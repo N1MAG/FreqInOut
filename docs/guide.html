@@ -94,9 +94,10 @@
     <tbody>
       <tr><td>Core</td><td><code>ControlFreq</code>, <code>FreqPlanner</code>, <code>Messages</code>, <code>Map</code></td></tr>
       <tr><td>NCS</td><td><code>FLDigi / SSB</code>, <code>JS8Call</code>, <code>VHF/UHF</code></td></tr>
-      <tr><td>Schedules</td><td><code>HF Daily</code>, <code>HF Nets</code>, <code>HF Peers</code></td></tr>
+      <tr><td>Plans</td><td><code>Plan Builder</code>, <code>SOP Builder</code>, <code>HF Daily</code>, <code>HF Nets</code>, <code>Local Nets</code>, <code>HF Peer Schedules</code></td></tr>
       <tr><td>Operators</td><td><code>HF Callsigns</code>, <code>Local Callsigns</code></td></tr>
-      <tr><td>Other</td><td><code>SOP Builder</code>, <code>Station Health</code>, <code>Settings</code>, <code>Help</code></td></tr>
+      <tr><td>Resources</td><td><code>Frequency Catalog</code>, <code>Net Directory</code>, <code>Import / Export</code></td></tr>
+      <tr><td>Other</td><td><code>Station Health</code>, <code>Settings</code>, <code>Help</code></td></tr>
     </tbody>
   </table>
 
@@ -166,6 +167,18 @@
         <td>This is the schedule for named nets.</td>
         <td>Net Schedule stores active net rows. Net Resources stores reusable catalog rows. Manage Net/SOP Policies records priority decisions when nets overlap active SOP windows.</td>
         <td>Use this when an event is not just baseline monitoring. Nets can carry names, early windows, FLDigi expectations, and priority decisions.</td>
+      </tr>
+      <tr>
+        <td><a href="#local-nets">Local Nets</a></td>
+        <td>This is the reminder calendar for local amateur and GMRS activity.</td>
+        <td>Search and filter saved reminders, add a directory session or custom local net, choose a frequency resource and Operating Group, review the next occurrence, and optionally open linked SOP context.</td>
+        <td>Use it to remember nearby nets without putting a local reminder into the HF scheduler. FIO never tunes, transmits, starts software, or activates an SOP because of a Local Net reminder.</td>
+      </tr>
+      <tr>
+        <td><a href="#tools-resources">Tools &amp; Resources</a></td>
+        <td>This is the reusable reference catalog.</td>
+        <td>Frequency Catalog stores channels and frequencies. Net Directory stores reusable net identities and sessions. Import / Export previews exchange data before it changes the catalog.</td>
+        <td>Use it when the same channel, repeater, or net session should be selected in more than one planning workflow. Catalog records are references, not instructions to control a radio.</td>
       </tr>
       <tr>
         <td><a href="#hf-peers">HF Peers</a></td>
@@ -351,6 +364,8 @@
       <tr><td>Propagation Forecast</td><td><code>Zone</code>, <code>Morning</code>, <code>Day</code>, <code>Night</code></td></tr>
     </tbody>
   </table>
+
+  <p><strong>Local Nets in Ops Center</strong>: the separate Local Nets section is a bounded reminder view. It remains visually distinct from HF schedule rows and message traffic. Use <code>Details</code> to open the saved reminder, <code>Dismiss</code> only for a due/active occurrence, and <code>Open SOP</code> only to review linked context manually. These actions do not QSY, start software, or activate an SOP.</p>
 
   <h2 id="freqplanner">Plan Manager</h2>
   <p><strong>Purpose</strong>: build, review, edit, and assign named Frequency Plans from HF Daily, HF Nets, and SOP condition layers.</p>
@@ -950,6 +965,61 @@
     <li><strong>5) Re-open HF Daily if you want the whole picture</strong>: HF Daily shows whether HF is clear, while Net Schedule focuses only on the Net-vs-SOP priority decision for overlapping windows.</li>
   </ol>
 
+  <h2 id="local-nets">Plans: Local Nets</h2>
+  <p><strong>Purpose</strong>: keep a clear, local-time reminder calendar for nearby Amateur or GMRS nets and activities. A Local Net is an operator reminder, not an HF schedule row and not a radio-control instruction.</p>
+  <div class="callout">
+    <strong>Reminder only.</strong> Local Nets can show a frequency, group, next occurrence, resource health, and optional SOP context. They never tune a radio, key PTT, launch software, run the HF scheduler, or activate an SOP automatically.
+  </div>
+  <h3 id="local-nets-workflow">Recommended Local Net workflow</h3>
+  <ol class="section-list">
+    <li><strong>Start with a reusable resource when one exists.</strong> Choose a published session from <a href="#tools-resources">Net Directory</a>, or choose a station/reference channel from Frequency Catalog. The selected resource appears as the Where context.</li>
+    <li><strong>Associate an Operating Group when the activity belongs to one.</strong> This preserves the operational context used elsewhere in FIO. Choose <code>Community / Unassigned</code> for an activity that does not belong to one of your operating groups.</li>
+    <li><strong>Set local recurrence and timezone deliberately.</strong> Review the next exact local and UTC occurrences before saving. Exception dates and an effective end date prevent stale reminders.</li>
+    <li><strong>Set the reminder lead.</strong> The reminder appears in the Local Nets workspace and Ops Center near the occurrence. <code>Dismiss This Occurrence</code> dismisses only the current occurrence; it does not pause or delete the Local Net.</li>
+    <li><strong>Use an optional SOP link only as a handoff.</strong> Opening linked SOP context is a manual review step. Confirm and save any SOP change yourself; the reminder never changes station or radio state.</li>
+  </ol>
+  <h3 id="local-nets-controls">Controls and status</h3>
+  <table>
+    <thead><tr><th>Control</th><th>Operator use</th></tr></thead>
+    <tbody>
+      <tr><td><code>Add Local Net</code> / <code>Edit</code></td><td>Create or revise a reminder. The editor is organized as Net/Session, Group/Where, When, Reminder &amp; SOP, and Review.</td></tr>
+      <tr><td>Group, Service, Enabled, and Needs review filters</td><td>Narrow the bounded reminder list. <code>Needs review</code> identifies a missing, retired, or changed linked frequency resource.</td></tr>
+      <tr><td><code>Pause</code> / <code>Enable</code></td><td>Stops or resumes reminder visibility without deleting the saved Local Net history and configuration.</td></tr>
+      <tr><td><code>Dismiss This Occurrence</code></td><td>Available only while the selected reminder is due or active. It clears that one operator reminder and leaves future occurrences intact.</td></tr>
+      <tr><td><code>Resources</code> and <code>Settings</code></td><td>Open the Frequency Catalog or Operating Groups management surface. When opened from the editor, unsaved selection work is preserved on return.</td></tr>
+    </tbody>
+  </table>
+  <p><strong>Status wording</strong>: <code>missing</code>, <code>retired</code>, or <code>update available</code> means the linked reference needs review; it does not claim that an operation is authorized or unauthorized. Use the resource details and your own operating judgment before participating.</p>
+
+  <h2 id="tools-resources">Resources: Tools &amp; Resources</h2>
+  <p><strong>Purpose</strong>: manage reference data that can be selected from planning workspaces without making the catalog itself an active schedule, station configuration page, or radio-control surface.</p>
+  <p><strong>Workspace model</strong>: use the browser-style tabs from left to right: <code>Frequency Catalog</code> for channels and frequencies, <code>Net Directory</code> for net identity and published sessions, and <code>Import / Export</code> for preview-first exchange. Search results are bounded so normal catalog work remains responsive.</p>
+  <h3 id="tools-resources-frequency-catalog">Frequency Catalog</h3>
+  <ul class="section-list">
+    <li><strong>Reference versus station resource</strong>: bundled and imported records retain their source and version. A station-owned record is the right choice for a locally maintained simplex frequency or repeater pair.</li>
+    <li><strong>Reference guidance</strong>: catalog wording such as <code>Within selected reference</code> is advisory. FIO does not determine a license class, location, equipment certification, emission authorization, or whether you may transmit.</li>
+    <li><strong>Used by</strong>: inspect this before changing a resource. It shows the saved Local Nets, directory sessions, or other consumers that retain a reference to it.</li>
+    <li><strong>Retire instead of delete</strong>: retirement removes a record from normal selection while preserving its identity and history. A referenced record cannot be silently removed. Hard deletion is only available after FIO proves there are no references and asks for confirmation.</li>
+  </ul>
+  <h3 id="tools-resources-net-directory">Net Directory and HF subscription</h3>
+  <ul class="section-list">
+    <li><strong>Directory identity is not a schedule.</strong> A directory entry describes a net; published sessions describe its reusable timing and frequency context. Neither one activates an HF or Local schedule on its own.</li>
+    <li><strong>Add to HF Nets</strong>: select one or more published sessions, choose <code>Add to HF Nets</code>, then review the proposed rows in the named HF Net schedule before saving. This is an explicit subscription workflow, not an automatic import into a live schedule.</li>
+    <li><strong>Add to Local Nets</strong>: choose a published session in the Local Net editor to prefill a reminder draft, then review group, frequency, recurrence, and timezone before saving.</li>
+    <li><strong>Updates do not rewrite schedules.</strong> A changed directory resource can mark a linked Local Net as needing review, while the accepted reminder snapshot remains unchanged. Review the directory and saved reminder deliberately before making any edit.</li>
+  </ul>
+  <h3 id="tools-resources-import-export">Import, export, and recovery</h3>
+  <ul class="section-list">
+    <li><strong>Preview first.</strong> Import reads a chosen JSON file and shows diagnostics before <code>Apply Preview</code> becomes available. Cancel Preview leaves the catalog unchanged.</li>
+    <li><strong>Source protection.</strong> Imports do not overwrite bundled read-only records. Resolve invalid, duplicate, ambiguous, or conflicting preview items before applying an exchange.</li>
+    <li><strong>Export is selective.</strong> Enter the stable frequency or net keys you want to exchange; export does not imply publication, scheduling, or radio action.</li>
+    <li><strong>Recovery mindset.</strong> Keep an export before a large catalog change. If a change must be reversed, restore or re-import a reviewed exchange rather than editing an active schedule or deleting a referenced source record.</li>
+  </ul>
+
+  <h3 id="operating-groups-resource-context">Operating Groups in resource workflows</h3>
+  <p>Operating Groups describe the group context of an activity; they do not prove membership, authority, licensing, or a radio assignment. In Local Nets, choose a configured group to make the reminder easier to filter and recognize in Ops Center. Frequency Catalog and Net Directory records may carry group context as reference information. Keep a local activity unassigned when no configured group applies.</p>
+  <p>Group context helps answer <em>why this reminder matters</em>; the Station Control Bar and the active workspace remain responsible for showing the current radio and operational state.</p>
+
   <h2 id="hf-peers">Schedules: HF Peers</h2>
   <p><strong>Purpose</strong>: import and review peer HF schedules with overlap visibility.</p>
   <p><strong>Why you use it</strong>: HF Peers gives your station awareness of what other operators expect to be doing. This lets FreqInOut support decisions like “who is likely on now?” instead of only showing your own plan.</p>
@@ -1339,9 +1409,9 @@
     <li><strong>Auto-Fill / Find</strong>: asks FreqInOut to inspect likely local software folders and fill in paths it can identify. Review the results before saving.</li>
   </ul>
 
-  <h3 id="settings-hf-groups-details">HF Operating Groups Details</h3>
+  <h3 id="settings-hf-groups-details">Operating Groups Details</h3>
   <ul class="section-list">
-    <li><strong>Purpose</strong>: HF Operating Groups are the reusable building blocks behind schedule rows. They describe the normal frequency, mode, VFO, FLDigi mode, and offset a group expects to use.</li>
+    <li><strong>Purpose</strong>: Operating Groups are reusable group context. HF schedules use their normal frequency, mode, VFO, FLDigi mode, and offset details; Local Nets use the same group identity to explain why a reminder matters without becoming a scheduler row.</li>
     <li><strong>Mode choices</strong>: choose <code>Digi</code> for digital-mode work such as JS8 or FLDigi workflows, and <code>SSB</code> for voice net work.</li>
     <li><strong>Voice sideband behavior</strong>: when <code>Mode=SSB</code>, <code>FLDigi Starting Mode</code> defaults to band-appropriate sideband (<code>LSB</code> on lower HF bands, <code>USB</code> on upper HF bands), and can be manually overridden.</li>
     <li><strong>Key table columns</strong>: <code>Group</code>, <code>Mode</code>, <code>Band</code>, <code>Freq (MHz)</code>, <code>VFO</code>, <code>FLDigi Starting Mode</code>, <code>FLDigi Offset</code>, <code>Auto-Tune</code>, <code>Use Condition Levels</code>.</li>
@@ -1351,6 +1421,7 @@
     <li><strong>Auto-Tune</strong>: tells FIO this group is allowed to tune automatically when schedule enforcement calls for it. Leave it off when you want the operator to confirm changes manually.</li>
     <li><strong>Drift behavior</strong>: FLDigi offset may move during operation and appear off plan. Whether FIO corrects it immediately or asks first depends on the FLDigi enforcement mode; active net operation can also suppress scheduler corrections.</li>
     <li><strong>Condition levels</strong>: group-scoped; changing one row applies to all rows for the same Group.</li>
+    <li><strong>Local reminder context</strong>: selecting a group in Local Nets improves filtering and Ops Center recognition. It does not assign a radio, authorize a transmission, enable a scheduler action, or activate an SOP.</li>
     <li><strong>Condition-level concept</strong>: condition levels let you pre-stage several operational postures without rewriting the whole schedule every time conditions change. Instead of editing frequency plans during an event, you can move the station's active level and let FreqInOut reveal only the rows meant for that level.</li>
   </ul>
 

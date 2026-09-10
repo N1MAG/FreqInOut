@@ -30,6 +30,7 @@ from freqinout.core.resource_catalog_transfer import (
     preview_json_import,
 )
 from freqinout.gui.frequency_catalog_view import FrequencyCatalogView
+from freqinout.gui.help_registry import resolve_help_host
 from freqinout.gui.net_directory_view import NetDirectoryView
 
 
@@ -184,6 +185,15 @@ class ResourcesTab(QWidget):
         self._build_ui()
         self._ensure_page(0)
 
+    def _open_context_help(self) -> None:
+        """Open task-specific guide content through the owning application shell."""
+        host = resolve_help_host(self)
+        if host is not None and hasattr(host, "open_context_help"):
+            try:
+                host.open_context_help("tab.tools-resources")
+            except Exception:
+                pass
+
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -194,10 +204,16 @@ class ResourcesTab(QWidget):
         title.setAccessibleName("Tools and Resources")
         header.addWidget(title)
         header.addStretch(1)
+        self.help_btn = QPushButton("Help", self)
+        self.help_btn.setToolTip("Open Tools and Resources help.")
+        self.help_btn.setAccessibleName("Open Tools and Resources help")
+        self.help_btn.clicked.connect(self._open_context_help)
+        header.addWidget(self.help_btn)
+        layout.addLayout(header)
         self.help_label = QLabel("Reusable reference data; not an active schedule or radio control surface.")
         self.help_label.setWordWrap(True)
-        header.addWidget(self.help_label)
-        layout.addLayout(header)
+        self.help_label.setAccessibleName("Tools and Resources purpose")
+        layout.addWidget(self.help_label)
         self.context_bar = QWidget(self)
         context_layout = QHBoxLayout(self.context_bar)
         context_layout.setContentsMargins(8, 4, 8, 4)

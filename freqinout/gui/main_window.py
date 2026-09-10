@@ -317,7 +317,8 @@ class MainWindow(QMainWindow):
             "sop_tab",
             lambda: SOPTab(self, plan_context_service=self.plan_context_service),
         )
-        self.sop_tab.local_net_return_requested.connect(self._return_navigation_intent)
+        if hasattr(self.sop_tab, "local_net_return_requested"):
+            self.sop_tab.local_net_return_requested.connect(self._return_navigation_intent)
         self.operator_history_tab: OperatorHistoryTab | None = None
         self.local_operator_tab: LocalOperatorTab | None = None
         self.local_report_history_tab: LocalReportHistoryTab | None = None
@@ -331,10 +332,14 @@ class MainWindow(QMainWindow):
             "ops_center",
             lambda: ControlFreqTab(self, plan_context_service=self.plan_context_service),
         )
-        self.controlfreq_tab.set_local_nets_outlook_provider(self._build_local_nets_outlook)
-        self.controlfreq_tab.local_net_details_requested.connect(self._open_local_net_details)
-        self.controlfreq_tab.local_net_dismiss_requested.connect(self._dismiss_local_net_occurrence)
-        self.controlfreq_tab.local_net_open_sop_requested.connect(self._open_local_net_sop)
+        if hasattr(self.controlfreq_tab, "set_local_nets_outlook_provider"):
+            self.controlfreq_tab.set_local_nets_outlook_provider(self._build_local_nets_outlook)
+        if hasattr(self.controlfreq_tab, "local_net_details_requested"):
+            self.controlfreq_tab.local_net_details_requested.connect(self._open_local_net_details)
+        if hasattr(self.controlfreq_tab, "local_net_dismiss_requested"):
+            self.controlfreq_tab.local_net_dismiss_requested.connect(self._dismiss_local_net_occurrence)
+        if hasattr(self.controlfreq_tab, "local_net_open_sop_requested"):
+            self.controlfreq_tab.local_net_open_sop_requested.connect(self._open_local_net_sop)
         self.command_palette_shortcut = QShortcut(QKeySequence("Ctrl+K"), self)
         self.command_palette_shortcut.setContext(Qt.ApplicationShortcut)
         self.command_palette_shortcut.activated.connect(self._open_command_palette)

@@ -1,6 +1,8 @@
 # Local Nets And Tools & Resources Specification
 
-Status: implementation authority; LN-0 through LN-5 passed; release qualification is the next gated package
+Status: implementation authority; implementation and focused automated
+qualification complete through LN-6; the exit gate awaits the full soak and
+Linux/operator release validation
 
 Date: 2026-09-09
 

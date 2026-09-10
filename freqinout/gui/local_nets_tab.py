@@ -31,6 +31,7 @@ from freqinout.core.operating_group_identity import operating_group_options
 from freqinout.core.resource_catalog_models import FrequencyResource
 from freqinout.core.resource_catalog_store import ResourceCatalogStore, STATION_MANUAL_SOURCE_KEY
 from freqinout.gui.resource_picker import choose_frequency_resource, frequency_where_text, session_when_text
+from freqinout.gui.help_registry import resolve_help_host
 
 
 REMINDER_COPY = "Reminder only — FIO will not tune a radio"
@@ -306,21 +307,36 @@ class LocalNetsTab(QWidget):
         super().__init__(parent); self.settings = settings; path = db_path or net_resources_db_path(); self.store = LocalNetStore(path); self.catalog = ResourceCatalogStore(path); self._rows: tuple[LocalNetSchedule, ...] = (); self._rendered_by_key: dict[str, tuple[object, object]] = {}; self._pending_editor_intent: NavigationIntent | None = None
         self._build_ui(); self.refresh()
 
+    def _open_context_help(self) -> None:
+        """Open the Local Nets operator guide without coupling this tab to MainWindow."""
+        host = resolve_help_host(self)
+        if host is not None and hasattr(host, "open_context_help"):
+            try:
+                host.open_context_help("tab.local-nets")
+            except Exception:
+                pass
+
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self); layout.setContentsMargins(10, 10, 10, 10); layout.setSpacing(8)
-        title = QLabel("Local Nets"); title.setStyleSheet("font-size: 18px; font-weight: 700;"); layout.addWidget(title)
+        header = QHBoxLayout()
+        title = QLabel("Local Nets"); title.setStyleSheet("font-size: 18px; font-weight: 700;"); header.addWidget(title)
+        header.addStretch(1)
+        self.help_btn = QPushButton("Help", self); self.help_btn.setToolTip("Open Local Nets help."); self.help_btn.setAccessibleName("Open Local Nets help")
+        self.help_btn.clicked.connect(self._open_context_help); header.addWidget(self.help_btn)
+        layout.addLayout(header)
         copy = QLabel(REMINDER_COPY); copy.setWordWrap(True); layout.addWidget(copy)
         self.summary_label = QLabel(""); self.summary_label.setWordWrap(True); self.summary_label.setObjectName("localNetsSummary"); layout.addWidget(self.summary_label)
         filters = QWidget(self); grid = QGridLayout(filters); grid.setContentsMargins(0, 0, 0, 0)
-        self.search = QLineEdit(filters); self.search.setPlaceholderText("Search Local Nets")
+        self.search = QLineEdit(filters); self.search.setPlaceholderText("Search local net, group, or frequency"); self.search.setAccessibleName("Search Local Nets")
         self.group_filter = QComboBox(filters); self.group_filter.addItem("All groups", None); self.group_filter.addItem("Community / Unassigned", "__unassigned__")
         for key, name in _groups(self.settings): self.group_filter.addItem(name, key)
         self.service_filter = QComboBox(filters); self.service_filter.addItems(["All services", "AMATEUR", "GMRS"])
         self.enabled_filter = QComboBox(filters); self.enabled_filter.addItems(["All", "Enabled", "Paused"])
-        self.review_filter = QCheckBox("Needs review", filters); self.refresh_btn = QPushButton("Refresh", filters)
+        self.review_filter = QCheckBox("Needs review", filters); self.review_filter.setAccessibleName("Show Local Nets needing review")
+        self.refresh_btn = QPushButton("Refresh", filters); self.refresh_btn.setAccessibleName("Refresh Local Nets")
         grid.addWidget(self.search, 0, 0, 1, 2); grid.addWidget(self.group_filter, 0, 2); grid.addWidget(self.service_filter, 1, 0); grid.addWidget(self.enabled_filter, 1, 1); grid.addWidget(self.review_filter, 1, 2); grid.addWidget(self.refresh_btn, 1, 3)
         layout.addWidget(filters)
-        self.table = QTableWidget(0, 5, self); self.table.setObjectName("localNetsTable"); self.table.setHorizontalHeaderLabels(["Net", "Group", "Where", "Next", "Status"]); self.table.setSelectionBehavior(QAbstractItemView.SelectRows); self.table.setSelectionMode(QAbstractItemView.SingleSelection); self.table.setEditTriggers(QAbstractItemView.NoEditTriggers); self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff); self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch); layout.addWidget(self.table, 1)
+        self.table = QTableWidget(0, 5, self); self.table.setObjectName("localNetsTable"); self.table.setAccessibleName("Local Net reminders"); self.table.setHorizontalHeaderLabels(["Net", "Group", "Where", "Next", "Status"]); self.table.setSelectionBehavior(QAbstractItemView.SelectRows); self.table.setSelectionMode(QAbstractItemView.SingleSelection); self.table.setEditTriggers(QAbstractItemView.NoEditTriggers); self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff); self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch); layout.addWidget(self.table, 1)
         self.detail_label = QLabel("Select a Local Net to review its reminder details.", self); self.detail_label.setObjectName("localNetReadOnlyDetail"); self.detail_label.setWordWrap(True); layout.addWidget(self.detail_label)
         actions = QHBoxLayout(); self.add_btn = QPushButton("Add Local Net", self); self.edit_btn = QPushButton("Edit", self); self.enable_btn = QPushButton("Pause", self); self.dismiss_btn = QPushButton("Dismiss This Occurrence", self); self.resources_btn = QPushButton("Resources", self); self.settings_btn = QPushButton("Settings", self)
         for button in (self.add_btn,self.edit_btn,self.enable_btn,self.dismiss_btn,self.resources_btn,self.settings_btn): actions.addWidget(button)

@@ -1,6 +1,7 @@
 # Local Nets And Tools & Resources Implementation Plan
 
-Status: active; LN-0 through LN-5 passed, LN-6 is next
+Status: implementation complete through LN-6; focused automated qualification
+passed; the LN-6 exit gate awaits the full soak and Linux/operator validation
 
 Date: 2026-09-09
 
@@ -29,7 +30,7 @@ package; they do not authorize a workaround that weakens the governing contract.
 | LN-3 HF directory subscription | Passed 2026-09-09 |
 | LN-4 Local Nets core and workspace | Passed 2026-09-09 |
 | LN-5 Ops Center and SOP integration | Passed 2026-09-09 |
-| LN-6 Release qualification | Next |
+| LN-6 Release qualification | Implementation/focused checks complete; full soak and Linux/operator gate pending |
 
 ## Existing Implementation Baseline
 

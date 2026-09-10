@@ -112,6 +112,18 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         title="Net Schedules Help",
         summary="Net schedule editing, plan context cue, net resources, and Net or SOP policy decisions.",
     ),
+    "tab.local-nets": HelpContext(
+        key="tab.local-nets",
+        anchor="local-nets",
+        title="Local Nets Help",
+        summary="Non-commanding local-net reminders, frequency resources, Operating Group context, and manual SOP review.",
+    ),
+    "tab.tools-resources": HelpContext(
+        key="tab.tools-resources",
+        anchor="tools-resources",
+        title="Tools & Resources Help",
+        summary="Reusable frequency and net-directory reference data, safe updates, retirement, and preview-first import/export.",
+    ),
     "tab.hf-peers": HelpContext(
         key="tab.hf-peers",
         anchor="hf-peers",
@@ -163,8 +175,8 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
     "settings.hf-groups": HelpContext(
         key="settings.hf-groups",
         anchor="settings-hf-groups-details",
-        title="HF Operating Groups Help",
-        summary="HF operating group rows, expected FLDigi behavior, and conflict-aware schedule inputs.",
+        title="Operating Groups Help",
+        summary="Reusable group context for HF and Local Nets, expected HF behavior, and conflict-aware schedule inputs.",
     ),
     "settings.local-comms": HelpContext(
         key="settings.local-comms",

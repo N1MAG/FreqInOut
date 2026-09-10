@@ -40,8 +40,13 @@ def test_export_net_includes_its_sessions_and_frequency_without_contact_or_secre
 
 def test_preview_is_non_mutating_then_explicit_apply_creates_relationships(tmp_path):
     source = _store(tmp_path / "source.db")
-    frequency = source.create_frequency(_frequency())
-    entry = source.create_net_entry(NetDirectoryEntry("net_county", "station", "County Net"))
+    frequency = source.create_frequency(
+        _frequency(), group_keys={"group_county": "County Group"}
+    )
+    entry = source.create_net_entry(
+        NetDirectoryEntry("net_county", "station", "County Net"),
+        group_keys={"group_county": "County Group"},
+    )
     source.create_session(NetDirectorySession("session_county", entry.net_entry_key, "station", "amateur", frequency.frequency_resource_key))
     payload = export_selected_resources(source, net_entry_keys=(entry.net_entry_key,))
     target = _store(tmp_path / "target.db")
@@ -53,6 +58,8 @@ def test_preview_is_non_mutating_then_explicit_apply_creates_relationships(tmp_p
 
     assert not [item for item in results if item.status in {"invalid", "ambiguous", "conflict"}]
     assert target.get_session("session_county").frequency_resource_key == frequency.frequency_resource_key
+    assert target.frequency_group_links(frequency.frequency_resource_key) == (("group_county", "County Group"),)
+    assert target.net_entry_group_links(entry.net_entry_key) == (("group_county", "County Group"),)
 
 
 def test_preview_reports_duplicate_invalid_ambiguous_and_bundled_conflict_without_writes(tmp_path):
@@ -84,3 +91,58 @@ def test_preview_rejects_secrets_and_bounded_oversized_documents(tmp_path):
 
     assert secret.diagnostics[0].status == "invalid"
     assert oversized.diagnostics[0].status == "invalid"
+
+
+def test_preview_rejects_malformed_group_links_without_writing_item(tmp_path):
+    store = _store(tmp_path / "catalog.db")
+    document = {
+        "schema_version": TRANSFER_SCHEMA_VERSION,
+        "kind": "resource_catalog_transfer",
+        "frequencies": [
+            {
+                "frequency_resource_key": "bad_links",
+                "resource_kind": "simplex",
+                "service": "amateur",
+                "label": "Synthetic frequency",
+                "center_hz": 146_520_000,
+                "group_links": [{"group_name_snapshot": "Missing stable key"}],
+            }
+        ],
+        "net_entries": [],
+        "sessions": [],
+    }
+
+    preview = preview_json_import(store, document)
+    assert any(item.status == "invalid" and item.item_key == "bad_links" for item in preview.diagnostics)
+    apply_import_preview(store, preview)
+    assert store.get_frequency("bad_links") is None
+
+
+def test_import_without_group_links_preserves_existing_associations(tmp_path):
+    store = _store(tmp_path / "catalog.db")
+    current = store.create_frequency(
+        _frequency(), group_keys={"group_county": "County Group"}
+    )
+    document = {
+        "schema_version": TRANSFER_SCHEMA_VERSION,
+        "kind": "resource_catalog_transfer",
+        "frequencies": [
+            {
+                "frequency_resource_key": current.frequency_resource_key,
+                "resource_kind": current.resource_kind,
+                "service": current.service,
+                "label": "Updated synthetic frequency",
+                "center_hz": current.center_hz,
+            }
+        ],
+        "net_entries": [],
+        "sessions": [],
+    }
+
+    preview = preview_json_import(store, document)
+    apply_import_preview(store, preview)
+
+    assert store.get_frequency(current.frequency_resource_key).label == "Updated synthetic frequency"
+    assert store.frequency_group_links(current.frequency_resource_key) == (
+        ("group_county", "County Group"),
+    )

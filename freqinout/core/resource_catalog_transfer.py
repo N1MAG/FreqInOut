@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
@@ -55,9 +55,13 @@ class ImportPreview:
     sessions: tuple[NetDirectorySession, ...]
     diagnostics: tuple[TransferDiagnostic, ...]
     expected_version_hashes: Mapping[str, str | None]
+    frequency_group_links: Mapping[str, tuple[tuple[str, str | None], ...]] = field(default_factory=dict)
+    net_entry_group_links: Mapping[str, tuple[tuple[str, str | None], ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "expected_version_hashes", MappingProxyType(dict(self.expected_version_hashes)))
+        object.__setattr__(self, "frequency_group_links", MappingProxyType(dict(self.frequency_group_links)))
+        object.__setattr__(self, "net_entry_group_links", MappingProxyType(dict(self.net_entry_group_links)))
 
     @property
     def actionable(self) -> bool:
@@ -139,9 +143,15 @@ def preview_json_import(
         diagnostics.append(_diagnostic("invalid", "document", None, reason=f"Transfer exceeds {limit} item limit.", resolution="Split the export into smaller selections."))
         return ImportPreview(target, (), (), (), tuple(diagnostics), {})
 
-    frequencies, f_expected = _preview_group(store, groups["frequencies"], "frequency", target.source_key, diagnostics)
-    entries, e_expected = _preview_group(store, groups["net_entries"], "net_entry", target.source_key, diagnostics)
-    sessions, s_expected = _preview_group(store, groups["sessions"], "session", target.source_key, diagnostics)
+    frequencies, f_expected, frequency_links = _preview_group(
+        store, groups["frequencies"], "frequency", target.source_key, diagnostics
+    )
+    entries, e_expected, entry_links = _preview_group(
+        store, groups["net_entries"], "net_entry", target.source_key, diagnostics
+    )
+    sessions, s_expected, _ = _preview_group(
+        store, groups["sessions"], "session", target.source_key, diagnostics
+    )
     frequency_keys = {item.frequency_resource_key for item in frequencies}
     entry_keys = {item.net_entry_key for item in entries}
     for session in sessions:
@@ -149,7 +159,16 @@ def preview_json_import(
             diagnostics.append(_diagnostic("conflict", "session", session.net_session_key, "net_entry_key", session.net_entry_key, "Referenced net entry is unavailable.", "Include the net entry or import it first."))
         if session.frequency_resource_key and session.frequency_resource_key not in frequency_keys and store.get_frequency(session.frequency_resource_key) is None:
             diagnostics.append(_diagnostic("ambiguous", "session", session.net_session_key, "frequency_resource_key", session.frequency_resource_key, "Referenced frequency is unavailable.", "Include the frequency or choose a station resource."))
-    return ImportPreview(target, tuple(frequencies), tuple(entries), tuple(sessions), tuple(diagnostics), {**f_expected, **e_expected, **s_expected})
+    return ImportPreview(
+        target,
+        tuple(frequencies),
+        tuple(entries),
+        tuple(sessions),
+        tuple(diagnostics),
+        {**f_expected, **e_expected, **s_expected},
+        frequency_links,
+        entry_links,
+    )
 
 
 def apply_import_preview(store: ResourceCatalogStore, preview: ImportPreview) -> tuple[TransferDiagnostic, ...]:
@@ -163,19 +182,41 @@ def apply_import_preview(store: ResourceCatalogStore, preview: ImportPreview) ->
     blocked = {item.item_key for item in results if item.status in {"invalid", "duplicate", "ambiguous", "conflict"}}
     if not store.get_source(preview.target_source.source_key):
         store.create_source(preview.target_source)
-    _apply_group(store, preview.frequencies, "frequency", preview.expected_version_hashes, blocked, results)
-    _apply_group(store, preview.net_entries, "net_entry", preview.expected_version_hashes, blocked, results)
-    _apply_group(store, preview.sessions, "session", preview.expected_version_hashes, blocked, results)
+    _apply_group(
+        store,
+        preview.frequencies,
+        "frequency",
+        preview.expected_version_hashes,
+        blocked,
+        results,
+        preview.frequency_group_links,
+    )
+    _apply_group(
+        store,
+        preview.net_entries,
+        "net_entry",
+        preview.expected_version_hashes,
+        blocked,
+        results,
+        preview.net_entry_group_links,
+    )
+    _apply_group(store, preview.sessions, "session", preview.expected_version_hashes, blocked, results, {})
     return tuple(results)
 
 
-def _preview_group(store: ResourceCatalogStore, items: list[Any], kind: str, source_key: str, diagnostics: list[TransferDiagnostic]) -> tuple[list[Any], dict[str, str | None]]:
+def _preview_group(
+    store: ResourceCatalogStore,
+    items: list[Any],
+    kind: str,
+    source_key: str,
+    diagnostics: list[TransferDiagnostic],
+) -> tuple[list[Any], dict[str, str | None], dict[str, tuple[tuple[str, str | None], ...]]]:
     model_type, key_field, getter = {
         "frequency": (FrequencyResource, "frequency_resource_key", store.get_frequency),
         "net_entry": (NetDirectoryEntry, "net_entry_key", store.get_net_entry),
         "session": (NetDirectorySession, "net_session_key", store.get_session),
     }[kind]
-    accepted, expected, seen = [], {}, set()
+    accepted, expected, group_links, seen = [], {}, {}, set()
     for raw in items:
         if not isinstance(raw, Mapping):
             diagnostics.append(_diagnostic("invalid", kind, None, reason="Item must be an object.")); continue
@@ -189,6 +230,7 @@ def _preview_group(store: ResourceCatalogStore, items: list[Any], kind: str, sou
             diagnostics.append(_diagnostic("ambiguous", kind, key, "service", raw.get("service"), "Service is missing or unsupported.", "Choose Amateur or GMRS.")); continue
         try:
             value = model_type(**_model_fields(raw, model_type, source_key))
+            links = _preview_group_links(raw) if kind in {"frequency", "net_entry"} else None
         except (CatalogValidationError, TypeError, ValueError) as exc:
             diagnostics.append(_diagnostic("invalid", kind, key, reason=str(exc), resolution="Correct the item and preview again.")); continue
         current = getter(key)
@@ -199,10 +241,20 @@ def _preview_group(store: ResourceCatalogStore, items: list[Any], kind: str, sou
         status = "new" if current is None else "unchanged" if incoming_hash and incoming_hash == current_hash else "updated"
         diagnostics.append(_diagnostic(status, kind, key))
         accepted.append(value); expected[key] = current_hash
-    return accepted, expected
+        if links is not None:
+            group_links[key] = links
+    return accepted, expected, group_links
 
 
-def _apply_group(store: ResourceCatalogStore, items: Sequence[Any], kind: str, expected: Mapping[str, str | None], blocked: set[str | None], results: list[TransferDiagnostic]) -> None:
+def _apply_group(
+    store: ResourceCatalogStore,
+    items: Sequence[Any],
+    kind: str,
+    expected: Mapping[str, str | None],
+    blocked: set[str | None],
+    results: list[TransferDiagnostic],
+    group_links: Mapping[str, tuple[tuple[str, str | None], ...]],
+) -> None:
     for item in items:
         key = getattr(item, {"frequency": "frequency_resource_key", "net_entry": "net_entry_key", "session": "net_session_key"}[kind])
         if key in blocked:
@@ -216,9 +268,35 @@ def _apply_group(store: ResourceCatalogStore, items: Sequence[Any], kind: str, e
         if current and getattr(current, "version_hash", None) != expected.get(key):
             results.append(_diagnostic("conflict", kind, key, reason="Item changed after preview.", resolution="Preview again before applying.")); continue
         try:
-            (update if current else create)(item)
+            writer = update if current else create
+            if kind in {"frequency", "net_entry"}:
+                links = group_links.get(key)
+                if current and links is None:
+                    writer(item, group_keys=None)
+                else:
+                    writer(item, group_keys=dict(links or ()))
+            else:
+                writer(item)
         except (CatalogValidationError, ReadOnlyResourceError, ValueError) as exc:
             results.append(_diagnostic("conflict", kind, key, reason=str(exc), resolution="Resolve references and preview again."))
+
+
+def _preview_group_links(raw: Mapping[str, Any]) -> tuple[tuple[str, str | None], ...] | None:
+    if "group_links" not in raw:
+        return None
+    supplied = raw.get("group_links")
+    if not isinstance(supplied, list):
+        raise ValueError("group_links must be an array")
+    links: dict[str, str | None] = {}
+    for item in supplied:
+        if not isinstance(item, Mapping):
+            raise ValueError("group_links items must be objects")
+        key = str(item.get("operating_group_key") or "").strip()
+        if not key:
+            raise ValueError("group_links operating_group_key is required")
+        name = str(item.get("group_name_snapshot") or "").strip() or None
+        links[key] = name
+    return tuple(sorted(links.items()))
 
 
 def _model_fields(raw: Mapping[str, Any], model_type: type, source_key: str) -> dict[str, Any]:

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import dataclasses
+import heapq
 import json
+import math
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, Mapping
 
@@ -259,6 +261,90 @@ class LocalNetStore:
                     continue
                 occurrence = dataclasses.replace(occurrence, state="dismissed", dismissed=True, operator_note=stored[1])
             results.append(occurrence)
+        return tuple(results)
+
+    def outlook_occurrences(
+        self,
+        window_start_utc: datetime | None = None,
+        *,
+        horizon_days: int = 30,
+        limit: int = 60,
+        include_dismissed: bool = False,
+    ) -> tuple[LocalNetOccurrence, ...]:
+        """Return the earliest bounded occurrences for dashboard projection.
+
+        Unlike the calendar-oriented ``upcoming`` query, this performs a
+        k-way merge over one next occurrence per schedule. It therefore avoids
+        expanding every recurrence through the whole horizon just to render a
+        small active/next/later dashboard window.
+        """
+        start = (window_start_utc or _now()).astimezone(timezone.utc)
+        days = max(1, min(MAX_HORIZON_DAYS, int(horizon_days)))
+        end = start + timedelta(days=days)
+        row_limit = max(1, min(MAX_UPCOMING_OCCURRENCES, int(limit)))
+        schedules = self.list_schedules(enabled=True, limit=MAX_LOCAL_NET_SCHEDULES)
+        by_key = {schedule.local_net_schedule_key: schedule for schedule in schedules}
+        heap: list[tuple[datetime, str, LocalNetOccurrence]] = []
+        for schedule in schedules:
+            rows = project_occurrences(schedule, start, horizon_days=days, limit=1)
+            if rows:
+                occurrence = rows[0]
+                heapq.heappush(
+                    heap,
+                    (occurrence.start_utc, occurrence.local_net_schedule_key, occurrence),
+                )
+
+        # Read beyond the visible count so a bounded number of dismissed rows
+        # cannot starve the dashboard. The final return is still row_limit.
+        scan_limit = min(MAX_UPCOMING_OCCURRENCES, max(row_limit, row_limit * 4))
+        projected: list[LocalNetOccurrence] = []
+        while heap and len(projected) < scan_limit:
+            _, schedule_key, occurrence = heapq.heappop(heap)
+            projected.append(occurrence)
+            schedule = by_key[schedule_key]
+            remaining_seconds = (end - occurrence.start_utc).total_seconds()
+            if remaining_seconds <= 0:
+                continue
+            remaining_days = max(1, math.ceil(remaining_seconds / 86_400))
+            # A long-running activity may overlap later recurrence starts. Ask
+            # for enough bounded candidates to step past every still-active
+            # earlier occurrence instead of assuming duration < recurrence.
+            candidate_limit = min(
+                MAX_UPCOMING_OCCURRENCES,
+                max(2, math.ceil(schedule.duration_minutes / (24 * 60)) + 2),
+            )
+            candidates = project_occurrences(
+                schedule,
+                occurrence.start_utc + timedelta(microseconds=1),
+                horizon_days=remaining_days,
+                limit=candidate_limit,
+            )
+            next_item = next(
+                (item for item in candidates if item.start_utc > occurrence.start_utc),
+                None,
+            )
+            if next_item is not None and next_item.start_utc < end:
+                heapq.heappush(
+                    heap,
+                    (next_item.start_utc, next_item.local_net_schedule_key, next_item),
+                )
+
+        state = self._occurrence_state(item.occurrence_key for item in projected)
+        results: list[LocalNetOccurrence] = []
+        for occurrence in projected:
+            stored = state.get(occurrence.occurrence_key)
+            if stored and stored[0] == "dismissed":
+                if not include_dismissed:
+                    continue
+                occurrence = dataclasses.replace(
+                    occurrence,
+                    state="dismissed",
+                    dismissed=True,
+                    operator_note=stored[1],
+                )
+            results.append(occurrence)
+            if len(results) >= row_limit:
+                break
         return tuple(results)
 
     def occurrences_for_schedule(

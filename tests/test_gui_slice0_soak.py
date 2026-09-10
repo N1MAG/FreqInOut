@@ -39,6 +39,8 @@ class _FakeWindow:
             ("Main", "Settings"),
             ("Plans", "Plan Builder"),
             ("SOP Builder", "SOP"),
+            ("Resources", "Resources"),
+            ("Local Nets", "Local Nets"),
             ("Help", "Help"),
             ("Net Ctrl", "NCS"),
             ("Map", "Map"),
@@ -69,6 +71,8 @@ def test_safe_nav_targets_skips_map_and_ncs() -> None:
         ("Ops", "ControlFreq"),
         ("Main", "Settings"),
         ("SOP Builder", "SOP"),
+        ("Resources", "Resources"),
+        ("Local Nets", "Local Nets"),
         ("Help", "Help"),
     ]
 

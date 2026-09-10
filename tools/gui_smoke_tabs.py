@@ -554,11 +554,13 @@ def main() -> int:
         report["dependency_shims"] = _install_optional_dependency_shims()
 
         from PySide6.QtWidgets import QApplication
+        from freqinout.core import db_initializer
         from freqinout.gui.main_window import MainWindow
 
         # Keep launch-control from spawning external applications in smoke runs.
         MainWindow._start_launch_control_startup = lambda self: None  # type: ignore[assignment]
 
+        db_initializer.ensure_all_tables()
         app = QApplication.instance() or QApplication([])
         window = MainWindow()
         window.show()

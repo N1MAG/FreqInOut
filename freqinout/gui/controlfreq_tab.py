@@ -7179,9 +7179,9 @@ class ControlFreqTab(QWidget):
             now,
         )
 
-        def done(completed: Future) -> None:
+        def done(future: Future) -> None:
             try:
-                payload, error = completed.result(), None
+                payload, error = future.result(), None
             except Exception as exc:
                 payload, error = None, exc
             try:

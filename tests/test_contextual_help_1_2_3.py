@@ -17,6 +17,8 @@ CORE_HELP_KEYS = [
     "map.paths",
     "tab.hf-daily",
     "tab.hf-nets",
+    "tab.local-nets",
+    "tab.tools-resources",
     "tab.sop-builder",
     "tab.settings",
     "settings.operator",
@@ -58,6 +60,18 @@ def test_sop_builder_context_help_is_registered_and_wired() -> None:
     assert 'self.help_btn.setToolTip("Open SOP Builder help.")' in source
     assert 'self.help_btn.clicked.connect(lambda: self._open_context_help("tab.sop-builder"))' in source
     assert "def _open_context_help(self, context_key: str) -> None:" in source
+
+
+def test_local_nets_and_resources_context_help_are_registered_and_wired() -> None:
+    local_context = get_help_context("tab.local-nets")
+    resources_context = get_help_context("tab.tools-resources")
+    local_source = Path("freqinout/gui/local_nets_tab.py").read_text(encoding="utf-8")
+    resources_source = Path("freqinout/gui/resources_tab.py").read_text(encoding="utf-8")
+
+    assert local_context.anchor == "local-nets"
+    assert resources_context.anchor == "tools-resources"
+    assert 'host.open_context_help("tab.local-nets")' in local_source
+    assert 'host.open_context_help("tab.tools-resources")' in resources_source
 
 
 class _DummyNode:

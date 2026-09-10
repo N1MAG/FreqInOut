@@ -190,10 +190,10 @@ def build_local_net_outlook(
     resources = catalog.frequencies_by_keys(
         row.frequency_resource_key for row in schedules if row.frequency_resource_key
     )
-    occurrences = store.upcoming(
+    occurrences = store.outlook_occurrences(
         now - timedelta(minutes=review_minutes),
         horizon_days=max(1, min(90, int(horizon_days))),
-        limit=500,
+        limit=min(55, max(5, int(later_limit) + 5)),
     )
     projected: list[LocalNetOutlookItem] = []
     for occurrence in occurrences:

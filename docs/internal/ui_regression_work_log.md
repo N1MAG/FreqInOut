@@ -2389,3 +2389,54 @@ passes 273 tests with one pre-existing macOS-environment QtCore import skip.
 Python compilation and `git diff --check` pass. The 900x560 Light/Dark and
 Normal/Large Text matrix is covered, and Local Net projections remain bounded
 at 500 recurrence results and 50 later dashboard items.
+
+## 2026-09-09 — Local Nets / Resources LN-6 focused qualification
+
+Status: implementation and focused automated checks complete; the LN-6 exit
+gate and release eligibility remain pending the specified 30-minute soak plus
+Linux/operator validation. No later slice was started.
+
+Help now covers the Resources catalog, HF subscription, Local Nets reminder
+workflow, Operating Group context, reference limitations, update/retirement
+behavior, recovery, and manual SOP handoff. Local Nets and Resources expose
+contextual Help controls with accessible names and clearer operator-facing
+search and status language. The release checklist now carries the migration,
+transfer, workflow, performance, responsive, soak, and Linux validation matrix.
+
+Import/export review found and corrected a relationship-fidelity gap: frequency
+and Net Directory Operating Group links are now validated during preview and
+preserved on apply. Invalid link payloads remain non-mutating. An isolated copy
+of the 311 MB production `freqinout_nets.db` rehearsed 73 legacy rows with zero
+review-required rows. The source hash remained unchanged, the backup matched
+the original, `PRAGMA integrity_check` returned `ok`, and the migrated clone
+contained 73 net resources, 110 frequency resources, 61 directory entries, 71
+sessions, and 73 legacy mappings. A second cutover performed zero writes and
+remained canonical.
+
+The complete 199-module repository test sweep ran each test file in a fresh
+process to avoid accumulated Qt worker state: 197 modules passed and two
+skip-only modules reported their expected skip status; no module failed.
+Release preflight, Python compilation, and `git diff --check` pass. Initialized
+all-tab GUI smoke opened all 22 screens with zero failures or missing-schema
+warnings. A 60-second automated UI soak exercised Resources and Local Nets with
+572 samples, 54 interactions, 14 resizes, 27 navigation switches, 872.3 ms
+first-usable time, 11.5 ms maximum event-loop lag, 34.1 ms shutdown, and no Qt
+thread/timer hard errors.
+
+The initial 1,000-schedule Ops projection missed its budget at 423.675 ms warm
+p95. Primary review replaced full occurrence sorting with a bounded heap merge
+that advances only schedules contributing the earliest results. The same
+1,000-schedule gate now measures 33.977 ms warm p95 and returns no more than 50
+later rows; an automated regression test enforces the 50 ms ceiling.
+
+Delegation: Terra/medium handled Help, accessibility, and operator wording;
+Luna/high handled focused release tests and transfer/recovery coverage. The
+high-reasoning primary model owned migration and production-clone rehearsal,
+relationship-fidelity correction, concurrency and performance architecture,
+fresh-process regression integration, delegated-diff review, and the final
+focused qualification review.
+
+Remaining release evidence is intentionally not inferred from offscreen macOS
+automation: run the full 30-minute soak and the Linux 1920x1080 Normal Text,
+compact, Large Text, Light/Dark, keyboard, and operator workflow matrix before
+promoting this feature to a release branch.

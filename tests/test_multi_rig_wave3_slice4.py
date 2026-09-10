@@ -587,6 +587,8 @@ def test_net_schedule_save_auto_creates_manual_resource_for_new_manual_net(monke
 
     net_mod = importlib.reload(net_mod)
     SettingsManager()
+    from freqinout.core.db_initializer import _ensure_nets_db
+    _ensure_nets_db()
     dummy = net_mod.NetScheduleTab.__new__(net_mod.NetScheduleTab)
     dummy.settings = SettingsManager()
 
@@ -641,6 +643,8 @@ def test_net_schedule_save_links_existing_resource_without_duplicate(monkeypatch
 
     net_mod = importlib.reload(net_mod)
     SettingsManager()
+    from freqinout.core.db_initializer import _ensure_nets_db
+    _ensure_nets_db()
     dummy = net_mod.NetScheduleTab.__new__(net_mod.NetScheduleTab)
     dummy.settings = SettingsManager()
 
@@ -685,6 +689,8 @@ def test_net_schedule_save_unlinks_edited_resource_row_without_updating_master(m
 
     net_mod = importlib.reload(net_mod)
     SettingsManager()
+    from freqinout.core.db_initializer import _ensure_nets_db
+    _ensure_nets_db()
     dummy = net_mod.NetScheduleTab.__new__(net_mod.NetScheduleTab)
     dummy.settings = SettingsManager()
 

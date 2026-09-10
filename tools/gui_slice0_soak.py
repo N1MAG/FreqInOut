@@ -26,6 +26,8 @@ if str(ROOT) not in sys.path:
 
 SAFE_SCREEN_LABELS = {
     "ControlFreq",
+    "Resources",
+    "Local Nets",
     "SOP",
     "Settings",
     "Help",
@@ -477,12 +479,14 @@ def run_soak(args: argparse.Namespace) -> SoakResult:
     from PySide6.QtCore import QEventLoop, Qt, QTimer, qInstallMessageHandler
     from PySide6.QtWidgets import QApplication
 
+    from freqinout.core import db_initializer
     from freqinout.gui.dialog_notifications import install_auto_closing_information_dialogs
     from freqinout.gui.main_window import MainWindow
     from freqinout.core.background_ingest import BackgroundIngestController
     from freqinout.core.scheduler_engine import SchedulerEngine
 
     _seed_minimal_runtime_profile(cfg_root)
+    db_initializer.ensure_all_tables()
     install_auto_closing_information_dialogs()
 
     app = QApplication.instance() or QApplication(["freqinout-gui-soak"])
