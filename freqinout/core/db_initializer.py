@@ -17,6 +17,7 @@ from freqinout.core.group_utils import normalize_group_name
 from freqinout.core.message_projection_store import ensure_message_projection_schema
 from freqinout.core.multi_radio_store import ensure_multi_radio_settings_schema
 from freqinout.core.operator_activity import ensure_js8_callsign_stats
+from freqinout.core.resource_catalog_migration import ensure_resource_catalog_shadow
 from freqinout.core.sqlite_utils import connect_sqlite
 from freqinout.core.varac_ingest import ensure_varac_local_tables
 from freqinout.core.varac_bbs_library_store import (
@@ -1539,6 +1540,10 @@ def _ensure_nets_db() -> None:
                 "fldigi_mode": "TEXT",
                 "fldigi_offset": "TEXT",
                 "resource_id": "INTEGER",
+                "net_session_key": "TEXT",
+                "accepted_session_version_hash": "TEXT",
+                "accepted_resource_version_hash": "TEXT",
+                "accepted_snapshot_json": "TEXT",
                 "target_scope": "TEXT NOT NULL DEFAULT 'station'",
                 "target_device_profile_id": "INTEGER",
                 "target_operating_profile_id": "INTEGER",
@@ -2024,4 +2029,19 @@ def ensure_nets_tables() -> None:
     Public entry point to ensure nets DB tables and migrations are applied.
     """
     _ensure_nets_db()
+    config_dir = _config_dir()
+    try:
+        report = ensure_resource_catalog_shadow(
+            config_dir / "freqinout_nets.db",
+            config_dir / "freqinout.db",
+        )
+        log.info(
+            "Resource catalog: %s (%d legacy row(s), %d review required).",
+            report.authority_state,
+            report.total_legacy_rows,
+            report.review_required_count,
+        )
+    except Exception as exc:
+        # LN-1 leaves legacy ownership intact, so startup can safely continue.
+        log.error("Resource catalog shadow migration failed safely; legacy resources remain active: %s", exc)
     log.info("DB init: ensured nets tables.")

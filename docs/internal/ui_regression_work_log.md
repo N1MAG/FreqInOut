@@ -2194,3 +2194,48 @@ the gate: 60 passed / 1 skipped core and lifecycle tests, 45 responsive tests,
 13 geometry tests, and 12 HF source/projection tests. `git diff --check` passed.
 No production database, runtime configuration, application feature code, or
 navigation was changed.
+
+## 2026-09-09 — Local Nets / Resources LN-1 gate
+
+Status: complete; LN-1 passed and LN-2 is authorized next. Resources and Local
+Nets navigation remain hidden until canonical cutover succeeds in LN-2.
+
+LN-1 adds the Qt-free canonical catalog models/store, deterministic Operating
+Group identity adapter, bundled US FCC advisory reference manifest, and a
+backup-first shadow migrator. The catalog separates source, integer-Hz frequency
+resources, net identities, and published sessions. Queries are bounded to 200
+rows, read-only queries never create or journal a database, read-only sources
+cannot be edited through the station repository, and usage/version-diff APIs
+protect referenced schedules.
+
+The startup-owned migration classifies every legacy `net_resources` and
+`local_net_profiles` row before writing. Credible legacy nets receive frequency,
+directory, and session identities; general standards remain frequency-only;
+ambiguous data remains losslessly audit-mapped as review-required. Parseable
+legacy local-profile targets may seed reviewed frequencies but never recurrence
+or Local Net schedules. Migration backs up affected existing databases, applies
+schema/data/group-key changes transactionally, reconciles legacy deltas, and
+checkpoints `shadow_ready`; the old UI remains authoritative. Linked HF rows
+retain `resource_id` and receive additive canonical session/version snapshots.
+
+Primary-model review corrected transaction ownership around SQLite schema DDL,
+Settings save-path key loss, group-name snapshots, linked-HF snapshot migration,
+stale legacy deletion reconciliation, bundled-version refresh, and the regular
+startup zero-write fast path. The reference package was rechecked against the
+current eCFR capture and remains explicitly advisory; it does not evaluate
+license, emission, equipment, location, or transmit authorization.
+
+Delegation: Terra/high implemented the bounded catalog repository and scale
+tests; Luna/high implemented the Operating Group identity adapter and migration
+fixtures; Terra/medium implemented the read-only reference validator and
+versioned manifest. The high-reasoning primary owned schema, migration,
+transactions, startup integration, compatibility, regulatory framing, and final
+review.
+
+Acceptance evidence: 30 catalog/migration/reference/identity tests pass; the
+10,000-frequency/2,000-net/5,000-session corpus enforces a warm filtered query
+p95 below 100 ms; 132 scheduler/Plan/projection tests pass with one environment
+skip; 42 HF schedule assignment tests pass; 40 SOP tests pass; and five focused
+initializer/Settings compatibility tests pass. Python compilation and
+`git diff --check` pass. No production configuration was used for validation,
+no legacy table was removed, and LN-2 did not begin before this gate passed.

@@ -111,6 +111,7 @@ from freqinout.core.js8_msg_auth_store import (
     save_msg_auth_key,
 )
 from freqinout.core.known_operating_groups import WEFAX_STATIONS, load_known_operating_group_catalog
+from freqinout.core.operating_group_identity import ensure_operating_group_keys
 from freqinout.core.nbems_compose import discover_form_families
 from freqinout.core.launch_orchestrator import (
     DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC,
@@ -13102,6 +13103,7 @@ class SettingsTab(QWidget):
                     self.operating_groups.append(
                         {
                             "group": str(g.get("group", "")).upper(),
+                            "operating_group_key": str(g.get("operating_group_key", "") or "").strip(),
                             "mode": mode_val,
                             "band": band_val,
                             "frequency": g.get("frequency", ""),
@@ -13118,6 +13120,7 @@ class SettingsTab(QWidget):
                             "fastlight_form_family": str(g.get("fastlight_form_family", "group_default") or "group_default").strip().upper(),
                         }
                     )
+                self.operating_groups = list(ensure_operating_group_keys(self.operating_groups))
         except Exception:
             self.operating_groups = []
         self._load_known_operating_group_catalog()
@@ -27356,6 +27359,7 @@ class SettingsTab(QWidget):
         fastlight_signed_suffix: str | None = None,
         fastlight_unsigned_suffix: str | None = None,
         fastlight_form_family: str | None = None,
+        operating_group_key: str | None = None,
     ):
         # replace existing entry with same group+mode+band
         name = name.strip().upper()
@@ -27401,6 +27405,7 @@ class SettingsTab(QWidget):
             self.operating_groups.append(
                 {
                     "group": name,
+                    "operating_group_key": str(operating_group_key or "").strip(),
                     "mode": mode,
                     "band": band,
                     "frequency": freq_display,
@@ -27417,6 +27422,7 @@ class SettingsTab(QWidget):
                     "fastlight_form_family": str(fastlight_form_family or "group_default").strip().upper(),
                 }
             )
+        self.operating_groups = list(ensure_operating_group_keys(self.operating_groups))
         # Condition-level participation is group-scoped (not per band/mode row).
         for g in self.operating_groups:
             if str(g.get("group", "")).strip().upper() == name:
@@ -28383,6 +28389,7 @@ class SettingsTab(QWidget):
             result.append(
                 {
                     "group": group,
+                    "operating_group_key": str(g.get("operating_group_key", "") or "").strip(),
                     "mode": mode_key,
                     "band": band_key,
                     "frequency": self._format_freq_storage(freq_val),
@@ -28399,7 +28406,7 @@ class SettingsTab(QWidget):
                     "fastlight_form_family": str(g.get("fastlight_form_family", "group_default") or "group_default").strip().upper(),
                 }
             )
-        return result
+        return list(ensure_operating_group_keys(result))
 
     def _selected_op_rows(self) -> List[int]:
         rows: List[int] = []

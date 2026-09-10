@@ -1,6 +1,6 @@
 # Local Nets And Tools & Resources Specification
 
-Status: implementation authority; LN-0 passed, feature code not yet exposed
+Status: implementation authority; LN-0 and LN-1 passed, feature UI not yet exposed
 
 Date: 2026-09-09
 
