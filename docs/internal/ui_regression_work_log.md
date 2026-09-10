@@ -2164,3 +2164,33 @@ includes responsive, accessibility, performance, recurrence/timezone, scheduler
 isolation, production migration, shutdown, and Linux platform gates. No code,
 schema, configuration, or production data was changed during this specification
 work.
+
+## 2026-09-09 — Local Nets / Resources LN-0 gate
+
+Status: complete; LN-0 passed and LN-1 is authorized next. No later package was
+started during this gate.
+
+The repository audit mapped the duplicate `net_resources` schema/bootstrap
+ownership in startup and HF Nets, the direct HF Nets and FreqPlanner writers,
+the known-group reader, both projection paths, the separate and unnamespaced
+Daily Schedule resource IDs, existing Settings `local_net_profiles`, SOP
+consumers, Ops Schedule Outlook, named HF source schedules, and SchedulerEngine's
+commandable input boundary.
+
+The locked architecture uses typed text keys for catalog/session/schedule
+relationships, a shared transport-neutral Operating Group key, accepted
+snapshots for subscriptions, startup-only schema assurance, a Qt-free canonical
+repository, and a `legacy` -> `shadow_ready` -> `canonical` cutover. Existing
+`local_net_profiles` remains lossless compatibility metadata and never becomes a
+schedule. Local Nets receives a separate `commandable=false` projection and is
+excluded from generic QSY metadata.
+
+Terra/high performed the schema/call-site audit. Terra/medium produced the UI
+geometry and seam contract. Luna/high produced anonymized fixtures, the
+SchedulerEngine isolation characterization, and baseline evidence. The
+high-reasoning primary model reviewed each result, expanded the hidden-reader
+map, resolved identity/migration/navigation/SOP decisions, and independently ran
+the gate: 60 passed / 1 skipped core and lifecycle tests, 45 responsive tests,
+13 geometry tests, and 12 HF source/projection tests. `git diff --check` passed.
+No production database, runtime configuration, application feature code, or
+navigation was changed.

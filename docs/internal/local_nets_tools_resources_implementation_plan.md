@@ -1,11 +1,14 @@
 # Local Nets And Tools & Resources Implementation Plan
 
-Status: proposed; implementation has not begun
+Status: active; LN-0 passed, LN-1 is next
 
 Date: 2026-09-09
 
 Governing specification:
 `docs/internal/local_nets_tools_resources_spec.md`
+
+LN-0 architecture decisions:
+`docs/internal/local_nets_resources_ln0_architecture_decisions.md`
 
 ## Delivery Objective
 
@@ -17,6 +20,16 @@ The implementation must progress through gated packages. A later package does
 not begin until its predecessor's exit gate passes. Hardware, regulatory-data,
 or product decisions that cannot be safely inferred stop only the affected
 package; they do not authorize a workaround that weakens the governing contract.
+
+| Package | Status |
+| --- | --- |
+| LN-0 Audit, fixtures, and contract lock | Passed 2026-09-09 |
+| LN-1 Canonical resource store and migration | Next |
+| LN-2 Resources navigation and catalog | Pending LN-1 |
+| LN-3 HF directory subscription | Pending LN-2 |
+| LN-4 Local Nets core and workspace | Pending LN-3 |
+| LN-5 Ops Center and SOP integration | Pending LN-4 |
+| LN-6 Release qualification | Pending LN-5 |
 
 ## Existing Implementation Baseline
 
@@ -51,6 +64,9 @@ not yet suitable for the new feature:
 - Settings currently stores the configured Operating Group list; the new APIs
   must treat that identity as transport-neutral even while some UI labels remain
   HF-specific.
+- Settings `local_net_profiles` already supplies label-keyed local
+  group/resource metadata to SOP and message-actionability consumers. It is a
+  compatibility source, not a recurrence or Local Nets calendar model.
 - `freqinout/gui/main_window.py` owns lazy screen factories and the full/compact
   navigation hierarchy.
 
@@ -158,21 +174,27 @@ tab or the scheduler.
 
 1. Add source, frequency, directory-entry, session, group-relation, and
    legacy-ID mapping tables.
-2. Store frequency values as integer Hz and keep display formatting in adapters.
-3. Add stable source/resource/session keys and content versions/hashes.
-4. Implement bounded search/filter/query and computed usage APIs.
-5. Implement create/update/retire/replace behavior with read-only source guards.
-6. Implement accepted-version comparison and field-level diff models.
-7. Build a dry-run classifier/importer for existing `net_resources` rows.
+2. Add/preserve the shared transport-neutral `operating_group_key` on configured
+   group rows through the Qt-free identity adapter.
+3. Store frequency values as integer Hz and keep display formatting in adapters.
+4. Add stable source/resource/session keys and content versions/hashes.
+5. Implement bounded search/filter/query and computed usage APIs.
+6. Implement create/update/retire/replace behavior with read-only source guards.
+7. Implement accepted-version comparison and field-level diff models.
+8. Build a dry-run classifier/importer for existing `net_resources` rows.
    General digital/frequency standards become Frequency Catalog records only;
    credible net/session rows may additionally become directory entries and
    sessions; ambiguous rows remain review-required.
-8. Back up the affected database/configuration before cutover.
-9. Migrate in one transaction and checkpoint the schema/ownership version.
-10. Preserve legacy IDs and every source field through a mapping/audit record.
-11. Make repeated migration idempotent and verify rollback after an injected
+9. Classify existing `local_net_profiles` separately: parseable targets may seed
+   reviewed station resources; every row remains available to compatibility
+   readers and no recurrence is invented.
+10. Back up the affected database/configuration before cutover.
+11. Migrate in one transaction and checkpoint the schema/ownership version as
+    `shadow_ready`; legacy writers remain authoritative until LN-2.
+12. Preserve legacy IDs and every source field through a mapping/audit record.
+13. Make repeated migration idempotent and verify rollback after an injected
     mid-migration failure.
-12. Provide a compatibility reader/projection for current HF code while visible
+14. Provide a compatibility reader/projection for current HF code while visible
     ownership remains unchanged.
 
 ### Tests
@@ -180,6 +202,9 @@ tab or the scheduler.
 - empty, current, duplicate, malformed, and mixed-source fixtures;
 - exact preservation counts and field mappings;
 - ambiguous service retained as review-required;
+- Operating Group keys are shared across same-name configurations and survive a
+  rename;
+- `local_net_profiles` remains non-scheduled and lossless through classification;
 - built-in record cannot be overwritten;
 - station override and replacement behavior;
 - retirement with and without usage;
@@ -231,7 +256,11 @@ workspace, then move existing FIO resource writes to the canonical repository.
 8. Disable independent legacy resource writers after parity is proven. If a
    legacy materialized projection remains, update it only through the canonical
    transaction owner.
-9. Keep current HF schedule selection/runtime unchanged in this package.
+9. Re-run the legacy delta import, switch catalog authority from `shadow_ready`
+   to `canonical`, and expose navigation only in the successful cutover.
+10. Provide the compatibility resource-choice adapter for existing SOP
+    `local_net_profiles` consumers.
+11. Keep current HF schedule selection/runtime unchanged in this package.
 
 ### Tests
 

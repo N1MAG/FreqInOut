@@ -1,0 +1,158 @@
+{
+  "empty_installation": {
+    "freqinout_db": false,
+    "freqinout_nets_db": false,
+    "net_resources": [],
+    "hf_schedule_rows": [],
+    "named_hf_net_source_schedules": []
+  },
+  "bundled_like_resources": {
+    "resource_set": "Reference Bundle",
+    "source_type": "builtin",
+    "source_ref": "reference-bundle.json",
+    "readonly": 1,
+    "rows": [
+      {
+        "day_utc": "Monday",
+        "recurrence": "Weekly",
+        "biweekly_offset_weeks": 0,
+        "month_weeks": "",
+        "group_name": "Group Alpha",
+        "band": "40M",
+        "mode": "Digi",
+        "frequency": "7.078",
+        "start_utc": "01:00",
+        "end_utc": "02:00",
+        "early_checkin": 0,
+        "net_name": "Reference Net Alpha",
+        "coverage": "National"
+      }
+    ]
+  },
+  "station_created_resource": {
+    "resource_set": "Custom",
+    "source_type": "manual",
+    "source_ref": "station-entry",
+    "readonly": 0,
+    "row": {
+      "day_utc": "Tuesday",
+      "recurrence": "Weekly",
+      "biweekly_offset_weeks": 0,
+      "month_weeks": "",
+      "group_name": "Group Bravo",
+      "band": "2M",
+      "mode": "FM",
+      "frequency": "146.520",
+      "start_utc": "19:00",
+      "end_utc": "20:00",
+      "early_checkin": 0,
+      "net_name": "Station Net Bravo",
+      "coverage": "Local"
+    }
+  },
+  "imported_readonly_resources": {
+    "resource_set": "Imported Community Set",
+    "source_type": "imported",
+    "source_ref": "import-source.json",
+    "readonly": 1,
+    "rows": [
+      {
+        "day_utc": "Wednesday",
+        "recurrence": "Weekly",
+        "biweekly_offset_weeks": 0,
+        "month_weeks": "",
+        "group_name": "Group Charlie",
+        "band": "GMRS",
+        "mode": "FM",
+        "frequency": "462.675",
+        "start_utc": "20:00",
+        "end_utc": "21:00",
+        "early_checkin": 1,
+        "net_name": "Imported Net Charlie",
+        "coverage": "County"
+      }
+    ]
+  },
+  "duplicate_and_malformed_records": {
+    "duplicate_rows": [
+      {
+        "day_utc": "Thursday",
+        "recurrence": "Weekly",
+        "group_name": "Group Delta",
+        "band": "70CM",
+        "mode": "FM",
+        "frequency": "446.000",
+        "start_utc": "18:00",
+        "end_utc": "19:00",
+        "net_name": "Duplicate Net Delta"
+      },
+      {
+        "day_utc": " Thursday ",
+        "recurrence": "weekly",
+        "group_name": " group delta ",
+        "band": "70cm",
+        "mode": "fm",
+        "frequency": "446.0000",
+        "start_utc": "18:00",
+        "end_utc": "19:00",
+        "net_name": " duplicate net delta "
+      }
+    ],
+    "malformed_rows": [
+      {"band": "2M", "mode": "FM", "frequency": "not-a-frequency"},
+      {"day_utc": "Friday", "band": "", "mode": "FM", "frequency": "146.520"},
+      "not-an-object"
+    ]
+  },
+  "hf_schedule_rows": {
+    "linked": [
+      {
+        "id": 101,
+        "resource_id": 11,
+        "net_name": "Linked HF Net",
+        "group_name": "Group Alpha",
+        "band": "40M",
+        "mode": "Digi",
+        "frequency": "7.078",
+        "day_utc": "Monday",
+        "start_utc": "01:00",
+        "end_utc": "02:00"
+      }
+    ],
+    "unlinked": [
+      {
+        "id": 102,
+        "resource_id": null,
+        "net_name": "Private HF Net",
+        "group_name": "Group Bravo",
+        "band": "80M",
+        "mode": "Digi",
+        "frequency": "3.590",
+        "day_utc": "Tuesday",
+        "start_utc": "02:00",
+        "end_utc": "03:00"
+      }
+    ]
+  },
+  "named_hf_net_source_schedules": [
+    {
+      "id": "county-nets",
+      "name": "County Nets",
+      "category": "hf_net_schedule",
+      "rows": ["linked"]
+    },
+    {
+      "id": "exercise-nets",
+      "name": "Exercise Nets",
+      "category": "hf_net_schedule",
+      "rows": ["unlinked"]
+    }
+  ],
+  "settings_resource_keys": [
+    "net_resources_builtin_sync_version",
+    "net_resources_migrated_v1",
+    "net_resources_selected_set",
+    "freqplanner_hf_net_schedule_sets",
+    "freqplanner_selected_hf_net_schedule_set_id"
+  ]
+}

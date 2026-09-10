@@ -1,6 +1,6 @@
 # Local Nets And Tools & Resources Specification
 
-Status: proposed implementation authority; no implementation has begun
+Status: implementation authority; LN-0 passed, feature code not yet exposed
 
 Date: 2026-09-09
 
@@ -75,7 +75,9 @@ place any radio under scheduler control.
 - optional SOP association and SOP entry/reference support;
 - resource usage, update, retirement, import, and export workflows;
 - responsive, accessible administration and selection surfaces;
-- compatibility migration from the current `net_resources` row library.
+- compatibility migration from the current `net_resources` row library; and
+- compatibility treatment for the existing Settings `local_net_profiles` SOP
+  metadata without inventing schedules from those rows.
 
 ### Not in the initial scope
 
@@ -530,6 +532,12 @@ The current `net_resources` table is a row library: one record combines net,
 session, frequency, and recurrence data. It remains a compatibility source during
 migration and must not be renamed, dropped, or destructively reinterpreted.
 
+Settings `local_net_profiles` is a second legacy source, but it represents local
+group/resource hints used by SOP—not recurrence or calendar entries. Parseable
+targets may seed reviewed station Frequency Resources and group associations;
+unparseable rows remain intact and review-required. No Local Net schedule,
+occurrence, or automatic SOP behavior may be inferred from this metadata.
+
 Migration requirements:
 
 1. Create a timestamped database/config backup before ownership cutover.
@@ -666,7 +674,8 @@ The feature is acceptable only when:
 11. Retiring a referenced resource preserves schedules/history and clearly marks
     the dependency.
 12. Migration is backup-first, dry-runnable, transactional, idempotent, and
-    preserves every existing valid `net_resources` row or reports it for review.
+    preserves every existing valid `net_resources` and `local_net_profiles` row
+    or reports it for review.
 13. Import is preview-first and never overwrites bundled read-only resources.
 14. Resource use/impact is visible before retirement or destructive removal.
 15. Performance, responsive/theme/text, accessibility, shutdown, and Linux
