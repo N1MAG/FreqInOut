@@ -49,6 +49,7 @@ from freqinout.core.schedule_targeting import (
     schedule_target_identity_parts,
 )
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.resource_catalog_store import ResourceCatalogStore
 from freqinout.core.schedule_source_sets import (
     LIVE_SOURCE_SET_ID,
     HF_NET_SOURCE_CATEGORY,
@@ -387,6 +388,8 @@ class NetScheduleTab(QWidget):
         hv.setMinimumSectionSize(50)
 
         self.add_btn = QPushButton("Add Row")
+        self.add_hf_net_btn = QPushButton("Add HF Net")
+        self.add_hf_net_btn.setToolTip("Choose published Net Directory sessions and review them before adding drafts to a named HF Net schedule.")
         self.del_btn = QPushButton("Delete Selected")
         self.view_edit_btn = QPushButton("View/Edit")
         self.view_edit_btn.setCheckable(True)
@@ -427,6 +430,11 @@ class NetScheduleTab(QWidget):
         layout.addLayout(self._net_action_layout)
         self.source_usage_label.setVisible(True)
         layout.addWidget(self.source_usage_label)
+        self.subscription_status_label = QLabel("")
+        self.subscription_status_label.setObjectName("netScheduleDirectorySubscriptionStatus")
+        self.subscription_status_label.setWordWrap(True)
+        self.subscription_status_label.setVisible(False)
+        layout.addWidget(self.subscription_status_label)
         layout.addWidget(self.table)
 
         # Net resources section
@@ -524,6 +532,7 @@ class NetScheduleTab(QWidget):
 
         # signals
         self.add_btn.clicked.connect(self._add_row)
+        self.add_hf_net_btn.clicked.connect(self._open_add_hf_net_workflow)
         self.del_btn.clicked.connect(self._delete_rows)
         self.view_edit_btn.toggled.connect(self._apply_compact_schedule_view)
         self.move_to_resources_btn.clicked.connect(self._save_selected_schedule_rows_as_resources)
@@ -611,11 +620,12 @@ class NetScheduleTab(QWidget):
                 (self.rename_source_btn, 0, 6),
                 (self.delete_source_btn, 0, 7),
                 (self.add_btn, 1, 0),
-                (self.del_btn, 1, 1),
-                (self.view_edit_btn, 1, 2),
-                (self.move_to_resources_btn, 1, 3, 1, 2),
-                (self.export_btn, 1, 5),
-                (self.manage_net_sop_policies_btn, 1, 6),
+                (self.add_hf_net_btn, 1, 1),
+                (self.del_btn, 1, 2),
+                (self.view_edit_btn, 1, 3),
+                (self.move_to_resources_btn, 1, 4, 1, 2),
+                (self.export_btn, 1, 6),
+                (self.manage_net_sop_policies_btn, 1, 7),
             ]
             filter_placements = [
                 (self.resource_set_label, 0, 0),
@@ -637,11 +647,12 @@ class NetScheduleTab(QWidget):
                 (self.rename_source_btn, 0, 7),
                 (self.delete_source_btn, 0, 8),
                 (self.add_btn, 1, 0),
-                (self.del_btn, 1, 1),
-                (self.view_edit_btn, 1, 2),
-                (self.move_to_resources_btn, 1, 3),
-                (self.export_btn, 1, 4),
-                (self.manage_net_sop_policies_btn, 1, 5),
+                (self.add_hf_net_btn, 1, 1),
+                (self.del_btn, 1, 2),
+                (self.view_edit_btn, 1, 3),
+                (self.move_to_resources_btn, 1, 4),
+                (self.export_btn, 1, 5),
+                (self.manage_net_sop_policies_btn, 1, 6),
             ]
             filter_placements = [
                 (self.resource_set_label, 0, 0),
@@ -713,6 +724,32 @@ class NetScheduleTab(QWidget):
             "Named net schedules stay linked to plans by default. Updating this source refreshes dependent plans after RF Guard review."
         )
 
+    def _refresh_directory_subscription_status(self) -> None:
+        """Surface directory changes without applying them to HF schedule rows."""
+        if not hasattr(self, "subscription_status_label") or not hasattr(self, "table"):
+            return
+        from freqinout.core.hf_net_subscription import subscription_update_status
+
+        store = ResourceCatalogStore(self._db_path())
+        notices = []
+        for row_index in range(min(self.table.rowCount(), 200)):
+            widget = self.table.cellWidget(row_index, self.COL_SELECT)
+            if not isinstance(widget, QWidget):
+                continue
+            key = str(widget.property("net_session_key") or "").strip()
+            if not key:
+                continue
+            row = {name: widget.property(name) for name in ("net_session_key", "accepted_session_version_hash", "accepted_snapshot_json")}
+            status = subscription_update_status(store, row)
+            if status.state not in {"current", "unlinked"}:
+                fields = ", ".join(str(getattr(diff, "field_name", "change")) for diff in status.diffs[:4])
+                notices.append(f"{key}: {status.warning}{' Fields: ' + fields if fields else ''}")
+        if notices:
+            self.subscription_status_label.setText("Directory review required — " + " | ".join(notices[:4]) + ". Apply changes only through normal HF Save Schedule review.")
+            self.subscription_status_label.setVisible(True)
+        else:
+            self.subscription_status_label.setVisible(False)
+
     def _on_freqplanner_source_selected(self, *_args: Any) -> None:
         if not hasattr(self, "schedule_source_combo"):
             return
@@ -771,6 +808,92 @@ class NetScheduleTab(QWidget):
             line_edit.setPlaceholderText("New HF Net schedule name")
             line_edit.setFocus(Qt.OtherFocusReason)
         self._refresh_freq_planner()
+
+    def open_hf_net_subscription(self, session_keys: Tuple[str, ...] | List[str] = ()) -> None:
+        """Open the source-first directory workflow without saving or commanding.
+
+        The dialog selects a named destination.  The canonical service creates
+        reviewed schedule rows; this tab then uses its existing editor and Save
+        Schedule/RF Guard/reprojection path for the actual subscription write.
+        """
+        from freqinout.gui.hf_net_subscription_dialog import HfNetSubscriptionDialog
+
+        store = ResourceCatalogStore(self._db_path())
+        dialog = HfNetSubscriptionDialog(store, self.settings, self, initial_session_keys=session_keys)
+        if dialog.exec() != QDialog.Accepted or dialog.selection is None:
+            return
+        self._add_hf_subscription_draft(store, dialog.selection.destination_id, dialog.selection.destination_name, dialog.selection.session_keys)
+
+    def _open_add_hf_net_workflow(self) -> None:
+        self.open_hf_net_subscription()
+
+    def open_directory_subscription(self, session_keys: Tuple[str, ...] | List[str]) -> None:
+        """Stable Net Directory handoff target for canonical session keys."""
+        self.open_hf_net_subscription(session_keys)
+
+    def open_directory_schedule(self, net_session_key: str) -> None:
+        """Open the named HF source that already follows a directory session."""
+        from freqinout.core.hf_net_subscription import hf_net_destination_for_session
+
+        destination = hf_net_destination_for_session(self.settings, net_session_key)
+        if destination is None:
+            self.net_resources_hint.setText("This directory session is not present in a named HF Net schedule.")
+            return
+        destination_id, destination_name = destination
+        index = self.schedule_source_combo.findData(destination_id)
+        if index < 0:
+            self._refresh_freqplanner_source_combo()
+            index = self.schedule_source_combo.findData(destination_id)
+        if index >= 0:
+            self.schedule_source_combo.setCurrentIndex(index)
+            self.net_resources_hint.setText(f"Opened '{destination_name}' for the selected directory session.")
+
+    def _add_hf_subscription_draft(self, store: ResourceCatalogStore, destination_id: str, destination_name: str, session_keys: Tuple[str, ...]) -> None:
+        """Place service-built drafts in the existing named-source editor only."""
+        from freqinout.core.hf_net_subscription import build_hf_subscription_drafts
+
+        destination_id = str(destination_id or "").strip()
+        if not destination_id or destination_id == LIVE_SOURCE_SET_ID:
+            QMessageBox.warning(self, "Add HF Net", "Choose a named HF Net schedule destination before adding sessions.")
+            return
+        index = self.schedule_source_combo.findData(destination_id)
+        if index < 0:
+            QMessageBox.warning(self, "Add HF Net", "The selected named HF Net schedule is no longer available. Refresh and choose it again.")
+            return
+        # Selecting the target preserves the established unsaved-change prompt
+        # and source loading behavior before any canonical draft is inserted.
+        self.schedule_source_combo.setCurrentIndex(index)
+        if self._selected_freqplanner_source_id() != destination_id:
+            return
+        try:
+            drafts = build_hf_subscription_drafts(store, session_keys)
+        except Exception as exc:
+            QMessageBox.warning(self, "Add HF Net", f"Could not prepare published sessions:\n{exc}")
+            return
+        existing_keys = set()
+        for row_index in range(self.table.rowCount()):
+            widget = self.table.cellWidget(row_index, self.COL_SELECT)
+            if isinstance(widget, QWidget):
+                key = str(widget.property("net_session_key") or "").strip()
+                if key:
+                    existing_keys.add(key)
+        added, duplicates, warnings = 0, 0, []
+        for draft in drafts:
+            if draft.net_session_key in existing_keys:
+                duplicates += 1
+                continue
+            self._add_row(self._to_view_row(dict(draft.schedule_row)))
+            existing_keys.add(draft.net_session_key)
+            added += 1
+            warnings.extend(draft.warnings)
+        if added:
+            self._set_dirty(True)
+            self._apply_schedule_table_height_hints()
+            self._schedule_net_sop_conflict_refresh(force=True)
+            self._refresh_directory_subscription_status()
+        review = " Review the highlighted recurrence/time, target/radio, early check-in, mode, frequency, and conflict policy before Save Schedule."
+        warning_text = f" Warnings: {'; '.join(dict.fromkeys(warnings))}" if warnings else ""
+        self.net_resources_hint.setText(f"Added {added} canonical session draft(s) to '{destination_name}'. Skipped {duplicates} duplicate(s).{review}{warning_text}")
 
     def _selected_freqplanner_source_row(self) -> Optional[Dict[str, Any]]:
         if not hasattr(self, "schedule_source_combo"):
@@ -849,6 +972,7 @@ class NetScheduleTab(QWidget):
             self._saved_rows_signature = self._rows_signature(self._raw_rows)
             self._set_dirty(False)
             self._schedule_net_sop_conflict_refresh(force=True)
+            self._refresh_directory_subscription_status()
         finally:
             self._suspend_dirty_tracking = False
         self._apply_schedule_table_height_hints()
@@ -1903,6 +2027,17 @@ class NetScheduleTab(QWidget):
             sel_wrap.setProperty("source_row_id", 0)
         sel_wrap.setProperty("source_key", str(row_data.get("source_key") or row_data.get("_source_key") or "").strip())
         sel_wrap.setProperty("source_table", str(row_data.get("source_table") or "net_schedule_tab"))
+        # Canonical directory subscription metadata is carried through the
+        # existing HF source-row save path; it never becomes a bare legacy ID.
+        for key in (
+            "net_session_key",
+            "frequency_resource_key",
+            "accepted_session_version_hash",
+            "accepted_resource_version_hash",
+            "accepted_snapshot_json",
+        ):
+            if row_data.get(key) not in (None, ""):
+                sel_wrap.setProperty(key, row_data.get(key))
         if row_data.get("_resource_set"):
             sel_wrap.setProperty("resource_set", str(row_data.get("_resource_set")))
         fld_mode = str(row_data.get("fldigi_mode") or "").strip()
@@ -2578,6 +2713,18 @@ class NetScheduleTab(QWidget):
                 fo = select_widget.property("fldigi_offset")
                 if not fldigi_offset and fo not in (None, ""):
                     fldigi_offset = str(fo).strip()
+                subscription_values = {
+                    key: select_widget.property(key)
+                    for key in (
+                        "net_session_key",
+                        "frequency_resource_key",
+                        "accepted_session_version_hash",
+                        "accepted_resource_version_hash",
+                        "accepted_snapshot_json",
+                    )
+                }
+            else:
+                subscription_values = {}
 
             freq = text(self.COL_FREQ)
             start_txt = text(self.COL_START)
@@ -2709,6 +2856,9 @@ class NetScheduleTab(QWidget):
                 row["_resource_id"] = resource_id
             if resource_set:
                 row["_resource_set"] = resource_set
+            for key, value in subscription_values.items():
+                if value not in (None, ""):
+                    row[key] = value
             rows.append(row)
 
             if net_name:
@@ -2777,6 +2927,10 @@ class NetScheduleTab(QWidget):
                             fldigi_mode,
                             fldigi_offset,
                             resource_id,
+                            net_session_key,
+                            accepted_session_version_hash,
+                            accepted_resource_version_hash,
+                            accepted_snapshot_json,
                             target_scope,
                             target_device_profile_id,
                             target_operating_profile_id
@@ -2804,6 +2958,10 @@ class NetScheduleTab(QWidget):
                         fldigi_mode,
                         fldigi_offset,
                         resource_id,
+                        net_session_key,
+                        accepted_session_version_hash,
+                        accepted_resource_version_hash,
+                        accepted_snapshot_json,
                         target_scope,
                         target_device_profile_id,
                         target_operating_profile_id,
@@ -2833,6 +2991,10 @@ class NetScheduleTab(QWidget):
                                     "source_row_id": int(row_id or 0),
                                     "source_key": f"NET:{int(row_id or 0)}" if int(row_id or 0) > 0 else "",
                                     "_resource_id": int(resource_id) if resource_id not in (None, "") else None,
+                                    "net_session_key": net_session_key or "",
+                                    "accepted_session_version_hash": accepted_session_version_hash or "",
+                                    "accepted_resource_version_hash": accepted_resource_version_hash or "",
+                                    "accepted_snapshot_json": accepted_snapshot_json or "",
                                     "target_scope": target_scope,
                                     "target_device_profile_id": target_device_profile_id,
                                     "target_operating_profile_id": target_operating_profile_id,
@@ -3831,8 +3993,9 @@ class NetScheduleTab(QWidget):
                 INSERT INTO net_schedule_tab
                   (day_utc, recurrence, biweekly_offset_weeks, month_weeks, band, mode, vfo, frequency, start_utc, end_utc,
                    early_checkin, auto_tune, primary_js8call_group, comment, net_name, group_name, fldigi_mode, fldigi_offset,
-                   resource_id, target_scope, target_device_profile_id, target_operating_profile_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   resource_id, net_session_key, accepted_session_version_hash, accepted_resource_version_hash,
+                   accepted_snapshot_json, target_scope, target_device_profile_id, target_operating_profile_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized.get("day_utc"),
@@ -3854,6 +4017,10 @@ class NetScheduleTab(QWidget):
                     normalized.get("fldigi_mode", ""),
                     normalized.get("fldigi_offset", ""),
                     normalized.get("_resource_id"),
+                    normalized.get("net_session_key"),
+                    normalized.get("accepted_session_version_hash"),
+                    normalized.get("accepted_resource_version_hash"),
+                    normalized.get("accepted_snapshot_json"),
                     normalized.get("target_scope"),
                     normalized.get("target_device_profile_id"),
                     normalized.get("target_operating_profile_id"),
@@ -3864,8 +4031,9 @@ class NetScheduleTab(QWidget):
                 INSERT INTO net_schedule
                   (day_utc, recurrence, biweekly_offset_weeks, month_weeks, band, mode, frequency, start_utc, end_utc,
                    early_checkin, auto_tune, primary_js8call_group, comment, net_name, group_name, fldigi_mode, fldigi_offset,
-                   target_scope, target_device_profile_id, target_operating_profile_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   net_session_key, accepted_session_version_hash, accepted_resource_version_hash,
+                   accepted_snapshot_json, target_scope, target_device_profile_id, target_operating_profile_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized.get("day_utc"),
@@ -3885,6 +4053,10 @@ class NetScheduleTab(QWidget):
                     normalized.get("group_name"),
                     normalized.get("fldigi_mode", ""),
                     normalized.get("fldigi_offset", ""),
+                    normalized.get("net_session_key"),
+                    normalized.get("accepted_session_version_hash"),
+                    normalized.get("accepted_resource_version_hash"),
+                    normalized.get("accepted_snapshot_json"),
                     normalized.get("target_scope"),
                     normalized.get("target_device_profile_id"),
                     normalized.get("target_operating_profile_id"),

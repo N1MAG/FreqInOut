@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
@@ -171,6 +171,8 @@ class ResourcesTab(QWidget):
 
     TAB_LABELS = ("Frequency Catalog", "Net Directory", "Import / Export")
     SECTION_INDEX = {"frequency_catalog": 0, "net_directory": 1, "import_export": 2}
+    add_to_hf_nets_requested = Signal(object)
+    open_hf_schedule_requested = Signal(object)
 
     def __init__(self, parent: QWidget | None = None, *, store: ResourceCatalogStore | None = None, db_path: str | Path | None = None) -> None:
         super().__init__(parent)
@@ -212,6 +214,8 @@ class ResourcesTab(QWidget):
             page: QWidget = FrequencyCatalogView(self.store, self.tabs)
         elif index == 1:
             page = NetDirectoryView(self.store, self.tabs)
+            page.add_to_hf_nets_requested.connect(self.add_to_hf_nets_requested.emit)
+            page.open_hf_schedule_requested.connect(self.open_hf_schedule_requested.emit)
         else:
             page = ResourceImportExportView(self.store, self.tabs)
         old = self.tabs.widget(index)

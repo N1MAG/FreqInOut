@@ -4189,6 +4189,32 @@ class MainWindow(QMainWindow):
         if tab is not None and hasattr(tab, "open_section"):
             tab.open_section(key)
 
+    def open_hf_net_subscription(self, session_keys: object) -> None:
+        """Hand canonical directory sessions to the existing HF Nets editor."""
+        keys = tuple(str(key).strip() for key in (session_keys or ()) if str(key).strip())
+        if not keys:
+            return
+        idx = self._screen_index_by_label.get("Net Schedule", -1)
+        if idx < 0:
+            return
+        self._set_screen(idx)
+        tab = self._get_tab_by_label("Net Schedule")
+        if tab is not None and hasattr(tab, "open_directory_subscription"):
+            QTimer.singleShot(0, lambda target=tab, selected=keys: target.open_directory_subscription(selected))
+
+    def open_hf_net_schedule_for_session(self, net_session_key: object) -> None:
+        """Open the named HF schedule that already follows a directory session."""
+        key = str(net_session_key or "").strip()
+        if not key:
+            return
+        idx = self._screen_index_by_label.get("Net Schedule", -1)
+        if idx < 0:
+            return
+        self._set_screen(idx)
+        tab = self._get_tab_by_label("Net Schedule")
+        if tab is not None and hasattr(tab, "open_directory_schedule"):
+            QTimer.singleShot(0, lambda target=tab, selected=key: target.open_directory_schedule(selected))
+
     def _open_station_health_runtime_source_related_view(self, payload: object) -> None:
         if not isinstance(payload, Mapping):
             return
@@ -5518,6 +5544,8 @@ class MainWindow(QMainWindow):
 
         with perf_span("main_window.create_resources_tab", settings=self.settings, min_ms=5.0):
             tab = ResourcesTab(self)
+            tab.add_to_hf_nets_requested.connect(self.open_hf_net_subscription)
+            tab.open_hf_schedule_requested.connect(self.open_hf_net_schedule_for_session)
             self.resources_tab = tab
             return tab
 

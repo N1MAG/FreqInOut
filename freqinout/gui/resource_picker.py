@@ -50,7 +50,7 @@ def resource_status_text(resource: FrequencyResource) -> str:
 
 
 def session_when_text(session: NetDirectorySession) -> str:
-    parts = [part for part in (session.recurrence, session.local_start_time, session.timezone) if part]
+    parts = [part for part in (getattr(session, "day_utc", None), session.recurrence, session.local_start_time, session.timezone) if part]
     return " · ".join(parts) or "Timing not published"
 
 

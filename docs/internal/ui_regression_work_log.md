@@ -2270,3 +2270,37 @@ resource, Plan, and schedule-assignment tests pass. The dedicated cutover suite
 proves backup failure rollback and canonical zero-write startup. Responsive
 tests pass at 900x560 and 1000x700, including Large Text, and `git diff --check`
 passes. No legacy table was deleted and LN-3 did not begin before this gate.
+
+## 2026-09-09 — Local Nets / Resources LN-3 gate
+
+Status: complete; LN-3 passed and LN-4 is authorized next.
+
+HF Nets now supports a source-first Net Directory subscription workflow from
+either HF Nets or Tools & Resources. Operators can select multiple published
+sessions, choose a named HF Net schedule, and add review drafts without tuning,
+launching, or changing the active scheduler. The existing Save Schedule path
+continues to own validation, RF Guard, Plan reprojection, conflict review, and
+scheduler refresh. Existing subscriptions show Scheduled/Open Schedule.
+
+Each subscribed row persists its canonical session key, accepted session and
+frequency versions, and reviewed snapshot through named source storage and both
+live HF schedule projections. Directory or frequency changes, missing records,
+and retired sessions surface as review-required status; they never silently
+replace local schedule values. Duplicate session adds are suppressed. Creating
+a directory net uses the stable mutable station source automatically, and a
+station-private one-time option retains stable identity without publishing a
+general resource.
+
+Delegation: Terra/high implemented and refined the bounded subscription,
+directory, and HF Nets UI; Luna/high implemented the focused subscription,
+persistence, wiring, and warning tests. The high-reasoning primary model owned
+schema/migration changes, immutable snapshot/version semantics, scheduler and
+RF Guard boundaries, delegated-diff review, and final integration.
+
+Acceptance evidence: 203 focused catalog, migration, transfer, HF schedule,
+Plan reprojection, assignment, and scheduler tests pass; one pre-existing
+macOS-environment shutdown test is skipped because importing QtCore aborts in
+that test environment. The 17-test dedicated LN-3 suite passes without skips.
+Python compilation and `git diff --check` pass. The legacy row library remains
+as an explicitly temporary compatibility surface until full parity; it is not a
+second canonical writer. LN-4 did not begin before this gate passed.

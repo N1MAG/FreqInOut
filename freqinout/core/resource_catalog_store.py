@@ -45,6 +45,7 @@ CATALOG_TABLES = (
     "resource_catalog_migration_state",
 )
 MAX_RESULTS = 200
+STATION_MANUAL_SOURCE_KEY = "source_station_manual"
 
 
 def _utc_now() -> str:
@@ -139,6 +140,7 @@ def ensure_resource_catalog_schema(conn: sqlite3.Connection) -> None:
             source_key TEXT NOT NULL REFERENCES resource_catalog_sources(source_key),
             service TEXT NOT NULL, frequency_resource_key TEXT REFERENCES frequency_resources(frequency_resource_key),
             recurrence TEXT, local_start_time TEXT, duration_minutes INTEGER, timezone TEXT,
+            day_utc TEXT,
             effective_start_date TEXT, effective_end_date TEXT, exception_dates_json TEXT NOT NULL DEFAULT '[]',
             reminder_minutes INTEGER, mode TEXT, mode_details TEXT,
             content_hash TEXT NOT NULL, version_hash TEXT NOT NULL,
@@ -168,6 +170,9 @@ def ensure_resource_catalog_schema(conn: sqlite3.Connection) -> None:
             ON net_directory_sessions(net_entry_key, active, retired);
         """,
     )
+    session_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(net_directory_sessions)")}
+    if "day_utc" not in session_columns:
+        conn.execute("ALTER TABLE net_directory_sessions ADD COLUMN day_utc TEXT")
 
 
 def create_resource_catalog_schema(db_path: str | Path) -> None:
@@ -263,6 +268,42 @@ class ResourceCatalogStore:
 
     def get_source(self, source_key: str) -> CatalogSource | None:
         return self._read_one("resource_catalog_sources", "source_key", source_key, self._source_from_row)
+
+    def ensure_station_source(
+        self,
+        source_key: str = STATION_MANUAL_SOURCE_KEY,
+        label: str = "Station Resources",
+    ) -> CatalogSource:
+        """Return the stable mutable source used for operator-created records."""
+        key = str(source_key or STATION_MANUAL_SOURCE_KEY).strip()
+        with self._write() as conn:
+            self._require_schema(conn)
+            row = conn.execute(
+                "SELECT * FROM resource_catalog_sources WHERE source_key=?",
+                (key,),
+            ).fetchone()
+            if row is None:
+                now = _utc_now()
+                source = CatalogSource(key, str(label or "Station Resources"), "station")
+                content_hash = _hash({
+                    "source_key": source.source_key,
+                    "label": source.label,
+                    "source_kind": source.source_kind,
+                    "read_only": False,
+                    "enabled": True,
+                })
+                conn.execute(
+                    """INSERT INTO resource_catalog_sources
+                    (source_key,label,source_kind,content_hash,read_only,enabled,created_utc,updated_utc)
+                    VALUES (?,?,?,?,0,1,?,?)""",
+                    (source.source_key, source.label, source.source_kind, content_hash, now, now),
+                )
+            elif bool(row["read_only"]) or str(row["source_kind"] or "").lower() != "station":
+                raise CatalogValidationError(f"station source is not mutable: {key}")
+        source = self.get_source(key)
+        if source is None:
+            raise CatalogValidationError(f"station source unavailable: {key}")
+        return source
 
     # ---- frequency resources ---------------------------------------------------
     def create_frequency(self, resource: FrequencyResource, *, group_keys: Iterable[str] | Mapping[str, str] = ()) -> FrequencyResource:
@@ -417,10 +458,10 @@ class ResourceCatalogStore:
                 self._require_mutable_source(conn, session.source_key, old["source_key"])
             revision = self._revision(None) if not old else self._revision_from_hash(old["version_hash"])
             content_hash = _hash(self._session_payload(session)); version_hash = _hash({"content_hash": content_hash, "revision": revision}); created = old["created_utc"] if old else now
-            conn.execute("""INSERT INTO net_directory_sessions(net_session_key,net_entry_key,source_key,service,frequency_resource_key,recurrence,local_start_time,duration_minutes,timezone,effective_start_date,effective_end_date,exception_dates_json,reminder_minutes,mode,mode_details,content_hash,version_hash,active,retired,replacement_net_session_key,created_utc,updated_utc)
-                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                            ON CONFLICT(net_session_key) DO UPDATE SET net_entry_key=excluded.net_entry_key,source_key=excluded.source_key,service=excluded.service,frequency_resource_key=excluded.frequency_resource_key,recurrence=excluded.recurrence,local_start_time=excluded.local_start_time,duration_minutes=excluded.duration_minutes,timezone=excluded.timezone,effective_start_date=excluded.effective_start_date,effective_end_date=excluded.effective_end_date,exception_dates_json=excluded.exception_dates_json,reminder_minutes=excluded.reminder_minutes,mode=excluded.mode,mode_details=excluded.mode_details,content_hash=excluded.content_hash,version_hash=excluded.version_hash,active=excluded.active,retired=excluded.retired,replacement_net_session_key=excluded.replacement_net_session_key,updated_utc=excluded.updated_utc""",
-                         (session.net_session_key,session.net_entry_key,session.source_key,session.service,session.frequency_resource_key,session.recurrence,session.local_start_time,session.duration_minutes,session.timezone,session.effective_start_date,session.effective_end_date,_canonical_json(session.exception_dates),session.reminder_minutes,session.mode,session.mode_details,content_hash,version_hash,int(session.active),int(session.retired),session.replacement_net_session_key,created,now))
+            conn.execute("""INSERT INTO net_directory_sessions(net_session_key,net_entry_key,source_key,service,frequency_resource_key,recurrence,local_start_time,duration_minutes,timezone,effective_start_date,effective_end_date,exception_dates_json,reminder_minutes,mode,mode_details,day_utc,content_hash,version_hash,active,retired,replacement_net_session_key,created_utc,updated_utc)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            ON CONFLICT(net_session_key) DO UPDATE SET net_entry_key=excluded.net_entry_key,source_key=excluded.source_key,service=excluded.service,frequency_resource_key=excluded.frequency_resource_key,recurrence=excluded.recurrence,local_start_time=excluded.local_start_time,duration_minutes=excluded.duration_minutes,timezone=excluded.timezone,effective_start_date=excluded.effective_start_date,effective_end_date=excluded.effective_end_date,exception_dates_json=excluded.exception_dates_json,reminder_minutes=excluded.reminder_minutes,mode=excluded.mode,mode_details=excluded.mode_details,day_utc=excluded.day_utc,content_hash=excluded.content_hash,version_hash=excluded.version_hash,active=excluded.active,retired=excluded.retired,replacement_net_session_key=excluded.replacement_net_session_key,updated_utc=excluded.updated_utc""",
+                         (session.net_session_key,session.net_entry_key,session.source_key,session.service,session.frequency_resource_key,session.recurrence,session.local_start_time,session.duration_minutes,session.timezone,session.effective_start_date,session.effective_end_date,_canonical_json(session.exception_dates),session.reminder_minutes,session.mode,session.mode_details,session.day_utc,content_hash,version_hash,int(session.active),int(session.retired),session.replacement_net_session_key,created,now))
         return dataclasses.replace(session, content_hash=content_hash, version_hash=version_hash, created_utc=created, updated_utc=now)
 
     def get_session(self, net_session_key: str) -> NetDirectorySession | None:
@@ -638,6 +679,7 @@ class ResourceCatalogStore:
 __all__ = [
     "CATALOG_TABLES",
     "MAX_RESULTS",
+    "STATION_MANUAL_SOURCE_KEY",
     "ResourceCatalogStore",
     "create_resource_catalog_schema",
     "ensure_resource_catalog_schema",

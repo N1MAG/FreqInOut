@@ -172,6 +172,7 @@ class NetDirectorySession:
     reminder_minutes: int | None = None
     mode: str | None = None
     mode_details: str | None = None
+    day_utc: str | None = None
     content_hash: str | None = None
     version_hash: str | None = None
     active: bool = True

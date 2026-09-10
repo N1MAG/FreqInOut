@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 import uuid
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -39,6 +39,9 @@ def new_net_session_key() -> str:
 
 class NetDirectoryView(QWidget):
     """Directory identities and published sessions; never a station scheduler."""
+
+    add_to_hf_nets_requested = Signal(object)
+    open_hf_schedule_requested = Signal(object)
 
     def __init__(self, store: ResourceCatalogStore, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -109,7 +112,7 @@ class NetDirectoryView(QWidget):
         self.session_table = QTableWidget(0, 4, right)
         self.session_table.setHorizontalHeaderLabels(["When", "Service", "Frequency key", "Status"])
         self.session_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.session_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.session_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.session_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.session_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.session_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -121,7 +124,9 @@ class NetDirectoryView(QWidget):
         self.clone_session_btn = QPushButton("Clone Session", right)
         self.retire_session_btn = QPushButton("Retire Session", right)
         self.delete_session_btn = QPushButton("Delete Session", right)
-        for button in (self.new_session_btn, self.edit_session_btn, self.clone_session_btn, self.retire_session_btn, self.delete_session_btn):
+        self.add_hf_net_btn = QPushButton("Add to HF Nets", right)
+        self.add_hf_net_btn.setToolTip("Review selected published sessions in the named HF Net schedule workflow.")
+        for button in (self.new_session_btn, self.edit_session_btn, self.clone_session_btn, self.retire_session_btn, self.delete_session_btn, self.add_hf_net_btn):
             session_actions.addWidget(button)
         right_layout.addLayout(session_actions)
         self.entry_editor = self._build_entry_editor(right)
@@ -141,6 +146,7 @@ class NetDirectoryView(QWidget):
         self.clone_session_btn.clicked.connect(self.begin_clone_session)
         self.retire_session_btn.clicked.connect(self.retire_session)
         self.delete_session_btn.clicked.connect(self.delete_session)
+        self.add_hf_net_btn.clicked.connect(self.request_add_to_hf_nets)
         self.entry_editor.setVisible(False)
         self.session_editor.setVisible(False)
         self._set_action_state()
@@ -175,10 +181,12 @@ class NetDirectoryView(QWidget):
         self.session_service_edit = QComboBox(frame)
         self.session_service_edit.addItems(["AMATEUR", "GMRS"])
         self.session_recurrence_edit = QLineEdit(frame)
+        self.session_day_edit = QLineEdit(frame)
         self.session_start_edit = QLineEdit(frame)
         self.session_timezone_edit = QLineEdit(frame)
         self.session_duration_edit = QLineEdit(frame)
-        for label, widget in (("Session key", self.session_key_edit), ("Source key", self.session_source_edit), ("Frequency key", self.session_frequency_edit), ("Service", self.session_service_edit), ("Recurrence", self.session_recurrence_edit), ("Local start", self.session_start_edit), ("Timezone", self.session_timezone_edit), ("Duration minutes", self.session_duration_edit)):
+        self.session_day_edit.setPlaceholderText("Monday, Tuesday, or ALL")
+        for label, widget in (("Session key", self.session_key_edit), ("Source key", self.session_source_edit), ("Frequency key", self.session_frequency_edit), ("Service", self.session_service_edit), ("Recurrence", self.session_recurrence_edit), ("Day (UTC)", self.session_day_edit), ("Local start", self.session_start_edit), ("Timezone", self.session_timezone_edit), ("Duration minutes", self.session_duration_edit)):
             form.addRow(label, widget)
         actions = QHBoxLayout()
         save = QPushButton("Save Session", frame)
@@ -244,8 +252,32 @@ class NetDirectoryView(QWidget):
         if isinstance(session, NetDirectorySession):
             self._selected_session = session
             usage = self.store.session_usage(session.net_session_key)
-            self.status_label.setText(f"Session used by {usage.total_references} record(s).")
+            if usage.is_referenced:
+                self.status_label.setText(f"Scheduled: this session is used by {usage.total_references} HF schedule record(s). Open Schedule to review it.")
+            else:
+                self.status_label.setText("Not scheduled by this station.")
             self._set_action_state()
+
+    def _selected_session_keys(self) -> tuple[str, ...]:
+        keys = []
+        for item in self.session_table.selectedItems():
+            if item.column() != 0:
+                continue
+            session = item.data(Qt.UserRole)
+            if isinstance(session, NetDirectorySession):
+                keys.append(session.net_session_key)
+        return tuple(dict.fromkeys(keys))
+
+    def request_add_to_hf_nets(self) -> None:
+        """Emit canonical session keys; HF Nets owns the destination and save."""
+        keys = self._selected_session_keys()
+        if not keys:
+            self.status_label.setText("Select one or more published sessions before adding to HF Nets.")
+            return
+        if len(keys) == 1 and self.store.session_usage(keys[0]).is_referenced:
+            self.open_hf_schedule_requested.emit(keys[0])
+            return
+        self.add_to_hf_nets_requested.emit(keys)
 
     def _set_action_state(self) -> None:
         entry = self._selected_entry is not None
@@ -254,6 +286,10 @@ class NetDirectoryView(QWidget):
             button.setEnabled(entry)
         for button in (self.edit_session_btn, self.clone_session_btn, self.retire_session_btn, self.delete_session_btn):
             button.setEnabled(session)
+        keys = self._selected_session_keys()
+        scheduled = len(keys) == 1 and self.store.session_usage(keys[0]).is_referenced
+        self.add_hf_net_btn.setText("Open Schedule" if scheduled else "Add to HF Nets")
+        self.add_hf_net_btn.setEnabled(bool(keys))
 
     def begin_new_entry(self) -> None:
         self._editing_entry_key = None
@@ -305,7 +341,7 @@ class NetDirectoryView(QWidget):
     def begin_new_session(self) -> None:
         if not self._selected_entry: return
         self._editing_session_key = None; self.session_key_edit.setReadOnly(False); self.session_key_edit.setText(new_net_session_key())
-        for field in (self.session_source_edit, self.session_frequency_edit, self.session_recurrence_edit, self.session_start_edit, self.session_timezone_edit, self.session_duration_edit): field.clear()
+        for field in (self.session_source_edit, self.session_frequency_edit, self.session_recurrence_edit, self.session_day_edit, self.session_start_edit, self.session_timezone_edit, self.session_duration_edit): field.clear()
         self.session_source_edit.setText(self._selected_entry.source_key); self.session_service_edit.setCurrentText("AMATEUR"); self.session_editor.setVisible(True)
 
     def begin_edit_session(self) -> None:
@@ -313,6 +349,7 @@ class NetDirectoryView(QWidget):
         session = self._selected_session; self._editing_session_key = session.net_session_key
         self.session_key_edit.setText(session.net_session_key); self.session_key_edit.setReadOnly(True); self.session_source_edit.setText(session.source_key)
         self.session_frequency_edit.setText(session.frequency_resource_key or ""); self.session_service_edit.setCurrentText(session.service); self.session_recurrence_edit.setText(session.recurrence or "")
+        self.session_day_edit.setText(getattr(session, "day_utc", None) or "")
         self.session_start_edit.setText(session.local_start_time or ""); self.session_timezone_edit.setText(session.timezone or ""); self.session_duration_edit.setText(str(session.duration_minutes or "")); self.session_editor.setVisible(True)
 
     def begin_clone_session(self) -> None:
@@ -324,7 +361,7 @@ class NetDirectoryView(QWidget):
         prior = self._selected_session if self._editing_session_key else None
         try:
             duration = int(self.session_duration_edit.text()) if self.session_duration_edit.text().strip() else None
-            session = NetDirectorySession(self.session_key_edit.text(), self._selected_entry.net_entry_key, self.session_source_edit.text(), self.session_service_edit.currentText(), self.session_frequency_edit.text().strip() or None, recurrence=self.session_recurrence_edit.text().strip() or None, local_start_time=self.session_start_edit.text().strip() or None, timezone=self.session_timezone_edit.text().strip() or None, duration_minutes=duration, active=prior.active if prior else True, retired=prior.retired if prior else False, replacement_net_session_key=prior.replacement_net_session_key if prior else None)
+            session = NetDirectorySession(self.session_key_edit.text(), self._selected_entry.net_entry_key, self.session_source_edit.text(), self.session_service_edit.currentText(), self.session_frequency_edit.text().strip() or None, recurrence=self.session_recurrence_edit.text().strip() or None, day_utc=self.session_day_edit.text().strip() or None, local_start_time=self.session_start_edit.text().strip() or None, timezone=self.session_timezone_edit.text().strip() or None, duration_minutes=duration, active=prior.active if prior else True, retired=prior.retired if prior else False, replacement_net_session_key=prior.replacement_net_session_key if prior else None)
             self.store.update_session(session) if self._editing_session_key else self.store.create_session(session)
         except (CatalogValidationError, ReadOnlyResourceError, ValueError) as exc:
             self.status_label.setText(f"Cannot save session: {exc}"); return
