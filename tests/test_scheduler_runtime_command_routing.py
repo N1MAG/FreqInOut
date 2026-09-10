@@ -233,6 +233,142 @@ def test_active_schedule_lanes_apply_each_radio_row_without_singleton_fallback()
     assert all(kwargs["ignore_fldigi_busy"] is True for _entry, _source, kwargs in applied)
 
 
+def test_active_schedule_lanes_use_one_writer_for_compatible_shared_endpoint_aliases() -> None:
+    from freqinout.core.scheduler_engine import SchedulerEngine
+    from freqinout.core.shared_state import SchedulerManualControlState
+
+    class FakeManualControlService:
+        def get_state(self, radio_id: int):
+            return SchedulerManualControlState(radio_profile_id=f"radio_{radio_id}", state="on_schedule")
+
+    shared_entry = {
+        "group_name": "MAGNET",
+        "band": "20M",
+        "frequency": "14.115",
+    }
+    scheduler = SchedulerEngine.__new__(SchedulerEngine)
+    scheduler._manual_control_service = FakeManualControlService()
+    scheduler._schedule_coordinator = None
+    scheduler._schedule_snapshot_revision = 0
+    scheduler.settings = SimpleNamespace(get=lambda _key, default=None: default)
+    scheduler.active_schedule_lanes = lambda force=False, now_utc=None: [
+        {
+            "device_profile_id": 8,
+            "device_name": "FIO-A",
+            "device_profile": {
+                "id": 8,
+                "name": "FIO-A",
+                "control_backend": "flrig",
+                "flrig_host": "LOCALHOST",
+                "flrig_port": 12345,
+            },
+            "current_source": "HF",
+            "current_entry": dict(shared_entry),
+        },
+        {
+            "device_profile_id": 9,
+            "device_name": "FIO-A alias",
+            "device_profile": {
+                "id": 9,
+                "name": "FIO-A alias",
+                "control_backend": "flrig",
+                "flrig_host": "localhost",
+                "flrig_port": 12345,
+            },
+            "current_source": "HF",
+            "current_entry": dict(shared_entry),
+        },
+    ]
+    applied: list[tuple[dict[str, object], str]] = []
+    scheduler._apply_schedule_entry = lambda entry, source, **_kwargs: applied.append(
+        (dict(entry), source)
+    )
+    scheduler._clear_scheduler_health_issue = lambda *args, **kwargs: None
+    scheduler._record_scheduler_health_issue = lambda *args, **kwargs: None
+    scheduler._record_scheduler_event = lambda *args, **kwargs: None
+
+    handled = SchedulerEngine._apply_active_schedule_lanes(
+        scheduler,
+        now_utc=datetime.datetime.now(datetime.timezone.utc),
+        force=True,
+    )
+
+    assert handled is True
+    assert [(entry["target_device_profile_id"], source) for entry, source in applied] == [(8, "HF")]
+
+
+def test_active_schedule_lanes_fail_closed_for_competing_shared_endpoint_intents() -> None:
+    from freqinout.core.scheduler_engine import SchedulerEngine
+    from freqinout.core.shared_state import SchedulerManualControlState
+
+    class FakeManualControlService:
+        def get_state(self, radio_id: int):
+            return SchedulerManualControlState(radio_profile_id=f"radio_{radio_id}", state="on_schedule")
+
+    scheduler = SchedulerEngine.__new__(SchedulerEngine)
+    scheduler._manual_control_service = FakeManualControlService()
+    scheduler._schedule_coordinator = None
+    scheduler._schedule_snapshot_revision = 0
+    scheduler.settings = SimpleNamespace(get=lambda _key, default=None: default)
+    scheduler.active_schedule_lanes = lambda force=False, now_utc=None: [
+        {
+            "device_profile_id": 8,
+            "device_name": "FIO-A",
+            "device_profile": {
+                "id": 8,
+                "name": "FIO-A",
+                "control_backend": "flrig",
+                "flrig_host": "127.0.0.1",
+                "flrig_port": 12345,
+            },
+            "current_source": "HF",
+            "current_entry": {"group_name": "MAGNET", "band": "20M", "frequency": "14.115"},
+        },
+        {
+            "device_profile_id": 9,
+            "device_name": "FIO-A alias",
+            "device_profile": {
+                "id": 9,
+                "name": "FIO-A alias",
+                "control_backend": "flrig",
+                "flrig_host": "127.0.0.1",
+                "flrig_port": 12345,
+            },
+            "current_source": "HF",
+            "current_entry": {"group_name": "AMRRON", "band": "40M", "frequency": "7.115"},
+        },
+    ]
+    applied: list[dict[str, object]] = []
+    health: list[tuple[str, str, dict[str, object]]] = []
+    events: list[tuple[str, str, dict[str, object]]] = []
+    scheduler._apply_schedule_entry = lambda entry, _source, **_kwargs: applied.append(dict(entry))
+    scheduler._clear_scheduler_health_issue = lambda *args, **kwargs: None
+    scheduler._record_scheduler_health_issue = lambda name, detail, **metadata: health.append(
+        (name, detail, dict(metadata))
+    )
+    scheduler._record_scheduler_event = lambda event_type, code, **metadata: events.append(
+        (event_type, code, dict(metadata))
+    )
+
+    handled = SchedulerEngine._apply_active_schedule_lanes(
+        scheduler,
+        now_utc=datetime.datetime.now(datetime.timezone.utc),
+        force=True,
+    )
+
+    assert handled is True
+    assert applied == []
+    assert {name for name, _detail, _metadata in health} == {
+        "endpoint-ownership:8",
+        "endpoint-ownership:9",
+    }
+    assert [code for _event_type, code, _metadata in events] == [
+        "endpoint_ownership_conflict",
+        "endpoint_ownership_conflict",
+    ]
+    assert all("different desired states" in detail for _name, detail, _metadata in health)
+
+
 def test_active_schedule_lanes_report_assigned_plan_gap() -> None:
     from freqinout.core.scheduler_engine import SchedulerEngine
     from freqinout.core.shared_state import SchedulerManualControlState

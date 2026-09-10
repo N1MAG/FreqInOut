@@ -39,7 +39,7 @@ class _RecorderExecutor:
 def test_scheduler_stop_cancels_future_and_shuts_down_executor(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
-    monkeypatch.setattr(scheduler_engine_module, "ThreadPoolExecutor", _RecorderExecutor)
+    monkeypatch.setattr(scheduler_engine_module, "DaemonSerialExecutor", _RecorderExecutor)
 
     app = QCoreApplication.instance() or QCoreApplication([])
     engine = SchedulerEngine()

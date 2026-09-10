@@ -88,6 +88,30 @@ realistic operating maximum for common use, and the design must remain usable fo
 the less-common three-radio operator. Mesh and similar sources must remain
 distinguishable from commandable radios even when they share the awareness rail.
 
+Runtime coordination must also pass a three-radio plus two-receive-only-SDR
+station gate. This is a concurrency requirement, not a demand to render five
+expanded cards. One slow, unreachable, or hung radio/receiver endpoint must not
+delay status, schedule dispatch, retry, readback, or manual control for another
+endpoint. Shared antenna, frontend, amplifier, PTT, and RF Guard decisions remain
+station-coordinated before endpoint work is dispatched. The authoritative
+architecture, lifecycle, performance budgets, and release gates are defined in
+`multi_endpoint_scheduler_concurrency_spec.md`.
+
+Station and command-bar rendering is cache-only. Selecting or expanding a card,
+switching theme, resizing, and periodic repaint must never initiate a process
+walk, socket/API request, PTT read, frequency read, receiver probe, or schedule
+command. Background endpoint lanes own those bounded operations and publish
+immutable snapshots. Operator wording comes from the selected endpoint's cached
+state and uses concise, target-scoped language such as `On schedule · verified`,
+`Applying schedule`, `Manual tuning`, `Waiting for shared RF resource`,
+`Receiver unavailable`, or `Control stalled · other radios unaffected`.
+Unknown or stale evidence must not be presented as success.
+
+The UI hang watchdog may include the scheduler's bounded cache-only diagnostic
+snapshot. That snapshot may identify a safe endpoint label/hash, generation,
+failure/circuit state, queue/in-flight state, staleness, and lifecycle event, but
+must not perform endpoint I/O, expose credentials, or grow without bound.
+
 At minimum, the selected radio presentation should make radio identity, current
 operating destination, schedule/event state, and next meaningful transition
 understandable. Secondary detail may use a drawer, popover, selector, or dedicated

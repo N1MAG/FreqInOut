@@ -766,7 +766,7 @@ def test_status_refresh_applies_js8_shadow_comparison_on_scheduler_thread(monkey
         def stop(self):
             pass
 
-    monkeypatch.setattr(scheduler_module, "ThreadPoolExecutor", _ImmediateExecutor)
+    monkeypatch.setattr(scheduler_module, "DaemonSerialExecutor", _ImmediateExecutor)
     monkeypatch.setattr(scheduler_module, "SettingsManager", lambda: DummySettings({"control_via": "JS8Call"}))
     monkeypatch.setattr(scheduler_module, "VarACStatusClient", _FakeVarACStatusClient)
     monkeypatch.setattr(scheduler_module, "SoftwareStatusService", _FakeShadowService)

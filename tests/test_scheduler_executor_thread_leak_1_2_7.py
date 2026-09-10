@@ -99,7 +99,7 @@ def test_status_refresh_invokes_js8_shadow_comparison_for_offset_only_branch(mon
         def stop(self):
             pass
 
-    monkeypatch.setattr(scheduler_module, "ThreadPoolExecutor", _ImmediateExecutor)
+    monkeypatch.setattr(scheduler_module, "DaemonSerialExecutor", _ImmediateExecutor)
     monkeypatch.setattr(scheduler_module, "SettingsManager", lambda: DummySettings({"control_via": "FLRig"}))
     monkeypatch.setattr(scheduler_module, "VarACStatusClient", _FakeVarACStatusClient)
     monkeypatch.setattr(scheduler_module, "SoftwareStatusService", _FakeShadowService)
@@ -216,7 +216,7 @@ def test_status_refresh_invokes_js8_shadow_comparison(monkeypatch):
         def stop(self):
             pass
 
-    monkeypatch.setattr(scheduler_module, "ThreadPoolExecutor", _ImmediateExecutor)
+    monkeypatch.setattr(scheduler_module, "DaemonSerialExecutor", _ImmediateExecutor)
     monkeypatch.setattr(scheduler_module, "SettingsManager", lambda: DummySettings({"control_via": "JS8Call"}))
     monkeypatch.setattr(scheduler_module, "VarACStatusClient", _FakeVarACStatusClient)
     monkeypatch.setattr(scheduler_module, "SoftwareStatusService", _FakeShadowService)
@@ -298,7 +298,7 @@ def test_status_refresh_reuses_coordinated_js8_and_varac_snapshots(monkeypatch):
         def stop(self):
             pass
 
-    monkeypatch.setattr(scheduler_module, "ThreadPoolExecutor", _ImmediateExecutor)
+    monkeypatch.setattr(scheduler_module, "DaemonSerialExecutor", _ImmediateExecutor)
     monkeypatch.setattr(scheduler_module, "SettingsManager", DummySettings)
     monkeypatch.setattr(scheduler_module, "VarACStatusClient", _FakeVarACStatusClient)
     monkeypatch.setattr(scheduler_module, "SoftwareStatusService", _FakeShadowService)

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import datetime
 import faulthandler
+import json
 import os
 import platform
 import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Mapping, Optional
 
 from PySide6.QtCore import QObject, QTimer
 
@@ -45,9 +46,18 @@ class UiEventLoopWatchdog(QObject):
         self._running = False
         self._stop_event = threading.Event()
         self._monitor_thread: Optional[threading.Thread] = None
+        self._diagnostic_provider: Optional[Callable[[], Mapping[str, object]]] = None
         self._timer = QTimer(self)
         self._timer.setInterval(self._heartbeat_interval_ms)
         self._timer.timeout.connect(self._beat)
+
+    def set_diagnostic_provider(
+        self,
+        provider: Optional[Callable[[], Mapping[str, object]]],
+    ) -> None:
+        """Register a thread-safe, cache-only diagnostic snapshot provider."""
+
+        self._diagnostic_provider = provider
 
     def start(self) -> None:
         if self._running:
@@ -116,6 +126,15 @@ class UiEventLoopWatchdog(QObject):
                 handle.write(f"Python: {sys.version.replace(chr(10), ' ')}\n")
                 handle.write(f"Platform: {platform.platform()}\n")
                 handle.write(f"UI heartbeat stale for: {stale_for:.3f} seconds\n")
+                provider = self._diagnostic_provider
+                if callable(provider):
+                    try:
+                        diagnostics = dict(provider() or {})
+                        handle.write("\nScheduler diagnostics:\n")
+                        handle.write(json.dumps(diagnostics, indent=2, sort_keys=True, default=str))
+                        handle.write("\n")
+                    except Exception as exc:
+                        handle.write(f"\nScheduler diagnostics unavailable: {type(exc).__name__}\n")
                 handle.write("\nThread dump:\n")
                 handle.flush()
                 faulthandler.dump_traceback(file=handle, all_threads=True)

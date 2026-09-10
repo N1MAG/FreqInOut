@@ -13,6 +13,9 @@ def test_ui_watchdog_writes_hang_dump(monkeypatch, tmp_path: Path) -> None:
     from freqinout.core.ui_watchdog import UiEventLoopWatchdog
 
     watchdog = UiEventLoopWatchdog(stall_threshold_sec=2.0, report_cooldown_sec=5.0)
+    watchdog.set_diagnostic_provider(
+        lambda: {"endpoint_lane_count": 5, "endpoint_lanes": [{"state": "running"}]}
+    )
     watchdog._write_hang_dump(9.25)
 
     dumps = sorted((tmp_path / "ui_hang_dumps").glob("fio_ui_hang_*.txt"))
@@ -20,6 +23,8 @@ def test_ui_watchdog_writes_hang_dump(monkeypatch, tmp_path: Path) -> None:
     text = dumps[-1].read_text(encoding="utf-8")
     assert "FreqInOut UI hang watchdog report" in text
     assert "UI heartbeat stale for: 9.250 seconds" in text
+    assert "Scheduler diagnostics:" in text
+    assert '"endpoint_lane_count": 5' in text
     assert "Thread dump:" in text
     watchdog.deleteLater()
     app.processEvents()

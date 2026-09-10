@@ -2514,3 +2514,341 @@ specification.
 Artifacts: `shortwave_resources_spec.md` and
 `shortwave_resources_implementation_plan.md`. This review changed documentation
 only; it made no runtime, configuration, schema, or production-data changes.
+
+## 2026-09-10 — SDR receiver API and hardware compatibility design review
+
+Status: specification complete; implementation and hardware acceptance have not
+begun. SDR receiver control is now the prerequisite implementation priority
+before Shortwave packages.
+
+The audit confirmed that current observer SDR profiles and `SDR Follow` are
+receive-only identity/advisory features. FIO's existing RigCtlD protocol client
+is a useful code seam, but observer policy prevents production SDR tuning today.
+The new specification separates hardware support by the listening application,
+availability of a FIO application adapter, and acceptance of the exact
+hardware/application/API/OS combination.
+
+The hardware-first matrix covers SDR++ RigCTL, SDRangel REST, SDRconnect
+WebSocket, Gqrx remote control, and KiwiSDR tuned-URL handoff. It also records why
+direct SoapySDR, UHD, RTL-TCP, and vendor-library ownership is deferred: those
+interfaces normally own discovery, I/Q streaming, and often exclusive device
+access rather than remotely controlling the operator's running receiver.
+Application compatibility is never presented as FIO-verified tuning.
+
+The UI contract preserves a first-class manual path for every configured SDR.
+It uses `FIO tuning ready`, `Connected; verify tuning`, `Manual tuning`, and
+`Receiver unavailable` rather than a misleading supported/unsupported label.
+Frequency/mode guidance, copy actions, and an optional explicit receiver launch
+remain available when no API adapter exists or a tune fails. Only successful API
+readback permits a tuning-success claim.
+
+Delegation: the existing focused integration agent performed a read-only audit
+of upstream hardware lists, package caveats, and operator wording using official
+project/vendor documentation. The high-reasoning primary model owned the FIO
+current-state audit, ownership/concurrency boundary, hardware-first compatibility
+model, adapter ordering, manual fallback contract, and final integration review.
+
+Artifacts: `sdr_receiver_control_spec.md`,
+`sdr_receiver_control_implementation_plan.md`, and reconciled Shortwave spec/plan.
+This review changed documentation only; it made no runtime, schema, configuration,
+or production-data changes.
+
+Follow-up concurrency review: the existing scheduler correctly projects active
+rows and retains pending intent by radio, but it executes all device commands
+through one station-wide control worker and stores failure/backoff plus several
+busy/readback values globally. A slow or hung endpoint can therefore delay other
+radios despite their correctly scoped schedule rows. The governing contracts now
+require a central no-I/O station coordinator with a serialized, failure-isolated
+command lane per distinct physical endpoint. Three radios plus two SDRs is the
+required hardware acceptance station; eight active fake endpoints provide stress
+headroom. This clarification changed documentation only.
+
+## 2026-09-10 — Multi-endpoint scheduler concurrency specification extraction
+
+Status: standalone specification complete; implementation and production
+qualification have not begun.
+
+The compact multi-endpoint requirement was extracted from the product and SDR
+documents into `multi_endpoint_scheduler_concurrency_spec.md`. A code audit
+confirmed that current schedule rows and retained intents are partly radio-scoped,
+but control execution, pending identity, timeout/failure/backoff, post-apply
+verification, and several actual/busy caches still share station-global workers
+or state. The standalone specification therefore treats endpoint isolation as a
+release-safety requirement for FIO's critical automated scheduler.
+
+The design uses one no-I/O station coordinator for time/precedence and shared RF
+safety, plus one long-lived serialized lane per distinct automated physical
+endpoint. It defines alias prevention, immutable intent generations, latest-state
+coalescing, endpoint-scoped readback and health, bounded circuit breakers,
+non-leaking hung-call handling, startup/reconfiguration/shutdown order, truthful
+operator states, and correlated diagnostics. Manual SDRs remain usable without a
+worker; receive-only lanes have no transmit surface.
+
+Acceptance requires single-radio compatibility, a physical three-transceiver plus
+two-SDR station with a deliberately hung peer, an eight-endpoint 30-minute
+synthetic soak, shared-resource safety, bounded resource counts, and Linux/macOS
+lifecycle evidence. The work is divided into MES-0 through MES-5 so implementation
+cannot proceed past a failed characterization, identity, isolation, status/safety,
+SDR, or production gate.
+
+Model: high-reasoning primary model for repository/code audit, concurrency and
+lifecycle architecture, performance/reliability gates, extraction, and final
+integration review. No implementation was delegated because this task changed
+specification artifacts only.
+
+Artifacts: `multi_endpoint_scheduler_concurrency_spec.md`, plus authority links in
+`multirig_product_ui_contract.md`, `sdr_receiver_control_spec.md`, and
+`sdr_receiver_control_implementation_plan.md`. No runtime, schema, configuration,
+or production-data change was made.
+
+## 2026-09-10 — Multi-endpoint scheduler MES-0 characterization
+
+Status: MES-0 exit gate passed; MES-1 not started.
+
+MES-0 added only test/support/tooling artifacts. The production scheduler and
+database schema were not changed. The production-code tests freeze the existing
+single-radio behavior, deterministic cross-midnight schedule timing, three-radio
+projection, per-radio latest-intent coalescing, station-global intent drain,
+global failure/backoff and status-cache gaps, shared PTT/RF Guard rejection,
+manual-QSY precedence, and shutdown generation invalidation.
+
+The bounded fault harness separately records a successful one-radio
+connect/apply/readback transaction and a controlled three-radio scenario. With
+Radio A held in apply, both healthy peers are rejected by the shared control
+future and never begin endpoint work. Controlled cancellation releases the
+worker, and harness thread, file-descriptor, and child-process counts return to
+their initial values. The result makes the MES-2 defect concrete without adding
+an expected-failing test or changing production behavior.
+
+Delegation and review:
+
+- Primary high-reasoning model: architecture/code audit, concurrency/migration
+  safety, worktree protection, review of every delegated file, integrated tests,
+  baseline record, and final gate decision.
+- `gpt-5.6-terra` high: deterministic fault harness, bounded resource/correlation
+  capture, baseline CLI, and six focused harness tests.
+- `gpt-5.6-luna` high: ten production-code characterization tests for schedule,
+  control/status scope, safety, precedence, and shutdown behavior.
+
+Acceptance evidence:
+
+- pre-change focused baseline: 116 passed, 1 skipped;
+- integrated scheduler/SOP/safety gate: 132 passed, 1 skipped in 2.17 seconds;
+- `tools/scheduler_multi_endpoint_baseline.py`: exit 0, one-radio success,
+  three-radio defect reproduced, cleanup stable;
+- `py_compile`: all four new Python artifacts passed; and
+- `git diff --check`: passed.
+
+The skip is the existing macOS guard in `test_scheduler_shutdown.py`; new MES-0
+shutdown-generation coverage passed on this host. Development-host details,
+commands, limitations, and the complete exit checklist are recorded in
+`multi_endpoint_scheduler_mes0_baseline_2026-09-10.md`. Linux production
+performance and the physical three-transceiver/two-SDR station remain later
+release gates.
+
+## 2026-09-10 — Multi-endpoint scheduler MES-1 identity and pure coordinator
+
+Status: MES-1 exit gate passed; MES-2 not started at the time of this entry.
+
+Added a Qt-free coordination boundary with normalized same-family route keys,
+resolved-profile projection, immutable schedule snapshots, immutable
+generation-tagged intent/result types, deterministic latest-state coalescing, and
+fail-closed duplicate-writer validation. The coordinator consumes the existing
+schedule projection after NET/SOP/HF precedence has been selected; it performs no
+database, file, socket, adapter, timer, thread-pool, or Qt work. Manual and current
+observer profiles remain non-automated. Cross-protocol physical-radio identity is
+not guessed and requires an explicit future association before routes can merge.
+
+Delegation and review:
+
+- High-reasoning primary model: concurrency architecture, migration safety,
+  coordinator implementation, delegated diff review, integrated verification,
+  documentation, and gate decision.
+- `gpt-5.6-terra` high: read-only resolved-configuration and precedence audit.
+- `gpt-5.6-luna` high: 18 focused identity, snapshot, determinism, conflict,
+  generation, result, and no-I/O tests. Primary review corrected test annotations
+  for the supported Python 3.9 floor.
+
+Acceptance evidence: 18 focused tests passed; the integrated scheduler/SOP/safety
+gate passed 150 tests with one existing platform skip; the MES-0 baseline tool
+still reproduced the legacy global-worker blocking defect with stable cleanup;
+`py_compile` and `git diff --check` passed. Full details are in
+`multi_endpoint_scheduler_mes1_evidence_2026-09-10.md`. No schema, configuration,
+or production-data change was made.
+
+## 2026-09-10 — Multi-endpoint scheduler MES-2 isolated command lanes
+
+Status: MES-2 exit gate passed; MES-3 not started at the time of this entry.
+
+Added one serialized, long-lived command lane per normalized endpoint route and
+connected existing transceiver control through the unchanged scheduler facade.
+Apply plus immediate verification readback now remain in the target lane. Pending
+generation, timeout, failure/backoff, circuit recovery, last result, and shutdown
+suppression are endpoint-local, so a hung or failed radio does not hold healthy
+peers. Compatible aliases use one deterministic writer; competing intents for
+the same route fail closed and emit profile-specific health/event evidence.
+
+Delegation and review:
+
+- High-reasoning primary model: concurrency architecture, implementation,
+  migration safety, delegated diff review, coordinator integration tests,
+  combined acceptance, documentation, and gate decision.
+- `gpt-5.6-terra` high: legacy compatibility audit and five production-engine
+  endpoint-isolation/lifecycle integration tests.
+- `gpt-5.6-luna` high: deterministic test audit and thirteen focused
+  lane/fault/resource tests.
+
+Acceptance evidence: the 41-test focused integration set passed; the full
+scheduler/SOP/safety gate passed 171 tests with one existing platform skip; the
+standalone MES-0 baseline remained stable; `py_compile` and `git diff --check`
+passed. Details are recorded in
+`multi_endpoint_scheduler_mes2_evidence_2026-09-10.md`. No schema,
+configuration, or production-data change was made.
+
+## 2026-09-10 — Multi-endpoint scheduler MES-3 status and shared safety
+
+Status: MES-3 exit gate passed; MES-4 not started at the time of this entry.
+
+Added immutable endpoint-scoped status snapshots with one bounded serialized
+status worker per normalized route. Status reads are cache-only for consumers;
+refresh timeout, failure/backoff, and generation fencing are isolated so a hung
+endpoint cannot delay a healthy peer. Explicit target control no longer borrows
+primary-radio status. Unknown or stale target/shared PTT evidence fails closed,
+while shared PTT/RF/antenna/frontend/amplifier arbitration remains central and
+uses target-qualified cached evidence. Scheduler health, events, and PTT
+evidence now retain the target radio identity.
+
+Delegation and review:
+
+- High-reasoning primary model: concurrency/safety architecture, scheduler
+  integration, compatibility, delegated diff review, combined acceptance,
+  documentation, and gate decision.
+- `gpt-5.6-terra` high: status/safety audit, endpoint-status registry, target
+  runtime-manager safety, and five focused manager tests.
+- `gpt-5.6-luna` high: six deterministic status-registry tests and eight
+  production-engine integration tests.
+
+Acceptance evidence: 19 focused MES-3 tests passed; the integrated scheduler,
+SOP, station-safety, and multi-rig gate passed 213 tests with three existing
+platform/optional-environment skips; the MES-0 characterization CLI, Python 3.9
+compilation, and `git diff --check` passed. Details are recorded in
+`multi_endpoint_scheduler_mes3_evidence_2026-09-10.md`. No schema,
+configuration, or production-data change was made.
+
+## 2026-09-10 — Multi-endpoint scheduler MES-4 receive-only lanes
+
+Status: MES-4 automated exit gate passed; MES-5 not started at the time of this
+entry. No physical SDR application/hardware combination is claimed as verified.
+
+Added the Qt-free receiver-control contract with no PTT/transmit surface and
+integrated verified automated observers into target-qualified isolated endpoint
+lanes. Manual, disabled, incomplete, or unverified receivers retain a zero-I/O
+Manual tuning path. Receiver rows branch before transceiver scheduling, share
+the existing coordinator and worker lifecycle, use central configured RF
+resource arbitration, and publish target-scoped cached tune/readback status.
+The old observer foreground TCP probe and false reachability/control implication
+were removed.
+
+Six startup-owned, additive `device_profiles` fields persist the application,
+adapter, target, enablement, verification state, and evidence. Existing rows
+receive safe Manual/disabled defaults, and enabling control fails closed unless
+the verified receiver identity is complete. The populated-clone migration test
+preserved its existing profile and endpoint values.
+
+Delegation and review:
+
+- High-reasoning primary model: architecture, migration, scheduler/runtime
+  integration, safety/truthfulness review, delegated diff review, combined
+  acceptance, documentation, and gate decision.
+- `gpt-5.6-terra` high: read-only seam audit; separate bounded implementation of
+  the receiver contract and four focused tests.
+- `gpt-5.6-luna` high: seven deterministic five-endpoint/isolation/lifecycle
+  tests.
+
+Acceptance evidence: 19 focused MES-4 tests passed; the integrated scheduler,
+runtime, multi-rig, SOP, and station-safety gate passed 241 tests with five
+existing platform/optional-environment skips; Python compilation and
+`git diff --check` passed. Details are recorded in
+`multi_endpoint_scheduler_mes4_evidence_2026-09-10.md`. No destructive migration
+or production-data rewrite occurred.
+
+## 2026-09-10 — Multi-endpoint scheduler MES-5 lifecycle and qualification
+
+Status: implementation and automated focused/integrated gates complete. The
+required real-time soak is in progress; Linux and physical five-endpoint evidence
+remain explicit release gates.
+
+Dynamic endpoint reconfiguration now fingerprints only control, identity, and
+shared-RF safety fields. Editing, disabling, or removing a profile retires only
+its command/status lanes, increments an endpoint configuration epoch, clears its
+assumed/pending state, and fences late callbacks; unaffected peers keep running.
+Resume, sleep/wake, monotonic reset, and forward/back wall-clock handling discard
+stale actual-state assumptions and offer only current schedule authority. Startup
+status probes are deterministically staggered, endpoint retry is local, and
+shutdown rejects new work and records bounded outstanding-lane evidence without
+waiting indefinitely for a hung external adapter.
+
+Station Overview and the station command bar now consume cache-only runtime
+snapshots. UI selection, repaint, resize, and theme work therefore do not own
+process walks or endpoint I/O. Target-scoped status wording distinguishes
+verified schedule state, application, manual tuning, shared-resource waits,
+receiver unavailability, and isolated control stalls. Cache-only bounded
+scheduler diagnostics are attached to UI hang dumps without credentials.
+
+The new eight-endpoint qualification harness exercises four transceiver and four
+receive-only routes with simultaneous transitions, a slow receiver, repeated
+disconnect/reconnect, and a recurring-failure endpoint. It reports bounded
+healthy-lane latency, queues, thread/file-descriptor/child-process/RSS stability,
+timeouts, and diagnostic drops. An isolated production-database clone migration
+and rollback rehearsal verified all six receiver fields; the untouched source and
+restored clone shared SHA-256
+`a9b927910e231f4d677b18f652a773e2ed0d2f25b82be28987e0f4f142361345`.
+
+Delegation and review:
+
+- High-reasoning primary model: lifecycle/concurrency architecture,
+  reconfiguration fencing, clock/resume behavior, cache-only UI boundary,
+  diagnostics, migration rehearsal, delegated-diff review, integration, and gate
+  decision.
+- `gpt-5.6-terra` high: read-only lifecycle/UI/shutdown audit; separate bounded
+  eight-endpoint soak harness and resource instrumentation.
+- `gpt-5.6-luna` high: deterministic lifecycle, clock, reconfiguration,
+  unavailability, shutdown, and repeated-start/stop tests.
+
+Acceptance evidence to date: the integrated scheduler, runtime, multi-rig, SOP,
+station-safety, and watchdog gate passes 264 tests with five existing
+platform/optional-environment skips. A 1,100-cycle accelerated regression passes
+8,800 commands, including 1,210 expected faults, with no unexpected failure or
+timeout and stable resources. It was added after the first real-time attempt
+correctly exposed overflow in the old exponential-backoff intermediate after
+roughly 1,024 repeated failures; command/status backoff now shares bounded finite
+math and the qualifying run restarted from zero. Python compilation and
+`git diff --check` pass. Final full-suite and real-time soak results are recorded
+in `multi_endpoint_scheduler_mes5_evidence_2026-09-10.md` when those gates finish.
+No production database was modified.
+
+Final primary safety review closed three delegated-audit findings before the
+qualifying soak. Fresh readback is now compared with the active endpoint intent
+before the UI may say `On schedule · verified`; stale, missing, or mismatched
+evidence cannot receive that label. Resume and clock discontinuities now detach
+and generation-fence every prior command/status lane before current intent is
+reoffered. The project-owned one-worker endpoint executor uses a daemon worker,
+bounded production joins, queued-work cancellation, and survivor diagnostics;
+explicit cooperative `wait=True` lifecycle calls still fully join. A permanently
+hung fake adapter exits cleanly in a subprocess test. Full-run soak percentiles
+now use deterministic bounded reservoir sampling, retain exact maximum latency,
+and enforce a 250 ms healthy-lane p95 gate. After these amendments, the focused
+scheduler/receiver/runtime/watchdog set passes 210 tests with three optional or
+platform skips; the focused shutdown/lifecycle/soak subset passes 46 tests.
+
+The final 30-minute real-time eight-endpoint soak passed 13,936/13,936 commands
+over 1,742 cycles with 1,917 expected injected failures, zero unexpected
+failures/timeouts/queue-instability observations, healthy p50/p95/max latency of
+0.507/1.032/6.653 ms, and stable endpoint threads, descriptors, child processes,
+and RSS. The final repository assertion gate passes 2,950 tests with 37
+environment/platform skips in clean A–H, I–K, L, M, N–R, S, and T–Z processes.
+The monolithic process still reproduces the known cumulative native Qt teardown
+segmentation fault at the unrelated compact log-viewer construction test; that
+test passes alone and in the clean L partition. MES-5 automated macOS evidence is
+complete. Linux lifecycle and the physical three-transceiver/two-SDR matrix
+remain external release gates, so production verification is not claimed.

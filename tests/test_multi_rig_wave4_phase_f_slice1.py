@@ -168,13 +168,7 @@ def test_station_runtime_manager_reports_observer_follow_guidance(monkeypatch, t
     monkeypatch.setattr(
         SoftwareStatusService,
         "generic_endpoint_status",
-        lambda self, **kwargs: {
-            "state": "ok",
-            "tooltip": f"Observer SDR reachable at {kwargs['host']}:{kwargs['port']}",
-            "running": True,
-            "reachable": True,
-            "endpoint": f"{kwargs['host']}:{kwargs['port']}",
-        },
+        lambda self, **kwargs: pytest.fail("observer snapshot performed a foreground TCP probe"),
     )
     monkeypatch.setattr(
         DeviceRuntime,
@@ -188,7 +182,9 @@ def test_station_runtime_manager_reports_observer_follow_guidance(monkeypatch, t
 
     observer_snapshot = next(snap for snap in snapshots if snap.device_profile_id == int(observer["id"]))
     assert observer_snapshot.device_class == "observer"
-    assert observer_snapshot.service_states["Observer"]["state"] == "ok"
+    assert observer_snapshot.service_states["Observer"]["state"] == "idle"
+    assert observer_snapshot.service_states["Observer"]["control_state"] == "manual_tuning"
+    assert "Manual tuning" in observer_snapshot.status_summary
     assert observer_snapshot.observer_follow_source_name == str(primary["name"])
     assert "park on 40M" in observer_snapshot.observer_follow_summary
 
@@ -317,6 +313,9 @@ def test_station_overview_shows_observer_follow_guidance(monkeypatch, tmp_path):
 
     manager = StationRuntimeManager(store=store, settings=settings)
     manager.sync_with_store()
+    primary_runtime = manager.get_primary_runtime()
+    assert primary_runtime is not None
+    primary_runtime._freq_state_cache = 14_078_000
     tab = StationOverviewTab()
     try:
         tab.set_runtime_manager(manager)

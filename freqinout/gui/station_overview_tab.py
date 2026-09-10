@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Mapping, Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -52,6 +52,7 @@ class StationOverviewTab(QWidget):
         self._runtime_manager: Optional[StationRuntimeManager] = None
         self._busy_state_service: Optional[BusyStateService] = None
         self._manual_control_service: Optional[SchedulerManualControlService] = None
+        self._endpoint_summary_provider: Optional[Callable[[], Mapping[int, Mapping[str, object]]]] = None
         self._tab_active = False
         self._refresh_dirty = False
         self._last_render_signature: tuple[object, ...] = tuple()
@@ -136,6 +137,13 @@ class StationOverviewTab(QWidget):
         self._refresh_dirty = True
         self.refresh_from_manager(force=True)
 
+    def set_endpoint_summary_provider(
+        self,
+        provider: Optional[Callable[[], Mapping[int, Mapping[str, object]]]],
+    ) -> None:
+        self._endpoint_summary_provider = provider
+        self._refresh_dirty = True
+
     def set_tab_active(self, active: bool) -> None:
         self._tab_active = bool(active)
         if active:
@@ -152,7 +160,35 @@ class StationOverviewTab(QWidget):
         if manager is None:
             self._rebuild_cards([])
             return
-        snapshots = manager.get_runtime_snapshots(force=force)
+        try:
+            snapshots = manager.get_runtime_snapshots(force=force, cache_only=True)
+        except TypeError:
+            snapshots = manager.get_runtime_snapshots(force=force)
+        summaries: Mapping[int, Mapping[str, object]] = {}
+        if callable(self._endpoint_summary_provider):
+            try:
+                summaries = self._endpoint_summary_provider() or {}
+            except Exception:
+                summaries = {}
+        for snapshot in snapshots:
+            summary = summaries.get(int(snapshot.device_profile_id or 0))
+            if not isinstance(summary, Mapping):
+                continue
+            label = str(summary.get("label") or "").strip()
+            detail = str(summary.get("detail") or "").strip()
+            state_code = str(summary.get("state") or "").strip().lower()
+            if label:
+                snapshot.status_summary = label
+                snapshot.service_states["Scheduler"] = {
+                    "state": (
+                        "ok"
+                        if state_code == "on_schedule_verified"
+                        else ("warn" if state_code not in {"manual_tuning", "verification_unavailable"} else "idle")
+                    ),
+                    "tooltip": detail or label,
+                    "control_state": state_code,
+                    "label": label,
+                }
         signature = self._overview_signature(snapshots)
         if not force and signature == self._last_render_signature:
             return
@@ -381,6 +417,10 @@ class StationOverviewTab(QWidget):
         busy_label = self._busy_label_for(snapshot)
         if busy_label:
             return busy_label
+        scheduler_state = snapshot.service_states.get("Scheduler", {})
+        scheduler_label = str(scheduler_state.get("label") or "").strip()
+        if scheduler_label:
+            return scheduler_label
         if snapshot.device_class == "observer":
             return "Monitor"
         state, suffix = self._manual_state_for(snapshot)

@@ -1035,6 +1035,13 @@ class MainWindow(QMainWindow):
             pass
         self._notify_startup_status("Starting scheduler services...")
         self.scheduler.start()
+        try:
+            if hasattr(self._ui_watchdog, "set_diagnostic_provider"):
+                self._ui_watchdog.set_diagnostic_provider(
+                    self.scheduler.get_multi_endpoint_diagnostics
+                )
+        except Exception as exc:
+            log.debug("MainWindow: scheduler diagnostics wiring failed: %s", exc)
         self.background_ingest = _construct_startup_component(
             "background_ingest",
             lambda: BackgroundIngestController(
@@ -1547,6 +1554,12 @@ class MainWindow(QMainWindow):
         self._ui_resume_pending = False
         self._resume_noncritical_ui_timers()
         self._set_child_app_active(True)
+        try:
+            scheduler = getattr(self, "scheduler", None)
+            if scheduler is not None and hasattr(scheduler, "handle_resume"):
+                scheduler.handle_resume()
+        except Exception as exc:
+            log.debug("UI_LIFECYCLE|scheduler_resume_failed err=%s", exc)
         self._flush_visible_ui_refresh("app_resume")
 
     def _on_application_state_changed(self, state) -> None:
@@ -5664,6 +5677,9 @@ class MainWindow(QMainWindow):
         with perf_span("main_window.create_station_overview_tab", settings=self.settings, min_ms=5.0):
             tab = StationOverviewTab(self)
             tab.set_runtime_manager(self.station_runtime_manager)
+            scheduler = getattr(self, "scheduler", None)
+            if scheduler is not None and hasattr(scheduler, "get_endpoint_operational_summaries"):
+                tab.set_endpoint_summary_provider(scheduler.get_endpoint_operational_summaries)
             self.station_overview_tab = tab
             try:
                 self.station_overview_tab.health_details_requested.connect(self._open_station_health_detail)
@@ -10749,9 +10765,27 @@ class MainWindow(QMainWindow):
         snapshots: list[object] = []
         if manager is not None:
             try:
-                snapshots = list(manager.get_runtime_snapshots(force=force))
+                try:
+                    snapshots = list(manager.get_runtime_snapshots(force=force, cache_only=True))
+                except TypeError:
+                    snapshots = list(manager.get_runtime_snapshots(force=force))
             except Exception:
                 snapshots = []
+        scheduler = getattr(self, "scheduler", None)
+        operational = {}
+        if scheduler is not None and hasattr(scheduler, "get_endpoint_operational_summaries"):
+            try:
+                operational = scheduler.get_endpoint_operational_summaries() or {}
+            except Exception:
+                operational = {}
+        for snapshot in snapshots:
+            profile_id = self._station_command_snapshot_id(snapshot)
+            endpoint_summary = operational.get(profile_id) if isinstance(operational, Mapping) else None
+            if not isinstance(endpoint_summary, Mapping):
+                continue
+            label = str(endpoint_summary.get("label") or "").strip()
+            if label and hasattr(snapshot, "status_summary"):
+                snapshot.status_summary = label
         snapshot_by_id = {self._station_command_snapshot_id(snapshot): snapshot for snapshot in snapshots}
         choices: list[object] = []
         seen_ids: set[int] = set()

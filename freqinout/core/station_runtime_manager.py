@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import time
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from freqinout.core.logger import log
 from freqinout.core.multi_radio_store import (
@@ -21,6 +21,11 @@ from freqinout.core.multi_rig_runtime_status import (
     build_multi_rig_runtime_status,
 )
 from freqinout.core.radio_status_poll_coordinator import RadioStatusPollCoordinator
+from freqinout.core.receiver_control import (
+    ReceiverControlClient,
+    ReceiverIdentity,
+    receiver_identity_from_profile,
+)
 from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.varac_ingest import load_latest_varac_sync_status
 from freqinout.radio_interface.js8_status import JS8ControlClient, VarACStatusClient
@@ -130,13 +135,20 @@ def _normalize_device_class(value: object) -> str:
 
 def _device_endpoint_summary(profile: Mapping[str, Any]) -> str:
     if _normalize_device_class(profile.get("device_class", "tx_rx")) == "observer":
+        application = str(profile.get("sdr_application", "") or "").strip()
+        adapter = str(profile.get("sdr_adapter", "manual") or "manual").strip().lower()
+        target = str(profile.get("sdr_target", "") or "").strip()
         host = str(profile.get("sdr_host", "") or "").strip()
         port = profile.get("sdr_port")
+        label = application or "Observer SDR"
+        if adapter == "manual" or not _row_bool(profile.get("sdr_control_enabled", False), False):
+            return f"{label} / manual tuning"
         if host and port not in (None, ""):
-            return f"Observer SDR {host}:{int(port)}"
+            suffix = f" / {target}" if target else ""
+            return f"{label} {host}:{int(port)}{suffix}"
         if host:
-            return f"Observer SDR {host}"
-        return "Observer / no endpoint"
+            return f"{label} {host}"
+        return f"{label} / receiver unavailable"
     backend = str(profile.get("control_backend", "") or "").strip().lower()
     if backend == "rigctld":
         host = str(profile.get("rig_host", "") or "").strip() or "127.0.0.1"
@@ -188,6 +200,14 @@ class DeviceSettingsProxy:
             "varac_launch_cmd": str(profile.get("launch_cmd", "") or "").strip(),
             "sdr_host": str(profile.get("sdr_host", "") or "").strip(),
             "sdr_port": profile.get("sdr_port"),
+            "sdr_application": str(profile.get("sdr_application", "") or "").strip(),
+            "sdr_adapter": str(profile.get("sdr_adapter", "manual") or "manual").strip().lower(),
+            "sdr_target": str(profile.get("sdr_target", "") or "").strip(),
+            "sdr_control_enabled": _row_bool(profile.get("sdr_control_enabled", 0), False),
+            "sdr_verification_state": str(
+                profile.get("sdr_verification_state", "manual") or "manual"
+            ).strip().lower(),
+            "sdr_verification_json": str(profile.get("sdr_verification_json", "{}") or "{}"),
             "message_paths": {},
             "launch_control_enabled": bool(int(profile.get("launch_enabled", 0) or 0)),
         }
@@ -321,6 +341,13 @@ class SharedPttLockSnapshot:
     owner_ptt_active: bool
     target_ptt_active: bool
     reason: str
+    # These defaulted fields keep the legacy snapshot constructor compatible
+    # while letting scheduler lanes report whether their cached interlock
+    # evidence was safe to use.  A missing or stale cache is deliberately not
+    # interpreted as an idle transmitter.
+    evidence_known: bool = True
+    evidence_stale: bool = False
+    evidence_detail: str = ""
 
 
 @dataclass
@@ -364,6 +391,9 @@ class DeviceRuntime:
         assignment: Optional[Mapping[str, Any]] = None,
         operating_profile: Optional[Mapping[str, Any]] = None,
         status_poll_coordinator: Optional[RadioStatusPollCoordinator] = None,
+        receiver_client_factory: Optional[
+            Callable[[Mapping[str, Any]], Optional[ReceiverControlClient]]
+        ] = None,
     ) -> None:
         self.fallback_settings = fallback_settings
         self.profile: Dict[str, Any] = {}
@@ -375,6 +405,9 @@ class DeviceRuntime:
         self.rig_client: Optional[RigControlClient] = None
         self.js8_control_client: Optional[JS8ControlClient] = None
         self.varac_status_client: Optional[VarACStatusClient] = None
+        self.receiver_client: Optional[ReceiverControlClient] = None
+        self.receiver_identity: Optional[ReceiverIdentity] = None
+        self._receiver_client_factory = receiver_client_factory
         self.status_poll_coordinator = status_poll_coordinator or RadioStatusPollCoordinator(
             ttl_seconds=0.8,
             retry_seconds=4.0,
@@ -426,13 +459,31 @@ class DeviceRuntime:
         self.settings_proxy = DeviceSettingsProxy(self.profile, self.fallback_settings)
         self.status_service = SoftwareStatusService(self.settings_proxy)
         backend = str(self.profile.get("control_backend", "") or "").strip().lower()
-        if backend in {"flrig", "rigctld"}:
+        device_class = _normalize_device_class(self.profile.get("device_class", "tx_rx"))
+        if device_class == "observer":
+            try:
+                self.receiver_identity = receiver_identity_from_profile(self.profile)
+            except Exception as exc:
+                log.debug("DeviceRuntime: invalid persisted receiver identity for %s: %s", self.profile.get("name", ""), exc)
+                self.receiver_identity = None
+            if (
+                self.receiver_identity is not None
+                and _row_bool(self.profile.get("sdr_control_enabled", 0), False)
+                and str(self.profile.get("sdr_verification_state", "manual") or "manual").strip().lower() == "verified"
+                and callable(self._receiver_client_factory)
+            ):
+                try:
+                    self.receiver_client = self._receiver_client_factory(self.profile)
+                except Exception as exc:
+                    log.debug("DeviceRuntime: failed building receive-only client for %s: %s", self.profile.get("name", ""), exc)
+                    self.receiver_client = None
+        if device_class != "observer" and backend in {"flrig", "rigctld"}:
             try:
                 self.rig_client = rig_control_client_from_settings(self.settings_proxy)
             except Exception as exc:
                 log.debug("DeviceRuntime: failed building rig client for %s: %s", self.profile.get("name", ""), exc)
                 self.rig_client = None
-        if self.is_primary or backend == "js8call":
+        if device_class != "observer" and (self.is_primary or backend == "js8call"):
             try:
                 host = str(self.settings_proxy.get("js8_host", "127.0.0.1") or "127.0.0.1").strip() or "127.0.0.1"
                 port = int(self.settings_proxy.get("js8_port", 2442) or 2442)
@@ -449,6 +500,11 @@ class DeviceRuntime:
         self._config_signature = signature
 
     def stop(self) -> None:
+        if self.receiver_client is not None:
+            try:
+                self.receiver_client.close()
+            except Exception:
+                pass
         if self.js8_control_client is not None:
             try:
                 self.js8_control_client.stop()
@@ -457,6 +513,8 @@ class DeviceRuntime:
         self.rig_client = None
         self.js8_control_client = None
         self.varac_status_client = None
+        self.receiver_client = None
+        self.receiver_identity = None
         self._ptt_state_cache = False
         self._ptt_state_ts = 0.0
         self._ptt_retry_ts = 0.0
@@ -542,7 +600,7 @@ class DeviceRuntime:
             "use_net_control_tabs": _row_bool(operating.get("use_net_control_tabs", 1), True),
         }
 
-    def snapshot(self, *, force: bool = False) -> DeviceRuntimeSnapshot:
+    def snapshot(self, *, force: bool = False, cache_only: bool = False) -> DeviceRuntimeSnapshot:
         backend = str(self.profile.get("control_backend", "manual") or "manual").strip().lower() or "manual"
         device_class = _normalize_device_class(self.profile.get("device_class", "tx_rx"))
         service_states: Dict[str, Dict[str, object]] = {}
@@ -558,7 +616,7 @@ class DeviceRuntime:
         varac_gateway_handler_name = str(self.profile.get("varac_gateway_handler_name", "") or "").strip()
         varac_cluster_member_count = int(self.profile.get("varac_cluster_enabled_member_count", 0) or 0)
         varac_shared_db_path = str(self.profile.get("varac_shared_db_path", "") or "").strip()
-        if device_class != "observer" and self.status_service is not None:
+        if device_class != "observer" and self.status_service is not None and not cache_only:
             kwargs: Dict[str, object] = {
                 "force": force,
                 "host_override": str(self.profile.get("js8_host", "") or "").strip() or None,
@@ -576,25 +634,41 @@ class DeviceRuntime:
         control_key = CONTROL_STATUS_KEYS.get(backend)
         control_info = dict(service_states.get(control_key, {})) if control_key else {}
         if device_class == "observer":
-            observer_info = (
-                self.status_service.generic_endpoint_status(
-                    service_name="OBSERVER",
-                    endpoint_label="Observer SDR",
-                    host=str(self.profile.get("sdr_host", "") or "").strip(),
-                    port=int(self.profile.get("sdr_port", 0) or 0),
-                    force=force,
-                )
-                if self.status_service is not None
-                else {
-                    "state": "idle",
-                    "tooltip": "Observer SDR status unavailable",
+            control_enabled = _row_bool(self.profile.get("sdr_control_enabled", 0), False)
+            verification_state = str(
+                self.profile.get("sdr_verification_state", "manual") or "manual"
+            ).strip().lower()
+            if control_enabled and verification_state == "verified" and self.receiver_client is not None:
+                observer_info = {
+                    "state": "attention",
+                    "tooltip": "Receiver control is configured but has no cached live verification; use manual tuning until tune/readback succeeds.",
                     "running": False,
                     "reachable": False,
-                    "endpoint": "",
+                    "endpoint": _device_endpoint_summary(self.profile),
+                    "control_state": "receiver_unavailable",
                 }
-            )
+            elif control_enabled:
+                observer_info = {
+                    "state": "attention",
+                    "tooltip": "Receiver control is unavailable; tune this receiver manually.",
+                    "running": False,
+                    "reachable": False,
+                    "endpoint": _device_endpoint_summary(self.profile),
+                    "control_state": "receiver_unavailable",
+                }
+            else:
+                observer_info = {
+                    "state": "idle",
+                    "tooltip": "Manual tuning. FIO will show the scheduled receive frequency without controlling the receiver.",
+                    "running": False,
+                    "reachable": False,
+                    "endpoint": _device_endpoint_summary(self.profile),
+                    "control_state": "manual_tuning",
+                }
             service_states["Observer"] = dict(observer_info)
-            control_ready = bool(observer_info.get("reachable", False))
+            # Construction from persisted configuration is not a live probe.
+            # Cached adapter readback must establish readiness elsewhere.
+            control_ready = False
             overall_state = str(observer_info.get("state", "idle") or "idle").strip().lower() or "idle"
             status_summary = str(observer_info.get("tooltip", "") or "").strip() or "Observer SDR status unavailable"
         else:
@@ -606,12 +680,16 @@ class DeviceRuntime:
             running_varac = False
             if self.status_service is not None and varac_configured:
                 try:
-                    running_varac = bool(self.status_service.program_is_running("VarAC"))
+                    running_varac = bool(
+                        self.status_service.cached_program_is_running("VarAC")
+                        if cache_only and hasattr(self.status_service, "cached_program_is_running")
+                        else self.status_service.program_is_running("VarAC")
+                    )
                 except Exception:
                     running_varac = False
             raw_varac_status = (
                 self.varac_status_client.get_status()
-                if self.varac_status_client is not None and varac_configured
+                if self.varac_status_client is not None and varac_configured and not cache_only
                 else {}
             )
             varac_reason = str(raw_varac_status.get("reason", "") or "").strip().lower()
@@ -794,8 +872,8 @@ class DeviceRuntime:
         warning_text = " ".join(dict.fromkeys([warning for warning in warnings if warning]))
         policy = self.operating_policy()
         ptt_group = "" if device_class == "observer" else normalize_ptt_group(self.profile.get("ptt_group", ""))
-        ptt_active = self.ptt_active(force=force)
-        current_frequency_hz = self.current_frequency_hz(force=force)
+        ptt_active = bool(self._ptt_state_cache) if cache_only else self.ptt_active(force=force)
+        current_frequency_hz = self._freq_state_cache if cache_only else self.current_frequency_hz(force=force)
         return DeviceRuntimeSnapshot(
             device_profile_id=int(self.profile.get("id", 0) or 0),
             name=str(self.profile.get("name", "") or "").strip(),
@@ -851,7 +929,15 @@ class DeviceRuntime:
 
 
 class StationRuntimeManager:
-    def __init__(self, store: Optional[MultiRadioStore] = None, settings: Optional[object] = None) -> None:
+    def __init__(
+        self,
+        store: Optional[MultiRadioStore] = None,
+        settings: Optional[object] = None,
+        *,
+        receiver_client_factory: Optional[
+            Callable[[Mapping[str, Any]], Optional[ReceiverControlClient]]
+        ] = None,
+    ) -> None:
         self.store = store or MultiRadioStore()
         self.settings = settings
         self._runtimes: Dict[int, DeviceRuntime] = {}
@@ -869,6 +955,7 @@ class StationRuntimeManager:
             retry_seconds=4.0,
             time_fn=time.monotonic,
         )
+        self._receiver_client_factory = receiver_client_factory
 
     def invalidate_runtime_status(self) -> None:
         self._runtime_status = None
@@ -1020,6 +1107,7 @@ class StationRuntimeManager:
                     assignment=assignment,
                     operating_profile=operating,
                     status_poll_coordinator=self._status_poll_coordinator,
+                    receiver_client_factory=self._receiver_client_factory,
                 )
                 self._runtimes[device_id] = runtime
             else:
@@ -1051,6 +1139,7 @@ class StationRuntimeManager:
         *,
         for_device_id: Optional[int] = None,
         force: bool = False,
+        status_by_device: Optional[Mapping[object, object]] = None,
     ) -> SharedPttLockSnapshot:
         target_id = int(for_device_id or 0) if for_device_id not in (None, "") else int(self._primary_device_id or 0)
         if target_id <= 0:
@@ -1079,7 +1168,15 @@ class StationRuntimeManager:
                 reason="",
             )
         ptt_group = normalize_ptt_group(target_runtime.profile.get("ptt_group", ""))
-        target_ptt_active = bool(target_runtime.ptt_active(force=force))
+        target_evidence_known = True
+        target_evidence_stale = False
+        target_evidence_detail = ""
+        if status_by_device is None:
+            target_ptt_active = bool(target_runtime.ptt_active(force=force))
+        else:
+            target_ptt_active, target_evidence_known, target_evidence_stale, target_evidence_detail = (
+                self._cached_ptt_evidence(status_by_device, int(target_id))
+            )
         if not ptt_group:
             return SharedPttLockSnapshot(
                 device_profile_id=int(target_id),
@@ -1091,15 +1188,37 @@ class StationRuntimeManager:
                 owner_ptt_active=False,
                 target_ptt_active=target_ptt_active,
                 reason="",
+                evidence_known=target_evidence_known,
+                evidence_stale=target_evidence_stale,
+                evidence_detail=target_evidence_detail,
             )
 
         owners: List[DeviceRuntime] = []
+        unknown_members: List[Dict[str, object]] = []
         for runtime_id, runtime in self._runtimes.items():
             if int(runtime_id) == int(target_id):
                 continue
             if normalize_ptt_group(runtime.profile.get("ptt_group", "")) != ptt_group:
                 continue
-            if runtime.ptt_active(force=force):
+            if status_by_device is None:
+                peer_ptt_active = bool(runtime.ptt_active(force=force))
+                peer_evidence_known = True
+                peer_evidence_stale = False
+                peer_evidence_detail = ""
+            else:
+                peer_ptt_active, peer_evidence_known, peer_evidence_stale, peer_evidence_detail = (
+                    self._cached_ptt_evidence(status_by_device, int(runtime_id))
+                )
+            if not peer_evidence_known:
+                unknown_members.append(
+                    {
+                        "id": int(runtime_id),
+                        "name": str(runtime.profile.get("name", "") or "").strip() or f"Device {runtime_id}",
+                        "stale": bool(peer_evidence_stale),
+                        "detail": peer_evidence_detail,
+                    }
+                )
+            elif peer_ptt_active:
                 owners.append(runtime)
         owners.sort(
             key=lambda runtime: (
@@ -1112,8 +1231,23 @@ class StationRuntimeManager:
         owner_profile = owner.profile if owner is not None else {}
         owner_name = str(owner_profile.get("name", "") or "").strip()
         owner_backend = str(owner_profile.get("control_backend", "") or "").strip().lower()
-        blocked = owner is not None
-        if blocked:
+        evidence_known = bool(target_evidence_known and not unknown_members)
+        evidence_stale = bool(target_evidence_stale or any(bool(item.get("stale")) for item in unknown_members))
+        evidence_details: List[str] = []
+        if not target_evidence_known:
+            target_name = str(target_runtime.profile.get("name", "") or "").strip() or f"Device {target_id}"
+            detail = target_evidence_detail or "cached PTT evidence is unavailable"
+            evidence_details.append(f"{target_name}: {detail}")
+        for member in unknown_members:
+            detail = str(member.get("detail", "") or "").strip() or "cached PTT evidence is unavailable"
+            evidence_details.append(f"{member['name']}: {detail}")
+        evidence_detail = "; ".join(evidence_details)
+        blocked = owner is not None or not evidence_known
+        if not evidence_known:
+            reason = f"Shared PTT group {ptt_group} is blocked because cached PTT evidence is incomplete."
+            if evidence_detail:
+                reason += f" {evidence_detail}."
+        elif owner is not None:
             owner_label = owner_name or f"Device {int(owner_profile.get('id', 0) or 0)}"
             reason = f"Shared PTT group {ptt_group} is in use by {owner_label}."
         elif target_ptt_active:
@@ -1133,7 +1267,93 @@ class StationRuntimeManager:
             owner_ptt_active=owner is not None,
             target_ptt_active=target_ptt_active,
             reason=reason,
+            evidence_known=evidence_known,
+            evidence_stale=evidence_stale,
+            evidence_detail=evidence_detail,
         )
+
+    @staticmethod
+    def _cached_status_row(
+        status_by_device: Mapping[object, object],
+        device_profile_id: int,
+    ) -> Optional[object]:
+        """Return one lane's status without invoking a device endpoint."""
+        for key in (int(device_profile_id), str(int(device_profile_id))):
+            try:
+                if key in status_by_device:
+                    return status_by_device[key]
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _status_field(row: object, *names: str) -> object:
+        for name in names:
+            if isinstance(row, Mapping) and name in row:
+                return row.get(name)
+            try:
+                value = getattr(row, name)
+            except Exception:
+                continue
+            if value is not None:
+                return value
+        return None
+
+    @classmethod
+    def _cached_ptt_evidence(
+        cls,
+        status_by_device: Mapping[object, object],
+        device_profile_id: int,
+    ) -> tuple[bool, bool, bool, str]:
+        """Return ``active, known, stale, detail`` from a supplied cache only."""
+        row = cls._cached_status_row(status_by_device, device_profile_id)
+        if row is None:
+            return False, False, False, "cached PTT evidence is missing"
+        nested = cls._status_field(row, "ptt")
+        source = nested if isinstance(nested, Mapping) else row
+        active_marker = cls._status_field(source, "ptt_active", "active")
+        known_marker = cls._status_field(source, "ptt_known", "known")
+        stale = bool(cls._status_field(source, "ptt_stale", "stale"))
+        errors = cls._status_field(source, "ptt_error", "error", "errors")
+        if errors:
+            return False, False, stale, f"cached PTT evidence error: {errors}"
+        if stale:
+            return False, False, True, "cached PTT evidence is stale"
+        if known_marker is False:
+            return False, False, False, "cached PTT evidence is unavailable"
+        if active_marker is None:
+            return False, False, False, "cached PTT evidence is missing"
+        return bool(active_marker), True, False, ""
+
+    @classmethod
+    def _cached_frequency_evidence(
+        cls,
+        status_by_device: Mapping[object, object],
+        device_profile_id: int,
+    ) -> tuple[Optional[int], bool, bool, str]:
+        """Return ``frequency_hz, known, stale, detail`` from a supplied cache only."""
+        row = cls._cached_status_row(status_by_device, device_profile_id)
+        if row is None:
+            return None, False, False, "cached peer frequency evidence is missing"
+        nested = cls._status_field(row, "frequency")
+        source = nested if isinstance(nested, Mapping) else row
+        raw_frequency = cls._status_field(source, "frequency_hz", "current_frequency_hz", "value")
+        known_marker = cls._status_field(source, "frequency_known", "known")
+        stale = bool(cls._status_field(source, "frequency_stale", "stale"))
+        errors = cls._status_field(source, "frequency_error", "error", "errors")
+        if errors:
+            return None, False, stale, f"cached peer frequency evidence error: {errors}"
+        if stale:
+            return None, False, True, "last peer frequency check is stale"
+        if known_marker is False:
+            return None, False, False, "cached peer frequency evidence is unavailable"
+        try:
+            frequency_hz = int(raw_frequency)
+        except (TypeError, ValueError):
+            frequency_hz = 0
+        if frequency_hz <= 0:
+            return None, False, False, "cached peer frequency evidence is missing"
+        return frequency_hz, True, False, ""
 
     @staticmethod
     def _apply_shared_ptt_annotations(snapshots: List[DeviceRuntimeSnapshot]) -> None:
@@ -1247,13 +1467,18 @@ class StationRuntimeManager:
                 snapshot.swap_role = "source"
                 snapshot.swap_summary = f"Temporary swap source: restore returns the primary shell to {source_name}."
 
-    def get_runtime_snapshots(self, *, force: bool = False) -> List[DeviceRuntimeSnapshot]:
+    def get_runtime_snapshots(
+        self,
+        *,
+        force: bool = False,
+        cache_only: bool = False,
+    ) -> List[DeviceRuntimeSnapshot]:
         snapshots: List[DeviceRuntimeSnapshot] = []
         for device_id in self._active_profile_ids:
             runtime = self._runtimes.get(int(device_id))
             if runtime is None:
                 continue
-            snapshots.append(runtime.snapshot(force=force))
+            snapshots.append(runtime.snapshot(force=force, cache_only=cache_only))
         self._apply_shared_ptt_annotations(snapshots)
         self._apply_observer_follow_annotations(snapshots)
         self._apply_profile_swap_annotations(snapshots)
@@ -1287,11 +1512,46 @@ class StationRuntimeManager:
         source: str = "",
         force: bool = False,
     ) -> Optional[RfConflictSnapshot]:
+        """Legacy primary-device facade for target-aware RF conflict checks."""
         primary_runtime = self.get_primary_runtime()
         if primary_runtime is None:
             return None
         primary_id = int(primary_runtime.profile.get("id", 0) or 0)
         if primary_id <= 0:
+            return None
+        return self.evaluate_rf_conflict_for_device(
+            primary_id,
+            target_band=target_band,
+            target_frequency_hz=target_frequency_hz,
+            source=source,
+            force=force,
+        )
+
+    def evaluate_rf_conflict_for_device(
+        self,
+        target_device_profile_id: int,
+        *,
+        target_band: str = "",
+        target_frequency_hz: Optional[int] = None,
+        source: str = "",
+        force: bool = False,
+        status_by_device: Optional[Mapping[object, object]] = None,
+    ) -> Optional[RfConflictSnapshot]:
+        """Evaluate RF guard policies for one requested device.
+
+        When ``status_by_device`` is supplied, this method uses only that
+        caller-owned cache for peer frequency evidence.  It must therefore be
+        safe to call from a scheduler lane without synchronously polling any
+        other radio endpoint.
+        """
+        try:
+            target_id = int(target_device_profile_id or 0)
+        except (TypeError, ValueError):
+            target_id = 0
+        if target_id <= 0:
+            return None
+        target_runtime = self._runtimes.get(target_id)
+        if target_runtime is None:
             return None
         normalized_band = str(target_band or "").strip().upper() or _hz_to_band(target_frequency_hz)
         if not normalized_band and not isinstance(target_frequency_hz, (int, float)):
@@ -1302,10 +1562,10 @@ class StationRuntimeManager:
             if not bool(int(policy.get("enabled", 1) or 0)):
                 continue
             source_id = int(policy.get("source_device_id", 0) or 0)
-            target_id = int(policy.get("target_device_id", 0) or 0)
-            if primary_id not in {source_id, target_id}:
+            policy_target_id = int(policy.get("target_device_id", 0) or 0)
+            if target_id not in {source_id, policy_target_id}:
                 continue
-            peer_id = target_id if primary_id == source_id else source_id
+            peer_id = policy_target_id if target_id == source_id else source_id
             peer_runtime = self._runtimes.get(peer_id)
             if peer_runtime is None:
                 continue
@@ -1323,25 +1583,32 @@ class StationRuntimeManager:
                 or advanced_frequency_groups
             ):
                 continue
-            peer_frequency_hz = peer_runtime.current_frequency_hz(force=force)
-            peer_status_unknown = not isinstance(peer_frequency_hz, (int, float)) or int(peer_frequency_hz) <= 0
-            peer_status_stale = False
-            peer_status_detail = ""
-            try:
-                peer_frequency_snapshot = peer_runtime.status_poll_coordinator.latest_snapshot(
-                    peer_runtime._status_poll_key("frequency")
+            if status_by_device is None:
+                peer_frequency_hz = peer_runtime.current_frequency_hz(force=force)
+                peer_status_unknown = not isinstance(peer_frequency_hz, (int, float)) or int(peer_frequency_hz) <= 0
+                peer_status_stale = False
+                peer_status_detail = ""
+                try:
+                    peer_frequency_snapshot = peer_runtime.status_poll_coordinator.latest_snapshot(
+                        peer_runtime._status_poll_key("frequency")
+                    )
+                except Exception:
+                    peer_frequency_snapshot = None
+                if peer_frequency_snapshot is not None:
+                    peer_status_stale = bool(getattr(peer_frequency_snapshot, "stale", False))
+                    errors = getattr(peer_frequency_snapshot, "errors", {}) or {}
+                    if errors:
+                        peer_status_unknown = True
+                        peer_status_detail = "; ".join(str(v) for v in errors.values() if str(v or "").strip())
+                    elif peer_status_stale:
+                        peer_status_unknown = True
+                        peer_status_detail = "last peer frequency check is stale"
+            else:
+                peer_frequency_hz, peer_known, peer_status_stale, peer_status_detail = self._cached_frequency_evidence(
+                    status_by_device,
+                    peer_id,
                 )
-            except Exception:
-                peer_frequency_snapshot = None
-            if peer_frequency_snapshot is not None:
-                peer_status_stale = bool(getattr(peer_frequency_snapshot, "stale", False))
-                errors = getattr(peer_frequency_snapshot, "errors", {}) or {}
-                if errors:
-                    peer_status_unknown = True
-                    peer_status_detail = "; ".join(str(v) for v in errors.values() if str(v or "").strip())
-                elif peer_status_stale:
-                    peer_status_unknown = True
-                    peer_status_detail = "last peer frequency check is stale"
+                peer_status_unknown = not peer_known
             if peer_status_unknown:
                 peer_frequency_hz = None
                 peer_band = ""
@@ -1359,7 +1626,7 @@ class StationRuntimeManager:
             advanced_window_hz = 0
             if advanced_frequency_groups:
                 try:
-                    target_window = int(advanced_windows.get(str(primary_id), 0) or 0)
+                    target_window = int(advanced_windows.get(str(target_id), 0) or 0)
                 except Exception:
                     target_window = 0
                 try:
@@ -1545,7 +1812,7 @@ class StationRuntimeManager:
         detail += f" Shared resources: {resource_text}."
         signature = "|".join(
             [
-                str(primary_id),
+                str(target_id),
                 str(source or "").strip().upper(),
                 normalized_band,
                 str(normalized_target_hz or 0),
@@ -1562,8 +1829,8 @@ class StationRuntimeManager:
             ]
         )
         return RfConflictSnapshot(
-            target_device_profile_id=primary_id,
-            target_device_name=str(primary_runtime.profile.get("name", "") or "").strip() or f"Device {primary_id}",
+            target_device_profile_id=target_id,
+            target_device_name=str(target_runtime.profile.get("name", "") or "").strip() or f"Device {target_id}",
             target_band=normalized_band,
             target_frequency_hz=normalized_target_hz,
             peer_device_profile_id=int(primary_candidate["peer_id"]),

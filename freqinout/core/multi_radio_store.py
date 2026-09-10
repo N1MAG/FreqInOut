@@ -40,6 +40,8 @@ SUPPORTED_DEVICE_CONTROL_BACKENDS = frozenset({"flrig", "js8call", "manual", "ri
 SUPPORTED_RUNTIME_CONTROL_BACKENDS = frozenset({"flrig", "js8call", "manual", "rigctld"})
 SUPPORTED_SOFTWARE_ROLES = frozenset({"js8call", "fast_light", "varac", "flamp", "flmsg", "js8spotter", "commstat"})
 SUPPORTED_DEVICE_CLASSES = frozenset({"tx_rx", "observer", "gateway"})
+SUPPORTED_RECEIVER_ADAPTERS = frozenset({"manual", "sdrpp_rigctl"})
+SUPPORTED_RECEIVER_VERIFICATION_STATES = frozenset({"manual", "unverified", "verified", "failed"})
 SUPPORTED_DEPLOYMENT_MODES = frozenset({"full", "minimal"})
 SUPPORTED_ASSIGNMENT_STATES = frozenset({"active", "temporary_override", "scheduled", "inactive", "superseded"})
 EFFECTIVE_ASSIGNMENT_STATES = frozenset({"active", "temporary_override"})
@@ -288,6 +290,12 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             advanced_frequency_guard_window_hz INTEGER NOT NULL DEFAULT 0,
             sdr_host TEXT,
             sdr_port INTEGER,
+            sdr_application TEXT,
+            sdr_adapter TEXT NOT NULL DEFAULT 'manual',
+            sdr_target TEXT,
+            sdr_control_enabled INTEGER NOT NULL DEFAULT 0,
+            sdr_verification_state TEXT NOT NULL DEFAULT 'manual',
+            sdr_verification_json TEXT NOT NULL DEFAULT '{}',
             notes TEXT,
             created_utc TEXT NOT NULL,
             updated_utc TEXT NOT NULL
@@ -390,6 +398,12 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             "advanced_frequency_guard_window_hz": "INTEGER NOT NULL DEFAULT 0",
             "sdr_host": "TEXT",
             "sdr_port": "INTEGER",
+            "sdr_application": "TEXT",
+            "sdr_adapter": "TEXT NOT NULL DEFAULT 'manual'",
+            "sdr_target": "TEXT",
+            "sdr_control_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "sdr_verification_state": "TEXT NOT NULL DEFAULT 'manual'",
+            "sdr_verification_json": "TEXT NOT NULL DEFAULT '{}'",
             "notes": "TEXT",
             "created_utc": "TEXT NOT NULL",
             "updated_utc": "TEXT NOT NULL",
@@ -5114,6 +5128,21 @@ class MultiRadioStore:
             default_use_varac = varac_node_id is not None
         existing_name = _coerce_text((existing or {}).get("name", ""), "")
         display_name = _coerce_text(payload.get("name", existing_name or "Device Profile"), "Device Profile") or "Device Profile"
+        sdr_adapter = _coerce_text(
+            payload.get("sdr_adapter", (existing or {}).get("sdr_adapter", "manual")),
+            "manual",
+        ).lower().replace("-", "_")
+        if sdr_adapter not in SUPPORTED_RECEIVER_ADAPTERS:
+            raise ValueError(f"Unsupported receiver adapter: {sdr_adapter}")
+        sdr_verification_state = _coerce_text(
+            payload.get(
+                "sdr_verification_state",
+                (existing or {}).get("sdr_verification_state", "manual"),
+            ),
+            "manual",
+        ).lower()
+        if sdr_verification_state not in SUPPORTED_RECEIVER_VERIFICATION_STATES:
+            raise ValueError(f"Unsupported receiver verification state: {sdr_verification_state}")
         needs_operator_name_value = payload.get("needs_operator_name")
         if needs_operator_name_value in (None, "") and display_name == existing_name:
             needs_operator_name_value = (existing or {}).get("needs_operator_name")
@@ -5427,10 +5456,42 @@ class MultiRadioStore:
             ),
             "sdr_host": _coerce_text(payload.get("sdr_host", (existing or {}).get("sdr_host", "")), ""),
             "sdr_port": _coerce_optional_int(payload.get("sdr_port", (existing or {}).get("sdr_port"))),
+            "sdr_application": _coerce_text(
+                payload.get("sdr_application", (existing or {}).get("sdr_application", "")),
+                "",
+            ),
+            "sdr_adapter": sdr_adapter,
+            "sdr_target": _coerce_text(
+                payload.get("sdr_target", (existing or {}).get("sdr_target", "")),
+                "",
+            ),
+            "sdr_control_enabled": _coerce_bool_int(
+                payload.get("sdr_control_enabled", (existing or {}).get("sdr_control_enabled", 0)),
+                False,
+            ),
+            "sdr_verification_state": sdr_verification_state,
+            "sdr_verification_json": _coerce_json_object_text(
+                payload.get(
+                    "sdr_verification",
+                    payload.get(
+                        "sdr_verification_json",
+                        (existing or {}).get("sdr_verification_json", "{}"),
+                    ),
+                )
+            ),
             "notes": _coerce_text(payload.get("notes", (existing or {}).get("notes", "")), ""),
             "created_utc": (existing or {}).get("created_utc", now_iso),
             "updated_utc": now_iso,
         }
+        if bool(record["sdr_control_enabled"]):
+            if device_class != "observer":
+                raise ValueError("Receiver control can only be enabled for observer / SDR device profiles.")
+            if record["sdr_adapter"] == "manual":
+                raise ValueError("Receiver control requires a receive-only adapter.")
+            if not record["sdr_host"] or record["sdr_port"] is None or not record["sdr_target"]:
+                raise ValueError("Receiver control requires host, port, and a selected receiver target.")
+            if record["sdr_verification_state"] != "verified":
+                raise ValueError("Receiver control cannot be enabled until tune/readback verification passes.")
         if device_class == "observer":
             if record["runtime_primary"]:
                 raise ValueError("Observer / SDR device profiles cannot become the compatibility runtime device.")
