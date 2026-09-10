@@ -2852,3 +2852,34 @@ segmentation fault at the unrelated compact log-viewer construction test; that
 test passes alone and in the clean L partition. MES-5 automated macOS evidence is
 complete. Linux lifecycle and the physical three-transceiver/two-SDR matrix
 remain external release gates, so production verification is not claimed.
+
+## 2026-09-10 — Message ingest/projection performance design
+
+Status: production evidence reviewed and dedicated specification complete;
+implementation has not begun.
+
+The supplied FIO/performance logs were prefix snapshots of one Linux launch, not
+two independent runs. FIO reached its first usable shell in 43.426 seconds.
+Opening Messages then started a 152.752-second native projection of 11,957 rows
+and overlapped a 9.229-second foreground file-scan completion handler. A later
+change caused another 267.269-second projection of 10,583 rows. The evidence
+also captured SQLite lock errors, unchanged 551-file scans above five seconds, a
+seven-second Settings save, Station Control Bar callbacks averaging 954.7 ms,
+and hang stacks identifying synchronous SOP reconstruction and read-side radio
+profile normalization/commit. BLE was waiting in a worker and was not the CPU
+hotspot.
+
+`message_ingest_projection_performance_spec.md` requires durable per-identity
+dirty work, bounded preparation, one serialized projection writer, atomic
+differential message/reference/artifact bundles, a 250 ms traffic coalescing
+window, batches capped at 100 bundles or 50 ms writer time, visible Inbox
+invalidations capped at twice per second, watermark-only idle checks, post-shell
+resumable catch-up, read-only list/get APIs, off-UI file/BBS/SOP work, a separate
+Expect fast path, bounded performance logs, and production-shaped qualification.
+Normal new-message visibility targets one-half second; unchanged sources perform
+no projection writes. MIP-0 through MIP-5 have explicit exit gates and no
+destructive migration is authorized.
+
+Before this specification work, the completed MES-0 through MES-5 scheduler was
+committed as `71ac840` and pushed to the internal-testing WIP branch. Existing
+Shortwave edits, rendered documents, and Office temporary files were excluded.

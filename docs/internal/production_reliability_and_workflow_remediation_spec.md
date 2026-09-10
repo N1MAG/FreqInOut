@@ -1,7 +1,9 @@
 # Production Reliability And Workflow Remediation Spec
 
-Status: Slices 0–6 implemented with automated gates passed; Slice 1 software
-gate passed 2026-09-06 with the T1000-E reconnect hardware exception documented
+Status: Slices 0–6 behavior implemented with automated gates passed; the
+September 10 message performance gate is reopened under
+`message_ingest_projection_performance_spec.md`; Slice 1 software gate passed
+2026-09-06 with the T1000-E reconnect hardware exception documented
 
 Date: 2026-09-06
 
@@ -21,6 +23,7 @@ behavior not changed by this remediation:
 - `varac_managed_bbs_database_manifest_spec.md`
 - `message_inbox_controls_spec.md`
 - `message_intelligence_projection_spec.md`
+- `message_ingest_projection_performance_spec.md`
 - `sop_schedule_plan_spec.md`
 - `ui_layout_standards.md`
 
@@ -1729,6 +1732,16 @@ authoritative fresh-process repository gate passes all 176 test-bearing files
 plus two environment-skip-only files with no failures across 2,610 collected
 tests. Python compilation and
 `git diff --check` pass. No schema, configuration, or persisted data changes.
+
+September 10 production performance follow-up: the semantic and FIO Spotter
+behavioral gate remains passed, but the message performance gate is reopened.
+Linux evidence recorded 152.752- and 267.269-second native projections that
+replayed roughly 10,000-12,000 rows, foreground file completion above five
+seconds even when unchanged, SQLite lock errors, and UI watchdog stalls. The
+specific remediation authority, batching cadence, writer ownership, migration
+constraints, performance budgets, and MIP-0 through MIP-5 gates are defined in
+`message_ingest_projection_performance_spec.md`. This follow-up changes the
+specification only; implementation has not begun.
 
 ### Slice 4 — Radio launch bundles
 
