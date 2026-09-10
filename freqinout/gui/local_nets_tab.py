@@ -303,7 +303,7 @@ class LocalNetsTab(QWidget):
     MAX_ROWS = 200
 
     def __init__(self, parent: QWidget | None = None, *, settings: object | None = None, db_path: object | None = None) -> None:
-        super().__init__(parent); self.settings = settings; path = db_path or net_resources_db_path(); self.store = LocalNetStore(path); self.catalog = ResourceCatalogStore(path); self._rows: tuple[LocalNetSchedule, ...] = (); self._pending_editor_intent: NavigationIntent | None = None
+        super().__init__(parent); self.settings = settings; path = db_path or net_resources_db_path(); self.store = LocalNetStore(path); self.catalog = ResourceCatalogStore(path); self._rows: tuple[LocalNetSchedule, ...] = (); self._rendered_by_key: dict[str, tuple[object, object]] = {}; self._pending_editor_intent: NavigationIntent | None = None
         self._build_ui(); self.refresh()
 
     def _build_ui(self) -> None:
@@ -321,6 +321,7 @@ class LocalNetsTab(QWidget):
         grid.addWidget(self.search, 0, 0, 1, 2); grid.addWidget(self.group_filter, 0, 2); grid.addWidget(self.service_filter, 1, 0); grid.addWidget(self.enabled_filter, 1, 1); grid.addWidget(self.review_filter, 1, 2); grid.addWidget(self.refresh_btn, 1, 3)
         layout.addWidget(filters)
         self.table = QTableWidget(0, 5, self); self.table.setObjectName("localNetsTable"); self.table.setHorizontalHeaderLabels(["Net", "Group", "Where", "Next", "Status"]); self.table.setSelectionBehavior(QAbstractItemView.SelectRows); self.table.setSelectionMode(QAbstractItemView.SingleSelection); self.table.setEditTriggers(QAbstractItemView.NoEditTriggers); self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff); self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch); layout.addWidget(self.table, 1)
+        self.detail_label = QLabel("Select a Local Net to review its reminder details.", self); self.detail_label.setObjectName("localNetReadOnlyDetail"); self.detail_label.setWordWrap(True); layout.addWidget(self.detail_label)
         actions = QHBoxLayout(); self.add_btn = QPushButton("Add Local Net", self); self.edit_btn = QPushButton("Edit", self); self.enable_btn = QPushButton("Pause", self); self.dismiss_btn = QPushButton("Dismiss This Occurrence", self); self.resources_btn = QPushButton("Resources", self); self.settings_btn = QPushButton("Settings", self)
         for button in (self.add_btn,self.edit_btn,self.enable_btn,self.dismiss_btn,self.resources_btn,self.settings_btn): actions.addWidget(button)
         layout.addLayout(actions); self.status = QLabel(""); self.status.setWordWrap(True); layout.addWidget(self.status)
@@ -340,6 +341,10 @@ class LocalNetsTab(QWidget):
             frequency = frequencies.get(row.frequency_resource_key or "")
             state = statuses[row.local_net_schedule_key]
             rendered.append((row, summary.by_schedule.get(row.local_net_schedule_key), frequency, state))
+        self._rendered_by_key = {
+            row.local_net_schedule_key: (frequency, state)
+            for row, _occurrence, frequency, state in rendered
+        }
         catalog_attention = sum(
             state.state in {"missing", "retired", "update_available"}
             for state in statuses.values()
@@ -363,7 +368,33 @@ class LocalNetsTab(QWidget):
     def _selected(self) -> LocalNetSchedule | None:
         selected = self.table.selectedItems(); return self.table.item(selected[0].row(), 0).data(Qt.UserRole) if selected else None
     def _selection_changed(self) -> None:
-        row = self._selected(); self.edit_btn.setEnabled(row is not None); self.enable_btn.setEnabled(row is not None); self.dismiss_btn.setEnabled(self._dismissible_occurrence(row) is not None); self.enable_btn.setText("Enable" if row and not row.enabled else "Pause")
+        row = self._selected(); self.edit_btn.setEnabled(row is not None); self.enable_btn.setEnabled(row is not None); self.dismiss_btn.setEnabled(self._dismissible_occurrence(row) is not None); self.enable_btn.setText("Enable" if row and not row.enabled else "Pause"); self._show_readonly_detail(row)
+
+    def _show_readonly_detail(self, row: LocalNetSchedule | None) -> None:
+        if row is None:
+            self.detail_label.setText("Select a Local Net to review its reminder details.")
+            return
+        frequency, state = self._rendered_by_key.get(row.local_net_schedule_key, (None, None))
+        where = frequency_where_text(frequency) if frequency is not None else "Frequency not selected"
+        health = getattr(state, "message", "Resource status unavailable")
+        sop = f"SOP {row.sop_id} available for manual review" if row.sop_id else "No SOP linked"
+        self.detail_label.setText(
+            f"{row.name} · {row.operating_group_name or 'Community / Unassigned'} · "
+            f"{row.service} · {where}\n{health} · {sop}. {REMINDER_COPY}."
+        )
+
+    def focus_schedule(self, schedule_id: object, occurrence_id: object | None = None) -> bool:
+        """Open a stable schedule selection in the read-only detail surface."""
+        row = self.store.get_schedule(str(schedule_id or ""))
+        if row is None:
+            return False
+        self.search.setText(row.name)
+        self.group_filter.setCurrentIndex(0); self.service_filter.setCurrentIndex(0); self.enabled_filter.setCurrentIndex(0); self.review_filter.setChecked(False)
+        self.refresh()
+        for index, candidate in enumerate(self._rows):
+            if candidate.local_net_schedule_key == row.local_net_schedule_key:
+                self.table.selectRow(index); self.table.scrollToItem(self.table.item(index, 0)); return True
+        return False
     def _add(self) -> None:
         self._run_editor()
     def _edit(self) -> None:

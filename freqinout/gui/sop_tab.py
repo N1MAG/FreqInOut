@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
 )
 
 from freqinout.core.logger import log
+from freqinout.core.navigation_intent import NavigationIntent
 from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.plan_context_service import PlanContextService
 from freqinout.core.condition_sop_policy import (
@@ -4341,6 +4342,7 @@ class SOPTab(_LegacySOPTab):
     HF_CONFLICT_MODE_REVIEW_DAILY = "REVIEW_DAILY"
     NET_CONFLICT_MODE_SOP_PRIORITY_TEMP = "SOP_PRIORITY_TEMP"
     NET_CONFLICT_MODE_REVIEW_NET = "REVIEW_NET"
+    local_net_return_requested = Signal(object)
     WB_FILTER_ALL = "ALL"
     WB_FILTER_HF = "HF"
     WB_FILTER_NET = "NET"
@@ -4399,6 +4401,18 @@ class SOPTab(_LegacySOPTab):
         )
         root.addWidget(self.operating_plan_inputs_label)
         self._refresh_operating_plan_inputs_summary()
+
+        self.local_net_context_bar = QGroupBox("Local Net reminder context", self.sop_scroll_content)
+        local_net_context_layout = QHBoxLayout(self.local_net_context_bar)
+        self.local_net_context_label = QLabel("", self.local_net_context_bar)
+        self.local_net_context_label.setWordWrap(True)
+        local_net_context_layout.addWidget(self.local_net_context_label, 1)
+        self.local_net_context_return_btn = QPushButton("Return to Ops Center", self.local_net_context_bar)
+        self.local_net_context_return_btn.clicked.connect(self._return_from_local_net_context)
+        local_net_context_layout.addWidget(self.local_net_context_return_btn)
+        self.local_net_context_bar.setVisible(False)
+        self._local_net_navigation_intent: NavigationIntent | None = None
+        root.addWidget(self.local_net_context_bar)
 
         self.traffic_suggestions_box = QGroupBox("Traffic Suggestions")
         traffic_layout = QHBoxLayout(self.traffic_suggestions_box)
@@ -9453,6 +9467,44 @@ class SOPTab(_LegacySOPTab):
             min_ms=0.0,
         ):
             self._update_clock_labels()
+
+    def open_local_net_context(self, intent: object) -> bool:
+        """Focus a linked SOP with stable Local Net reminder context."""
+        if not isinstance(intent, NavigationIntent) or intent.sop_id is None:
+            return False
+        self._local_net_navigation_intent = intent
+        selected = self.select_profile(intent.sop_id)
+        schedule_name = intent.local_net_schedule_id or "Local Net"
+        group_name = "Community / Unassigned"
+        try:
+            from freqinout.core.known_operating_groups import net_resources_db_path
+            from freqinout.core.local_net_store import LocalNetStore
+
+            schedule = LocalNetStore(net_resources_db_path()).get_schedule(
+                intent.local_net_schedule_id or ""
+            )
+            if schedule is not None:
+                schedule_name = schedule.name
+                group_name = schedule.operating_group_name or group_name
+        except Exception as exc:
+            log.debug("SOP Local Net context lookup unavailable: %s", exc)
+        occurrence = str(intent.draft_snapshot.get("occurrence_key") or "")
+        status = "Linked SOP selected" if selected else "Linked SOP is unavailable"
+        self.local_net_context_label.setText(
+            f"{schedule_name} · {group_name} · {occurrence}. {status}. "
+            "Review is manual and does not change station or radio state."
+        )
+        self.local_net_context_bar.setVisible(True)
+        self.local_net_context_bar.setFocus(Qt.OtherFocusReason)
+        return selected
+
+    def _return_from_local_net_context(self) -> None:
+        intent = self._local_net_navigation_intent
+        if intent is None:
+            return
+        self._local_net_navigation_intent = None
+        self.local_net_context_bar.setVisible(False)
+        self.local_net_return_requested.emit(intent)
 
     def on_sop_profiles_updated(self) -> None:
         self._reload_profiles(select_id=int(self._selected_profile_id or 0))

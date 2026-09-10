@@ -2351,3 +2351,41 @@ skipped because importing QtCore aborts in that test environment. Python
 compilation and `git diff --check` pass. Static and runtime tests confirm that
 SchedulerEngine never reads Local Net inputs and no QSY, launch, radio mutation,
 or automatic SOP activation path exists.
+
+## 2026-09-09 — Local Nets / Resources LN-5 gate
+
+Status: complete; LN-5 passed and LN-6 release qualification is authorized
+next. LN-6 did not begin before this gate passed.
+
+Ops Center now receives an immutable, host-owned Local Net projection on a
+single background worker. The projection performs bounded recurrence and batch
+catalog reads, identifies active/next/up-to-50-later occurrences, preserves the
+configured reminder lead time, and carries stable schedule, occurrence,
+directory-session, group, resource, and SOP references. It contains no radio,
+QSY, launcher, or scheduler command metadata. A collapsed Local Nets section
+does not query or rebuild its row presentation, and overlapping refresh
+requests coalesce rather than create parallel workers.
+
+Schedule Outlook presents Local Nets in a visually separate, collapsible,
+internally scrollable reminder surface with explicit What/Why, group, service,
+frequency/channel, countdown, and resource-update health. Thirty- and
+fifteen-minute urgency is expressed in text as well as color. Details opens the
+stable schedule in Local Nets; Dismiss affects only the projected occurrence;
+and Open SOP selects the linked SOP for manual review with Local Net context.
+The return path restores Ops Center context. No action activates an SOP or
+enters the HF/SOP conflict, RF Guard, or station-control paths.
+
+Delegation: Terra/high implemented the bounded responsive Ops Center reminder
+surface. Luna/high implemented the focused projection, safety, SOP intent,
+collapse, theme, Large Text, and compact-viewport tests. The high-reasoning
+primary model owned immutable projection architecture, batching and worker
+concurrency, stable dismissal/SOP navigation, delegated-diff review, regression
+integration, specification reconciliation, and the exit gate.
+
+Acceptance evidence: the dedicated LN-5 suite passes 14 tests and the combined
+LN-0 through LN-5 feature suites pass 75 tests without skips. The broader Local
+Nets, Ops Center, shell, SOP, scheduler-routing, and shutdown regression gate
+passes 273 tests with one pre-existing macOS-environment QtCore import skip.
+Python compilation and `git diff --check` pass. The 900x560 Light/Dark and
+Normal/Large Text matrix is covered, and Local Net projections remain bounded
+at 500 recurrence results and 50 later dashboard items.

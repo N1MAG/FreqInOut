@@ -370,6 +370,13 @@ class ControlFreqTab(QWidget):
     _focus_suggestions_ready = Signal(int, object, object)
     _focus_snapshot_ready = Signal(int, object, object)
     _focus_backfill_ready = Signal(bool, int)
+    _local_nets_outlook_ready = Signal(int, object, object)
+    # Local Nets are reminder-only.  The host owns persistence and typed routing;
+    # this presentation seam deliberately carries the immutable projection item
+    # back to the host instead of interpreting it as a scheduler row.
+    local_net_details_requested = Signal(object)
+    local_net_dismiss_requested = Signal(object)
+    local_net_open_sop_requested = Signal(object)
 
     def __init__(self, parent=None, *, plan_context_service: Optional[PlanContextService] = None):
         super().__init__(parent)
@@ -395,6 +402,14 @@ class ControlFreqTab(QWidget):
         self._saved_right_sizes: List[int] = []
         self._schedule_entries_by_row: Dict[int, Dict[str, Any]] = {}
         self._next_schedule_outlook_preview: Optional[Dict[str, Any]] = None
+        self._local_nets_outlook_items: Tuple[Any, ...] = ()
+        self._local_nets_outlook_rendered_revision = -1
+        self._local_nets_outlook_revision = 0
+        self._local_nets_outlook_provider: Optional[Callable[[dt.datetime], Any]] = None
+        self._local_nets_outlook_executor: Optional[ThreadPoolExecutor] = None
+        self._local_nets_outlook_pending = False
+        self._local_nets_outlook_followup = False
+        self._local_nets_outlook_request_id = 0
         self._force_hero_resync = False
         self._message_summary_target_height = 0
         self._freq_meta_full_text = "Scheduled: -- | Active: --"
@@ -516,6 +531,7 @@ class ControlFreqTab(QWidget):
         self._focus_suggestions_ready.connect(self._on_focus_suggestions_ready)
         self._focus_snapshot_ready.connect(self._on_focus_snapshot_ready)
         self._focus_backfill_ready.connect(self._on_focus_backfill_ready)
+        self._local_nets_outlook_ready.connect(self._on_local_nets_outlook_ready)
         self._focus_autocomplete_timer = QTimer(self)
         self._focus_autocomplete_timer.setSingleShot(True)
         self._focus_autocomplete_timer.setInterval(125)
@@ -1256,6 +1272,52 @@ class ControlFreqTab(QWidget):
         self.schedule_timeline_layout.setContentsMargins(0, 0, 0, 0)
         self.schedule_timeline_layout.setSpacing(5)
         schedule_layout.addWidget(self.schedule_timeline_container)
+
+        # This is intentionally a distinct surface from commandable HF/SOP
+        # timeline rows.  It has its own bounded, internally-scrollable list and
+        # only exposes reminder actions supplied by the Local Nets projection.
+        self.local_nets_outlook_box = QFrame(self.schedule_box)
+        self.local_nets_outlook_box.setObjectName("controlfreqLocalNetsOutlook")
+        self.local_nets_outlook_box.setFrameShape(QFrame.StyledPanel)
+        local_nets_layout = QVBoxLayout(self.local_nets_outlook_box)
+        local_nets_layout.setContentsMargins(8, 6, 8, 6)
+        local_nets_layout.setSpacing(5)
+        local_nets_header = QHBoxLayout()
+        self.local_nets_outlook_title = QLabel("Local Nets · reminders")
+        self.local_nets_outlook_title.setStyleSheet("font-weight: 700;")
+        self.local_nets_outlook_title.setToolTip(
+            "Local Net reminders are informational. They do not tune or control a radio."
+        )
+        local_nets_header.addWidget(self.local_nets_outlook_title)
+        local_nets_header.addStretch(1)
+        self.local_nets_later_btn = QToolButton()
+        self.local_nets_later_btn.setText("Later (0)")
+        self.local_nets_later_btn.setCheckable(True)
+        self.local_nets_later_btn.setToolTip("Show or hide later Local Net reminders (up to 50).")
+        self.local_nets_later_btn.toggled.connect(lambda _checked: self._refresh_local_nets_outlook())
+        local_nets_header.addWidget(self.local_nets_later_btn)
+        self.local_nets_outlook_toggle = QToolButton()
+        self.local_nets_outlook_toggle.setText("Hide")
+        self.local_nets_outlook_toggle.setCheckable(True)
+        self.local_nets_outlook_toggle.setChecked(True)
+        self.local_nets_outlook_toggle.setToolTip("Show or hide Local Net reminders.")
+        self.local_nets_outlook_toggle.toggled.connect(self._set_local_nets_outlook_visible)
+        local_nets_header.addWidget(self.local_nets_outlook_toggle)
+        local_nets_layout.addLayout(local_nets_header)
+        self.local_nets_outlook_list = QScrollArea(self.local_nets_outlook_box)
+        self.local_nets_outlook_list.setObjectName("controlfreqLocalNetsOutlookList")
+        self.local_nets_outlook_list.setWidgetResizable(True)
+        self.local_nets_outlook_list.setFrameShape(QFrame.NoFrame)
+        self.local_nets_outlook_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.local_nets_outlook_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.local_nets_outlook_list.setMaximumHeight(276)
+        self.local_nets_outlook_list_container = QWidget(self.local_nets_outlook_list)
+        self.local_nets_outlook_list_layout = QVBoxLayout(self.local_nets_outlook_list_container)
+        self.local_nets_outlook_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.local_nets_outlook_list_layout.setSpacing(4)
+        self.local_nets_outlook_list.setWidget(self.local_nets_outlook_list_container)
+        local_nets_layout.addWidget(self.local_nets_outlook_list)
+        schedule_layout.addWidget(self.local_nets_outlook_box)
         self.schedule_table = QTableWidget(0, 5)
         self.schedule_table.setHorizontalHeaderLabels(["When/Day", "Type", "Group/Net", "Band/Freq", "Actions"])
         self._setup_table_defaults(self.schedule_table)
@@ -2166,6 +2228,14 @@ class ControlFreqTab(QWidget):
             )
             if hasattr(self, "schedule_action_hint"):
                 self.schedule_action_hint.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
+            if hasattr(self, "local_nets_outlook_box"):
+                bg, fg, border = self._semantic_panel_colors("panel")
+                self.local_nets_outlook_box.setStyleSheet(
+                    f"QFrame#controlfreqLocalNetsOutlook {{ background: {bg}; color: {fg}; "
+                    f"border: 1px solid {border}; border-radius: 6px; }}"
+                )
+                self.local_nets_later_btn.setStyleSheet(button_style("muted", theme))
+                self.local_nets_outlook_toggle.setStyleSheet(button_style("muted", theme))
             self.effective_source_label.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
         except Exception:
             pass
@@ -2825,6 +2895,19 @@ class ControlFreqTab(QWidget):
 
     def _shutdown_background_executors(self) -> None:
         self._shutdown_message_summary_executor()
+        local_nets_executor = self._local_nets_outlook_executor
+        self._local_nets_outlook_executor = None
+        self._local_nets_outlook_provider = None
+        self._local_nets_outlook_pending = False
+        self._local_nets_outlook_followup = False
+        self._local_nets_outlook_request_id += 1
+        if local_nets_executor is not None:
+            try:
+                local_nets_executor.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                local_nets_executor.shutdown(wait=False)
+            except Exception as exc:
+                log.debug("ControlFreq: Local Nets executor shutdown failed: %s", exc)
         executor = self._focus_executor
         self._focus_executor = None
         if executor is None:
@@ -7048,6 +7131,311 @@ class ControlFreqTab(QWidget):
         for delay_ms in (180, 700, 1500):
             QTimer.singleShot(delay_ms, _pulse_refresh)
 
+    def set_local_nets_outlook_items(self, items: Any) -> None:
+        """Receive an already-bounded immutable Local Nets projection from the host.
+
+        This tab deliberately does not open the Local Nets database or expand
+        recurrence.  The projection owner supplies active, next, and no more
+        than 50 later items; the view only performs a cheap ordering and render.
+        """
+        # Accept the core snapshot directly as well as its visible-item tuple.
+        # This keeps the renderer independent of projection/storage ownership.
+        snapshot_items = getattr(items, "visible_items", items)
+        self._local_nets_outlook_items = tuple(snapshot_items or ())
+        self._local_nets_outlook_revision += 1
+        self._update_local_nets_outlook_header()
+        if self.local_nets_outlook_toggle.isChecked():
+            self._refresh_local_nets_outlook()
+
+    def set_local_nets_outlook_provider(
+        self,
+        provider: Optional[Callable[[dt.datetime], Any]],
+    ) -> None:
+        """Install the host-owned projection callback without reading data here."""
+        self._local_nets_outlook_provider = provider
+        if provider is not None and self._active and self.local_nets_outlook_toggle.isChecked():
+            self._schedule_local_nets_outlook_refresh()
+
+    def _schedule_local_nets_outlook_refresh(
+        self,
+        now_utc: Optional[dt.datetime] = None,
+    ) -> None:
+        if self._local_nets_outlook_provider is None or not self.local_nets_outlook_toggle.isChecked():
+            return
+        if self._local_nets_outlook_pending:
+            self._local_nets_outlook_followup = True
+            return
+        self._local_nets_outlook_pending = True
+        self._local_nets_outlook_request_id += 1
+        request_id = self._local_nets_outlook_request_id
+        now = now_utc or dt.datetime.now(dt.timezone.utc)
+        if self._local_nets_outlook_executor is None:
+            self._local_nets_outlook_executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="fio-local-nets-outlook",
+            )
+        future = self._local_nets_outlook_executor.submit(
+            self._local_nets_outlook_provider,
+            now,
+        )
+
+        def done(completed: Future) -> None:
+            try:
+                payload, error = completed.result(), None
+            except Exception as exc:
+                payload, error = None, exc
+            try:
+                self._local_nets_outlook_ready.emit(request_id, payload, error)
+            except RuntimeError:
+                # The tab may have been destroyed while the bounded read was
+                # finishing; shutdown invalidates the request above.
+                return
+
+        future.add_done_callback(done)
+
+    def refresh_local_nets_outlook(self) -> None:
+        """Request a bounded refresh without exposing executor internals."""
+        self._schedule_local_nets_outlook_refresh()
+
+    def _on_local_nets_outlook_ready(
+        self,
+        request_id: int,
+        payload: object,
+        error: object,
+    ) -> None:
+        if request_id != self._local_nets_outlook_request_id:
+            return
+        self._local_nets_outlook_pending = False
+        if error is not None:
+            log.debug("ControlFreq: Local Nets outlook unavailable: %s", error)
+        else:
+            self.set_local_nets_outlook_items(payload)
+        if self._local_nets_outlook_followup:
+            self._local_nets_outlook_followup = False
+            self._schedule_local_nets_outlook_refresh()
+
+    # A descriptive alias for hosts that use change-notification naming.
+    on_local_nets_outlook_changed = set_local_nets_outlook_items
+
+    @staticmethod
+    def _local_net_item_value(item: Any, *names: str, default: Any = None) -> Any:
+        for name in names:
+            if isinstance(item, dict) and name in item:
+                value = item.get(name)
+            else:
+                value = getattr(item, name, None)
+            if value not in (None, ""):
+                return value
+        return default
+
+    def _local_net_item_start(self, item: Any) -> Optional[dt.datetime]:
+        value = self._local_net_item_value(item, "start_utc", "when_utc", "occurrence_start_utc")
+        if isinstance(value, dt.datetime):
+            return value.replace(tzinfo=dt.timezone.utc) if value.tzinfo is None else value.astimezone(dt.timezone.utc)
+        if isinstance(value, str):
+            try:
+                parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+                return parsed.replace(tzinfo=dt.timezone.utc) if parsed.tzinfo is None else parsed.astimezone(dt.timezone.utc)
+            except ValueError:
+                return None
+        return None
+
+    def _local_net_item_end(self, item: Any, start: dt.datetime) -> dt.datetime:
+        value = self._local_net_item_value(item, "end_utc", "occurrence_end_utc")
+        if isinstance(value, dt.datetime):
+            return value.replace(tzinfo=dt.timezone.utc) if value.tzinfo is None else value.astimezone(dt.timezone.utc)
+        if isinstance(value, str):
+            try:
+                parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+                return parsed.replace(tzinfo=dt.timezone.utc) if parsed.tzinfo is None else parsed.astimezone(dt.timezone.utc)
+            except ValueError:
+                pass
+        duration = self._local_net_item_value(item, "duration_minutes", default=60)
+        try:
+            return start + dt.timedelta(minutes=max(1, int(duration)))
+        except (TypeError, ValueError):
+            return start + dt.timedelta(minutes=60)
+
+    def _local_net_outlook_partition(
+        self,
+        now_utc: Optional[dt.datetime] = None,
+    ) -> Tuple[List[Any], Optional[Any], List[Any]]:
+        """Return active, next, and a bounded later list without persistence work."""
+        now = now_utc or dt.datetime.now(dt.timezone.utc)
+        ordered: List[Tuple[dt.datetime, Any]] = []
+        for item in self._local_nets_outlook_items:
+            start = self._local_net_item_start(item)
+            if start is not None:
+                ordered.append((start, item))
+        ordered.sort(key=lambda row: row[0])
+        active: List[Any] = []
+        future: List[Any] = []
+        for start, item in ordered:
+            state = str(self._local_net_item_value(item, "state", "occurrence_state", default="pending")).lower()
+            dismissed = bool(self._local_net_item_value(item, "dismissed", "is_dismissed", default=False))
+            if dismissed or state in {"dismissed", "missed", "completed"}:
+                continue
+            is_active = bool(self._local_net_item_value(item, "is_active", "active", default=False))
+            if is_active or (start <= now < self._local_net_item_end(item, start)):
+                active.append(item)
+            elif start >= now:
+                future.append(item)
+        next_item = future[0] if future else None
+        return active[:1], next_item, future[1:51]
+
+    def _update_local_nets_outlook_header(self) -> None:
+        """Keep collapse-state updates to a count/urgency pass only."""
+        if not hasattr(self, "local_nets_outlook_title"):
+            return
+        active, next_item, later = self._local_net_outlook_partition()
+        count = len(active) + (1 if next_item is not None else 0) + len(later)
+        attention = sum(
+            1
+            for item in self._local_nets_outlook_items
+            if str(
+                self._local_net_item_value(item, "source_health", "resource_status", "health", default="")
+            ).lower()
+            in {"update_available", "retired", "missing", "needs_review"}
+        )
+        suffix = f" · {count} upcoming" if count else " · no active reminders"
+        if attention:
+            suffix += f" · {attention} needs review"
+        self.local_nets_outlook_title.setText(f"Local Nets · reminders{suffix}")
+        self.local_nets_later_btn.setText(f"Later ({len(later)})")
+
+    def _set_local_nets_outlook_visible(self, visible: bool) -> None:
+        self.local_nets_outlook_list.setVisible(bool(visible))
+        self.local_nets_later_btn.setVisible(bool(visible))
+        self.local_nets_outlook_toggle.setText("Hide" if visible else "Show")
+        if visible:
+            self._schedule_local_nets_outlook_refresh()
+            self._refresh_local_nets_outlook()
+        else:
+            # Do not clear the host projection: reopening only needs a bounded
+            # presentation rebuild, not another data fetch.
+            self._local_nets_outlook_rendered_revision = -1
+        self._fit_group_box_to_contents(self.schedule_box)
+
+    def _refresh_local_nets_outlook(self, now_utc: Optional[dt.datetime] = None) -> None:
+        """Render the separate, non-commandable Local Nets outlook surface."""
+        if not hasattr(self, "local_nets_outlook_toggle") or not self.local_nets_outlook_toggle.isChecked():
+            self._update_local_nets_outlook_header()
+            return
+        self._update_local_nets_outlook_header()
+        layout = self.local_nets_outlook_list_layout
+        self._clear_widget_layout(layout)
+        now = now_utc or dt.datetime.now(dt.timezone.utc)
+        active, next_item, later = self._local_net_outlook_partition(now)
+        rows: List[Tuple[str, Any]] = [("active", item) for item in active]
+        if next_item is not None:
+            rows.append(("next", next_item))
+        if self.local_nets_later_btn.isChecked():
+            rows.extend(("later", item) for item in later)
+        if not rows:
+            empty = QLabel("No active Local Net reminders. Reminder only — FIO will not tune a radio.")
+            empty.setWordWrap(True)
+            empty.setObjectName("controlfreqLocalNetsOutlookEmpty")
+            layout.addWidget(empty)
+        else:
+            for placement, item in rows:
+                layout.addWidget(self._build_local_net_outlook_row(item, placement, now))
+        layout.addStretch(1)
+        self._local_nets_outlook_rendered_revision = self._local_nets_outlook_revision
+        self._fit_group_box_to_contents(self.schedule_box)
+
+    def _build_local_net_outlook_row(self, item: Any, placement: str, now_utc: dt.datetime) -> QWidget:
+        start = self._local_net_item_start(item) or now_utc
+        end = self._local_net_item_end(item, start)
+        mins = int((start - now_utc).total_seconds() // 60)
+        reminder_minutes = self._local_net_item_value(item, "reminder_minutes", default=15)
+        try:
+            is_reminding = bool(self._local_net_item_value(item, "is_reminding", "reminding", default=False)) or (
+                0 <= mins <= int(reminder_minutes)
+            )
+        except (TypeError, ValueError):
+            is_reminding = 0 <= mins <= 15
+        if placement == "active":
+            urgency_text = f"ACTIVE — ends {self._format_display_time(end, False, self._get_display_tz())}"
+            role = "warning"
+        elif is_reminding:
+            urgency_text = f"REMINDER — due in {max(0, mins)}m"
+            role = "warning"
+        elif mins <= 30:
+            urgency_text = f"SOON — due in {max(0, mins)}m"
+            role = "secondary"
+        elif placement == "next":
+            urgency_text = f"NEXT — in {max(0, mins)}m"
+            role = "secondary"
+        else:
+            urgency_text = f"LATER — in {max(0, mins)}m"
+            role = "panel"
+        bg, fg, border = self._semantic_panel_colors(role)
+        frame = QFrame(self.local_nets_outlook_list_container)
+        frame.setObjectName("controlfreqLocalNetsOutlookRow")
+        frame.setStyleSheet(
+            f"QFrame#controlfreqLocalNetsOutlookRow {{ background: {bg}; color: {fg}; "
+            f"border-left: 3px solid {border}; border-top: 1px solid {border}; "
+            f"border-right: 1px solid {border}; border-bottom: 1px solid {border}; border-radius: 5px; }}"
+        )
+        row = QHBoxLayout(frame)
+        row.setContentsMargins(8, 5, 8, 5)
+        row.setSpacing(8)
+        icon = QLabel("◷")
+        icon.setAccessibleName("Local Net reminder")
+        icon.setToolTip("Local Net reminder — informational only")
+        icon.setMinimumWidth(18)
+        row.addWidget(icon)
+        details = QVBoxLayout()
+        details.setContentsMargins(0, 0, 0, 0)
+        details.setSpacing(1)
+        name = str(self._local_net_item_value(item, "name", "net_name", default="Local Net"))
+        group = str(self._local_net_item_value(item, "operating_group_name", "group_name", "group", default="Community / Unassigned"))
+        service = str(self._local_net_item_value(item, "service", default="Local"))
+        where = str(self._local_net_item_value(item, "where_text", "frequency_text", "channel_text", "band_freq", default="Location not configured"))
+        when_text = self._format_display_time(start, True, self._get_display_tz())
+        headline = QLabel(f"<b>{urgency_text}</b> · Reminder · Local Net · {when_text}")
+        headline.setTextFormat(Qt.RichText)
+        headline.setWordWrap(True)
+        details.addWidget(headline)
+        summary = QLabel(f"{name} · {group} · {service} / {where}")
+        summary.setWordWrap(True)
+        summary.setToolTip(summary.text())
+        details.addWidget(summary)
+        source_health = str(
+            self._local_net_item_value(item, "source_health_text", "resource_status_text", default="")
+        ).strip()
+        if source_health:
+            source_label = QLabel(f"Source: {source_health}")
+            source_label.setWordWrap(True)
+            source_label.setToolTip(source_health)
+            details.addWidget(source_label)
+        why = str(self._local_net_item_value(item, "why_text", "why", default="")).strip()
+        if why:
+            why_label = QLabel(f"Why: {why}")
+            why_label.setWordWrap(True)
+            why_label.setToolTip(why)
+            details.addWidget(why_label)
+        row.addLayout(details, 1)
+        details_btn = QPushButton("Details")
+        details_btn.setToolTip("Open this Local Net reminder in read-only detail.")
+        details_btn.setStyleSheet(button_style("secondary", self._theme()))
+        details_btn.clicked.connect(lambda _checked=False, payload=item: self.local_net_details_requested.emit(payload))
+        row.addWidget(details_btn)
+        if placement == "active" or is_reminding:
+            dismiss_btn = QPushButton("Dismiss")
+            dismiss_btn.setToolTip("Dismiss this occurrence only; future reminders remain enabled.")
+            dismiss_btn.setStyleSheet(button_style("muted", self._theme()))
+            dismiss_btn.clicked.connect(lambda _checked=False, payload=item: self.local_net_dismiss_requested.emit(payload))
+            row.addWidget(dismiss_btn)
+        sop_id = self._local_net_item_value(item, "sop_id", "sop_profile_id", "linked_sop_id")
+        if sop_id not in (None, "", 0):
+            sop_btn = QPushButton("Open SOP")
+            sop_btn.setToolTip("Open the linked SOP with this Local Net as context. It will not activate the SOP.")
+            sop_btn.setStyleSheet(button_style("primary", self._theme()))
+            sop_btn.clicked.connect(lambda _checked=False, payload=item: self.local_net_open_sop_requested.emit(payload))
+            row.addWidget(sop_btn)
+        return frame
+
     def _refresh_schedule_outlook(self) -> None:
         if not bool(self._view_cards.get("schedule", True)):
             return
@@ -7125,6 +7513,11 @@ class ControlFreqTab(QWidget):
         self._next_schedule_outlook_preview = self._next_schedule_outlook_entry(now_utc, today_rows + week_rows)
         self._set_awareness_sop_summary(today_rows, week_rows)
         self._render_schedule_timeline(today_rows, week_rows, now_utc=now_utc)
+        # Local Nets has an independent bounded projection and never enters the
+        # commandable HF/SOP schedule table below.  A collapsed section only
+        # receives its cheap header invalidation inside its own renderer.
+        self._schedule_local_nets_outlook_refresh(now_utc)
+        self._refresh_local_nets_outlook(now_utc)
         self.schedule_table.setRowCount(0)
         self._schedule_entries_by_row.clear()
         self._append_section_row_to(self.schedule_table, "Today")

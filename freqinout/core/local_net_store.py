@@ -201,6 +201,22 @@ class LocalNetStore:
             return bool(cursor.rowcount)
 
     def dismiss_occurrence(self, occurrence: LocalNetOccurrence, *, note: str | None = None) -> None:
+        self.dismiss_occurrence_reference(
+            occurrence.occurrence_key,
+            occurrence.local_net_schedule_key,
+            occurrence.start_utc,
+            note=note,
+        )
+
+    def dismiss_occurrence_reference(
+        self,
+        occurrence_key: str,
+        schedule_key: str,
+        occurrence_start_utc: datetime,
+        *,
+        note: str | None = None,
+    ) -> None:
+        """Dismiss a stable projected occurrence without reconstructing UI state."""
         now = _stamp(_now())
         with self._write() as conn:
             conn.execute(
@@ -209,7 +225,14 @@ class LocalNetStore:
                 VALUES (?,?,?,?,?,?)
                 ON CONFLICT(occurrence_key) DO UPDATE SET state='dismissed',
                     operator_note=excluded.operator_note,updated_utc=excluded.updated_utc""",
-                (occurrence.occurrence_key, occurrence.local_net_schedule_key, _stamp(occurrence.start_utc), "dismissed", note, now),
+                (
+                    str(occurrence_key),
+                    str(schedule_key),
+                    _stamp(occurrence_start_utc),
+                    "dismissed",
+                    note,
+                    now,
+                ),
             )
 
     def upcoming(

@@ -317,6 +317,7 @@ class MainWindow(QMainWindow):
             "sop_tab",
             lambda: SOPTab(self, plan_context_service=self.plan_context_service),
         )
+        self.sop_tab.local_net_return_requested.connect(self._return_navigation_intent)
         self.operator_history_tab: OperatorHistoryTab | None = None
         self.local_operator_tab: LocalOperatorTab | None = None
         self.local_report_history_tab: LocalReportHistoryTab | None = None
@@ -330,6 +331,10 @@ class MainWindow(QMainWindow):
             "ops_center",
             lambda: ControlFreqTab(self, plan_context_service=self.plan_context_service),
         )
+        self.controlfreq_tab.set_local_nets_outlook_provider(self._build_local_nets_outlook)
+        self.controlfreq_tab.local_net_details_requested.connect(self._open_local_net_details)
+        self.controlfreq_tab.local_net_dismiss_requested.connect(self._dismiss_local_net_occurrence)
+        self.controlfreq_tab.local_net_open_sop_requested.connect(self._open_local_net_sop)
         self.command_palette_shortcut = QShortcut(QKeySequence("Ctrl+K"), self)
         self.command_palette_shortcut.setContext(Qt.ApplicationShortcut)
         self.command_palette_shortcut.activated.connect(self._open_command_palette)
@@ -4213,6 +4218,98 @@ class MainWindow(QMainWindow):
             index = self._screen_index_by_label.get("Local Nets", -1)
             if index >= 0:
                 self._set_screen(index)
+        elif intent.return_route == "ops.schedule_outlook":
+            index = self._screen_index_by_label.get("Ops Center", -1)
+            if index < 0:
+                return
+            self._set_screen(index)
+
+            def restore_ops_context() -> None:
+                scroll = getattr(self.controlfreq_tab, "controlfreq_scroll", None)
+                if scroll is not None:
+                    scroll.verticalScrollBar().setValue(max(0, int(intent.return_scroll_y)))
+                self.controlfreq_tab.refresh_local_nets_outlook()
+
+            QTimer.singleShot(0, restore_ops_context)
+
+    @staticmethod
+    def _local_net_item_value(item: object, name: str) -> object:
+        return item.get(name) if isinstance(item, Mapping) else getattr(item, name, None)
+
+    def _build_local_nets_outlook(self, now_utc: datetime.datetime) -> object:
+        from freqinout.core.known_operating_groups import net_resources_db_path
+        from freqinout.core.local_net_projection import build_local_net_outlook
+        from freqinout.core.local_net_store import LocalNetStore
+        from freqinout.core.resource_catalog_store import ResourceCatalogStore
+
+        path = net_resources_db_path()
+        return build_local_net_outlook(
+            LocalNetStore(path),
+            ResourceCatalogStore(path),
+            now_utc,
+            horizon_days=30,
+            later_limit=50,
+        )
+
+    def _open_local_net_details(self, item: object) -> None:
+        schedule_id = self._local_net_item_value(item, "local_net_schedule_id")
+        occurrence_id = self._local_net_item_value(item, "occurrence_id")
+        index = self._screen_index_by_label.get("Local Nets", -1)
+        if index < 0 or not schedule_id:
+            return
+        self._set_screen(index)
+        tab = self._get_tab_by_label("Local Nets")
+        if tab is not None and hasattr(tab, "focus_schedule"):
+            QTimer.singleShot(
+                0,
+                lambda target=tab, schedule=schedule_id, occurrence=occurrence_id: target.focus_schedule(
+                    schedule, occurrence
+                ),
+            )
+
+    def _dismiss_local_net_occurrence(self, item: object) -> None:
+        from freqinout.core.known_operating_groups import net_resources_db_path
+        from freqinout.core.local_net_store import LocalNetStore
+
+        occurrence_id = self._local_net_item_value(item, "occurrence_id")
+        schedule_id = self._local_net_item_value(item, "local_net_schedule_id")
+        start_utc = self._local_net_item_value(item, "start_utc")
+        if not occurrence_id or not schedule_id or not isinstance(start_utc, datetime.datetime):
+            return
+        try:
+            LocalNetStore(net_resources_db_path()).dismiss_occurrence_reference(
+                str(occurrence_id),
+                str(schedule_id),
+                start_utc,
+                note="Dismissed from Ops Center",
+            )
+        except Exception as exc:
+            log.debug("Ops Center Local Net dismissal failed: %s", exc)
+            return
+        self.controlfreq_tab.refresh_local_nets_outlook()
+
+    def _open_local_net_sop(self, item: object) -> None:
+        from freqinout.core.local_net_projection import build_local_net_sop_intent
+
+        schedule_id = self._local_net_item_value(item, "local_net_schedule_id")
+        occurrence_id = self._local_net_item_value(item, "occurrence_id")
+        session_id = self._local_net_item_value(item, "net_session_id")
+        sop_id = self._local_net_item_value(item, "sop_id")
+        if not schedule_id or not occurrence_id or not sop_id:
+            return
+        intent = build_local_net_sop_intent(
+            local_net_schedule_key=str(schedule_id),
+            occurrence_key=str(occurrence_id),
+            net_session_key=str(session_id) if session_id else None,
+            sop_id=int(sop_id),
+            return_scroll_y=self.controlfreq_tab.controlfreq_scroll.verticalScrollBar().value(),
+        )
+        index = self._screen_index_by_label.get("SOP", -1)
+        if index < 0:
+            return
+        self._set_screen(index)
+        if hasattr(self.sop_tab, "open_local_net_context"):
+            QTimer.singleShot(0, lambda target=self.sop_tab, context=intent: target.open_local_net_context(context))
 
     def open_hf_net_subscription(self, session_keys: object) -> None:
         """Hand canonical directory sessions to the existing HF Nets editor."""

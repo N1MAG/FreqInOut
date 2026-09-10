@@ -1,6 +1,6 @@
 # Local Nets And Tools & Resources Implementation Plan
 
-Status: active; LN-0 through LN-4 passed, LN-5 is next
+Status: active; LN-0 through LN-5 passed, LN-6 is next
 
 Date: 2026-09-09
 
@@ -28,8 +28,8 @@ package; they do not authorize a workaround that weakens the governing contract.
 | LN-2 Resources navigation and catalog | Passed 2026-09-09 |
 | LN-3 HF directory subscription | Passed 2026-09-09 |
 | LN-4 Local Nets core and workspace | Passed 2026-09-09 |
-| LN-5 Ops Center and SOP integration | Next |
-| LN-6 Release qualification | Pending LN-5 |
+| LN-5 Ops Center and SOP integration | Passed 2026-09-09 |
+| LN-6 Release qualification | Next |
 
 ## Existing Implementation Baseline
 
