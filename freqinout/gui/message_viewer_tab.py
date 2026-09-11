@@ -34,7 +34,7 @@ from PySide6.QtCore import (
     QThread,
     QFileSystemWatcher,
 )
-from PySide6.QtGui import QPainter, QColor, QPalette, QFont
+from PySide6.QtGui import QPainter, QColor, QPalette, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -237,6 +237,7 @@ from freqinout.core.message_projection_store import (
     load_projected_message_detail,
     mark_projected_messages_read,
     process_message_delete_queue,
+    query_projected_inbox_focus_counts,
     query_projected_message_page,
 )
 from freqinout.core.source_view_contracts import (
@@ -1749,6 +1750,8 @@ class _ProjectedMessageQueryWorker(QObject):
         refs: dict[str, list[dict[str, object]]] = {}
         total_count = 0
         generation = 0
+        focus_counts: dict[str, int] = {}
+        focus_counts_generation = 0
         try:
             page = query_projected_message_page(
                 self._db_path,
@@ -1765,6 +1768,25 @@ class _ProjectedMessageQueryWorker(QObject):
                 message_id: [dict(ref) for ref in message_refs]
                 for message_id, message_refs in loaded_refs.items()
             }
+            count_query = {
+                key: self._query[key]
+                for key in (
+                    "group_name",
+                    "group_names",
+                    "received_after_ts",
+                    "received_before_ts",
+                )
+                if key in self._query
+            }
+            focus_snapshot = query_projected_inbox_focus_counts(
+                self._db_path,
+                **count_query,
+            )
+            focus_counts = {
+                str(key): max(0, int(value or 0))
+                for key, value in focus_snapshot.counts.items()
+            }
+            focus_counts_generation = int(focus_snapshot.generation or 0)
         except Exception as exc:
             error = str(exc)
         self.finished.emit(
@@ -1775,6 +1797,8 @@ class _ProjectedMessageQueryWorker(QObject):
                 "refs": refs,
                 "total_count": total_count,
                 "generation": generation,
+                "focus_counts": focus_counts,
+                "focus_counts_generation": focus_counts_generation,
                 "elapsed_ms": (time.perf_counter() - started) * 1000.0,
                 "error": error,
             }
@@ -3038,6 +3062,8 @@ class MessageViewerTab(QWidget):
         )
         self._available_type_filters: List[str] = []
         self._inbox_focus_unread_counts: Dict[str, int] = {}
+        self._projection_focus_counts_available: bool = False
+        self._focus_counts_generation: int = 0
         self._responsive_layout_mode = "wide"
         self._responsive_compact_width = 1200
         msg_paths = self.settings.get("message_paths", {}) or {}
@@ -3135,6 +3161,18 @@ class MessageViewerTab(QWidget):
         self._locally_deleted_row_keys: set[tuple] = set()
         self._filters_initialized = False
         self._has_active_view = False
+        # Reader presentation is intentionally independent from the Messages
+        # tab lifecycle.  The latter owns timers and deferred projection work;
+        # this state owns only the currently displayed, bounded list snapshot.
+        self._reader_open: bool = False
+        self._reader_message_key: tuple | None = None
+        self._reader_snapshot: List[UnifiedMessage] = []
+        self._reader_index: int = -1
+        self._reader_generation: int = 0
+        self._reader_transitioning: bool = False
+        self._reader_transition_serial: int = 0
+        self._saved_list_scroll: int = 0
+        self._reader_bbs_known_counts: Dict[tuple, int] = {}
         self._default_sort_column = 5
         self._default_sort_order = Qt.DescendingOrder
         self._sort_column = self._default_sort_column
@@ -4857,6 +4895,13 @@ class MessageViewerTab(QWidget):
             self.more_export_selected_action.triggered.connect(self._export_selected_csv)
         else:
             self.more_export_selected_action.setEnabled(False)
+        self.more_publish_selected_bbs_action = self.more_actions_menu.addAction(
+            "Publish Selected to BBS..."
+        )
+        self.more_publish_selected_bbs_action.triggered.connect(
+            self._publish_selected_messages_to_bbs
+        )
+        self.more_publish_selected_bbs_action.setVisible(False)
         self.more_copy_selected_summary_action = self.more_actions_menu.addAction("Copy Selected Summary")
         self.more_copy_selected_summary_action.triggered.connect(self._copy_selected_messages_summary)
         self.more_copy_summary_action = self.more_actions_menu.addAction("Copy Summary")
@@ -4988,9 +5033,16 @@ class MessageViewerTab(QWidget):
         messages_workspace.addWidget(content_wrap, 1)
         layout.addLayout(messages_workspace, 1)
         self.inbox_page = QWidget()
-        inbox_root = QHBoxLayout(self.inbox_page)
+        inbox_root = QVBoxLayout(self.inbox_page)
         inbox_root.setContentsMargins(0, 0, 0, 0)
         inbox_root.setSpacing(10)
+        self.inbox_workspace_stack = QStackedWidget()
+        self.inbox_list_page = QWidget()
+        inbox_list_root = QHBoxLayout(self.inbox_list_page)
+        inbox_list_root.setContentsMargins(0, 0, 0, 0)
+        inbox_list_root.setSpacing(10)
+        self.inbox_workspace_stack.addWidget(self.inbox_list_page)
+        inbox_root.addWidget(self.inbox_workspace_stack, 1)
         self.inbox_controls_panel = inbox_wrap
         self.inbox_controls_panel.setObjectName("messagesInboxControlPanel")
         self.inbox_controls_panel.setMinimumWidth(250)
@@ -5004,7 +5056,7 @@ class MessageViewerTab(QWidget):
         self.inbox_controls_scroll.setMinimumWidth(262)
         self.inbox_controls_scroll.setMaximumWidth(352)
         self.inbox_controls_scroll.setWidget(self.inbox_controls_panel)
-        inbox_root.addWidget(self.inbox_controls_scroll, 0)
+        inbox_list_root.addWidget(self.inbox_controls_scroll, 0)
         inbox_body = QWidget()
         inbox_body.setObjectName("messagesInboxBody")
         inbox_body.setMinimumWidth(MESSAGE_INBOX_BODY_MIN_WIDTH)
@@ -5020,7 +5072,7 @@ class MessageViewerTab(QWidget):
         self.inbox_body_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.inbox_body_scroll.setFrameShape(QFrame.NoFrame)
         self.inbox_body_scroll.setWidget(inbox_body)
-        inbox_root.addWidget(self.inbox_body_scroll, 1)
+        inbox_list_root.addWidget(self.inbox_body_scroll, 1)
         self.messages_mode_stack.addWidget(self.inbox_page)
 
         # JS8 retrievals are a utility queue, not the message Inbox.  Keep the
@@ -5141,13 +5193,65 @@ class MessageViewerTab(QWidget):
         self.messages_table.setItemDelegateForColumn(0, MessageCheckboxDelegate(self.messages_table))
         messages_layout.addWidget(self.messages_table)
         messages_box.setLayout(messages_layout)
-        splitter = QSplitter(Qt.Vertical)
-        style_splitter_handles(splitter, resolve_theme(self.settings))
-        splitter.addWidget(messages_box)
-        self.messages_splitter = splitter
+        # The list owns the Inbox workspace.  A reader is a separate stacked
+        # page, so neither an empty reader nor a list minimum can consume the
+        # other mode's height.
+        body.addWidget(messages_box, 1)
+
+        self.reader_page = QWidget()
+        reader_layout = QVBoxLayout(self.reader_page)
+        reader_layout.setContentsMargins(0, 0, 0, 0)
+        reader_layout.setSpacing(8)
+        reader_toolbar = QHBoxLayout()
+        self.reader_back_btn = QPushButton("Back to Inbox")
+        self.reader_back_btn.setAccessibleName("Back to Inbox")
+        self.reader_back_btn.setToolTip("Return to the message list and restore its position.")
+        self.reader_back_btn.clicked.connect(self._close_message_reader)
+        self.reader_previous_btn = QPushButton("Previous")
+        self.reader_previous_btn.setAccessibleName("Previous message")
+        self.reader_previous_btn.setToolTip("Show the previous message in the current list order.")
+        self.reader_previous_btn.clicked.connect(lambda: self._navigate_message_reader(-1))
+        self.reader_next_btn = QPushButton("Next")
+        self.reader_next_btn.setAccessibleName("Next message")
+        self.reader_next_btn.setToolTip("Show the next message in the current list order.")
+        self.reader_next_btn.clicked.connect(lambda: self._navigate_message_reader(1))
+        self.reader_position_label = QLabel("0 of 0")
+        self.reader_position_label.setAccessibleName("Reader position")
+        self.reader_bbs_btn = QPushButton("+BBS")
+        self.reader_bbs_btn.setAccessibleName("Add message file to Managed BBS")
+        self.reader_bbs_btn.setToolTip("Choose the Managed BBS locations for this message file.")
+        self.reader_bbs_btn.clicked.connect(self._manage_reader_bbs_locations)
+        self.reader_bbs_btn.setVisible(False)
+        self.reader_bbs_status_label = QLabel("")
+        self.reader_bbs_status_label.setAccessibleName("Managed BBS publication result")
+        self.reader_bbs_status_label.setVisible(False)
+        self.reader_delete_btn = QPushButton("Delete…")
+        self.reader_delete_btn.setAccessibleName("Delete message file")
+        self.reader_delete_btn.setToolTip(
+            "Move this FLMSG or FLAMP source file to the system Trash or Recycle Bin."
+        )
+        self.reader_delete_btn.setStyleSheet(button_style("danger", resolve_theme(self.settings)))
+        self.reader_delete_btn.clicked.connect(self._delete_reader_file_message)
+        self.reader_delete_btn.setVisible(False)
+        reader_toolbar.addWidget(self.reader_back_btn)
+        reader_toolbar.addWidget(self.reader_previous_btn)
+        reader_toolbar.addWidget(self.reader_next_btn)
+        reader_toolbar.addWidget(self.reader_position_label)
+        reader_toolbar.addStretch()
+        reader_toolbar.addWidget(self.reader_bbs_status_label)
+        reader_toolbar.addWidget(self.reader_bbs_btn)
+        reader_toolbar.addWidget(self.reader_delete_btn)
+        reader_layout.addLayout(reader_toolbar)
+        self._reader_back_escape_shortcut = QShortcut(QKeySequence("Escape"), self.reader_page)
+        self._reader_back_escape_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self._reader_back_escape_shortcut.activated.connect(self._close_message_reader)
+        self._reader_back_alt_left_shortcut = QShortcut(QKeySequence("Alt+Left"), self.reader_page)
+        self._reader_back_alt_left_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self._reader_back_alt_left_shortcut.activated.connect(self._close_message_reader)
 
         viewer_container = QWidget()
         viewer_layout = QVBoxLayout(viewer_container)
+        viewer_layout.setContentsMargins(0, 0, 0, 0)
         self.info_label = QLabel("No file selected")
         self.info_label.setStyleSheet("font-weight: bold;")
         info_row = QHBoxLayout()
@@ -5162,10 +5266,9 @@ class MessageViewerTab(QWidget):
         self.viewer.setReadOnly(True)
         self.viewer.setAcceptRichText(False)
         viewer_layout.addWidget(self.viewer)
-        splitter.addWidget(viewer_container)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 3)
-        body.addWidget(splitter, 3)
+        reader_layout.addWidget(viewer_container, 1)
+        self.inbox_workspace_stack.addWidget(self.reader_page)
+        self.inbox_workspace_stack.setCurrentWidget(self.inbox_list_page)
 
         self.type_filter = QComboBox()
         self.status_filter = QComboBox()
@@ -5491,6 +5594,7 @@ class MessageViewerTab(QWidget):
         valid = {key for key, _label, _tip in self._inbox_focus_options()}
         if focus not in valid:
             focus = "all"
+        self._close_message_reader_for_scope_change()
         if focus == self._inbox_focus:
             self._sync_inbox_focus_buttons()
             self._sync_source_filter_for_inbox_focus(focus)
@@ -9060,6 +9164,7 @@ class MessageViewerTab(QWidget):
         action_filter: str = "",
     ) -> None:
         self.show_inbox_from_navigation()
+        self._close_message_reader_for_scope_change()
         try:
             age_seconds = int(age_filter_seconds or 0)
         except Exception:
@@ -9402,10 +9507,19 @@ class MessageViewerTab(QWidget):
             QTimer.singleShot(1500, lambda: self.messages_copy_summary_btn.setText("Copy Summary"))
 
     def _refresh_more_actions_menu(self) -> None:
-        selected = len(self._messages_model.selected_rows()) if hasattr(self, "_messages_model") else 0
-        visible = len(self._messages_model.rows()) if hasattr(self, "_messages_model") else 0
+        selected_rows = self._messages_model.selected_rows() if hasattr(self, "_messages_model") else []
+        selected = len(selected_rows)
         if hasattr(self, "more_export_selected_action"):
             self.more_export_selected_action.setEnabled(bool(self._export_selected_available) and selected > 0)
+        if hasattr(self, "more_publish_selected_bbs_action"):
+            bbs_count = len(self._eligible_bbs_publication_rows(selected_rows))
+            self.more_publish_selected_bbs_action.setVisible(bbs_count > 0)
+            self.more_publish_selected_bbs_action.setEnabled(bbs_count > 0)
+            self.more_publish_selected_bbs_action.setText(
+                f"Publish Selected to BBS... ({bbs_count})"
+                if bbs_count > 0
+                else "Publish Selected to BBS..."
+            )
         if hasattr(self, "more_copy_selected_summary_action"):
             self.more_copy_selected_summary_action.setEnabled(selected > 0)
         if hasattr(self, "more_actions_btn"):
@@ -13170,6 +13284,8 @@ class MessageViewerTab(QWidget):
                 self.compose_status_label.text() or "Compose is ready.",
                 role=getattr(self, "_compose_status_role", "info"),
             )
+        if hasattr(self, "reader_delete_btn"):
+            self.reader_delete_btn.setStyleSheet(button_style("danger", theme))
 
     def shutdown(self) -> None:
         self._is_shutting_down = True
@@ -14052,6 +14168,24 @@ class MessageViewerTab(QWidget):
             db_rows if isinstance(db_rows, list) else [],
             refs if isinstance(refs, dict) else {},
         )
+        focus_counts = data.get("focus_counts", data.get("focus_unread_counts"))
+        focus_counts_generation = int(data.get("focus_counts_generation", generation) or 0)
+        if (
+            isinstance(focus_counts, Mapping)
+            and (
+                not focus_counts_generation
+                or focus_counts_generation >= int(getattr(self, "_focus_counts_generation", 0) or 0)
+            )
+        ):
+            focus_keys = [key for key, _label, _tip in self._inbox_focus_options()]
+            self._inbox_focus_unread_counts = {
+                key: max(0, int(focus_counts.get(key, 0) or 0))
+                for key in focus_keys
+            }
+            self._focus_counts_generation = focus_counts_generation
+            self._projection_focus_counts_available = True
+            if hasattr(self, "_inbox_focus_buttons"):
+                self._sync_inbox_focus_buttons()
         self._projected_table_loading = True
         try:
             self._message_rows = rows
@@ -14491,7 +14625,13 @@ class MessageViewerTab(QWidget):
         )
         self._message_rows = rows
         self._save_message_file_metadata_from_rows(rows)
-        self._start_message_projection_write(rows, force=bool(data.get("force", False)))
+        # Projection-primary mode is owned by the application coordinator.
+        # Re-projecting this presentation snapshot here creates a second
+        # identity lane (notably across file-path identity upgrades) and can
+        # duplicate one physical FLMSG/FLAMP file in the Inbox. Keep the legacy
+        # writer only for the explicit projection-disabled compatibility mode.
+        if not self._projection_primary_enabled:
+            self._start_message_projection_write(rows, force=bool(data.get("force", False)))
         sender_updates = data.get("sender_cache_updates", {})
         if isinstance(sender_updates, dict):
             self._sender_cache.update(sender_updates)
@@ -14931,6 +15071,7 @@ class MessageViewerTab(QWidget):
         return "muted"
 
     def _toggle_intel_filter(self, kind: str, value: str) -> None:
+        self._close_message_reader_for_scope_change()
         kind = str(kind or "").strip().lower()
         value = str(value or "").strip()
         if kind == "status":
@@ -14960,6 +15101,7 @@ class MessageViewerTab(QWidget):
         return self._traffic_context_cache
 
     def _set_traffic_action_filter(self, bucket: object) -> None:
+        self._close_message_reader_for_scope_change()
         self._traffic_action_filter = str(bucket or "").strip().lower()
         if hasattr(self, "traffic_action_summary"):
             self.traffic_action_summary.set_active_bucket(self._traffic_action_filter)
@@ -15098,7 +15240,10 @@ class MessageViewerTab(QWidget):
             filtered = sorted(filtered, key=lambda r: r.rcv_ts or 0.0)
         else:
             filtered = self._sort_rows(filtered)
-        self._refresh_inbox_focus_unread_counts(rows, now_ts=now_ts)
+        if self._projection_primary_enabled and self._projection_focus_counts_available:
+            self._sync_inbox_focus_buttons()
+        else:
+            self._refresh_inbox_focus_unread_counts(rows, now_ts=now_ts)
         self._render_messages_table(filtered)
         self._refresh_intel_filter_bar(intel_base_rows)
         self._refresh_traffic_action_summary(traffic_base_rows)
@@ -15736,12 +15881,17 @@ class MessageViewerTab(QWidget):
 
     def _refresh_table_after_read(self, match_fn, row_ref: Optional[UnifiedMessage] = None) -> None:
         updated = False
+        unread_rows: List[UnifiedMessage] = []
         if row_ref is not None:
+            if self._row_is_unread_for_focus_count(row_ref):
+                unread_rows.append(row_ref)
             row_ref.status = "READ"
             updated = True
         else:
             for row in self._message_rows:
                 if match_fn(row):
+                    if self._row_is_unread_for_focus_count(row):
+                        unread_rows.append(row)
                     row.status = "READ"
                     updated = True
         if not updated:
@@ -15756,8 +15906,25 @@ class MessageViewerTab(QWidget):
             else:
                 self._update_rendered_status(match_fn)
             self._update_mark_all_read_style()
+        for row in unread_rows:
+            self._decrement_inbox_focus_counts_for_row(row)
+
+    def _decrement_inbox_focus_counts_for_row(self, row: UnifiedMessage) -> None:
+        counts = getattr(self, "_inbox_focus_unread_counts", None)
+        if not isinstance(counts, dict) or not counts:
+            return
+        matched = {"all", "new"}
+        for key, _label, _tip in self._inbox_focus_options():
+            if key in {"all", "new"}:
+                continue
+            if _core_row_matches_inbox_focus(row, key):
+                matched.add(key)
+        for key in matched:
+            counts[key] = max(0, int(counts.get(key, 0) or 0) - 1)
+        self._sync_inbox_focus_buttons()
 
     def _clear_filters(self) -> None:
+        self._close_message_reader_for_scope_change()
         self._unfreeze_table()
         if (
             self.type_filter.currentText() in ("", "MSG Type...")
@@ -15823,6 +15990,7 @@ class MessageViewerTab(QWidget):
         self.show_all_message_groups_chk.setChecked(not self._show_all_message_groups_enabled())
 
     def _on_show_all_message_groups_changed(self, *_args) -> None:
+        self._close_message_reader_for_scope_change()
         self._update_show_all_message_groups_style()
         if hasattr(self, "operating_group_filter"):
             commstat_state = self._commstat_group_state()
@@ -15895,6 +16063,7 @@ class MessageViewerTab(QWidget):
                 pass
 
     def _on_filter_changed(self) -> None:
+        self._close_message_reader_for_scope_change()
         self._unfreeze_table()
         self._update_excluded_types_button_state()
         self._refresh_basic_filter_button_texts()
@@ -16169,9 +16338,12 @@ class MessageViewerTab(QWidget):
         QMessageBox.information(self, "Delete Message", self._single_delete_success_text(row, hidden=outcome.hidden))
 
     def _clear_message_detail_view(self, label: str = "No message selected") -> None:
-        self._has_active_view = False
-        self.info_label.setText(label)
-        self.viewer.clear()
+        if getattr(self, "_reader_open", False):
+            self._close_message_reader(clear_content=True, cleared_label=label)
+        else:
+            self._set_open_external_path(None)
+            self.info_label.setText(label)
+            self.viewer.clear()
 
     @staticmethod
     def _delete_audit_row_key(row: UnifiedMessage) -> str:
@@ -17142,6 +17314,7 @@ class MessageViewerTab(QWidget):
     def _on_sort_clicked(self, section: int) -> None:
         if section == 0 or section >= 7:
             return
+        self._close_message_reader_for_scope_change()
         if section == self._sort_column:
             self._sort_order = (
                 Qt.AscendingOrder if self._sort_order == Qt.DescendingOrder else Qt.DescendingOrder
@@ -17401,7 +17574,367 @@ class MessageViewerTab(QWidget):
         rows.sort(key=lambda r: r.rcv_ts, reverse=True)
         return rows
 
+    def _reader_row_key(self, row: UnifiedMessage | None) -> tuple | None:
+        return MessageTableModel._row_key(row) if row is not None else None
+
+    def _reader_visible_rows(self) -> List[UnifiedMessage]:
+        if not hasattr(self, "_messages_model"):
+            return []
+        # The model is already capped by the Inbox projection.  Copy only the
+        # row references so navigation cannot trigger source, DB, or page work.
+        return list(self._messages_model.rows())[:200]
+
+    def _log_message_reader_lifecycle(self, event: str, **fields: object) -> None:
+        """Record sparse, operator-driven reader events for production diagnosis."""
+
+        details = "|".join(
+            f"{key}={str(value).replace(chr(10), ' ')[:160]}"
+            for key, value in fields.items()
+            if value is not None
+        )
+        suffix = f"|{details}" if details else ""
+        log.info("MESSAGES|reader_%s%s", str(event or "event").strip().lower(), suffix)
+
+    def _update_message_reader_navigation(self) -> None:
+        count = len(getattr(self, "_reader_snapshot", []))
+        index = int(getattr(self, "_reader_index", -1))
+        transitioning = bool(getattr(self, "_reader_transitioning", False))
+        if hasattr(self, "reader_position_label"):
+            self.reader_position_label.setText(f"{index + 1} of {count}" if 0 <= index < count else "0 of 0")
+        if hasattr(self, "reader_previous_btn"):
+            self.reader_previous_btn.setEnabled(not transitioning and index > 0)
+        if hasattr(self, "reader_next_btn"):
+            self.reader_next_btn.setEnabled(not transitioning and 0 <= index < (count - 1))
+
+    def _release_message_reader_navigation(self, serial: int) -> None:
+        """Release the short post-paint input debounce for reader navigation."""
+        if serial != int(getattr(self, "_reader_transition_serial", 0)):
+            return
+        if not getattr(self, "_reader_open", False) or not getattr(self, "_reader_transitioning", False):
+            return
+        self._reader_transitioning = False
+        row = self._reader_current_row()
+        self._sync_reader_bbs_action(row)
+        self._sync_reader_delete_action(row)
+        self._update_message_reader_navigation()
+
+    def _reader_current_row(self) -> UnifiedMessage | None:
+        rows = getattr(self, "_reader_snapshot", [])
+        index = int(getattr(self, "_reader_index", -1))
+        if 0 <= index < len(rows):
+            return rows[index]
+        return None
+
+    def _cached_reader_bbs_location_count(self, row: UnifiedMessage | None) -> int | None:
+        rec = self._file_record_for_message_row(row, allow_detail_lookup=False)
+        key = self._bbs_copy_session_key_for_record(rec)
+        if key is None:
+            return None
+        known = getattr(self, "_reader_bbs_known_counts", {})
+        if key in known:
+            return max(0, int(known[key] or 0))
+        cache_ts = float(getattr(self, "_bbs_published_index_cache_ts", 0.0) or 0.0)
+        if (time.monotonic() - cache_ts) >= 5.0:
+            return None
+        published = getattr(self, "_bbs_published_index_cache", {})
+        if not isinstance(published, dict):
+            return None
+        return len(set(published.get(key[0], set())))
+
+    def _sync_reader_bbs_action(
+        self,
+        row: UnifiedMessage | None,
+        *,
+        confirmed_count: int | None = None,
+    ) -> None:
+        button = getattr(self, "reader_bbs_btn", None)
+        status = getattr(self, "reader_bbs_status_label", None)
+        if button is None:
+            return
+        eligible = MessageViewerTab._row_supports_managed_bbs_publication(self, row)
+        button.setVisible(eligible)
+        button.setEnabled(eligible and not getattr(self, "_reader_transitioning", False))
+        if status is not None:
+            status.clear()
+            status.setVisible(False)
+        if not eligible:
+            button.setText("+BBS")
+            return
+        count = confirmed_count
+        rec = self._file_record_for_message_row(row, allow_detail_lookup=False)
+        key = self._bbs_copy_session_key_for_record(rec)
+        if count is not None and key is not None:
+            self._reader_bbs_known_counts[key] = max(0, int(count))
+        if count is None:
+            count = self._cached_reader_bbs_location_count(row)
+        if count is not None and count > 0:
+            button.setText(f"BBS · {count}")
+            button.setAccessibleName(f"Manage {count} Managed BBS locations for this message file")
+            button.setToolTip("Review or change the Managed BBS locations for this message file.")
+        else:
+            button.setText("+BBS")
+            button.setAccessibleName("Add message file to Managed BBS")
+            button.setToolTip("Choose the Managed BBS locations for this message file.")
+
+    def _manage_reader_bbs_locations(self) -> None:
+        row = self._reader_current_row()
+        if not MessageViewerTab._row_supports_managed_bbs_publication(self, row):
+            return
+        result = self._copy_row_to_varac_bbs(row, show_confirmation=False)
+        if result is None:
+            return
+        self._sync_reader_bbs_action(row, confirmed_count=result)
+        status = getattr(self, "reader_bbs_status_label", None)
+        if status is not None:
+            status.setText("BBS updated")
+            status.setVisible(True)
+
+    def _reader_deletable_file_record(self, row: UnifiedMessage | None) -> FileRecord | None:
+        rec = self._file_record_for_message_row(row, allow_detail_lookup=False)
+        if rec is None:
+            return None
+        origin = str(rec.origin or getattr(row, "origin", "") or "").strip().lower()
+        if origin not in {"flmsg", "flamp"}:
+            return None
+        if not rec.path.exists() or not rec.path.is_file():
+            return None
+        return rec
+
+    def _sync_reader_delete_action(self, row: UnifiedMessage | None) -> None:
+        button = getattr(self, "reader_delete_btn", None)
+        if button is None:
+            return
+        rec = self._reader_deletable_file_record(row)
+        button.setVisible(rec is not None)
+        button.setEnabled(rec is not None and not getattr(self, "_reader_transitioning", False))
+        if rec is not None:
+            source = str(rec.origin or "message").strip().upper()
+            button.setAccessibleName(f"Delete {source} message file")
+            button.setToolTip(f"Move {rec.path.name} to the system Trash or Recycle Bin.")
+
+    def _delete_reader_file_message(self) -> None:
+        row = self._reader_current_row()
+        rec = self._reader_deletable_file_record(row)
+        if row is None or rec is None:
+            return
+        source = str(rec.origin or row.origin or "message").strip().upper()
+        bbs_count = self._cached_reader_bbs_location_count(row)
+        publication_note = (
+            f"It is currently associated with {bbs_count} Managed BBS location(s); "
+            "those locations will stop publishing it when the missing source is reconciled."
+            if bbs_count is not None and bbs_count > 0
+            else "If it is published through Managed BBS, publication will stop when the missing source is reconciled."
+        )
+        prompt = (
+            f"Move this {source} message file to Trash / Recycle Bin?\n\n"
+            f"{rec.path}\n\n"
+            "The operating system trash may allow recovery. FIO will remove the message from its current views.\n"
+            f"{publication_note}"
+        )
+        delete_row = self._delete_audit_row_for_payload(rec)
+        if not self._confirm_single_delete(delete_row, prompt):
+            return
+        button = getattr(self, "reader_delete_btn", None)
+        if button is not None:
+            button.setEnabled(False)
+        outcome = self._execute_message_delete(delete_row)
+        if outcome.result != "deleted":
+            self._record_message_delete_audit(
+                delete_row,
+                result=outcome.result,
+                detail=message_delete_result_detail(rec, outcome.detail_key),
+                batch_id="reader",
+            )
+            if outcome.result == "failed":
+                QMessageBox.warning(
+                    self,
+                    "Delete Message File",
+                    outcome.warning or "FIO could not move the file to Trash / Recycle Bin.",
+                )
+            self._sync_reader_delete_action(row)
+            return
+        self._record_message_delete_audit(
+            delete_row,
+            result="deleted",
+            detail=message_delete_result_detail(rec, outcome.detail_key),
+            batch_id="reader",
+        )
+        self._remember_locally_deleted_row(row)
+        self._mark_projection_rows_deleted([row], source_scope="reader_file")
+        if getattr(self, "_reader_open", False):
+            self._close_message_reader(
+                clear_content=True,
+                cleared_label="Message moved to Trash",
+                reason="delete",
+            )
+        self._remove_deleted_rows_from_current_view([row])
+        self._unfreeze_table()
+        self._populate_messages_table(force=True)
+        QMessageBox.information(
+            self,
+            "Delete Message File",
+            f"Moved {rec.path.name} to Trash / Recycle Bin.",
+        )
+
+    def _scroll_reader_to_top(self) -> None:
+        if hasattr(self, "viewer"):
+            self.viewer.verticalScrollBar().setValue(0)
+
+    def _open_message_reader(self, row: UnifiedMessage) -> None:
+        rows = self._reader_visible_rows()
+        key = self._reader_row_key(row)
+        try:
+            index = next(i for i, candidate in enumerate(rows) if self._reader_row_key(candidate) == key)
+        except StopIteration:
+            # A direct View action can race a model refresh.  Keep the selected
+            # row readable, but never fetch a replacement Inbox page for it.
+            rows = [row]
+            index = 0
+        if hasattr(self, "messages_table"):
+            self._saved_list_scroll = self.messages_table.verticalScrollBar().value()
+        self._reader_snapshot = rows
+        self._reader_message_key = key
+        self._reader_index = index
+        self._reader_generation = int(getattr(self, "_active_projection_generation", 0) or 0)
+        self._reader_open = True
+        if hasattr(self, "inbox_workspace_stack") and hasattr(self, "reader_page"):
+            self.inbox_workspace_stack.setCurrentWidget(self.reader_page)
+        self._render_message_content(row)
+        self._sync_reader_bbs_action(row)
+        self._sync_reader_delete_action(row)
+        self._scroll_reader_to_top()
+        self._update_message_reader_navigation()
+        self._log_message_reader_lifecycle(
+            "open",
+            index=index + 1,
+            count=len(rows),
+            key=hashlib.sha1(repr(key).encode("utf-8", errors="replace")).hexdigest()[:12],
+            origin=row.origin,
+        )
+        if hasattr(self, "viewer"):
+            self.viewer.setFocus(Qt.OtherFocusReason)
+
+    def _navigate_message_reader(self, delta: int) -> None:
+        if not getattr(self, "_reader_open", False) or getattr(self, "_reader_transitioning", False):
+            return
+        target = int(getattr(self, "_reader_index", -1)) + int(delta)
+        rows = getattr(self, "_reader_snapshot", [])
+        if target < 0 or target >= len(rows):
+            self._update_message_reader_navigation()
+            return
+        row = rows[target]
+        self._reader_transitioning = True
+        self._reader_transition_serial = int(getattr(self, "_reader_transition_serial", 0)) + 1
+        serial = int(self._reader_transition_serial)
+        self._update_message_reader_navigation()
+        if hasattr(self, "reader_bbs_btn"):
+            self.reader_bbs_btn.setEnabled(False)
+        if hasattr(self, "reader_delete_btn"):
+            self.reader_delete_btn.setEnabled(False)
+        try:
+            # Render first, then commit the identity and position.  This keeps
+            # the toolbar from describing N+1 while the document still shows N
+            # and fences accidental re-entry during file/form parsing.
+            self._render_message_content(row)
+            self._scroll_reader_to_top()
+        except Exception as exc:
+            log.exception("MessageViewer: failed reader navigation render")
+            if hasattr(self, "info_label"):
+                self.info_label.setText("Message could not be displayed")
+            if hasattr(self, "viewer"):
+                self.viewer.setAcceptRichText(False)
+                self.viewer.setPlainText(f"FIO could not display this message.\n\nError: {exc}")
+            self._scroll_reader_to_top()
+        finally:
+            # The document is installed before its identity controls change.
+            # Let Qt paint the complete state after this handler returns; do
+            # not force, intercept, or suppress a paint event here. Linux
+            # compositors proved sensitive to all three approaches.
+            self._reader_index = target
+            self._reader_message_key = self._reader_row_key(row)
+            self._sync_reader_bbs_action(row)
+            self._sync_reader_delete_action(row)
+            self._update_message_reader_navigation()
+            self._log_message_reader_lifecycle(
+                "navigate",
+                index=target + 1,
+                count=len(rows),
+                key=hashlib.sha1(
+                    repr(self._reader_message_key).encode("utf-8", errors="replace")
+                ).hexdigest()[:12],
+                origin=row.origin,
+            )
+            QTimer.singleShot(100, lambda serial=serial: self._release_message_reader_navigation(serial))
+
+    def _restore_reader_list_position(self) -> None:
+        if not hasattr(self, "messages_table"):
+            return
+        table = self.messages_table
+        table.verticalScrollBar().setValue(min(int(getattr(self, "_saved_list_scroll", 0)), table.verticalScrollBar().maximum()))
+        key = getattr(self, "_reader_message_key", None)
+        if key is None:
+            return
+        for i, row in enumerate(self._messages_model.rows()):
+            if self._reader_row_key(row) != key:
+                continue
+            index = self._messages_model.index(i, 1)
+            table.setCurrentIndex(index)
+            table.scrollTo(index, QAbstractItemView.PositionAtCenter)
+            break
+
+    def _close_message_reader(
+        self,
+        *_args,
+        clear_content: bool = False,
+        cleared_label: str = "No message selected",
+        reason: str = "back",
+    ) -> None:
+        was_open = bool(getattr(self, "_reader_open", False))
+        self._reader_open = False
+        if hasattr(self, "inbox_workspace_stack") and hasattr(self, "inbox_list_page"):
+            self.inbox_workspace_stack.setCurrentWidget(self.inbox_list_page)
+        if was_open:
+            self._restore_reader_list_position()
+        self._reader_snapshot = []
+        self._reader_index = -1
+        self._reader_generation = 0
+        self._reader_transitioning = False
+        self._reader_transition_serial = int(getattr(self, "_reader_transition_serial", 0)) + 1
+        if clear_content:
+            self._reader_message_key = None
+            self._set_open_external_path(None)
+            self.current_record = None
+            self.current_js8 = None
+            self.current_sitrep = None
+            self.current_commstat = None
+            self.current_observation = None
+            self.info_label.setText(cleared_label)
+            self.viewer.clear()
+        if hasattr(self, "reader_bbs_btn"):
+            self.reader_bbs_btn.setVisible(False)
+        if hasattr(self, "reader_bbs_status_label"):
+            self.reader_bbs_status_label.clear()
+            self.reader_bbs_status_label.setVisible(False)
+        if hasattr(self, "reader_delete_btn"):
+            self.reader_delete_btn.setVisible(False)
+        self._update_message_reader_navigation()
+        if was_open:
+            self._log_message_reader_lifecycle("close", reason=reason, clear=int(bool(clear_content)))
+
+    def _close_message_reader_for_scope_change(self) -> None:
+        if not getattr(self, "_reader_open", False):
+            return
+        # Scope changes must never leave an old document looking as though it
+        # belongs to the newly requested Inbox result.
+        self._close_message_reader(clear_content=True, reason="scope_change")
+
     def _on_view_message(self, row: UnifiedMessage) -> None:
+        if hasattr(self, "inbox_workspace_stack"):
+            self._open_message_reader(row)
+            return
+        self._render_message_content(row)
+
+    def _render_message_content(self, row: UnifiedMessage) -> None:
         with perf_span(
             "messages.view_message",
             settings=self.settings,
@@ -17414,8 +17947,6 @@ class MessageViewerTab(QWidget):
                 row.origin,
                 row.title,
             )
-            self._has_active_view = True
-            self._freeze_messages_table = True
             self._set_open_external_path(None)
             if isinstance(row.payload, JS8Message):
                 self.current_record = None
@@ -17494,6 +18025,23 @@ class MessageViewerTab(QWidget):
                 self.current_commstat = None
                 self.current_observation = row.payload
                 self._load_observation_content(row.payload)
+            else:
+                # Never advance reader identity while retaining the previous
+                # document. Unknown payloads can occur during an additive
+                # source rollout or while opening a stale model snapshot.
+                self.current_js8 = None
+                self.current_record = None
+                self.current_sitrep = None
+                self.current_commstat = None
+                self.current_observation = None
+                self._set_open_external_path(None)
+                self.info_label.setText("Message format is not available")
+                self.viewer.setAcceptRichText(False)
+                self.viewer.setPlainText(
+                    "FIO cannot display this message format in the current build.\n\n"
+                    f"Source: {row.origin or 'unknown'}\n"
+                    f"Type: {row.msg_type or 'unknown'}"
+                )
 
     def _load_projected_content(self, msg: ProjectedMessagePayload) -> None:
         with perf_span(
@@ -18355,17 +18903,39 @@ class MessageViewerTab(QWidget):
             return self._projected_file_record(payload, allow_detail_lookup=allow_detail_lookup)
         return None
 
-    def _can_copy_row_to_varac_bbs(self, row: UnifiedMessage | None) -> bool:
-        if row is None:
-            return False
-        if not self._varac_bbs_copy_targets():
-            return False
+    def _row_supports_managed_bbs_publication(self, row: UnifiedMessage | None) -> bool:
+        """Return eligibility from already-loaded row data without BBS I/O."""
+
         rec = self._file_record_for_message_row(row, allow_detail_lookup=False)
         return isinstance(rec, FileRecord) and str(rec.origin or "").strip().lower() in {
             "flmsg",
             "flamp",
             "varac",
         }
+
+    def _eligible_bbs_publication_rows(
+        self,
+        rows: Sequence[UnifiedMessage],
+    ) -> List[UnifiedMessage]:
+        eligible: List[UnifiedMessage] = []
+        seen_paths: set[str] = set()
+        for row in list(rows)[:200]:
+            if not MessageViewerTab._row_supports_managed_bbs_publication(self, row):
+                continue
+            rec = self._file_record_for_message_row(row, allow_detail_lookup=False)
+            key = self._bbs_copy_session_key_for_record(rec)
+            if key is None or key[0] in seen_paths:
+                continue
+            seen_paths.add(key[0])
+            eligible.append(row)
+        return eligible
+
+    def _can_copy_row_to_varac_bbs(self, row: UnifiedMessage | None) -> bool:
+        if not MessageViewerTab._row_supports_managed_bbs_publication(self, row):
+            return False
+        if not self._varac_bbs_copy_targets():
+            return False
+        return True
 
     @staticmethod
     def _bbs_copy_session_key_for_record(rec: FileRecord | None) -> tuple[str, float, int] | None:
@@ -18532,7 +19102,7 @@ class MessageViewerTab(QWidget):
             if preferred is not None:
                 preferred_id = str(preferred.get("id", "") or "")
         dialog = QDialog(self)
-        dialog.setWindowTitle("Publish to BBS")
+        dialog.setWindowTitle("Manage BBS Locations")
         layout = QVBoxLayout(dialog)
         intro = QLabel("Select every BBS location where this file should be available.")
         intro.setWordWrap(True)
@@ -18559,6 +19129,9 @@ class MessageViewerTab(QWidget):
         note.setWordWrap(True)
         layout.addWidget(note)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
+        apply_button = buttons.button(QDialogButtonBox.Ok)
+        if apply_button is not None:
+            apply_button.setText("Apply")
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
@@ -18787,21 +19360,31 @@ class MessageViewerTab(QWidget):
         self._unfreeze_table()
         self._populate_messages_table(force=True)
 
-    def _copy_row_to_varac_bbs(self, row: UnifiedMessage | None) -> None:
-        if row is None or not self._can_copy_row_to_varac_bbs(row):
-            return
+    def _copy_row_to_varac_bbs(
+        self,
+        row: UnifiedMessage | None,
+        *,
+        show_confirmation: bool = True,
+    ) -> int | None:
+        if row is None or not MessageViewerTab._row_supports_managed_bbs_publication(self, row):
+            return None
         if not self._is_row_bbs_copy_action_enabled(row):
-            return
+            QMessageBox.information(
+                self,
+                "Managed BBS",
+                "No enabled Managed BBS locations are available. Add or enable a location in the BBS service first.",
+            )
+            return None
         rec = self._file_record_for_message_row(row, allow_detail_lookup=False)
         if not isinstance(rec, FileRecord):
-            return
+            return None
         src = rec.path
         if not src.exists() or not src.is_file():
             QMessageBox.warning(self, "Copy to VarAC BBS", "The selected source file no longer exists.")
-            return
+            return None
         targets = self._select_varac_bbs_publish_targets(row)
         if targets is None:
-            return
+            return None
         selected_location_ids = [
             str(target.get("location_id", "") or "").strip()
             for target in targets
@@ -18830,7 +19413,7 @@ class MessageViewerTab(QWidget):
                     )
         except Exception as exc:
             QMessageBox.warning(self, "Publish to BBS", f"Managed BBS update failed:\n{exc}")
-            return
+            return None
         selected_names = [str(target.get("label", "") or "Managed BBS") for target in targets]
         if selected_names:
             message = "Published through the station Managed BBS catalog:\n" + "\n".join(
@@ -18838,11 +19421,102 @@ class MessageViewerTab(QWidget):
             )
         else:
             message = "Publication was removed from all Managed BBS locations. The source file remains unchanged."
-        QMessageBox.information(
-            self,
-            "Managed BBS Updated",
-            message,
-        )
+        if show_confirmation:
+            QMessageBox.information(
+                self,
+                "Managed BBS Updated",
+                message,
+            )
+        self._invalidate_bbs_action_cache()
+        self._unfreeze_table()
+        self._populate_messages_table(force=True)
+        return len(selected_location_ids)
+
+    def _publish_selected_messages_to_bbs(self) -> None:
+        selected_rows = self._messages_model.selected_rows() if hasattr(self, "_messages_model") else []
+        eligible_rows = self._eligible_bbs_publication_rows(selected_rows)
+        if not eligible_rows:
+            QMessageBox.information(
+                self,
+                "Publish Selected to BBS",
+                "Select at least one FLMsg, FLAmp, or VarAC message file.",
+            )
+            return
+        targets = self._select_varac_bbs_publish_targets(None)
+        if targets is None:
+            return
+        location_ids = {
+            str(target.get("location_id", "") or "").strip()
+            for target in targets
+            if str(target.get("location_id", "") or "").strip()
+        }
+        if not location_ids:
+            QMessageBox.information(
+                self,
+                "Publish Selected to BBS",
+                "No BBS locations were selected. Existing publication memberships were unchanged.",
+            )
+            return
+        published = 0
+        missing = 0
+        try:
+            db_path = bbs_library_db_path_from_settings(self.settings)
+            with connect_sqlite(db_path) as conn:
+                with conn:
+                    for row in eligible_rows:
+                        rec = self._file_record_for_message_row(row, allow_detail_lookup=False)
+                        if not isinstance(rec, FileRecord) or not rec.path.exists() or not rec.path.is_file():
+                            missing += 1
+                            continue
+                        try:
+                            artifact_id = upsert_bbs_artifact_path(
+                                conn,
+                                source_path=rec.path,
+                                source_kind="message_file",
+                                source_id=str(
+                                    getattr(row, "id", "")
+                                    or getattr(row, "source_id", "")
+                                    or ""
+                                ),
+                                display_name=rec.path.name,
+                                metadata={
+                                    "msg_type": str(getattr(row, "msg_type", "") or ""),
+                                    "subject": str(getattr(row, "subject", "") or ""),
+                                    "origin": str(getattr(rec, "origin", "") or ""),
+                                },
+                            )
+                        except FileNotFoundError:
+                            missing += 1
+                            continue
+                        current = set(list_bbs_artifact_location_ids(conn, artifact_id))
+                        current.update(location_ids)
+                        set_bbs_artifact_locations(
+                            conn,
+                            artifact_id=artifact_id,
+                            location_ids=current,
+                        )
+                        published += 1
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Publish Selected to BBS",
+                f"No bulk publication changes were applied:\n{exc}",
+            )
+            return
+        ineligible = max(0, len(selected_rows) - len(eligible_rows))
+        details = [
+            f"Published {published} message file{'s' if published != 1 else ''} to "
+            f"{len(location_ids)} BBS location{'s' if len(location_ids) != 1 else ''}."
+        ]
+        if missing:
+            details.append(f"Skipped {missing} missing source file{'s' if missing != 1 else ''}.")
+        if ineligible:
+            details.append(
+                f"Skipped {ineligible} selected item{'s' if ineligible != 1 else ''} "
+                "not eligible for Managed BBS publication."
+            )
+        details.append("Existing memberships in other locations and all source files were preserved.")
+        QMessageBox.information(self, "Managed BBS Updated", "\n".join(details))
         self._invalidate_bbs_action_cache()
         self._unfreeze_table()
         self._populate_messages_table(force=True)
@@ -19392,6 +20066,34 @@ class MessageViewerTab(QWidget):
             except Exception as e:
                 log.debug("MessageViewer: recycle bin delete exception path=%s err=%s", path, e)
                 return False
+
+        if platform.system() == "Darwin":
+            osascript = shutil.which("osascript")
+            if not osascript:
+                return False
+            # Finder's delete command moves the exact POSIX file to Trash. The
+            # JSON string literal safely quotes spaces, quotes, and backslashes
+            # without invoking a shell.
+            script = f'tell application "Finder" to delete POSIX file {json.dumps(str(path))}'
+            try:
+                res = subprocess.run(
+                    [osascript, "-e", script],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=5,
+                )
+                if res.returncode == 0:
+                    return True
+                log.debug(
+                    "MessageViewer: macOS Trash failed code=%s stderr=%s path=%s",
+                    res.returncode,
+                    res.stderr.strip(),
+                    path,
+                )
+            except Exception as e:
+                log.debug("MessageViewer: macOS Trash exception path=%s err=%s", path, e)
+            return False
 
         # Linux fallbacks: gio, trash-put (trash-cli), then kioclient
         path_str = str(path)

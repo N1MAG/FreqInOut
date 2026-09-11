@@ -13,6 +13,7 @@ from freqinout.core.message_projection_store import (
     list_projected_messages,
     load_projected_external_refs_for_messages,
     load_projected_message_detail,
+    query_projected_inbox_focus_counts,
     query_projected_message_page,
 )
 
@@ -164,6 +165,67 @@ def test_mip4_filter_count_uses_migration_indexes_and_returns_matching_page(tmp_
     assert any("idx_msg_projection_model_source_received_v2" in str(row) for row in plan)
 
 
+def test_inbox_read_model_collapses_legacy_and_safe_identities_for_same_file_version(tmp_path) -> None:
+    """A file-path identity upgrade must not create two reader positions."""
+
+    db_path = tmp_path / "projection.db"
+    _seed_projection_rows(db_path, count=0)
+    path = "/home/operator/.nbems/ICS/messages/report.k2s"
+    rows = (
+        (
+            "legacy-file",
+            "flmsg:/home/operator/.nbems/ICS/messages",
+            "2026-09-06T00:00:00+00:00",
+        ),
+        (
+            "safe-file",
+            "flmsg:L2hvbWUvb3BlcmF0b3IvLm5iZW1zL0lDUy9tZXNzYWdlcw",
+            "2026-09-11T00:00:00+00:00",
+        ),
+    )
+    conn = sqlite3.connect(db_path)
+    try:
+        with conn:
+            for message_id, source_id, projected_utc in rows:
+                conn.execute(
+                    """
+                    INSERT INTO message_projection (
+                        message_id, canonical_key, content_hash, primary_source_id,
+                        source_family, message_type, status, read_state, deleted,
+                        archived, inbox_visible, event_ts, received_ts, projected_utc
+                    ) VALUES (?, ?, ?, ?, 'flmsg', 'FLMSG', 'NEW', 'new', 0, 0, 1, 50, 100, ?)
+                    """,
+                    (message_id, f"key:{message_id}", f"hash:{message_id}", source_id, projected_utc),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO message_external_refs (
+                        message_id, source_id, external_kind, external_key,
+                        external_path, external_mtime, external_size, updated_utc
+                    ) VALUES (?, ?, 'flmsg_file', ?, ?, 100, 42, ?)
+                    """,
+                    (message_id, source_id, f"external:{message_id}", path, projected_utc),
+                )
+    finally:
+        conn.close()
+
+    page = query_projected_message_page(db_path, include_total=True)
+    counts = query_projected_inbox_focus_counts(db_path)
+
+    assert [row["message_id"] for row in page.rows] == ["safe-file"]
+    assert page.total_count == 1
+    assert count_projected_messages(db_path) == 1
+    assert counts.counts["all"] == 1
+    assert counts.counts["forms"] == 1
+
+    conn = sqlite3.connect(db_path)
+    try:
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(message_external_refs)")}
+    finally:
+        conn.close()
+    assert "idx_msg_refs_file_identity" in indexes
+
+
 def test_mip4_page_applies_multi_group_identity_type_and_age_filters_before_limit(tmp_path) -> None:
     db_path = tmp_path / "projection.db"
     _seed_projection_rows(db_path, count=205)
@@ -193,6 +255,73 @@ def test_mip4_page_applies_multi_group_identity_type_and_age_filters_before_limi
     assert len(page.rows) == 16
     assert all(10.0 <= float(row["received_ts"]) <= 30.0 for row in page.rows)
     assert all(row["status"] == "NEW" for row in page.rows)
+
+
+def test_inbox_focus_counts_are_one_scoped_snapshot_independent_of_active_focus(tmp_path) -> None:
+    db_path = tmp_path / "projection.db"
+    _seed_projection_rows(db_path, count=0)
+    rows = [
+        ("form", "flmsg", "FLMSG", "NEW", "new", "MR08", 101.0),
+        ("spotter", "js8", "F!104", "NEW", "new", "MR08", 102.0),
+        ("commstat", "commstat", "COMMSTAT", "YELLOW", "new", "MR08", 103.0),
+        ("mesh", "meshcore", "MSG", "UNREAD", "unread", "MR08", 104.0),
+        ("varac", "varac", "VARAC", "ALERT", "alert", "MR08", 105.0),
+        ("bbs", "bbs_archive", "BBS", "RED", "new", "MR08", 106.0),
+        ("read-wins", "flamp", "FLAMP", "READ", "new", "MR08", 107.0),
+        ("other-group", "flmsg", "FLMSG", "NEW", "new", "MAGNET", 108.0),
+        ("too-old", "flmsg", "FLMSG", "NEW", "new", "MR08", 10.0),
+    ]
+    conn = sqlite3.connect(db_path)
+    try:
+        with conn:
+            for message_id, family, message_type, status, read_state, group, received_ts in rows:
+                conn.execute(
+                    """
+                    INSERT INTO message_projection (
+                        message_id, canonical_key, content_hash, primary_source_id,
+                        source_family, message_type, group_name, status, read_state,
+                        deleted, archived, inbox_visible, event_ts, received_ts, projected_utc
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 1, ?, ?, ?)
+                    """,
+                    (
+                        message_id,
+                        f"key:{message_id}",
+                        f"hash:{message_id}",
+                        f"source:{family}",
+                        family,
+                        message_type,
+                        group,
+                        status,
+                        read_state,
+                        received_ts,
+                        received_ts,
+                        "2026-09-10T00:00:00+00:00",
+                    ),
+                )
+            conn.execute(
+                "UPDATE message_projection_generation SET generation=41 WHERE singleton=1"
+            )
+    finally:
+        conn.close()
+
+    snapshot = query_projected_inbox_focus_counts(
+        db_path,
+        group_names=("@MR08", "MR08"),
+        received_after_ts=100.0,
+    )
+
+    assert snapshot.generation == 41
+    assert dict(snapshot.counts) == {
+        "all": 6,
+        "new": 6,
+        "forms": 1,
+        "spotter": 1,
+        "commstat": 1,
+        "js8call": 2,
+        "mesh": 1,
+        "varac": 1,
+        "bbs": 1,
+    }
 
 
 def test_mip4_read_apis_are_readonly_and_never_repair_schema(monkeypatch, tmp_path) -> None:

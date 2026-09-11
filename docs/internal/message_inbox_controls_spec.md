@@ -11,6 +11,10 @@ file received inside the active age window must not be hidden because its
 embedded report date is older or because only a fallback display type is
 available.
 
+The content-first Inbox/Reader modes, stable Previous/Next navigation,
+stale-detail clearing, and independent live focus counters are governed by
+`message_inbox_reader_experience_spec.md`.
+
 The production correction that keeps the ordinary multi-source Inbox primary
 while presenting pending JS8 retrievals as a bounded auxiliary workbench is
 governed by `production_inbox_bbs_correction_spec.md`. A pending retrieval is

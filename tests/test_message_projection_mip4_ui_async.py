@@ -84,6 +84,39 @@ def test_populate_projection_primary_never_starts_legacy_rows_build_even_force()
     assert calls == ["projection"]
 
 
+def test_completed_legacy_rows_build_cannot_write_back_in_projection_primary_mode() -> None:
+    """A late compatibility worker must not become a second projection writer."""
+
+    from freqinout.gui.message_viewer_tab import MessageViewerTab
+
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    tab._is_shutting_down = False
+    tab._rows_build_generation = 4
+    tab._locally_deleted_row_keys = set()
+    tab._projection_primary_enabled = True
+    tab._last_projection_render_ts = 1.0
+    tab._message_rows = []
+    tab._sender_cache = {}
+    tab._cache_max_sender_entries = 10
+    tab._retag_bbs_archive_rows = lambda _rows: None
+    tab._save_message_file_metadata_from_rows = lambda _rows: None
+    writes: list[object] = []
+    tab._start_message_projection_write = lambda rows, **kwargs: writes.append((rows, kwargs))
+
+    MessageViewerTab._on_rows_build_finished(
+        tab,
+        {
+            "generation": 4,
+            "rows": [],
+            "force": True,
+            "sender_cache_updates": {},
+            "elapsed_ms": 0.0,
+        },
+    )
+
+    assert writes == []
+
+
 def test_query_worker_returns_bounded_rows_total_and_generation(tmp_path: Path) -> None:
     from freqinout.gui.message_viewer_tab import _ProjectedMessageQueryWorker
 

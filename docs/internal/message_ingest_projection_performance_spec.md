@@ -118,6 +118,10 @@ file projection instead of being represented safely as source evidence.
     synchronously for message projection.
 12. Shutdown is bounded. Uncommitted derived work remains discoverable through
     its durable dirty record or source watermark after restart.
+13. One physical file version produces one Inbox projection regardless of a
+    source-id encoding upgrade. Page rows, totals, and focus counts collapse
+    legacy and SQLite-safe identities consistently, and the application
+    coordinator is the only writer in projection-primary mode.
 
 ## Ownership And Processing Architecture
 
@@ -237,6 +241,10 @@ send complete message bodies through a Qt signal.
   `flmsg_inbox_arrival_visibility_correction_spec.md`.
 - A model diff updates changed rows and counts. Complete widget reconstruction
   is reserved for a structural column or theme change.
+- Opening a message never freezes projection invalidation or focus-count
+  refresh. Reader presentation and live scalar focus counts are governed by
+  `message_inbox_reader_experience_spec.md`; reader navigation performs no
+  Inbox page query or source refresh.
 
 ### Idle reconciliation
 

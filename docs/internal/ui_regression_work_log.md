@@ -3749,3 +3749,218 @@ ms median, 0.999 ms p95, and 1.143 ms maximum. Python compilation and
 `git diff --check` pass. A monolithic all-message Qt run still encounters the
 known cross-fixture native abort after accumulating scheduler-executor threads;
 the affected partitions pass when run in isolated processes.
+
+## 2026-09-11 — Message Inbox content-first reader (MIR-0/MIR-1/MIR-2)
+
+Status: review/specification and automated software exit gates passed. MIR-3
+Linux production qualification remains operator-assisted.
+
+The fixed Inbox/detail splitter was replaced with two persistent modes in one
+stacked workspace. Inbox mode gives the bounded list all available height;
+opening a message switches to a full-height reader with Back to Inbox,
+Previous, Next, position context, Escape/Alt+Left return, top-of-document
+reset, and retained source-specific content and Open Image behavior. Navigation
+uses at most the current 200 model rows and performs no Inbox page query,
+source scan, parsing pass, or widget reconstruction. Back restores the saved
+list position and current message where it remains available. User-initiated
+focus/filter/sort changes close and clear the reader before requesting the new
+scope, so content from a previous focus cannot appear associated with the new
+one.
+
+Tab-active lifecycle and reader-open state are now independent. Reading no
+longer freezes projection invalidation. All focus counters arrive together from
+one read-only grouped aggregate on the existing background projection-query
+lane; the active focus, source refinement, search, and advanced filters do not
+distort cross-focus summaries. There is no new timer, polling lane, schema
+migration, source read, or GUI-thread database work. Opening an unread message
+decrements all applicable visible counters immediately, with the next fenced
+projection result providing durable reconciliation.
+
+Model ownership: Terra implemented the bounded content-first reader, stable
+navigation, state restoration, keyboard/accessibility behavior, and scope
+clearing. Luna implemented focused responsive-reader, lifecycle, request-fence,
+and immediate-counter tests. The high-reasoning primary model reviewed both
+packages, owned the state/concurrency and aggregate-query design, integrated
+the counter worker and local read transition, optimized the production-scale
+query, reviewed offscreen renders, and ran final integration.
+
+Acceptance evidence: all 424 message-related tests pass, plus a focused
+37-test projection/responsive partition. Python compilation and
+`git diff --check` pass. Offscreen 1280x720 and 900x560 renders confirm that the
+reader owns the usable content height. On a migrated disposable copy of the
+16,029-row production projection database, 50 aggregate samples measured
+10.913 ms median, 11.409 ms p95, and 11.471 ms maximum against the 25 ms gate.
+No production database or source file was modified. Linux production remains
+the required final confirmation for live counter updates, compact-height
+reading, theme/text scaling, and idle CPU.
+
+## 2026-09-11 — Message reader Managed BBS actions (MRB-0/MRB-1/MRB-2)
+
+Status: review/specification and automated implementation gates passed. MRB-3
+Linux production qualification remains operator-assisted.
+
+Eligible FLMsg, FLAmp, and VarAC file-backed messages now expose `+BBS` in the
+content-first reader toolbar. The action is absent for messages that cannot be
+published. Invoking it lazily opens the existing station Managed BBS location
+checklist with authoritative memberships checked. Apply replaces the open
+artifact's membership set; clearing every location unpublishes it everywhere
+without modifying its source. A successful reader action remains in context,
+shows `BBS · N` or `+BBS`, and provides a concise nonmodal confirmation.
+
+Reader open, Previous/Next, Back, scope changes, resize, theme, and paint add no
+BBS database or filesystem work. Eligibility comes from the current projected
+row and publication labels use only already-warm or explicitly confirmed cache
+state. Location and membership reads occur after the operator invokes the
+action. No timer, polling lane, retained row widget, projection rebuild, schema
+migration, or source scan was added.
+
+`More Actions` now conditionally offers `Publish Selected to BBS...`. It
+deduplicates at most the current 200 model rows and adds selected locations in
+one transaction while preserving memberships elsewhere. Missing sources and
+ineligible selected rows are skipped and summarized. The operation changes
+catalog mappings only; it does not copy, move, delete, rename, or read source
+content.
+
+Model ownership: the tightly coupled reader, table-selection, and BBS mapping
+change was handled by the high-reasoning primary model to avoid parallel edits
+to the same UI module. The primary owned the UX contract, persistence/safety
+review, implementation, focused tests, responsive render review, and final
+integration.
+
+Acceptance evidence: 585 Messages+BBS tests pass with one platform-dependent
+skip, including focused cache-only eligibility/navigation, exact add/remove,
+additive bulk, duplicate bounding, source preservation, projected-file,
+filename-normalization, station catalog, retention, and responsive reader
+coverage. A 900-pixel-wide offscreen reader render with a real `.k2s` file was
+reviewed. Python compilation and `git diff --check` pass. No production data or
+source file was changed. Linux production confirmation remains for live
+membership preselection, add/remove convergence, and compact theme/text-scale
+behavior.
+
+## 2026-09-11 — Message reader navigation synchronization correction
+
+Status: implementation and automated regression gate passed; Linux production
+confirmation remains operator-assisted.
+
+Production review found that reader position was committed before the target
+document was rendered. Because the label update is inexpensive while file/form
+decoding and read-state handling can take longer, the toolbar could visibly
+advance one message ahead of the document; a rapid second activation could make
+the mismatch appear persistent.
+
+Reader navigation now disables re-entry, renders the target document first,
+and then commits its stable identity and `N of M` position together. Buttons
+are released after a short 100 ms input debounce, allowing Qt's normal event
+loop to paint the coherent state. A render exception commits an explicit error
+document with the target position instead of retaining the previous body.
+
+Follow-up Linux review found that whole-reader `setUpdatesEnabled(False)` can
+produce a compositor-level blanking or "swipe and vanish" effect. That paint
+suppression was removed immediately and is now prohibited by the reader spec.
+Render-first ordering and the input re-entry fence remain; widget painting is
+continuous throughout navigation.
+
+A second production observation showed that a zero-delay event-loop release
+was still weaker than the actual visual boundary: sufficiently fast clicks
+could advance the lightweight position label before a complex document paint.
+The reader initially requested an explicit viewport paint acknowledgement after
+each manual navigation. Position, stable identity, BBS context, and button
+release were intended to commit only after that paint completed. Additional
+activations remained disabled until the displayed document caught up.
+
+The initial paint-acknowledgement handler changed sibling toolbar state from a
+`QTextEdit.paintEvent`, which reintroduced the Linux "swipe and vanish"
+symptom. Queuing that callback did not eliminate the production symptom, so
+the specialized reader and paint observer were removed entirely. The current
+implementation installs the target document and then commits identity and
+position in the same handler; Qt paints that coherent state normally after the
+handler returns. A 100 ms single-shot input debounce prevents rapid-click
+re-entry. No widget is hidden, updates are never suppressed, no repaint is
+forced, and no application state is changed from a paint callback. Sparse
+`MESSAGES|reader_open`, `reader_navigate`, and `reader_close` records now
+distinguish an intentional close from a Linux repaint artifact.
+
+## 2026-09-11 — Message reader recoverable FLMSG/FLAMP delete action
+
+Status: specification and automated implementation gate passed; Linux
+production qualification remains operator-assisted.
+
+The reader now exposes `Delete…` only for an existing regular FLMSG or FLAMP
+source file resolved from the already-loaded row. FIO already supported this
+operation from the Inbox table: after explicit confirmation, the exact source
+file is moved to operating-system Trash/Recycle Bin, FIO cache/projection state
+is removed, and an audit record is written. The reader action does not broaden
+that authority.
+
+Confirmation names the source and exact path, explains recovery and current-view
+effects, and discloses known or possible Managed BBS publication impact. Cancel
+does nothing. Failure retains the reader and reports the problem. Success closes
+the reader, returns to the refreshed Inbox, suppresses the matching projection,
+and confirms the exact filename. Context actions are disabled while reader
+navigation is in its render/commit debounce, preventing deletion of a stale
+prior identity.
+
+Model ownership: the high-reasoning primary model owned the paint/lifecycle
+correction, delete-authority review, safety contract, implementation, and tests.
+
+Acceptance evidence: focused reader, navigation, and Managed BBS action coverage
+passes 21 tests, including the absence of a custom paint lifecycle, rapid-click
+rejection, render-before-position commit,
+cache-only delete eligibility, missing-file rejection, exact target removal,
+audit/projection handling, and Inbox return. No schema migration, recursive
+filesystem action, direct unlink path, BBS query on render, or polling lane was
+added.
+
+The recoverable-delete adapter now also uses native Finder Trash on macOS. The
+command is passed as an argument vector with an escaped POSIX path and no shell;
+failure leaves the file intact. Windows retains native Recycle Bin handling and
+Linux retains `gio trash`, `trash-put`, and KDE trash-service fallbacks.
+
+The broader reader, responsive-layout, asynchronous projection, Inbox query UI,
+and Message Intelligence partition passes 237 tests. Python compilation and
+`git diff --check` pass. The navigation correction adds no database query,
+source scan, polling lane, background worker, schema migration, or filesystem
+mutation.
+
+## 2026-09-11 — Message reader apparent one-click lag: duplicate file identity correction
+
+Status: implementation and automated gate passed; Linux production confirmation
+remains operator-assisted.
+
+The new sparse reader diagnostics showed that each reported click completed a
+synchronous FLMSG render in 5–31 ms and committed one new stable row identity.
+Inspection of the same production projection database then found 56 FLMSG file
+references representing only 28 distinct physical file versions. Each pair had
+the same path, modification time, size, subject, and body but different source
+identities: the legacy display-path identity and the newer reversible
+SQLite-safe path identity. The first click therefore advanced to an identical
+duplicate; the second reached the next actual file. This exactly reproduced the
+reported counter/body behavior and disproved paint latency as its cause.
+
+All projection Inbox reads now collapse duplicate file-version identities before
+page limits, totals, and focus counters. The SQLite-safe source identity is
+preferred deterministically, with newest projection time and message id as tie
+breakers. An additive covering index keeps the correlated identity check
+bounded. Projection-primary mode no longer writes reconstructed presentation
+rows through the legacy projector; the application coordinator remains the sole
+writer. Existing derived rows and source files are not deleted or rewritten.
+Unknown future payloads also replace the prior body with an explicit unsupported
+format document, closing the only other code path that could advance position
+without replacing content.
+
+Model ownership: Terra performed the independent reader/loader audit and
+identified the unsupported-payload stale-document risk. Luna added a real Qt
+single-physical-click regression using the production JS8 renderer. The
+high-reasoning primary model correlated lifecycle telemetry with the production
+database, identified the dual file identities and second writer lane, designed
+the read-model compatibility rule, implemented the architecture correction,
+and performed final integration.
+
+Acceptance evidence: 283 reader, projection, file-pipeline, responsive Inbox,
+and Message Intelligence tests pass. The focused production database read now
+returns 28 FLMSG/FLAMP rows and a total of 28 from 56 retained file references
+representing 28 unique physical file versions. Twenty-five read-only samples on
+that database measured 14.549 ms median; the 97.939 ms cold maximum remains on
+the background query lane. Python compilation and `git diff --check` pass. No
+source file or production database was modified, and no destructive migration
+was introduced.

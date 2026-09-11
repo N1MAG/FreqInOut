@@ -173,6 +173,14 @@ class MessageProjectionPage:
     total_count: int | None = None
 
 
+@dataclass(frozen=True)
+class MessageProjectionFocusCounts:
+    """Unread Inbox focus counts from one committed projection snapshot."""
+
+    counts: Mapping[str, int]
+    generation: int = 0
+
+
 def _json(value: object, default: str) -> str:
     try:
         return json.dumps(_sanitize_sql_value(value), sort_keys=True, separators=(",", ":"))
@@ -741,6 +749,10 @@ def ensure_message_projection_schema(conn: sqlite3.Connection) -> None:
         "operator_attention DESC, actionable DESC, event_ts DESC, received_ts DESC, message_id DESC)"
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_refs_message ON message_external_refs(message_id)")
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_msg_refs_file_identity "
+        "ON message_external_refs(external_kind, external_path, external_mtime, external_size, message_id)"
+    )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_artifacts_message ON message_artifacts(message_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_artifacts_flamp_qid ON message_artifacts(q_id, transfer_state)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_delete_queue_state ON message_delete_queue(state, requested_utc)")
@@ -1283,6 +1295,107 @@ def query_projected_message_page(
     )
 
 
+def query_projected_inbox_focus_counts(
+    db_path: str | Path,
+    *,
+    group_name: str = "",
+    group_names: Sequence[str] | None = None,
+    received_after_ts: float = 0.0,
+    received_before_ts: float = 0.0,
+) -> MessageProjectionFocusCounts:
+    """Return all Inbox focus counters with one scalar aggregate read.
+
+    Counts follow the Inbox workspace scope (configured groups and age) but
+    deliberately ignore the active focus, source refinement, search text, and
+    advanced filters.  This keeps every focus chip trustworthy while the
+    operator moves between views.  The query runs in the caller's background
+    read lane and does not migrate, repair, or write the projection database.
+    """
+
+    clauses, params = _projected_message_filter_sql(
+        source_family="",
+        source_families=None,
+        group_name=group_name,
+        group_names=group_names,
+        status="",
+        statuses=None,
+        severity="",
+        from_call="",
+        to_call="",
+        message_type="",
+        search_text="",
+        received_after_ts=received_after_ts,
+        received_before_ts=received_before_ts,
+        include_archived=False,
+        include_deleted=False,
+        include_suppressed=False,
+    )
+    unread = """(
+        UPPER(COALESCE(status, '')) <> 'READ'
+        AND (
+            UPPER(COALESCE(status, '')) IN ('NEW', 'UNREAD', 'ALERT', 'YELLOW', 'RED')
+            OR LOWER(COALESCE(read_state, '')) IN ('new', 'unread', 'alert')
+        )
+    )"""
+    clauses.append(unread)
+    where = " WHERE " + " AND ".join(clauses)
+    empty = {
+        "all": 0,
+        "new": 0,
+        "forms": 0,
+        "spotter": 0,
+        "commstat": 0,
+        "js8call": 0,
+        "mesh": 0,
+        "varac": 0,
+        "bbs": 0,
+    }
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = connect_sqlite_readonly(db_path, row_factory=sqlite3.Row)
+        conn.execute("BEGIN")
+        rows = conn.execute(
+            f"""
+            SELECT
+                LOWER(COALESCE(source_family, '')) AS family,
+                COUNT(*) AS unread_count,
+                SUM(CASE WHEN UPPER(COALESCE(message_type, '')) LIKE 'F!%'
+                         THEN 1 ELSE 0 END) AS spotter_form_count
+              FROM message_projection
+            {where}
+             GROUP BY LOWER(COALESCE(source_family, ''))
+            """,
+            tuple(params),
+        ).fetchall()
+        generation = _message_projection_generation_on_connection(conn)
+        counts = dict(empty)
+        for row in rows:
+            family = str(row["family"] or "").strip().lower()
+            unread_count = max(0, int(row["unread_count"] or 0))
+            spotter_form_count = max(0, int(row["spotter_form_count"] or 0))
+            counts["all"] += unread_count
+            counts["new"] += unread_count
+            if family in {"flmsg", "flamp"}:
+                counts["forms"] += unread_count
+            counts["spotter"] += unread_count if family == "spotter" else spotter_form_count
+            if family == "commstat":
+                counts["commstat"] += unread_count
+            if family in {"js8", "commstat", "spotter"}:
+                counts["js8call"] += unread_count
+            if family in {"mesh", "meshcore", "meshtastic", "mesh_client", "local_mesh"}:
+                counts["mesh"] += unread_count
+            if family == "varac":
+                counts["varac"] += unread_count
+            if family in {"bbs", "bbs_archive"}:
+                counts["bbs"] += unread_count
+        return MessageProjectionFocusCounts(counts=counts, generation=generation)
+    except sqlite3.Error:
+        return MessageProjectionFocusCounts(counts=empty, generation=0)
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def _count_projected_messages_on_connection(
     conn: sqlite3.Connection,
     where: str,
@@ -1334,6 +1447,60 @@ def _projected_message_filter_sql(
 ) -> tuple[list[str], list[Any]]:
     clauses: list[str] = []
     params: list[Any] = []
+    # A file projection identity changed from display-path text to a reversible
+    # SQLite-safe path token. Databases that span that upgrade can contain both
+    # derived rows for the exact same physical file version. Prefer the safe
+    # identity (and then the newest projection) in every Inbox read model so a
+    # reader click always advances to a different message. Source files and
+    # historical projection evidence remain untouched.
+    clauses.append(
+        """
+        NOT EXISTS (
+            SELECT 1
+              FROM message_external_refs AS current_ref
+              JOIN message_external_refs AS preferred_ref
+                ON preferred_ref.external_kind=current_ref.external_kind
+               AND preferred_ref.external_path=current_ref.external_path
+               AND COALESCE(preferred_ref.external_mtime, 0)=COALESCE(current_ref.external_mtime, 0)
+               AND COALESCE(preferred_ref.external_size, 0)=COALESCE(current_ref.external_size, 0)
+              JOIN message_projection AS preferred_message
+                ON preferred_message.message_id=preferred_ref.message_id
+             WHERE current_ref.message_id=message_projection.message_id
+               AND SUBSTR(current_ref.external_kind, -5)='_file'
+               AND COALESCE(current_ref.external_path, '') <> ''
+               AND preferred_ref.message_id <> current_ref.message_id
+               AND (
+                    (
+                        CASE WHEN INSTR(preferred_message.primary_source_id, '/')=0
+                                   AND INSTR(preferred_message.primary_source_id, CHAR(92))=0
+                             THEN 1 ELSE 0 END
+                        >
+                        CASE WHEN INSTR(message_projection.primary_source_id, '/')=0
+                                  AND INSTR(message_projection.primary_source_id, CHAR(92))=0
+                             THEN 1 ELSE 0 END
+                    )
+                    OR (
+                        CASE WHEN INSTR(preferred_message.primary_source_id, '/')=0
+                                   AND INSTR(preferred_message.primary_source_id, CHAR(92))=0
+                             THEN 1 ELSE 0 END
+                        =
+                        CASE WHEN INSTR(message_projection.primary_source_id, '/')=0
+                                  AND INSTR(message_projection.primary_source_id, CHAR(92))=0
+                             THEN 1 ELSE 0 END
+                        AND (
+                            COALESCE(preferred_message.projected_utc, '')
+                                > COALESCE(message_projection.projected_utc, '')
+                            OR (
+                                COALESCE(preferred_message.projected_utc, '')
+                                    = COALESCE(message_projection.projected_utc, '')
+                                AND preferred_message.message_id > message_projection.message_id
+                            )
+                        )
+                    )
+               )
+        )
+        """
+    )
     if not include_deleted:
         clauses.append("deleted=0")
     if not include_archived:
