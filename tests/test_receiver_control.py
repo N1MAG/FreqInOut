@@ -11,6 +11,8 @@ from freqinout.core.receiver_control import (
     ReceiverControlClient,
     ReceiverIdentity,
     ReceiverState,
+    receiver_control_verification_matches,
+    receiver_verification_evidence,
 )
 
 
@@ -100,3 +102,39 @@ def test_receiver_value_objects_reject_unsafe_or_ambiguous_values() -> None:
         ReceiverState(identity=_identity(), manual=True, verified=True)
     with pytest.raises(ValueError):
         ReceiverCapabilities(readback_tolerance_hz=-1)
+
+
+def test_receiver_verification_requires_exact_successful_endpoint_evidence() -> None:
+    profile = {
+        "sdr_adapter": "sdrpp_rigctl",
+        "sdr_host": "LOCALHOST",
+        "sdr_port": 4532,
+        "sdr_target": "Selected-VFO",
+        "sdr_verification_state": "verified",
+        "sdr_verification": {
+            "schema_version": 1,
+            "tested_at_utc": "2026-09-10T12:00:00+00:00",
+            "adapter": "sdrpp_rigctl",
+            "host": "localhost",
+            "port": 4532,
+            "target": "selected-vfo",
+            "tune_readback_verified": True,
+            "restore_readback_verified": True,
+        },
+    }
+    assert receiver_control_verification_matches(profile) is True
+
+    for changed in (
+        {"sdr_host": "127.0.0.1"},
+        {"sdr_port": 4533},
+        {"sdr_target": "other-vfo"},
+        {"sdr_adapter": "manual"},
+        {"sdr_verification_state": "unverified"},
+    ):
+        assert receiver_control_verification_matches({**profile, **changed}) is False
+
+
+def test_receiver_verification_parser_rejects_invalid_or_unbounded_json() -> None:
+    assert receiver_verification_evidence({"sdr_verification_json": "not-json"}) == {}
+    assert receiver_verification_evidence({"sdr_verification_json": "x" * 16_385}) == {}
+    assert receiver_verification_evidence({"sdr_verification_json": "[]"}) == {}

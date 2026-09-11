@@ -216,6 +216,8 @@ def test_settings_tab_persists_observer_fields_and_preferred_bands(monkeypatch, 
                 "deployment_mode": "full",
                 "sdr_host": "10.0.0.50",
                 "sdr_port": "7300",
+                "sdr_application": "SDR++",
+                "sdr_target": "VFO A",
                 "launch_enabled": True,
                 "launch_path": "",
                 "notes": "Observer endpoint",
@@ -224,6 +226,8 @@ def test_settings_tab_persists_observer_fields_and_preferred_bands(monkeypatch, 
         observer = next(row for row in store.list_device_profiles() if row["name"] == "North SDR")
         assert observer["sdr_host"] == "10.0.0.50"
         assert int(observer["sdr_port"] or 0) == 7300
+        assert observer["sdr_application"] == "SDR++"
+        assert observer["sdr_target"] == "VFO A"
 
         tab._persist_operating_profile(
             {
@@ -254,7 +258,7 @@ def test_settings_tab_persists_observer_fields_and_preferred_bands(monkeypatch, 
             for row in range(tab.device_profiles_table.rowCount())
             if int(tab.device_profiles_table.item(row, 3).data(Qt.UserRole) or 0) == int(observer["id"])
         )
-        assert tab.device_profiles_table.item(row_index, 8).text() == "Observer SDR 10.0.0.50:7300"
+        assert tab.device_profiles_table.item(row_index, 8).text() == "SDR++ · Manual tuning · VFO A · endpoint saved"
         assert tab.device_profiles_table.item(row_index, 13).text() == "Observer / SDR"
 
         _select_device_profiles(tab, [int(observer["id"])])

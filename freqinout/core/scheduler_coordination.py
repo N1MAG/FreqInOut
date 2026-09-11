@@ -17,6 +17,8 @@ import math
 import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from freqinout.core.receiver_control import receiver_control_verification_matches
+
 
 @dataclass(frozen=True)
 class FrozenMap:
@@ -297,6 +299,7 @@ def endpoint_binding_from_resolved_profile(
             not receiver_enabled
             or receiver_adapter in {"", "manual", "none"}
             or verification_state != "verified"
+            or not receiver_control_verification_matches(profile)
         ):
             return EndpointBinding(
                 endpoint_key=EndpointKey.manual(profile_id),

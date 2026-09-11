@@ -811,7 +811,20 @@ def _repair_group_column(conn: sqlite3.Connection, table: str, column: str, *, p
     if not _table_exists(conn, table) or column not in _table_columns(conn, table):
         return 0
     cur = conn.cursor()
-    cur.execute(f"SELECT rowid, {column} FROM {table}")
+    # This is a compatibility repair, not a startup projection.  Older builds
+    # loaded every row from several traffic tables into Python on every launch,
+    # even after all values were canonical.  On production histories that made
+    # database initialization take more than a minute.  Let SQLite identify
+    # only values which normalization can actually change.
+    cur.execute(
+        f"""SELECT rowid, {column} FROM {table}
+             WHERE COALESCE({column}, '') <> ''
+               AND (
+                    {column} <> TRIM({column})
+                    OR {column} <> UPPER({column})
+                    OR SUBSTR(TRIM({column}), 1, 1) = '@'
+               )"""
+    )
     changed = 0
     for rowid, value in cur.fetchall():
         original = str(value or "").strip()
@@ -833,7 +846,10 @@ def _repair_sitrep_commstat_groups(conn: sqlite3.Connection) -> None:
         ("commstat_artifacts", "report_group", False),
     ):
         changed += _repair_group_column(conn, table, column, preserve_all=preserve_all)
-    if _table_exists(conn, "sitrep_latest_by_callsign") and _table_exists(conn, "sitrep_state_rollup"):
+    # Rebuilding the rollup is expensive and is only necessary when the source
+    # repair changed at least one identity.  Recomputing it unconditionally was
+    # the dominant startup cost on mature production databases.
+    if changed and _table_exists(conn, "sitrep_latest_by_callsign") and _table_exists(conn, "sitrep_state_rollup"):
         try:
             from freqinout.core.sitrep_fusion import _refresh_state_rollups
 

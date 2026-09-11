@@ -28,7 +28,7 @@ Shortwave production package should imply or implement tuning outside this plan.
 - Do not add a direct hardware driver dependency in these packages.
 - Every package must pass on supported desktop platforms before the next begins.
 
-## Package SDR-0 — Compatibility Catalog And Truthful Manual UX
+## Package SDR-0 — Compatibility Catalog And Truthful Manual UX (complete)
 
 ### Work
 
@@ -49,7 +49,19 @@ Shortwave production package should imply or implement tuning outside this plan.
 - Registry data is bounded, versioned, and testable without device discovery.
 - Responsive, theme, Large Text, keyboard, and no-real-identity hint tests pass.
 
-## Package SDR-1 — Receive-Only Control Core
+Implementation evidence (2026-09-10): `sdr_compatibility.py` now provides one
+immutable, versioned, bounded, data-only catalog and the four canonical operator
+states without hardware discovery. RTL-SDR is explicitly represented through
+SDR++, SDRangel, and Gqrx as application-compatible but not yet FIO-verified.
+Guided Observer / SDR setup uses Radio Model for hardware identity, offers known
+or custom receiver applications, preserves optional target/endpoint details,
+and presents a selectable Manual tuning path. A saved host/port can no longer
+make an observer appear ready. Settings rendering performs no receiver I/O.
+The focused SDR-0 registry, manual-control, persistence, responsive UI, theme,
+keyboard, and hint-neutrality gate passes. SDR-1 work did not begin until this
+gate passed.
+
+## Package SDR-1 — Receive-Only Control Core (complete)
 
 ### Work
 
@@ -75,16 +87,23 @@ Shortwave production package should imply or implement tuning outside this plan.
 - Production-clone migration rehearsal and rollback evidence pass.
 - The MES-0 through MES-3 exit gates pass before an SDR adapter is attached.
 
-Implementation note (2026-09-10): the Qt-free receiver contract, target-qualified
+Implementation evidence (2026-09-10): the Qt-free receiver contract, target-qualified
 endpoint identity, shared isolated lane integration, zero-I/O manual fallback,
 safe additive configuration fields, cache-only UI boundary, lifecycle fencing,
 and bounded shutdown/diagnostics are complete under MES-4/MES-5. The additive
 receiver columns and rollback were rehearsed on an isolated clone of the supplied
-production database with matching pre/post source hashes. SDR-1 is not closed:
-operator setup/capability UX and an attached application adapter remain gated
-work. No hardware combination is yet labeled FIO-verified.
+production database with matching pre/post source hashes. Receiver setup now
+separates application, adapter, target, endpoint, enabled state, and persisted
+verification evidence. Its Test control is an asynchronous signal seam and stays
+disabled until a worker-owned adapter service is attached; opening or editing the
+dialog performs no endpoint I/O. Bounded fake-adapter tests cover capability
+probing, target enumeration, absolute deadlines, cancellation, reversible
+tune/readback/restore, manual fallback, target-qualified concurrent lanes, stale
+generation suppression, close fencing, and the absence of any PTT/transmit
+surface. The combined SDR-1 gate passes with 45 focused tests. SDR-2 did not begin
+until this gate passed. No hardware combination is yet labeled FIO-verified.
 
-## Package SDR-2 — SDR++ RigCTL Adapter
+## Package SDR-2 — SDR++ RigCTL Adapter (implementation complete; live gate pending)
 
 This is the recommended first adapter because FIO already has a compatible
 protocol seam and SDR++ exposes the broadest practical cross-platform hardware
@@ -112,6 +131,31 @@ gates rather than being duplicated here.
   pass on macOS and Linux for each published verified combination.
 - Other upstream SDR++ hardware stays labeled application-compatible, not
   FIO-verified.
+
+Implementation evidence (2026-09-10): FIO now has a named Qt-free, receive-only
+SDR++ RigCTL adapter and profile factory. The adapter controls only SDR++'s
+selected VFO, opens one short-lived bounded TCP connection per command, supports
+frequency read/set/readback, treats mode/bandwidth as optional advertised
+capabilities, and contains no PTT/transmit method or command. The explicit
+Settings test runs off the UI thread on the scheduler-owned target-qualified
+endpoint lane; it briefly changes frequency, verifies readback, restores the
+original frequency, and verifies restoration. Verification evidence is bound to
+adapter/host/port/target and editing any of those fields disables FIO tuning
+until a new test passes. The same evidence matcher is enforced by persistence,
+runtime construction, readiness presentation, and scheduler binding, so a stale
+or hand-edited state flag cannot authorize tuning. Scheduled tuning probes
+capabilities first and verifies frequency independently when mode is unavailable. Deterministic fragmented TCP,
+timeout, malformed/oversized response, reconnect, target identity, serialization,
+supersession, cancellation, shutdown, manual fallback, and UI evidence tests
+pass. The automated receiver/multi-endpoint partitions passed 102 and 111 tests
+respectively (one intentional skip), and an accelerated 1,800-cycle/eight-endpoint
+stress run completed all 14,400 commands with no unexpected failures, completion
+timeouts, or leaked threads. The registry status is `Experimental`, not `Verified`.
+
+The exit gate remains open for Bill's RTL-SDR production test and the required
+macOS/Linux live matrix, application restart/reconnect, manual-before/after, and
+30-minute CPU/thread stability evidence. SDR-3 must not begin until those results
+are recorded.
 
 ## Package SDR-3 — SDRconnect WebSocket Adapter
 

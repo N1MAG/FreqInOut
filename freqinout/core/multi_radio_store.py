@@ -17,6 +17,7 @@ from freqinout.core.js8_storage import (
     normalize_variant_family,
 )
 from freqinout.core.logger import log
+from freqinout.core.receiver_control import receiver_control_verification_matches
 from freqinout.core.sqlite_utils import connect_sqlite_readonly
 from freqinout.core.multi_rig_guardrails import (
     collect_multi_rig_guardrail_warnings,
@@ -5083,6 +5084,16 @@ class MultiRadioStore:
     def connect(self) -> sqlite3.Connection:
         return self._connect()
 
+    def connect_readonly(self) -> sqlite3.Connection:
+        """Open a runtime read connection without schema assurance or repair.
+
+        Startup owns schema migration.  Periodic schedulers, status services, and
+        UI projections must use this path so a read can never turn into DDL or
+        contend as a writer merely by opening the database.
+        """
+
+        return self._connect_readonly()
+
     def get_all_kv_settings(self) -> Dict[str, Any]:
         with self._connect() as conn:
             return _load_kv_settings(conn)
@@ -5573,6 +5584,11 @@ class MultiRadioStore:
                 raise ValueError("Receiver control requires host, port, and a selected receiver target.")
             if record["sdr_verification_state"] != "verified":
                 raise ValueError("Receiver control cannot be enabled until tune/readback verification passes.")
+            if not receiver_control_verification_matches(record):
+                raise ValueError(
+                    "Receiver control verification does not match this exact adapter, host, port, and target. "
+                    "Run Test control again."
+                )
         if device_class == "observer":
             if record["runtime_primary"]:
                 raise ValueError("Observer / SDR device profiles cannot become the compatibility runtime device.")
@@ -5822,7 +5838,7 @@ class MultiRadioStore:
             return [dict(row) for row in rows]
 
     def get_frequency_plan(self, frequency_plan_id: int) -> Optional[Dict[str, Any]]:
-        with self._connect() as conn:
+        with self._connect_readonly() as conn:
             return _record_by_id(conn, "frequency_plans", int(frequency_plan_id))
 
     def save_frequency_plan(self, values: Mapping[str, Any]) -> Dict[str, Any]:
@@ -5878,7 +5894,7 @@ class MultiRadioStore:
             return assignments
 
     def get_effective_assigned_plan_for_device(self, device_profile_id: int) -> Optional[Dict[str, Any]]:
-        with self._connect() as conn:
+        with self._connect_readonly() as conn:
             return _effective_assigned_plan_for_device(conn, int(device_profile_id))
 
     def set_assigned_plan(
@@ -6011,7 +6027,7 @@ class MultiRadioStore:
             return assignments
 
     def get_effective_assignment_for_device(self, device_profile_id: int) -> Optional[Dict[str, Any]]:
-        with self._connect() as conn:
+        with self._connect_readonly() as conn:
             assignment = _effective_assignment_for_device(conn, int(device_profile_id))
             return dict(assignment) if isinstance(assignment, dict) else None
 

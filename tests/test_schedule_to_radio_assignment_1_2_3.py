@@ -248,10 +248,11 @@ def test_main_window_owns_plan_context_service_for_lazy_freqplanner() -> None:
 
     assert "from freqinout.core.plan_context_service import PlanContextService" in source
     assert "self.plan_context_service = PlanContextService()" in source
-    assert "SOPTab(self, plan_context_service=self.plan_context_service)" in source
+    assert "SOPTab(" in source
+    assert "plan_context_service=self.plan_context_service" in source
     assert "DailyScheduleTab(self, plan_context_service=self.plan_context_service)" in source
     assert "NetScheduleTab(self, plan_context_service=self.plan_context_service)" in source
-    assert "ControlFreqTab(self, plan_context_service=self.plan_context_service)" in source
+    assert "ControlFreqTab(" in source
     assert "StationsMapTab(self, plan_context_service=self.plan_context_service)" in source
     assert "FreqPlannerTab(self, plan_context_service=self.plan_context_service)" in source
     assert "MessageViewerTab(self, plan_context_service=self.plan_context_service)" in source

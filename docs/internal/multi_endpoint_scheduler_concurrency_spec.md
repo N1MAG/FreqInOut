@@ -1,8 +1,9 @@
 # Multi-Endpoint Scheduler Concurrency Specification
 
 Status: active implementation authority; MES-0 through MES-5 implementation and
-automated macOS qualification complete; Linux lifecycle and the physical
-three-transceiver / two-SDR release gates remain pending
+automated macOS qualification complete; the September 10 Qt-thread remediation
+implementation gate passed; Linux lifecycle and the physical three-transceiver /
+two-SDR release gates remain pending
 
 Date: 2026-09-10
 
@@ -746,6 +747,43 @@ At minimum, tests cover:
 - 25 repeated start/stop cycles with stable resource counts; and
 - Qt warnings, callbacks after destruction, leaked processes/threads, and
   unbounded log/event growth.
+
+## September 10 Qt-Thread Requalification
+
+Production hang dumps proved that the compatibility scheduler still allowed
+three expensive operations to enter the Qt timer/render path despite endpoint
+lane isolation: schedule/assignment SQLite reads (including schema assurance),
+manual-control state reads, and process inventory during FLDigi availability
+checks. The Station Control Bar independently reopened plan tables every 15
+seconds and on forced refresh. Under message-writer contention these cache misses
+became multi-second application freezes.
+
+The following rules are therefore binding additions to MES-5:
+
+1. The scheduler Qt timer polls completion registries, requests work, and applies
+   immutable cached projections only. It cannot directly evaluate a DB-backed
+   schedule or invoke endpoint application.
+2. One dedicated serialized schedule-projection worker owns active profile,
+   assignment, plan, SOP/policy, and manual-control reads. Results are generation
+   fenced before publication on the scheduler thread.
+3. Latency-sensitive schedule getters use read-only connections and never run
+   schema assurance. Startup remains the sole migration/schema owner.
+4. FLDigi/process availability and apply operations run through a worker. A
+   cache miss in a render/evaluation path means unknown/unavailable; it never
+   triggers a live process walk or socket call.
+5. Scheduler construction performs no endpoint availability probe.
+6. The Station Control Bar derives plan, frequency-reference, lane, and endpoint
+   presentation from scheduler/runtime snapshots only. It performs no SQLite
+   fallback when a snapshot is absent or stale.
+7. A forced refresh invalidates/request-replaces worker state but continues to
+   render the last immutable snapshot until its generation-valid successor is
+   published.
+
+Automated requalification passes 201 scheduler tests with one intentional skip.
+Architecture guards inspect the Qt timer, schedule projection, constructor,
+FLDigi cache boundary, and Station Control Bar plan cache so synchronous I/O
+cannot silently return. Live Linux timer cadence and the physical endpoint gates
+remain external.
 
 Thread-concurrency tests must use deterministic barriers/events rather than
 timing-only sleeps wherever possible. Hardware tests supplement; they do not

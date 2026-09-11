@@ -10,6 +10,7 @@ selected receive target only after a later scheduler lane authorizes it.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Callable, Mapping, Optional, Protocol, Tuple, runtime_checkable
 
 
@@ -109,6 +110,59 @@ def receiver_identity_from_profile(profile: Mapping[str, object]) -> ReceiverIde
         hardware_family=_clean(profile.get("radio_model")),
         target_id=target,
         endpoint_label=endpoint,
+    )
+
+
+def receiver_verification_evidence(profile: Mapping[str, object]) -> Mapping[str, object]:
+    """Return bounded persisted receiver evidence, or an empty mapping."""
+
+    raw = profile.get("sdr_verification")
+    if raw in (None, ""):
+        raw = profile.get("sdr_verification_json", "{}")
+    if isinstance(raw, Mapping):
+        return dict(raw)
+    if not isinstance(raw, str) or len(raw) > 16_384:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return dict(parsed) if isinstance(parsed, Mapping) else {}
+
+
+def receiver_control_verification_matches(profile: Mapping[str, object]) -> bool:
+    """Return whether successful evidence belongs to this exact endpoint.
+
+    A stale or hand-edited ``verified`` flag must never authorize tuning. Any
+    adapter, host, port, or application-target change invalidates the proof and
+    safely returns the receiver to manual operation.
+    """
+
+    state = _clean(profile.get("sdr_verification_state")).lower()
+    adapter = _clean(profile.get("sdr_adapter")).lower().replace("-", "_")
+    host = _clean(profile.get("sdr_host")).casefold()
+    target = _clean(profile.get("sdr_target")).casefold()
+    try:
+        port = int(profile.get("sdr_port"))
+    except (TypeError, ValueError):
+        return False
+    if state != "verified" or adapter in {"", "manual", "none"} or not host or not target:
+        return False
+    evidence = receiver_verification_evidence(profile)
+    try:
+        evidence_schema = int(evidence.get("schema_version", 0) or 0)
+        evidence_port = int(evidence.get("port"))
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        evidence_schema >= 1
+        and _clean(evidence.get("tested_at_utc"))
+        and _clean(evidence.get("adapter")).lower().replace("-", "_") == adapter
+        and _clean(evidence.get("host")).casefold() == host
+        and evidence_port == port
+        and _clean(evidence.get("target")).casefold() == target
+        and evidence.get("tune_readback_verified") is True
+        and evidence.get("restore_readback_verified") is True
     )
 
 

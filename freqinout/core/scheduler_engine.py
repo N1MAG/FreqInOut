@@ -18,6 +18,7 @@ from freqinout.core.dependency_health import get_dependency_health_registry
 from freqinout.core.js8_defaults import random_default_js8_offset_hz
 from freqinout.core.mode_utils import normalize_operating_group_mode, resolve_rig_mode
 from freqinout.core.multi_radio_store import MultiRadioStore, normalize_rf_guard_mode, settings_db_path
+from freqinout.core.perf_metrics import emit_span
 from freqinout.core.ptt_conflict_service import PttConflictService
 from freqinout.core.radio_status_poll_coordinator import RadioStatusPollCoordinator
 from freqinout.core.receiver_control import (
@@ -424,6 +425,8 @@ class SchedulerEngine(QObject):
         self._fldigi_was_available: bool = False
         self._fldigi_apply_pending: bool = False
         self._fldigi_force_apply_once: bool = False
+        self._fldigi_apply_future = None
+        self._fldigi_apply_token: int = 0
         self._prompt_active: bool = False
         self._prompt_items: List[str] = []
         self._prompt_entry_key: Optional[Tuple] = None
@@ -505,6 +508,19 @@ class SchedulerEngine(QObject):
         self._last_lifecycle_event: Dict[str, object] = {}
         self._last_shutdown_diagnostics: Dict[str, object] = {}
         self._status_executor = DaemonSerialExecutor(max_workers=1, thread_name_prefix="freqinout-status")
+        # Schedule/database projection is independent of endpoint status and
+        # control.  It must never run from the QTimer callback: on production
+        # databases even a read can wait behind another SQLite writer.
+        self._schedule_projection_executor = DaemonSerialExecutor(
+            max_workers=1,
+            thread_name_prefix="freqinout-schedule-projection",
+        )
+        self._schedule_projection_future = None
+        self._schedule_projection_requested_at: float = 0.0
+        self._schedule_projection_started_at: Optional[float] = None
+        self._schedule_projection_refresh_interval_s: float = max(5.0, poll_interval_ms / 1000.0)
+        self._schedule_projection_generation: int = 0
+        self._manual_states_by_radio: Dict[int, SchedulerManualControlState] = {}
         self._control_future = None
         self._control_future_token: int = 0
         self._control_future_started_at: Optional[float] = None
@@ -582,7 +598,7 @@ class SchedulerEngine(QObject):
         self._schedule_gap_seconds: Optional[int] = None
         self._last_scheduler_selection_sig: Optional[Tuple] = None
         self._active_schedule_lane_rows_cache: Optional[Dict[str, object]] = None
-        self._active_schedule_lane_rows_cache_ttl_s: float = 0.75
+        self._active_schedule_lane_rows_cache_ttl_s: float = max(5.0, poll_interval_ms / 1000.0)
         self._shutdown_requested: bool = False
 
         self.timer = QTimer(self)
@@ -590,14 +606,9 @@ class SchedulerEngine(QObject):
         self._timer_connected = False
         self._connect_timer()
 
-        # If a rig was provided, we can optionally sanity-check it
-        # (non-fatal if unavailable).
-        if self.rig is not None:
-            try:
-                if hasattr(rig, "is_available") and not rig.is_available():
-                    log.warning("SchedulerEngine: rig control client is not available at init.")
-            except Exception as e:
-                log.error("SchedulerEngine: error probing rig control availability: %s", e)
+        # Construction is a Qt/startup boundary.  Endpoint availability is
+        # learned by the endpoint-scoped status workers after ``start()``;
+        # never turn scheduler construction into a socket/process probe.
         self._ensure_js8_offset_default()
 
     def _run_scheduler_thread_call(self, callback: object) -> None:
@@ -645,7 +656,13 @@ class SchedulerEngine(QObject):
         self._timer_connected = False
 
     def _queue_scheduler_thread_call(self, callback: Callable[[], None]) -> None:
-        self._scheduler_thread_call.emit(callback)
+        try:
+            self._scheduler_thread_call.emit(callback)
+        except RuntimeError:
+            # A bounded worker may finish after QObject teardown during tests or
+            # application shutdown. Generation fencing already makes its state
+            # disposable; never surface a late Qt callback as an exception.
+            return
 
     def set_runtime_scheduler_enabled(self, enabled: Optional[bool]) -> None:
         self._runtime_scheduler_enabled_override = None if enabled is None else bool(enabled)
@@ -1102,6 +1119,16 @@ class SchedulerEngine(QObject):
                 max_workers=1,
                 thread_name_prefix="freqinout-status",
             )
+            self._schedule_projection_executor = DaemonSerialExecutor(
+                max_workers=1,
+                thread_name_prefix="freqinout-schedule-projection",
+            )
+            self._schedule_projection_future = None
+            self._schedule_projection_requested_at = 0.0
+            self._schedule_projection_started_at = None
+            self._schedule_projection_generation += 1
+            self._fldigi_apply_future = None
+            self._fldigi_apply_token += 1
         self._shutdown_requested = False
         self._startup_probe_not_before = {}
         self._startup_probe_jitter_enabled = True
@@ -1111,18 +1138,23 @@ class SchedulerEngine(QObject):
         self._connect_scheduler_thread_call()
         self._connect_timer()
         self._maybe_refresh_external_status_snapshot(force=True)
-        self._apply_js8_offset_startup()
-        self._clear_startup_manual_qsy_states()
-        # Perform an immediate evaluation so UI sees something right away.
-        # In multi-radio mode, assigned plan lanes are the source of truth;
-        # the legacy singleton evaluator is only a fallback when no radio
-        # lanes are active.
+        # Startup endpoint writes and schedule/database projection are queued;
+        # constructing the main window must remain responsive.
         try:
-            now_utc = self._utc_now()
-            if not self._apply_active_schedule_lanes(now_utc=now_utc, force=True):
-                self._evaluate(now_utc=now_utc)
-        except Exception as e:
-            log.error("SchedulerEngine initial evaluate failed: %s", e)
+            startup_offset = int(self.settings.get("js8_offset_hz", 0) or 0)
+        except Exception:
+            startup_offset = 0
+        if startup_offset > 0 and self.js8 is not None:
+            try:
+                self._status_executor.submit(
+                    lambda: self._apply_js8_offset_startup(offset=startup_offset)
+                )
+            except RuntimeError:
+                pass
+        self._request_active_schedule_lane_rows_refresh(
+            force=True,
+            clear_startup_manual_qsy=True,
+        )
         if not self.timer.isActive():
             self.timer.start()
 
@@ -1152,6 +1184,7 @@ class SchedulerEngine(QObject):
         self._shutdown_control_executor("stop")
         self._shutdown_endpoint_status("stop")
         self._shutdown_status_executor("stop")
+        self._shutdown_schedule_projection_executor("stop")
         lane_survivors = (
             registry.last_shutdown_survivors
             if isinstance(registry, EndpointLaneRegistry)
@@ -1206,13 +1239,14 @@ class SchedulerEngine(QObject):
             return
         raise RuntimeError("SchedulerEngine must be constructed and started on the Qt application thread.")
 
-    def _apply_js8_offset_startup(self) -> None:
+    def _apply_js8_offset_startup(self, *, offset: Optional[int] = None) -> None:
         if not self.js8:
             return
-        try:
-            offset = int(self.settings.get("js8_offset_hz", 0) or 0)
-        except Exception:
-            offset = 0
+        if offset is None:
+            try:
+                offset = int(self.settings.get("js8_offset_hz", 0) or 0)
+            except Exception:
+                offset = 0
         if offset <= 0:
             return
         try:
@@ -1263,6 +1297,12 @@ class SchedulerEngine(QObject):
         if radio_id is None:
             return None
         try:
+            cache = getattr(self, "_manual_states_by_radio", None)
+            if isinstance(cache, dict):
+                return cache.get(int(radio_id))
+            # Compatibility for isolated legacy callers built without
+            # ``__init__``. Production scheduler instances always own the
+            # worker-published cache above.
             return self._manual_control_service.get_state(int(radio_id))
         except Exception:
             return None
@@ -1289,9 +1329,21 @@ class SchedulerEngine(QObject):
             return None
         now = datetime.datetime.now(datetime.timezone.utc)
         if now >= dt:
+            expired_radio_id = int(radio_id)
+            self._manual_states_by_radio.pop(expired_radio_id, None)
+
+            def _resume_expired_hold() -> None:
+                try:
+                    self._manual_control_service.resume(expired_radio_id)
+                except Exception as exc:
+                    log.debug(
+                        "SchedulerEngine: failed to persist expired manual hold: %s",
+                        exc,
+                    )
+
             try:
-                self._manual_control_service.resume(int(radio_id))
-            except Exception:
+                self._schedule_projection_executor.submit(_resume_expired_hold)
+            except RuntimeError:
                 pass
             if self._manual_qsy_radio_id == radio_id:
                 self._manual_qsy_active = False
@@ -1353,10 +1405,10 @@ class SchedulerEngine(QObject):
         using the current UTC time.
         """
         self._schedule_cache = None
-        self._active_schedule_lane_rows_cache = None
-        now_utc = self._utc_now()
-        if not self._apply_active_schedule_lanes(now_utc=now_utc, force=True):
-            self._evaluate(now_utc=now_utc, force=True)
+        # Keep the last immutable snapshot visible while its replacement is
+        # prepared.  Clearing first would make the control bar flicker and tempt
+        # callers back into synchronous database reads.
+        self._request_active_schedule_lane_rows_refresh(force=True)
 
     @staticmethod
     def _endpoint_profile_signature(profile: Mapping[str, object]) -> str:
@@ -1674,6 +1726,16 @@ class SchedulerEngine(QObject):
             self._expected_state_by_endpoint = {}
         return registry
 
+    def shared_endpoint_lane_registry(self) -> EndpointLaneRegistry:
+        """Return the scheduler-owned endpoint lanes for bounded setup work.
+
+        Receiver qualification must serialize with scheduled receiver control;
+        callers may submit bounded work here but must not own or shut down this
+        registry independently.
+        """
+
+        return self._ensure_endpoint_lane_registry()
+
     @staticmethod
     def _control_endpoint_key(
         control_mode: str,
@@ -1983,6 +2045,7 @@ class SchedulerEngine(QObject):
 
     def _shutdown_control_executor(self, reason: str) -> None:
         self._control_future_token += 1
+        self._fldigi_apply_token += 1
         registry = getattr(self, "_endpoint_lanes", None)
         if isinstance(registry, EndpointLaneRegistry):
             try:
@@ -2005,6 +2068,7 @@ class SchedulerEngine(QObject):
         except Exception as e:
             log.debug("SchedulerEngine: control executor shutdown failed during %s: %s", reason, e)
         self._control_future = None
+        self._fldigi_apply_future = None
         self._control_future_started_at = None
         self._pending_entry_key = None
         self._pending_entry_keys_by_endpoint = {}
@@ -2026,6 +2090,38 @@ class SchedulerEngine(QObject):
         except Exception as e:
             log.debug("SchedulerEngine: status executor shutdown failed during %s: %s", reason, e)
         self._status_snapshot_future = None
+
+    def _shutdown_schedule_projection_executor(self, reason: str) -> None:
+        self._schedule_projection_generation += 1
+        future = self._schedule_projection_future
+        if future is not None and not future.done():
+            try:
+                future.cancel()
+            except Exception as exc:
+                log.debug(
+                    "SchedulerEngine: schedule projection future cancel failed during %s: %s",
+                    reason,
+                    exc,
+                )
+        try:
+            self._schedule_projection_executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            try:
+                self._schedule_projection_executor.shutdown(wait=False)
+            except Exception as exc:
+                log.debug(
+                    "SchedulerEngine: schedule projection executor shutdown failed during %s: %s",
+                    reason,
+                    exc,
+                )
+        except Exception as exc:
+            log.debug(
+                "SchedulerEngine: schedule projection executor shutdown failed during %s: %s",
+                reason,
+                exc,
+            )
+        self._schedule_projection_future = None
+        self._schedule_projection_started_at = None
 
     def _ensure_endpoint_status_registry(self) -> EndpointStatusRegistry:
         registry = getattr(self, "_endpoint_status", None)
@@ -2245,6 +2341,17 @@ class SchedulerEngine(QObject):
                     "last_result_status": snapshot.last_result_status,
                 }
             )
+        projection_future = getattr(self, "_schedule_projection_future", None)
+        projection_started = float(
+            getattr(self, "_schedule_projection_started_at", 0.0) or 0.0
+        )
+        projection_cache = getattr(self, "_active_schedule_lane_rows_cache", None)
+        projection_checked = (
+            float(projection_cache.get("checked_ts") or 0.0)
+            if isinstance(projection_cache, dict)
+            else 0.0
+        )
+        now_monotonic = self._monotonic_clock()
         return {
             "scheduler_running": bool(not self._shutdown_requested),
             "schedule_snapshot_revision": int(self._schedule_snapshot_revision),
@@ -2253,6 +2360,26 @@ class SchedulerEngine(QObject):
             "endpoint_lane_count": len(lane_snapshots),
             "endpoint_lanes": rows,
             "endpoint_lanes_omitted": max(0, len(lane_snapshots) - len(rows)),
+            "schedule_projection": {
+                "inflight": bool(
+                    projection_future is not None and not projection_future.done()
+                ),
+                "inflight_age_s": round(
+                    max(0.0, now_monotonic - projection_started), 3
+                )
+                if projection_started
+                else 0.0,
+                "cache_age_s": round(
+                    max(0.0, now_monotonic - projection_checked), 3
+                )
+                if projection_checked
+                else None,
+                "cached_lane_count": len(
+                    projection_cache.get("data") or ()
+                )
+                if isinstance(projection_cache, dict)
+                else 0,
+            },
             "status_metrics": (
                 status_registry.metrics_snapshot().as_dict()
                 if isinstance(status_registry, EndpointStatusRegistry)
@@ -3112,12 +3239,17 @@ class SchedulerEngine(QObject):
         self._fldigi_offset_cache_ts = now_ts
         return offset
 
-    def _fldigi_available(self) -> bool:
+    def _fldigi_available(self, *, live: bool = False) -> bool:
         if not self.rig or not hasattr(self.rig, "is_fldigi_available"):
             return False
         now_ts = time.time()
         if now_ts - self._fldigi_available_ts < 5.0 and self._fldigi_available_cache is not None:
             return self._fldigi_available_cache
+        if not live:
+            # UI/scheduler callers consume the last worker-published result.
+            # A stale/unknown snapshot is treated as unavailable until the
+            # background apply lane refreshes it.
+            return bool(self._fldigi_available_cache)
         try:
             available = bool(self.rig.is_fldigi_available())
         except Exception:
@@ -3235,7 +3367,14 @@ class SchedulerEngine(QObject):
             "flrig": "FLRig",
             "varac": "VarAC",
         }
-        return bool(self._software_status.program_is_running(program_names.get(target, name)))
+        # The dependency/status workers refresh the shared process inventory.
+        # Scheduler and UI callbacks consume that immutable snapshot only; a
+        # psutil process walk can block for seconds on Linux/FUSE-backed procfs.
+        return bool(
+            self._software_status.cached_program_is_running(
+                program_names.get(target, name)
+            )
+        )
 
     def _js8_running(self) -> bool:
         return self._process_running("js8call")
@@ -5442,12 +5581,25 @@ class SchedulerEngine(QObject):
             if isinstance(status_registry, EndpointStatusRegistry):
                 status_registry.poll()
             self._maybe_refresh_external_status_snapshot()
-            if not self._apply_active_schedule_lanes(now_utc=now_utc):
-                self._evaluate(now_utc=now_utc)
-            self._maybe_apply_fldigi()
-            self._maybe_prompt_enforcement()
+            self._request_active_schedule_lane_rows_refresh()
+            self._apply_cached_schedule_tick(now_utc=now_utc)
         except Exception as e:
             log.error("SchedulerEngine timer tick failed: %s", e)
+
+    def _apply_cached_schedule_tick(
+        self,
+        *,
+        now_utc: Optional[datetime.datetime] = None,
+        force: bool = False,
+    ) -> None:
+        """Consume only worker-published state on the scheduler/Qt thread."""
+
+        if self._shutdown_requested:
+            return
+        current_utc = now_utc or self._utc_now()
+        self._apply_active_schedule_lanes(now_utc=current_utc, force=force)
+        self._maybe_apply_fldigi()
+        self._maybe_prompt_enforcement()
 
     def _load_operating_groups(self) -> List[Dict]:
         data = self.settings.all()
@@ -5615,31 +5767,75 @@ class SchedulerEngine(QObject):
             return
         if not (self._desired_fldigi_mode or self._desired_fldigi_offset is not None):
             return
-        available = self._fldigi_available()
         now_ts = time.time()
-        if not available:
-            self._fldigi_was_available = False
-            return
-        if not self._fldigi_was_available:
-            self._fldigi_was_available = True
-            self._fldigi_apply_after_ts = now_ts + 5
+        future = self._fldigi_apply_future
+        if future is not None and not future.done():
             return
         if self._fldigi_apply_after_ts is not None and now_ts < self._fldigi_apply_after_ts:
             return
         desired = (self._desired_fldigi_mode, self._desired_fldigi_offset)
         if self._last_fldigi_apply == desired and self._fldigi_apply_after_ts is None:
             return
-        if self.rig.set_fldigi_mode_offset(self._desired_fldigi_mode, self._desired_fldigi_offset):
-            self._last_fldigi_apply = desired
-            self._fldigi_mode_cache = self._desired_fldigi_mode.strip().upper() if self._desired_fldigi_mode else None
-            self._fldigi_offset_cache = self._desired_fldigi_offset
-            self._fldigi_mode_cache_ts = time.time()
-            self._fldigi_offset_cache_ts = self._fldigi_mode_cache_ts
-            self._fldigi_apply_after_ts = None
-            self._fldigi_apply_pending = False
-            self._fldigi_force_apply_once = False
-            self._net_fldigi_apply_allowed_once = False
-            self._net_resume_apply_once = False
+        rig = self.rig
+        mode, offset = desired
+        probe_only = not self._fldigi_was_available
+        self._fldigi_apply_token += 1
+        token = self._fldigi_apply_token
+
+        def _task() -> Dict[str, object]:
+            try:
+                available = bool(rig and rig.is_fldigi_available())
+            except Exception as exc:
+                return {"available": False, "applied": False, "error": str(exc)}
+            if not available or probe_only:
+                return {"available": available, "applied": False}
+            try:
+                applied = bool(rig and rig.set_fldigi_mode_offset(mode, offset))
+            except Exception as exc:
+                return {"available": True, "applied": False, "error": str(exc)}
+            return {"available": True, "applied": applied}
+
+        def _on_done(done) -> None:
+            def _apply() -> None:
+                if self._shutdown_requested or token != self._fldigi_apply_token:
+                    return
+                self._fldigi_apply_future = None
+                try:
+                    result = done.result()
+                except Exception as exc:
+                    log.debug("SchedulerEngine: FLDigi apply worker failed: %s", exc)
+                    return
+                completed_ts = time.time()
+                available = bool(result.get("available"))
+                self._fldigi_available_cache = available
+                self._fldigi_available_ts = completed_ts
+                if not available:
+                    self._fldigi_was_available = False
+                    return
+                if probe_only:
+                    self._fldigi_was_available = True
+                    self._fldigi_apply_after_ts = completed_ts + 5.0
+                    return
+                if not bool(result.get("applied")):
+                    return
+                self._last_fldigi_apply = desired
+                self._fldigi_mode_cache = mode.strip().upper() if mode else None
+                self._fldigi_offset_cache = offset
+                self._fldigi_mode_cache_ts = completed_ts
+                self._fldigi_offset_cache_ts = completed_ts
+                self._fldigi_apply_after_ts = None
+                self._fldigi_apply_pending = False
+                self._fldigi_force_apply_once = False
+                self._net_fldigi_apply_allowed_once = False
+                self._net_resume_apply_once = False
+
+            self._queue_scheduler_thread_call(_apply)
+
+        try:
+            self._fldigi_apply_future = self._control_executor.submit(_task)
+            self._fldigi_apply_future.add_done_callback(_on_done)
+        except RuntimeError:
+            self._fldigi_apply_future = None
 
     def _load_daily_schedule_from_db(self) -> Optional[List[Dict]]:
         """
@@ -6003,12 +6199,18 @@ class SchedulerEngine(QObject):
             return True
         return int(group_level) in allowed
 
-    def _load_sop_schedule_layer_from_db(self) -> Optional[List[Dict]]:
+    def _load_sop_schedule_layer_from_db(
+        self,
+        *,
+        enabled: Optional[bool] = None,
+    ) -> Optional[List[Dict]]:
         """
         Read active SOP schedule-layer entries from freqinout_nets.db.
         Rows are joined with sop_profiles so only active profiles are considered.
         """
-        if not self._sop_layer_enabled():
+        if enabled is None:
+            enabled = self._sop_layer_enabled()
+        if not enabled:
             return []
         db_path = self._config_dir() / "freqinout_nets.db"
         if not db_path.exists():
@@ -6454,7 +6656,12 @@ class SchedulerEngine(QObject):
             )
         return hf_rows, net_rows, True
 
-    def _load_active_schedule_lane_rows(self, *, force: bool = False) -> List[Dict[str, object]]:
+    def _load_active_schedule_lane_rows(
+        self,
+        *,
+        force: bool = False,
+        settings_snapshot: Optional[Mapping[str, Any]] = None,
+    ) -> List[Dict[str, object]]:
         """
         Build schedule-row lanes for every active radio without touching any
         external radio/application status endpoint.
@@ -6464,25 +6671,21 @@ class SchedulerEngine(QObject):
         view of each active radio's assigned plan while keeping polling bounded
         to the existing status coordinators.
         """
-        cache = self._active_schedule_lane_rows_cache
-        now_ts = time.monotonic()
-        if (
-            cache
-            and not force
-            and isinstance(cache.get("data"), list)
-            and now_ts - float(cache.get("checked_ts") or 0.0) < self._active_schedule_lane_rows_cache_ttl_s
-        ):
-            return list(cache["data"])  # type: ignore[index,return-value]
-
-        config_db = self._config_dir() / "freqinout.db"
-        nets_db = self._config_dir() / "freqinout_nets.db"
         if force:
+            worker_settings: Optional[SettingsManager] = None
             try:
-                refreshed = refresh_source_backed_frequency_plans(self.settings)
+                # SettingsManager is thread-affine.  The projection worker owns
+                # a short-lived instance when a forced source refresh is needed;
+                # it must never borrow the Qt thread's SettingsManager.
+                worker_settings = SettingsManager()
+                refreshed = refresh_source_backed_frequency_plans(worker_settings)
                 if refreshed:
                     log.info("SchedulerEngine refreshed %d source-backed Frequency Plan(s) before schedule evaluation.", len(refreshed))
             except Exception as exc:
                 log.warning("SchedulerEngine could not refresh source-backed Frequency Plans: %s", exc)
+            finally:
+                if worker_settings is not None:
+                    worker_settings.close()
         try:
             store = MultiRadioStore(settings_db_path())
             active_profiles = list(store.list_runtime_active_device_profiles())
@@ -6533,16 +6736,6 @@ class SchedulerEngine(QObject):
                         plan_updated = str(plan.get("updated_utc") or "")
             active_summary.append((device_id, operating_id, plan_id, plan_updated))
 
-        cache_key = (
-            self._db_mtime(config_db),
-            self._db_mtime(nets_db),
-            1 if self._sop_layer_enabled() else 0,
-            tuple(active_summary),
-        )
-        if cache and not force and cache.get("cache_key") == cache_key and isinstance(cache.get("data"), list):
-            cache["checked_ts"] = now_ts
-            return list(cache["data"])  # type: ignore[index,return-value]
-
         active_ids = [
             int(profile.get("id", 0) or 0)
             for profile in active_profiles
@@ -6553,10 +6746,11 @@ class SchedulerEngine(QObject):
         hf_db = None
         net_db = None
         if needs_base_schedule:
-            data = self.settings.all()
+            data = dict(settings_snapshot or {})
             hf_db = self._load_daily_schedule_from_db()
             net_db = self._load_net_schedule_from_db()
-        sop_layer_db = self._load_sop_schedule_layer_from_db()
+        sop_enabled = bool((settings_snapshot or {}).get("sop_schedule_layer_enabled", True))
+        sop_layer_db = self._load_sop_schedule_layer_from_db(enabled=sop_enabled)
         policy_db = self._load_sop_net_conflict_policies_from_db()
 
         hf_base = hf_db if hf_db is not None else data.get("hf_schedule") or data.get("daily_schedule") or []
@@ -6627,8 +6821,122 @@ class SchedulerEngine(QObject):
                 }
             )
 
-        self._active_schedule_lane_rows_cache = {"cache_key": cache_key, "checked_ts": now_ts, "data": list(lanes)}
         return lanes
+
+    def _request_active_schedule_lane_rows_refresh(
+        self,
+        *,
+        force: bool = False,
+        clear_startup_manual_qsy: bool = False,
+    ) -> None:
+        """Queue one database-backed schedule projection outside the Qt thread."""
+
+        if self._shutdown_requested:
+            return
+        now_ts = self._monotonic_clock()
+        future = self._schedule_projection_future
+        if future is not None and not future.done():
+            return
+        if (
+            not force
+            and self._active_schedule_lane_rows_cache is not None
+            and now_ts - float(self._schedule_projection_requested_at or 0.0)
+            < self._schedule_projection_refresh_interval_s
+        ):
+            return
+        self._schedule_projection_requested_at = now_ts
+        self._schedule_projection_started_at = now_ts
+        generation = self._schedule_projection_generation
+        # Copy the in-memory compatibility settings on their owning Qt thread.
+        # The worker receives immutable plain data and performs no calls against
+        # the UI-owned SettingsManager.
+        try:
+            settings_snapshot = dict(self.settings.all())
+        except Exception:
+            settings_snapshot = {}
+
+        def _task() -> Dict[str, object]:
+            task_started = self._monotonic_clock()
+            if clear_startup_manual_qsy:
+                self._clear_startup_manual_qsy_states()
+            lanes = self._load_active_schedule_lane_rows(
+                force=force,
+                settings_snapshot=settings_snapshot,
+            )
+            try:
+                manual_states = self._manual_control_service.list_active_states()
+            except Exception as exc:
+                log.debug("SchedulerEngine: failed loading cached manual control states: %s", exc)
+                manual_states = ()
+            return {
+                "lanes": tuple(dict(row) for row in lanes if isinstance(row, dict)),
+                "manual_states": tuple(manual_states),
+                "completed_monotonic": self._monotonic_clock(),
+                "elapsed_ms": max(
+                    0.0,
+                    (self._monotonic_clock() - task_started) * 1000.0,
+                ),
+            }
+
+        def _on_done(done) -> None:
+            def _apply() -> None:
+                if self._shutdown_requested or generation != self._schedule_projection_generation:
+                    return
+                self._schedule_projection_future = None
+                self._schedule_projection_started_at = None
+                try:
+                    result = done.result()
+                except Exception as exc:
+                    log.warning("SchedulerEngine: schedule projection refresh failed: %s", exc)
+                    return
+                rows = result.get("lanes")
+                if not isinstance(rows, tuple):
+                    rows = ()
+                self._active_schedule_lane_rows_cache = {
+                    "checked_ts": float(result.get("completed_monotonic") or self._monotonic_clock()),
+                    "data": tuple(dict(row) for row in rows if isinstance(row, dict)),
+                }
+                states: Dict[int, SchedulerManualControlState] = {}
+                for state in result.get("manual_states") or ():
+                    if not isinstance(state, SchedulerManualControlState):
+                        continue
+                    try:
+                        radio_id = int(str(state.radio_profile_id).removeprefix("radio_"))
+                    except Exception:
+                        continue
+                    states[radio_id] = state
+                self._manual_states_by_radio = states
+                elapsed_ms = float(result.get("elapsed_ms") or 0.0)
+                emit_span(
+                    "scheduler.schedule_projection",
+                    elapsed_ms,
+                    meta={
+                        "lanes": len(rows),
+                        "manual_states": len(states),
+                        "forced": bool(force),
+                    },
+                    level="warning" if elapsed_ms >= 250.0 else "debug",
+                )
+                # Apply only the immutable snapshot on the scheduler/Qt thread.
+                self._apply_cached_schedule_tick(force=force)
+
+            self._queue_scheduler_thread_call(_apply)
+
+        try:
+            self._schedule_projection_future = self._schedule_projection_executor.submit(_task)
+            self._schedule_projection_future.add_done_callback(_on_done)
+        except RuntimeError:
+            if not self._shutdown_requested:
+                log.warning("SchedulerEngine: schedule projection refresh could not be queued.")
+
+    def _cached_active_schedule_lane_rows(self) -> List[Dict[str, object]]:
+        cache = self._active_schedule_lane_rows_cache
+        if not cache:
+            return []
+        rows = cache.get("data")
+        if not isinstance(rows, (list, tuple)):
+            return []
+        return [dict(row) for row in rows if isinstance(row, dict)]
 
     def active_schedule_lanes(
         self,
@@ -6643,10 +6951,11 @@ class SchedulerEngine(QObject):
         by database/config mtime and active assignment identity, and each call
         only recomputes in-memory active/current/next selections.
         """
+        self._request_active_schedule_lane_rows_refresh(force=force)
         if now_utc is None:
             now_utc = datetime.datetime.now(datetime.timezone.utc)
         lanes: List[Dict[str, object]] = []
-        for lane in self._load_active_schedule_lane_rows(force=force):
+        for lane in self._cached_active_schedule_lane_rows():
             hf_rows = list(lane.get("hf_rows") or [])
             net_rows = list(lane.get("net_rows") or [])
             sop_rows = list(lane.get("sop_rows") or [])
@@ -6903,19 +7212,28 @@ class SchedulerEngine(QObject):
         # ceiling for legacy transceiver paths.
         timeout_s = min(2.0, float(getattr(self, "_control_timeout_s", 8.0) or 8.0))
         tolerance_hz = 20
-        desired = ReceiverCommand(
-            target_id=identity.target_id,
-            frequency_hz=int(frequency_hz),
-            mode=str(mode or ""),
-            bandwidth_hz=bandwidth_hz,
-            request_id=repr(entry_key),
-        )
-
         def _cancelled() -> bool:
             return bool(self._shutdown_requested)
 
         def _task() -> Dict[str, object]:
             deadline = time.monotonic() + timeout_s
+            probed_identity, capabilities = receiver.probe(
+                deadline=deadline,
+                cancel=_cancelled,
+            )
+            if (
+                probed_identity.adapter_id != identity.adapter_id
+                or probed_identity.receiver_id != identity.receiver_id
+                or probed_identity.target_id != identity.target_id
+                or capabilities.manual_only
+                or not capabilities.can_set_receive_frequency
+                or not capabilities.can_verify_state
+            ):
+                return {
+                    "ok": False,
+                    "reason_code": "receiver_capability_unavailable",
+                    "detail": capabilities.detail or "Receiver frequency control/readback is unavailable; use manual tuning.",
+                }
             applied = receiver.set_receive_frequency(
                 identity,
                 int(frequency_hz),
@@ -6936,6 +7254,40 @@ class SchedulerEngine(QObject):
                     "detail": applied.detail,
                     "actual_state": self._receiver_state_mapping(applied),
                 }
+            verified_mode = ""
+            verified_bandwidth = None
+            mode_detail = ""
+            if str(mode or "").strip() and capabilities.can_set_receive_mode:
+                mode_state = receiver.set_receive_mode(
+                    identity,
+                    str(mode or ""),
+                    bandwidth_hz if capabilities.can_set_receive_bandwidth else None,
+                    deadline=deadline,
+                    cancel=_cancelled,
+                )
+                if mode_state.cancelled:
+                    return {
+                        "ok": False,
+                        "reason_code": "receiver_cancelled",
+                        "detail": mode_state.detail,
+                        "actual_state": self._receiver_state_mapping(mode_state),
+                    }
+                if not mode_state.manual and mode_state.available:
+                    verified_mode = str(mode or "")
+                    verified_bandwidth = (
+                        bandwidth_hz if capabilities.can_set_receive_bandwidth else None
+                    )
+                else:
+                    mode_detail = mode_state.detail or "Set receiver mode manually."
+            elif str(mode or "").strip():
+                mode_detail = "This SDR++ endpoint did not advertise mode control; set mode manually."
+            desired = ReceiverCommand(
+                target_id=identity.target_id,
+                frequency_hz=int(frequency_hz),
+                mode=verified_mode,
+                bandwidth_hz=verified_bandwidth,
+                request_id=repr(entry_key),
+            )
             verified = receiver.verify_state(
                 identity,
                 desired,
@@ -6953,7 +7305,7 @@ class SchedulerEngine(QObject):
                 "ok": matches,
                 "actual_state": actual,
                 "reason_code": "" if matches else "receiver_readback_mismatch",
-                "detail": verified.detail,
+                "detail": " ".join(part for part in (verified.detail, mode_detail) if part),
             }
 
         def _on_done(result: EndpointResult) -> None:

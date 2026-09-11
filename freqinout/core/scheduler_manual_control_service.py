@@ -121,6 +121,9 @@ class SchedulerManualControlService:
 
     def get_state(self, radio_profile_id: str | int) -> SchedulerManualControlState:
         device_id = _radio_device_id(radio_profile_id)
+        # This public compatibility service may be used before the startup
+        # owner has created the database (including CLI/tests). Scheduler timer
+        # paths consume its worker-published cache and never call this inline.
         with self.store.connect() as conn:
             self._ensure_radio_exists(conn, device_id)
             row = conn.execute(

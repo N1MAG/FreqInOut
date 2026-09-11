@@ -1,9 +1,11 @@
 # Production Reliability And Workflow Remediation Spec
 
 Status: Slices 0–6 behavior implemented with automated gates passed; the
-September 10 message performance gate is reopened under
-`message_ingest_projection_performance_spec.md`; Slice 1 software gate passed
-2026-09-06 with the T1000-E reconnect hardware exception documented
+September 10 responsiveness remediation implementation gate passed under
+`message_ingest_projection_performance_spec.md` and
+`multi_endpoint_scheduler_concurrency_spec.md`; Linux production confirmation is
+reopened; Slice 1 software gate passed 2026-09-06 with the T1000-E reconnect
+hardware exception documented
 
 Date: 2026-09-06
 
@@ -1854,6 +1856,47 @@ edge-case, transaction, and compact Qt acceptance package. The high-reasoning
 primary model owned transaction and identity policy, reviewed every delegated
 diff, closed the implicit former-callsign association risk, ran performance and
 platform integration, and completed this gate. No subsequent slice began.
+
+## September 10 Full-UI Responsiveness Requalification
+
+The production logs and seven hang dumps show that the reported regression was
+not cosmetic rendering. The Qt thread was waiting in schedule/assignment schema
+and database reads, manual-state reads, and process inventory while a historical
+message projection lane repeatedly discovered and prepared large batches. The
+same run showed eager startup construction of Settings, SOP, and Ops Center and
+an unconditional SitRep rollup rebuild during database initialization.
+
+The remediation keeps the first shell and every recurrent control-bar/timer path
+cache-only: Settings and SOP data projections are first-use deferred; Ops Center
+constructs a clock-only first frame; index maintenance and initial refresh yield
+until after the selected surface paints; the scheduler publishes database-backed
+state from its own worker; the Station Control Bar consumes that snapshot; and
+native message catch-up is queue-first with global/sliced bounds. Startup group
+compatibility repair now selects only values normalization can change and rebuilds
+SitRep rollups only when a repair actually changed source identity. Shared and
+local operator autocomplete/list lookups are read-only and cannot perform schema
+or identity repair during a tab activation.
+
+On a disposable copy of the 311 MB production database containing 6,121 SitRep
+source rows, 5,998 SitRep event rows, 325 latest-call rows, and 5,214 CommStat
+artifacts, the bounded group repair completed in 85.208 ms. The complete nets
+schema/startup pass on a fresh copy completed in 1,891.094 ms, compared with the
+79,747.936 ms database-init span in the supplied Linux log. The copied database
+was deleted after measurement; no production database was mutated.
+
+The automated exit gate passes 201 scheduler tests (one intentional skip), 134
+message ingest/projection tests, 91 startup/SOP/Ops/Settings/UI tests, and the
+focused startup-repair tests. Linux first-paint, tab-switch p95, command-bar p95,
+backlog-drain CPU, idle CPU, and shutdown remain the required external
+requalification; the implementation is not described as production-verified
+until those measurements pass.
+
+An isolated 30-second real-window navigation/resize soak passed with a 701.6 ms
+first usable shell, 612.4 ms construction, 1.2 ms maximum event-loop lag across
+114 samples, 25 interactions, 13 navigation switches, six resize cycles, and
+62.8 ms clean shutdown. Against a disposable copy of the 311 MB store, the
+deferred Settings surface constructed in 266.907 ms and populated on first
+activation in 89.014 ms after startup initialization.
 
 ## Test And Release Strategy
 

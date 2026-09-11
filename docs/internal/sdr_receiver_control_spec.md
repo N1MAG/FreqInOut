@@ -1,8 +1,9 @@
 # SDR Receiver Control Specification
 
-Status: implementation authority; MES-4 receive-only control core and MES-5
-automated lifecycle/soak infrastructure complete; operator setup UX and
-application/hardware adapters not started
+Status: implementation authority; SDR-0 compatibility/manual UX, SDR-1
+receive-only qualification/setup, and MES-4/MES-5 receiver-lane infrastructure
+complete; SDR-2 application adapter implemented with live hardware acceptance
+still required; later adapters remain sequential gates
 
 Date: 2026-09-10
 
@@ -28,20 +29,23 @@ This specification extends `shortwave_resources_spec.md`,
 device/runtime safety contracts. It does not authorize implementation by itself;
 packages and exit gates are in `sdr_receiver_control_implementation_plan.md`.
 
-## Corrected Current-State Statement
+## Current Implementation State
 
-FIO does not currently provide production SDR tuning.
+FIO now provides an experimental receive-only SDR++ RigCTL adapter. It is not a
+direct SDR hardware driver, and no hardware/OS combination is labeled verified
+until the live SDR-2 acceptance matrix passes.
 
 - Observer SDR profiles store receive-only identity and endpoint information.
 - The current `SDR Follow` policy is advisory.
 - FIO has a RigCtlD protocol client capable of setting and reading frequency, but
   the observer policy deliberately prevents observer devices from entering the
   transceiver control path.
-- An SDR host and port therefore indicate a configured endpoint, not proven
-  tuning capability.
+- An SDR host and port indicate a configured application endpoint, not proven
+  tuning capability. Only the explicit reversible `Test control` flow can save
+  matching verification evidence and enable scheduled receiver tuning.
 
-The existing RigCtlD client is a useful implementation seam, not a shipped claim
-that FIO controls SDR hardware today.
+The transceiver RigCtlD client remains separate. Observer profiles use the
+receive-only contract and cannot access PTT or the HF transmit scheduler path.
 
 ## Operator Language And Compatibility States
 
@@ -99,9 +103,11 @@ source modules included and enabled in the user's SDR++ build.
 | Beta in the upstream module matrix | Hermes, Perseus, RFNM, network source, Spectran HTTP, and USRP |
 | Not an initial FIO claim | unfinished modules and deprecated Soapy source |
 
-FIO controls the selected SDR++ VFO, not the USB/network device directly. Its
-initial adapter should use only the basic frequency/mode operations the SDR++
-server actually reports, require frequency readback, and never issue PTT. Because
+FIO controls the selected SDR++ VFO, not the USB/network device directly. The
+adapter uses only the basic frequency/mode operations the SDR++ server reports,
+requires frequency readback, and has no PTT/transmit surface. Each command uses a
+short-lived bounded TCP connection so FIO does not monopolize SDR++'s single
+RigCTL client slot. Because
 packaged source modules differ by OS/release, FIO displays the application target
 reported or selected during setup and does not promise every listed family on
 every installation.
@@ -231,10 +237,20 @@ Configuration begins with the hardware the operator recognizes:
 1. Name the receiver and choose its hardware family or `Other / manual`.
 2. Choose the application used with that hardware.
 3. FIO shows the available bridge for that application and a short setup recipe.
-4. `Test control` probes the API, displays the selected device/VFO, reads the
-   current state, and—with explicit confirmation—performs a reversible tune and
-   readback test.
+4. `Test control` is the explicit operator action: it probes the API, reads the
+   selected VFO, moves it by a small bounded amount, verifies readback, restores
+   the original frequency, and verifies restoration on the background endpoint
+   lane.
 5. Only a passed test produces **FIO tuning ready** for that exact configuration.
+
+For SDR++, the operator first selects the intended VFO inside SDR++ and enables
+the RigCTL Server module's tuning control. FIO uses the saved `selected-vfo`
+label only as stable endpoint identity; SDR++ RigCTL does not expose a named VFO
+list for FIO to enumerate. Changing adapter, host, port, or target invalidates
+the saved evidence and returns the profile to manual tuning until it is tested
+again. Persistence, runtime construction, readiness presentation, and scheduler
+binding all validate that exact evidence independently; the persisted state flag
+alone never authorizes receiver control.
 
 The hardware and application names remain separate. A label such as `RSPdx in
 SDRconnect` is shown to the operator; opaque device IDs, API indexes, and ports

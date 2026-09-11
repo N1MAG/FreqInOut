@@ -99,6 +99,8 @@ from freqinout.core.varac_bbs_sources import (
 )
 from freqinout.core.system_timezone import detect_system_timezone_name
 from freqinout.core.js8_defaults import coerce_js8_offset_hz
+from freqinout.core.sdr_compatibility import get_sdr_compatibility_registry
+from freqinout.core.receiver_control import receiver_control_verification_matches
 from freqinout.core.js8_msg_auth import generate_msg_auth_secret_key
 from freqinout.core.js8_msg_auth_store import (
     MSG_AUTH_ANY_SENDER,
@@ -745,13 +747,46 @@ class SettingsTab(QWidget):
     mesh_channel_remove_device_requested = Signal(str, str)
     mesh_connect_requested = Signal(str)
     mesh_disconnect_requested = Signal()
+    # The eventual receiver-control service subscribes from its worker/lane to
+    # this request.  Settings itself must only emit the immutable draft; it
+    # must never open an endpoint or perform a probe in the Qt event handler.
+    receiver_control_test_requested = Signal(dict)
+    receiver_control_test_completed = Signal(dict)
     SECTION_HEALTH_STATE_ROLE = int(Qt.UserRole) + 1
     SECTION_HEALTH_KEY_ROLE = int(Qt.UserRole) + 2
     SECTION_STACK_INDEX_ROLE = int(Qt.UserRole) + 3
     SECTION_SCOPE_ROLE = int(Qt.UserRole) + 4
 
-    def __init__(self, parent=None, action_feedback_service: ActionFeedbackService | None = None):
+    def set_receiver_control_test_service_ready(self, ready: bool) -> None:
+        """Declare that an asynchronous receiver-test service is installed.
+
+        SDR-1 deliberately ships this as an opt-in seam.  No service is
+        installed by Settings, so the setup dialog keeps Test control disabled
+        rather than creating an endpoint connection on the UI thread.
+        """
+
+        self._receiver_control_test_service_ready = bool(ready)
+
+    def _receiver_control_test_service_is_ready(self) -> bool:
+        """Return cached service availability only; never discover a receiver."""
+
+        return bool(getattr(self, "_receiver_control_test_service_ready", False))
+
+    def __init__(
+        self,
+        parent=None,
+        action_feedback_service: ActionFeedbackService | None = None,
+        *,
+        defer_initial_load: bool = False,
+    ):
         super().__init__(parent)
+        # Settings has several database-backed administration projections.  It
+        # is not the default startup surface, so MainWindow can defer that
+        # population until Settings is actually opened.  The default remains
+        # eager for standalone callers and existing UI integrations.
+        self._defer_initial_load = bool(defer_initial_load)
+        self._initial_settings_loaded = False
+        self._initial_settings_load_pending = False
         self.settings = SettingsManager()
         self.action_feedback_service = action_feedback_service or ActionFeedbackService()
         self._last_action_feedback_event = None
@@ -890,7 +925,9 @@ class SettingsTab(QWidget):
         self._last_section_target_height = 0
 
         self._build_ui()
-        self._load_settings()
+        if not self._defer_initial_load:
+            self._load_settings()
+            self._initial_settings_loaded = True
 
         # Auto-save on application exit (no popup)
         app = QApplication.instance()
@@ -909,13 +946,39 @@ class SettingsTab(QWidget):
         self.status_timer.timeout.connect(self._refresh_running_status)
 
         self._update_clock_labels()
-        QTimer.singleShot(0, self._maybe_backfill_js8_geo)
+        if not self._defer_initial_load:
+            QTimer.singleShot(0, self._maybe_backfill_js8_geo)
+
+    def _ensure_initial_settings_loaded(self) -> None:
+        """Load the administration projections after Settings becomes visible."""
+
+        if self._initial_settings_loaded:
+            return
+        if not self._active:
+            self._initial_settings_load_pending = False
+            return
+        try:
+            self._load_settings()
+            self._initial_settings_loaded = True
+            self._initial_settings_load_pending = False
+            QTimer.singleShot(0, self._maybe_backfill_js8_geo)
+            self.on_tab_activated()
+        except Exception as exc:
+            self._initial_settings_load_pending = False
+            log.exception("SettingsTab: initial deferred settings load failed: %s", exc)
 
     def set_tab_active(self, active: bool) -> None:
         self._active = bool(active)
         if self._active:
             if not self.status_timer.isActive():
                 self.status_timer.start()
+            if self._defer_initial_load and not self._initial_settings_loaded:
+                if not self._initial_settings_load_pending:
+                    self._initial_settings_load_pending = True
+                    # Let the selected Settings workspace paint before its
+                    # potentially large administration tables are populated.
+                    QTimer.singleShot(75, self._ensure_initial_settings_loaded)
+                return
             QTimer.singleShot(0, self.on_tab_activated)
             return
         if self.status_timer.isActive():
@@ -13234,6 +13297,11 @@ class SettingsTab(QWidget):
 
     def _save_settings_quiet(self):
         """Auto-save on application exit (no dialog)."""
+        if self._defer_initial_load and not self._initial_settings_loaded:
+            # No settings form was populated or edited in this process.  Do
+            # not let blank deferred controls overwrite persisted settings at
+            # shutdown.
+            return
         self._shutdown_autosave = True
         try:
             self._save_settings(show_message=False)
@@ -16927,13 +16995,22 @@ class SettingsTab(QWidget):
 
     def _device_endpoint_summary(self, profile: Dict[str, Any]) -> str:
         if str(profile.get("device_class", "") or "").strip().lower() == "observer":
+            application = str(profile.get("sdr_application", "") or "").strip() or "Receiver"
+            target = str(profile.get("sdr_target", "") or "").strip()
             host = str(profile.get("sdr_host", "") or "").strip()
             port = str(profile.get("sdr_port", "") or "").strip()
+            fio_ready = bool(
+                int(profile.get("sdr_control_enabled", 0) or 0)
+                and receiver_control_verification_matches(profile)
+            )
+            summary = f"{application} · {'FIO tuning ready' if fio_ready else 'Manual tuning'}"
+            if target:
+                summary += f" · {target}"
             if host and port:
-                return f"Observer SDR {host}:{port}"
+                return f"{summary} · endpoint saved"
             if host:
-                return f"Observer SDR {host}"
-            return "Observer / no endpoint"
+                return f"{summary} · endpoint saved"
+            return summary
         backend = str(profile.get("control_backend", "") or "").strip().lower()
         if backend == "rigctld":
             host = str(profile.get("rig_host", "") or "").strip() or "127.0.0.1"
@@ -17062,8 +17139,12 @@ class SettingsTab(QWidget):
         backend = str(profile.get("control_backend", "") or "").strip().lower()
         device_class = str(profile.get("device_class", "") or "").strip().lower()
         if device_class == "observer":
-            host = str(profile.get("sdr_host", "") or "").strip()
-            return readiness_state_label("ready") if host else readiness_state_label("needs_setup")
+            if (
+                int(profile.get("sdr_control_enabled", 0) or 0)
+                and receiver_control_verification_matches(profile)
+            ):
+                return readiness_state_label("ready")
+            return readiness_state_label("external_manual")
         if backend == "manual":
             return readiness_state_label("external_manual")
         if backend == "js8call":
@@ -22674,19 +22755,149 @@ class SettingsTab(QWidget):
         varac_launch_cmd_wrap = _make_browse_row(varac_launch_cmd_edit, title="Select VarAC launch command", mode="folder")
         _add_form_row(connection_form, "VarAC Launch:", varac_launch_cmd_wrap, "Optional VarAC launch override for this radio.")
 
+        # An observer endpoint is not a transceiver endpoint.  Keep its setup
+        # self-contained and expressly manual until a later receiver adapter
+        # has completed an explicit capability/readback verification.
+        sdr_wrap = QGroupBox("Receiver setup")
+        sdr_wrap.setObjectName("guidedManualReceiverSetup")
+        sdr_form = QFormLayout(sdr_wrap)
+        _configure_guided_form(sdr_form)
+
+        sdr_application_combo = QComboBox()
+        sdr_application_combo.setObjectName("guidedReceiverApplication")
+        sdr_application_combo.setEditable(True)
+        sdr_application_combo.addItem("Other / manual", "Other / manual")
+        receiver_compatibility_entries = tuple(get_sdr_compatibility_registry().manual_entries())
+        receiver_entries_by_application = {
+            str(entry.application or "").strip(): entry
+            for entry in receiver_compatibility_entries
+            if str(entry.application or "").strip()
+            and str(entry.application or "").strip() != "Operator-controlled receiver"
+        }
+        for application_name in sorted(receiver_entries_by_application, key=str.casefold):
+            sdr_application_combo.addItem(application_name, application_name)
+        existing_sdr_application = str((existing or {}).get("sdr_application", "") or "").strip()
+        if existing_sdr_application:
+            application_index = sdr_application_combo.findData(existing_sdr_application)
+            if application_index < 0:
+                sdr_application_combo.addItem(existing_sdr_application, existing_sdr_application)
+                application_index = sdr_application_combo.count() - 1
+            sdr_application_combo.setCurrentIndex(application_index)
+        _configure_combo_width(sdr_application_combo, minimum=260)
+        sdr_form.addRow(
+            _make_help_label("Receiver application:", "The application that owns this receiver hardware. Choosing it does not claim that FIO can tune it."),
+            sdr_application_combo,
+        )
+
+        # Application support and FIO's adapter are intentionally separate.
+        # Selecting the adapter records intent only; an explicit worker-owned
+        # reversible tune/readback test is still required before enablement.
+        sdr_adapter_combo = QComboBox()
+        sdr_adapter_combo.setObjectName("guidedReceiverAdapter")
+        sdr_adapter_combo.addItem("Manual tuning (no FIO control API)", "manual")
+        sdr_adapter_combo.addItem("SDR++ RigCTL (selected VFO)", "sdrpp_rigctl")
+        existing_sdr_adapter = str((existing or {}).get("sdr_adapter", "manual") or "manual").strip().lower()
+        existing_sdr_adapter = existing_sdr_adapter.replace("-", "_") or "manual"
+        receiver_verification_state = str(
+            (existing or {}).get("sdr_verification_state", "manual") or "manual"
+        ).strip().lower()
+        try:
+            parsed_receiver_evidence = json.loads(
+                str((existing or {}).get("sdr_verification_json", "{}") or "{}")
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed_receiver_evidence = {}
+        receiver_verification_evidence: Dict[str, Any] = (
+            dict(parsed_receiver_evidence) if isinstance(parsed_receiver_evidence, dict) else {}
+        )
+        receiver_test_in_progress = False
+        adapter_index = sdr_adapter_combo.findData(existing_sdr_adapter)
+        if adapter_index < 0:
+            # The store will reject unknown adapters on save.  Showing the
+            # persisted value here keeps the configuration truthful and lets
+            # the operator deliberately choose a supported manual fallback.
+            sdr_adapter_combo.addItem(f"{existing_sdr_adapter} (not available)", existing_sdr_adapter)
+            adapter_index = sdr_adapter_combo.count() - 1
+        sdr_adapter_combo.setCurrentIndex(adapter_index)
+        _configure_combo_width(sdr_adapter_combo, minimum=320)
+        sdr_form.addRow(
+            _make_help_label(
+                "FIO control adapter:",
+                "This is FIO's application bridge, not the SDR hardware driver. SDR++ RigCTL controls the VFO currently selected inside SDR++.",
+            ),
+            sdr_adapter_combo,
+        )
+
+        sdr_target_edit = QLineEdit(str((existing or {}).get("sdr_target", "") or ""))
+        sdr_target_edit.setObjectName("guidedReceiverTarget")
+        sdr_target_edit.setPlaceholderText("selected-vfo")
+        sdr_target_edit.setToolTip("Stable label for the VFO selected inside SDR++; use letters, numbers, hyphens, or underscores without spaces.")
+        sdr_form.addRow(
+            _make_help_label("Receiver target:", "Name the VFO selected inside SDR++, for example selected-vfo. SDR++ RigCTL does not expose a named VFO list."),
+            sdr_target_edit,
+        )
+
         sdr_host_edit = QLineEdit(str((existing or {}).get("sdr_host", "") or ""))
+        sdr_host_edit.setPlaceholderText("Optional application host")
         sdr_port_edit = QLineEdit(str((existing or {}).get("sdr_port", "") or ""))
         sdr_port_edit.setValidator(QIntValidator(1, 65535, sdr_port_edit))
+        sdr_port_edit.setPlaceholderText("Port")
         _configure_port_edit(sdr_port_edit)
-        sdr_row = QHBoxLayout()
-        sdr_row.setContentsMargins(0, 0, 0, 0)
-        sdr_row.setSpacing(8)
-        sdr_row.addWidget(sdr_host_edit, 1)
-        sdr_row.addWidget(QLabel("Port"))
-        sdr_row.addWidget(sdr_port_edit)
-        sdr_wrap = QWidget()
-        sdr_wrap.setLayout(sdr_row)
-        _add_form_row(connection_form, "Observer SDR:", sdr_wrap, "Observer SDR endpoint used when this radio is an observer.")
+        sdr_endpoint_row = QHBoxLayout()
+        sdr_endpoint_row.setContentsMargins(0, 0, 0, 0)
+        sdr_endpoint_row.setSpacing(8)
+        sdr_endpoint_row.addWidget(sdr_host_edit, 1)
+        sdr_endpoint_row.addWidget(QLabel("Port"))
+        sdr_endpoint_row.addWidget(sdr_port_edit)
+        sdr_endpoint_wrap = QWidget()
+        sdr_endpoint_wrap.setLayout(sdr_endpoint_row)
+        sdr_form.addRow(
+            _make_help_label("Application endpoint:", "Optional saved application address. A host or port by itself is not proof that FIO can control the receiver."),
+            sdr_endpoint_wrap,
+        )
+
+        sdr_verification_summary = QLabel()
+        sdr_verification_summary.setObjectName("guidedReceiverVerificationSummary")
+        sdr_verification_summary.setWordWrap(True)
+        sdr_verification_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        sdr_verification_summary.setToolTip(
+            "This is saved verification evidence only. Opening this dialog does not contact the receiver application."
+        )
+        sdr_form.addRow(sdr_verification_summary)
+
+        sdr_control_enabled_chk = QCheckBox("Enable FIO tuning after verified evidence")
+        sdr_control_enabled_chk.setObjectName("guidedReceiverControlEnabled")
+        sdr_control_enabled_chk.setToolTip(
+            "FIO tuning can be enabled only after the selected application adapter has completed a successful capability and tune/readback verification."
+        )
+        sdr_control_enabled_chk.setChecked(bool(int((existing or {}).get("sdr_control_enabled", 0) or 0)))
+        sdr_form.addRow(sdr_control_enabled_chk)
+
+        sdr_test_control_btn = QPushButton("Test control")
+        sdr_test_control_btn.setObjectName("guidedReceiverTestControl")
+        sdr_test_control_btn.setToolTip(
+            "Test control is unavailable until a receive-only asynchronous adapter service is installed. Manual tuning remains available."
+        )
+        sdr_form.addRow(sdr_test_control_btn)
+
+        sdr_manual_status = QLabel()
+        sdr_manual_status.setObjectName("guidedReceiverManualStatus")
+        sdr_manual_status.setWordWrap(True)
+        sdr_manual_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        sdr_manual_status.setToolTip("Receiver configuration is saved without scanning hardware or contacting the configured application.")
+        sdr_form.addRow(sdr_manual_status)
+
+        sdr_manual_guidance = QLabel()
+        sdr_manual_guidance.setObjectName("guidedReceiverManualGuidance")
+        sdr_manual_guidance.setWordWrap(True)
+        sdr_manual_guidance.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        sdr_form.addRow(sdr_manual_guidance)
+        _add_form_row(
+            connection_form,
+            "Observer / SDR:",
+            sdr_wrap,
+            "Choose the receiver application and save any optional connection details. FIO keeps this receiver manually tuned until a verified adapter is available.",
+        )
 
         port_prompt_group = QGroupBox("Enter App Ports")
         port_prompt_group.setVisible(False)
@@ -22956,6 +23167,166 @@ class SettingsTab(QWidget):
             "commstat": commstat_launch_edit,
             "varac": varac_install_edit,
         }
+
+        def _receiver_evidence_configuration_matches() -> bool:
+            evidence = receiver_verification_evidence
+            adapter = str(sdr_adapter_combo.currentData() or "manual").strip().lower()
+            host = sdr_host_edit.text().strip()
+            port = sdr_port_edit.text().strip()
+            target = sdr_target_edit.text().strip()
+            return bool(
+                evidence
+                and str(evidence.get("adapter") or "").strip().lower() == adapter
+                and str(evidence.get("host") or "").strip().casefold() == host.casefold()
+                and str(evidence.get("port") or "").strip() == port
+                and str(evidence.get("target") or "").strip().casefold() == target.casefold()
+            )
+
+        def _receiver_evidence_is_verified_for_current() -> bool:
+            return receiver_control_verification_matches(
+                {
+                    "sdr_adapter": str(sdr_adapter_combo.currentData() or "manual"),
+                    "sdr_host": sdr_host_edit.text().strip(),
+                    "sdr_port": sdr_port_edit.text().strip(),
+                    "sdr_target": sdr_target_edit.text().strip(),
+                    "sdr_verification_state": receiver_verification_state,
+                    "sdr_verification": receiver_verification_evidence,
+                }
+            )
+
+        def _update_receiver_manual_card() -> None:
+            """Render cache-only receiver setup guidance; never contact an endpoint."""
+
+            application = str(sdr_application_combo.currentText() or "Other / manual").strip()
+            adapter = str(sdr_adapter_combo.currentData() or "manual").strip().lower()
+            target = sdr_target_edit.text().strip()
+            endpoint = sdr_host_edit.text().strip()
+            port = sdr_port_edit.text().strip()
+            saved_profile_id = int((existing or {}).get("id", 0) or 0)
+            endpoint_detail = ""
+            if endpoint:
+                endpoint_detail = f" Saved application endpoint: {endpoint}{':' + port if port else ''}."
+            target_detail = f" Selected receiver: {target}." if target else ""
+            setup = {
+                "SDR++": "In SDR++, select the receiver and VFO, enable the RigCTL Server module, enable tuning, and confirm its bind address and port. FIO opens only short-lived receive-control connections.",
+                "SDRangel": "Open SDRangel, select the receiver hardware and device set, then tune there. Do not treat an HTTP address as verified FIO control.",
+                "SDRconnect": "Open SDRconnect, select the receiver and VFO, then tune there. A later verified setup will respect its application control ownership.",
+                "Gqrx": "Open Gqrx, select the receiver source, then tune there. Its remote-control address remains optional technical information until verified.",
+                "KiwiSDR": "Open the receiver in its normal browser/application workflow, then tune it manually. FIO does not own that listening session.",
+            }.get(
+                application,
+                "Tune this receiver manually in its normal application. Record the hardware in Radio Model above so FIO can give accurate compatibility guidance later.",
+            )
+            sdr_manual_guidance.setText(
+                setup + " You can save this profile now; manual tuning remains available even when no API is configured."
+            )
+
+            def _verification_evidence_summary(evidence: object) -> str:
+                """Return bounded display facts from saved evidence, never live state."""
+
+                if not isinstance(evidence, dict):
+                    return ""
+                labels = (
+                    ("tested_at_utc", "test date"),
+                    ("tested_at", "test date"),
+                    ("verified_at", "verification date"),
+                    ("hardware_model", "hardware"),
+                    ("hardware_family", "hardware"),
+                    ("application_version", "application"),
+                    ("api_version", "API"),
+                    ("target", "target"),
+                    ("os", "OS"),
+                )
+                facts: list[str] = []
+                seen_labels: set[str] = set()
+                for key, label in labels:
+                    value = str(evidence.get(key, "") or "").strip()
+                    if value and label not in seen_labels:
+                        facts.append(f"{label}: {value[:96]}")
+                        seen_labels.add(label)
+                    if len(facts) == 4:
+                        break
+                return "; ".join(facts)
+
+            evidence = dict(receiver_verification_evidence)
+            evidence_present = bool(evidence)
+            evidence_matches = _receiver_evidence_is_verified_for_current()
+            effective_state = receiver_verification_state
+            if adapter == "manual":
+                effective_state = "manual"
+            elif not evidence_matches:
+                effective_state = "unverified"
+            evidence_summary = _verification_evidence_summary(evidence) if evidence_matches else ""
+
+            if adapter == "manual":
+                verification_text = "Manual tuning — no FIO control adapter is selected."
+            elif adapter == "sdrpp_rigctl":
+                if receiver_test_in_progress:
+                    verification_text = "Testing SDR++ control in the background; the selected VFO will move briefly and then be restored."
+                elif effective_state == "verified" and evidence_matches:
+                    verification_text = f"FIO tuning ready — tune/readback and restoration passed ({evidence_summary or 'saved evidence'})."
+                elif receiver_verification_state == "failed":
+                    verification_text = "Saved verification result: failed. Tune this receiver manually and correct setup before a later retry."
+                elif receiver_verification_state == "verified" and evidence_present:
+                    verification_text = "Verification pending — saved evidence does not match the current host, port, or target. Test this configuration again."
+                else:
+                    verification_text = "Verification pending — no successful reversible tune/readback evidence is saved for this configuration."
+            else:
+                verification_text = f"Manual tuning — adapter '{adapter}' is not available in this build."
+            sdr_verification_summary.setText(verification_text)
+
+            test_service_ready = self._receiver_control_test_service_is_ready()
+            target_is_canonical = bool(target) and not any(char.isspace() for char in target) and "|" not in target
+            can_test = bool(
+                adapter == "sdrpp_rigctl"
+                and test_service_ready
+                and saved_profile_id > 0
+                and endpoint
+                and port
+                and target_is_canonical
+                and not receiver_test_in_progress
+            )
+            sdr_test_control_btn.setEnabled(can_test)
+            sdr_test_control_btn.setText("Testing…" if receiver_test_in_progress else "Test control")
+            if can_test:
+                sdr_test_control_btn.setToolTip(
+                    "Run a background receive-only test. The selected VFO moves briefly, readback is checked, and the original frequency is restored and checked."
+                )
+            elif adapter == "sdrpp_rigctl" and saved_profile_id <= 0:
+                sdr_test_control_btn.setToolTip("Save this receiver profile, reopen it, then test SDR++ control.")
+            elif adapter == "sdrpp_rigctl" and not target_is_canonical:
+                sdr_test_control_btn.setToolTip("Enter a receiver target without spaces, such as selected-vfo.")
+            else:
+                sdr_test_control_btn.setToolTip(
+                    "Test control is unavailable until a receive-only asynchronous adapter service is installed. Manual tuning remains available."
+                )
+
+            can_enable = bool(
+                adapter == "sdrpp_rigctl"
+                and test_service_ready
+                and effective_state == "verified"
+                and evidence_matches
+            )
+            sdr_control_enabled_chk.setEnabled(can_enable)
+            if not can_enable:
+                sdr_control_enabled_chk.setChecked(False)
+            sdr_control_enabled_chk.setToolTip(
+                "Enable scheduled FIO tuning for this receive-only endpoint."
+                if can_enable
+                else "FIO tuning remains disabled until reversible tune/readback and restoration pass for this exact configuration."
+            )
+            if can_enable:
+                sdr_manual_status.setText(
+                    "FIO tuning ready. Manual tuning remains available whenever automatic receiver control is disabled."
+                    + target_detail
+                    + endpoint_detail
+                )
+            else:
+                sdr_manual_status.setText(
+                    "Manual tuning — FIO is not controlling this receiver. Saved application details are configuration, not proof of control."
+                    + target_detail
+                    + endpoint_detail
+                )
 
         def _browse_guided_app_choice(app_id: str) -> None:
             target = app_choice_targets.get(app_id)
@@ -23629,6 +24000,25 @@ class SettingsTab(QWidget):
                 "launch_path": preserved_launch_path,
                 "sdr_host": sdr_host_edit.text().strip(),
                 "sdr_port": sdr_port_edit.text().strip(),
+                "sdr_application": str(sdr_application_combo.currentText() or "Other / manual").strip(),
+                "sdr_adapter": str(sdr_adapter_combo.currentData() or "manual").strip().lower(),
+                "sdr_target": sdr_target_edit.text().strip(),
+                "sdr_control_enabled": bool(sdr_control_enabled_chk.isChecked()),
+                "sdr_verification_state": (
+                    "manual"
+                    if str(sdr_adapter_combo.currentData() or "manual").strip().lower() == "manual"
+                    else (
+                        receiver_verification_state
+                        if _receiver_evidence_configuration_matches()
+                        else "unverified"
+                    )
+                ),
+                "sdr_verification_json": json.dumps(
+                    receiver_verification_evidence
+                    if _receiver_evidence_configuration_matches()
+                    else {},
+                    sort_keys=True,
+                ),
                 "ptt_group": ptt_group_edit.text().strip(),
                 "antenna_group": antenna_group_edit.text().strip(),
                 "antenna_supported_bands": self._band_check_values(band_checks),
@@ -24994,6 +25384,8 @@ class SettingsTab(QWidget):
                 _set_row_visible(widget, visibility.js8_fields and use_commstat)
             for widget in observer_field_widgets:
                 _set_row_visible(widget, visibility.observer_fields)
+            if observer_mode:
+                _update_receiver_manual_card()
             for widget in fldigi_field_widgets:
                 _set_row_visible(widget, visibility.fldigi_fields)
             for widget in flmsg_field_widgets:
@@ -25189,6 +25581,7 @@ class SettingsTab(QWidget):
             varac_launch_cmd_edit,
             sdr_host_edit,
             sdr_port_edit,
+            sdr_target_edit,
             ptt_group_edit,
             antenna_group_edit,
             advanced_frequency_group_edit,
@@ -25196,6 +25589,64 @@ class SettingsTab(QWidget):
             amplifier_group_edit,
         ]:
             widget.textChanged.connect(lambda _text: _update_dialog_readiness())
+        sdr_application_combo.currentTextChanged.connect(lambda _text: _update_receiver_manual_card())
+        sdr_application_combo.currentTextChanged.connect(lambda _text: _update_dialog_readiness())
+
+        def _on_receiver_adapter_changed(_index: int) -> None:
+            if str(sdr_adapter_combo.currentData() or "manual") == "sdrpp_rigctl":
+                if sdr_application_combo.currentText().strip() in {"", "Other / manual"}:
+                    application_index = sdr_application_combo.findData("SDR++")
+                    if application_index >= 0:
+                        sdr_application_combo.setCurrentIndex(application_index)
+                if not sdr_host_edit.text().strip():
+                    sdr_host_edit.setText("127.0.0.1")
+                if not sdr_port_edit.text().strip():
+                    sdr_port_edit.setText("4532")
+                if not sdr_target_edit.text().strip():
+                    sdr_target_edit.setText("selected-vfo")
+            _update_receiver_manual_card()
+
+        sdr_adapter_combo.currentIndexChanged.connect(_on_receiver_adapter_changed)
+        sdr_adapter_combo.currentIndexChanged.connect(lambda _index: _update_dialog_readiness())
+        sdr_target_edit.textChanged.connect(lambda _text: _update_receiver_manual_card())
+        sdr_host_edit.textChanged.connect(lambda _text: _update_receiver_manual_card())
+        sdr_port_edit.textChanged.connect(lambda _text: _update_receiver_manual_card())
+        sdr_control_enabled_chk.stateChanged.connect(lambda _state: _update_dialog_readiness())
+
+        def _queue_receiver_control_test() -> None:
+            """Publish a draft to an installed worker without endpoint I/O here."""
+
+            nonlocal receiver_test_in_progress
+            if not sdr_test_control_btn.isEnabled():
+                return
+            draft = _draft_radio_profile()
+            draft["id"] = int((existing or {}).get("id", 0) or 0)
+            receiver_test_in_progress = True
+            _update_receiver_manual_card()
+            QTimer.singleShot(0, lambda payload=draft: self.receiver_control_test_requested.emit(payload))
+
+        def _on_receiver_control_test_completed(result: Dict[str, Any]) -> None:
+            nonlocal receiver_test_in_progress, receiver_verification_state, receiver_verification_evidence
+            expected_profile_id = int((existing or {}).get("id", 0) or 0)
+            try:
+                result_profile_id = int(result.get("profile_id", 0) or 0)
+            except (TypeError, ValueError):
+                result_profile_id = 0
+            if expected_profile_id <= 0 or result_profile_id != expected_profile_id:
+                return
+            receiver_test_in_progress = False
+            state = str(result.get("verification_state") or "failed").strip().lower()
+            receiver_verification_state = state if state in {"verified", "failed"} else "failed"
+            evidence = result.get("verification")
+            receiver_verification_evidence = dict(evidence) if isinstance(evidence, dict) else {}
+            detail = str(result.get("detail") or "").strip()
+            if detail and receiver_verification_state != "verified":
+                receiver_verification_evidence.setdefault("failure_detail", detail[:240])
+            _update_receiver_manual_card()
+            _update_dialog_readiness()
+
+        sdr_test_control_btn.clicked.connect(_queue_receiver_control_test)
+        self.receiver_control_test_completed.connect(_on_receiver_control_test_completed)
         advanced_frequency_mode_combo.currentIndexChanged.connect(lambda _index: _update_dialog_readiness())
         advanced_frequency_window_spin.valueChanged.connect(lambda _value: _update_dialog_readiness())
         for widget in [js8_port_edit, js8_profile_edit, js8_directed_edit]:
@@ -25273,7 +25724,14 @@ class SettingsTab(QWidget):
         buttons.accepted.connect(_save)
         buttons.rejected.connect(dlg.reject)
         _update_guided_save_button()
-        if dlg.exec() != QDialog.Accepted:
+        try:
+            dialog_result = dlg.exec()
+        finally:
+            try:
+                self.receiver_control_test_completed.disconnect(_on_receiver_control_test_completed)
+            except (RuntimeError, TypeError):
+                pass
+        if dialog_result != QDialog.Accepted:
             return None
         return out
 

@@ -23,6 +23,7 @@ from freqinout.core.message_projection_queue import (
     claim_ready,
     enqueue_dirty_conn,
     get_source_state_conn,
+    queue_diagnostics,
     release_owner_leases_conn,
     retry_dirty_conn,
     upsert_source_state_conn,
@@ -104,6 +105,14 @@ _SOURCE_SPECS: Mapping[str, Mapping[str, str]] = {
 }
 
 
+# A coordinator cycle is deliberately one UI-friendly unit of historical
+# catch-up.  Discovery must never fill the durable queue faster than this same
+# cycle can drain it.  Preparation uses smaller chunks so parsing/classifying a
+# large source row set yields the interpreter before the writer starts.
+MAX_CYCLE_ITEMS = 100
+PREPARE_ITEMS_PER_SLICE = 25
+
+
 def native_projection_source_state_specs() -> tuple[tuple[str, str, str], ...]:
     """Return stable derived-state identities for native reconcilers.
 
@@ -136,6 +145,7 @@ def reconcile_native_source_changes(
     *,
     sources: Sequence[str] = tuple(_SOURCE_SPECS),
     limit_per_source: int = 100,
+    max_items: int | None = None,
 ) -> dict[str, int]:
     """Discover only rows beyond each durable keyset watermark.
 
@@ -145,12 +155,20 @@ def reconcile_native_source_changes(
     """
 
     cap = max(1, min(1000, int(limit_per_source or 100)))
+    remaining = None if max_items is None else max(0, int(max_items))
     conn = connect_sqlite_runtime_write(
         db_path, timeout=0.25, row_factory=sqlite3.Row, busy_timeout_ms=250
     )
     results: dict[str, int] = {}
     try:
         for adapter in (str(value).strip().lower() for value in sources):
+            # ``max_items`` is the coordinator's queue budget.  Do not even
+            # advance an additional source cursor once the cycle has filled
+            # that budget: a later source remains durable, undiscovered work
+            # for the next short cycle rather than creating a hidden backlog.
+            if remaining is not None and remaining <= 0:
+                results[adapter] = 0
+                continue
             spec = _SOURCE_SPECS.get(adapter)
             if spec is None:
                 continue
@@ -186,6 +204,7 @@ def reconcile_native_source_changes(
             )
             high_water = 0 if state is None or version_changed else _int_key(state.high_water_key)
             watermark_expr = spec["watermark"]
+            source_cap = cap if remaining is None else min(cap, remaining)
             rows = conn.execute(
                 f"""
                 SELECT {watermark_expr} AS discovery_key,
@@ -197,9 +216,11 @@ def reconcile_native_source_changes(
                  ORDER BY {watermark_expr}
                  LIMIT ?
                 """,
-                (high_water, cap),
+                (high_water, source_cap),
             ).fetchall()
             results[adapter] = len(rows)
+            if remaining is not None:
+                remaining -= len(rows)
             if not rows:
                 if state is None or version_changed or state.availability_state != "available":
                     with conn:
@@ -261,6 +282,7 @@ class MessageProjectionCoordinator:
         self._lock = threading.Lock()
         self._inflight: Future | None = None
         self._closed = False
+        self._cancel = threading.Event()
 
     def submit_once(self, *, reconcile: bool = True) -> Future:
         """Coalesce callers onto one non-UI projection cycle."""
@@ -272,14 +294,43 @@ class MessageProjectionCoordinator:
                 return future
             if self._inflight is not None and not self._inflight.done():
                 return self._inflight
+            self._cancel.clear()
             self._inflight = self._executor.submit(self.run_once, reconcile=reconcile)
             return self._inflight
 
-    def run_once(self, *, reconcile: bool = True) -> ProjectionCycleResult:
+    def run_once(
+        self,
+        *,
+        reconcile: bool = True,
+        cancel_event: threading.Event | None = None,
+    ) -> ProjectionCycleResult:
+        """Drain one bounded durable-work cycle without blocking the UI.
+
+        Existing dirty rows always take precedence over fresh native-table
+        discovery.  This keeps historical scans from accumulating a larger
+        queue than the same cycle can process and leaves all cursors durable.
+        """
+
+        event = cancel_event or self._cancel
+        if event.is_set():
+            return ProjectionCycleResult(state="cancelled")
         discovered = 0
-        if reconcile:
+        # Queue-first backpressure: when work is already durable, consume it
+        # before considering any additional historical discovery.
+        queued_before = int(queue_diagnostics(self.db_path).get("depth", 0) or 0)
+        items = claim_ready(
+            self.db_path,
+            owner=self.owner,
+            limit=MAX_CYCLE_ITEMS,
+            lease_seconds=30.0,
+        )
+        if not items and not queued_before and reconcile and not event.is_set():
             reconcile_started = time.perf_counter()
-            source_discoveries = reconcile_native_source_changes(self.db_path)
+            source_discoveries = reconcile_native_source_changes(
+                self.db_path,
+                limit_per_source=MAX_CYCLE_ITEMS,
+                max_items=MAX_CYCLE_ITEMS,
+            )
             discovered = sum(source_discoveries.values())
             reconcile_ms = (time.perf_counter() - reconcile_started) * 1000.0
             if discovered or reconcile_ms >= 25.0:
@@ -296,20 +347,66 @@ class MessageProjectionCoordinator:
                     meta={"new_or_coalesced": discovered, "sources": source_discoveries},
                     level="debug",
                 )
-        items = claim_ready(self.db_path, owner=self.owner, limit=100, lease_seconds=30.0)
+            if event.is_set():
+                return ProjectionCycleResult(discovered=discovered, state="cancelled")
+            items = claim_ready(
+                self.db_path,
+                owner=self.owner,
+                limit=MAX_CYCLE_ITEMS,
+                lease_seconds=30.0,
+            )
         if not items:
-            return ProjectionCycleResult(discovered=discovered)
+            return ProjectionCycleResult(
+                discovered=discovered,
+                deferred=1 if queued_before and not event.is_set() else 0,
+                state=(
+                    "cancelled"
+                    if event.is_set()
+                    else "deferred"
+                    if queued_before
+                    else "idle"
+                ),
+            )
+        if event.is_set():
+            self._release_claims(items)
+            return ProjectionCycleResult(
+                discovered=discovered,
+                claimed=len(items),
+                deferred=len(items),
+                state="cancelled",
+            )
         upserts = tuple(item for item in items if item.operation != "delete")
         deletes = tuple(item for item in items if item.operation == "delete")
         bundles: tuple[ProjectionBundle, ...] = ()
         missing: tuple[object, ...] = ()
         if upserts:
             prepare_started = time.perf_counter()
-            conn = connect_sqlite_readonly(self.db_path, row_factory=sqlite3.Row)
-            try:
-                bundles, missing = prepare_native_message_bundles(conn, upserts)
-            finally:
-                conn.close()
+            prepared: list[ProjectionBundle] = []
+            absent: list[object] = []
+            for start in range(0, len(upserts), PREPARE_ITEMS_PER_SLICE):
+                if event.is_set():
+                    self._release_claims(items)
+                    return ProjectionCycleResult(
+                        discovered=discovered,
+                        claimed=len(items),
+                        prepared=len(prepared),
+                        deferred=len(items),
+                        state="cancelled",
+                    )
+                conn = connect_sqlite_readonly(self.db_path, row_factory=sqlite3.Row)
+                try:
+                    chunk_bundles, chunk_missing = prepare_native_message_bundles(
+                        conn, upserts[start : start + PREPARE_ITEMS_PER_SLICE]
+                    )
+                finally:
+                    conn.close()
+                prepared.extend(chunk_bundles)
+                absent.extend(chunk_missing)
+                # Keep historical parsing cooperative even when one source
+                # family has a long sequence of heavyweight payloads.
+                if start + PREPARE_ITEMS_PER_SLICE < len(upserts):
+                    time.sleep(0)
+            bundles, missing = tuple(prepared), tuple(absent)
             prepare_ms = (time.perf_counter() - prepare_started) * 1000.0
             emit_span(
                 "messages.prepare_batch",
@@ -320,6 +417,15 @@ class MessageProjectionCoordinator:
                     "unchanged_or_missing": len(missing),
                 },
                 level="warning" if prepare_ms >= 100.0 else "debug",
+            )
+        if event.is_set():
+            self._release_claims(items)
+            return ProjectionCycleResult(
+                discovered=discovered,
+                claimed=len(items),
+                prepared=len(bundles),
+                deferred=len(items),
+                state="cancelled",
             )
         by_identity = {
             (item.source_id, item.external_kind, item.external_key): item for item in upserts
@@ -344,7 +450,9 @@ class MessageProjectionCoordinator:
         max_transaction_ms = 0.0
         states: list[str] = []
         if owned_bundles:
-            result: ProjectionWriteResult = self._writer.submit(owned_bundles).result()
+            result: ProjectionWriteResult = self._writer.submit(
+                owned_bundles, cancel_event=event
+            ).result()
             committed += result.committed_bundles
             deferred += result.deferred_bundles
             max_transaction_ms = max(max_transaction_ms, float(result.max_transaction_ms or 0.0))
@@ -365,14 +473,17 @@ class MessageProjectionCoordinator:
                 )
         if delete_items:
             delete_result: ProjectionWriteResult = self._writer.submit_deletions(
-                ProjectionDeleteRequest(
-                    source_id=item.source_id,
-                    external_kind=item.external_kind,
-                    external_key=item.external_key,
-                    dirty_key=item.stable_key,
-                    dirty_owner=self.owner,
-                )
-                for item in delete_items
+                (
+                    ProjectionDeleteRequest(
+                        source_id=item.source_id,
+                        external_kind=item.external_kind,
+                        external_key=item.external_key,
+                        dirty_key=item.stable_key,
+                        dirty_owner=self.owner,
+                    )
+                    for item in delete_items
+                ),
+                cancel_event=event,
             ).result()
             deleted = delete_result.message_upserts
             committed += delete_result.committed_bundles
@@ -403,6 +514,26 @@ class MessageProjectionCoordinator:
             state=state,
         )
 
+    def _release_claims(self, items: Sequence[DirtyProjectionItem]) -> None:
+        """Make unprocessed durable work immediately available after cancel."""
+
+        if not items:
+            return
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = connect_sqlite_runtime_write(
+                self.db_path, timeout=0.25, busy_timeout_ms=250
+            )
+            with conn:
+                release_owner_leases_conn(conn, self.owner)
+        except Exception:
+            # A short lease is still a safe fallback if shutdown races another
+            # SQLite writer.
+            pass
+        finally:
+            if conn is not None:
+                conn.close()
+
     def _retry(self, *, items: Sequence[DirtyProjectionItem], code: str) -> None:
         conn = connect_sqlite_runtime_write(self.db_path, timeout=0.25, busy_timeout_ms=250)
         try:
@@ -422,6 +553,7 @@ class MessageProjectionCoordinator:
             if self._closed:
                 return
             self._closed = True
+            self._cancel.set()
         self._executor.shutdown(wait=wait, cancel_futures=True)
         conn: sqlite3.Connection | None = None
         try:

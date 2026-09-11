@@ -34,7 +34,7 @@ class _BatchCoordinator:
         self.event = event
         self.calls = 0
 
-    def run_once(self, *, reconcile: bool = True) -> ProjectionCycleResult:
+    def run_once(self, *, reconcile: bool = True, cancel_event=None) -> ProjectionCycleResult:
         assert reconcile is True
         self.calls += 1
         if self.remaining <= 0:
@@ -56,7 +56,7 @@ class _BlockedCoordinator:
         self.started = threading.Event()
         self.release = threading.Event()
 
-    def run_once(self, *, reconcile: bool = True) -> ProjectionCycleResult:
+    def run_once(self, *, reconcile: bool = True, cancel_event=None) -> ProjectionCycleResult:
         assert reconcile is True
         self.started.set()
         assert self.release.wait(2.0)

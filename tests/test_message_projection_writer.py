@@ -180,14 +180,14 @@ def test_writer_bundle_is_atomic_when_a_later_bundle_fails(tmp_path, monkeypatch
         writer.close()
 
 
-def test_writer_caps_transactions_at_100_bundles(tmp_path) -> None:
+def test_writer_caps_cpu_and_transaction_units_at_25_bundles(tmp_path) -> None:
     db_path = _prepared_writer(tmp_path)
     writer = ProjectionBundleWriter(db_path, transaction_budget_seconds=2.0)
     try:
         result = writer.write_batch(tuple(_bundle(f"message-{idx}") for idx in range(101)))
         assert result.state == "committed"
         assert result.committed_bundles == 101
-        assert result.transactions == 2
+        assert result.transactions == 5
         assert result.deferred_bundles == 0
     finally:
         writer.close()

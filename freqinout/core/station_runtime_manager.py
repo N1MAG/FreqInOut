@@ -24,6 +24,7 @@ from freqinout.core.radio_status_poll_coordinator import RadioStatusPollCoordina
 from freqinout.core.receiver_control import (
     ReceiverControlClient,
     ReceiverIdentity,
+    receiver_control_verification_matches,
     receiver_identity_from_profile,
 )
 from freqinout.core.software_status_service import SoftwareStatusService
@@ -141,7 +142,11 @@ def _device_endpoint_summary(profile: Mapping[str, Any]) -> str:
         host = str(profile.get("sdr_host", "") or "").strip()
         port = profile.get("sdr_port")
         label = application or "Observer SDR"
-        if adapter == "manual" or not _row_bool(profile.get("sdr_control_enabled", False), False):
+        if (
+            adapter == "manual"
+            or not _row_bool(profile.get("sdr_control_enabled", False), False)
+            or not receiver_control_verification_matches(profile)
+        ):
             return f"{label} / manual tuning"
         if host and port not in (None, ""):
             suffix = f" / {target}" if target else ""
@@ -469,7 +474,7 @@ class DeviceRuntime:
             if (
                 self.receiver_identity is not None
                 and _row_bool(self.profile.get("sdr_control_enabled", 0), False)
-                and str(self.profile.get("sdr_verification_state", "manual") or "manual").strip().lower() == "verified"
+                and receiver_control_verification_matches(self.profile)
                 and callable(self._receiver_client_factory)
             ):
                 try:
@@ -635,10 +640,7 @@ class DeviceRuntime:
         control_info = dict(service_states.get(control_key, {})) if control_key else {}
         if device_class == "observer":
             control_enabled = _row_bool(self.profile.get("sdr_control_enabled", 0), False)
-            verification_state = str(
-                self.profile.get("sdr_verification_state", "manual") or "manual"
-            ).strip().lower()
-            if control_enabled and verification_state == "verified" and self.receiver_client is not None:
+            if control_enabled and receiver_control_verification_matches(self.profile) and self.receiver_client is not None:
                 observer_info = {
                     "state": "attention",
                     "tooltip": "Receiver control is configured but has no cached live verification; use manual tuning until tune/readback succeeds.",

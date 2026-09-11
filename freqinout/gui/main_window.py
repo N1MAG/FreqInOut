@@ -64,6 +64,8 @@ from freqinout.core.condition_sop_audit import (
 )
 from freqinout.core.station_runtime_manager import StationRuntimeManager
 from freqinout.core.scheduler_engine import SchedulerEngine
+from freqinout.core.receiver_qualification_service import ReceiverQualificationCoordinator
+from freqinout.core.scheduler_coordination import EndpointResult
 from freqinout.core.background_ingest import BackgroundIngestController
 from freqinout.core.message_projection_maintenance import MessageProjectionMaintenanceService
 from freqinout.core.dependency_status_service import get_dependency_status_service, shutdown_dependency_status_service
@@ -107,6 +109,7 @@ from freqinout.core.view_contracts import (
 )
 from freqinout.utils.timezones import get_timezone
 from freqinout.radio_interface.rigctl_client import rig_control_client_from_settings
+from freqinout.core.sdrpp_rigctl_receiver import receiver_control_client_from_profile
 from freqinout.radio_interface.js8_status import JS8ControlClient, VarACStatusClient
 from freqinout.radio_interface.fldigi_status import FldigiLogStatusClient
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
@@ -224,6 +227,7 @@ class MainWindow(QMainWindow):
 
     _message_projection_cycle_finished = Signal(object)
     _message_projection_progressed = Signal(object)
+    _receiver_qualification_finished = Signal(object)
 
     def __init__(self, startup_status: Callable[[str], None] | None = None):
         super().__init__()
@@ -240,11 +244,15 @@ class MainWindow(QMainWindow):
         self._message_projection_future = None
         self._message_projection_catchup_pending = False
         self._message_projection_refresh_sequence = 0
+        self._receiver_qualification_profiles: dict[int, dict[str, object]] = {}
         self._message_projection_cycle_finished.connect(
             self._on_message_projection_cycle_finished
         )
         self._message_projection_progressed.connect(
             self._on_message_projection_progressed
+        )
+        self._receiver_qualification_finished.connect(
+            self._on_receiver_qualification_finished
         )
         self._app_active = True
         self._ui_resume_pending = False
@@ -287,7 +295,11 @@ class MainWindow(QMainWindow):
         self.multi_radio_store = _construct_startup_component("multi_radio_store", MultiRadioStore)
         self.station_runtime_manager = _construct_startup_component(
             "station_runtime_manager",
-            lambda: StationRuntimeManager(store=self.multi_radio_store, settings=self.settings),
+            lambda: StationRuntimeManager(
+                store=self.multi_radio_store,
+                settings=self.settings,
+                receiver_client_factory=receiver_control_client_from_profile,
+            ),
         )
         self.station_runtime_manager.sync_with_store()
         self._runtime_profile_signature: tuple[object, ...] | None = None
@@ -323,7 +335,11 @@ class MainWindow(QMainWindow):
         # Secondary widgets retain stable stack slots until first navigation.
         self.settings_tab = _construct_startup_component(
             "settings_tab",
-            lambda: SettingsTab(self, action_feedback_service=self.action_feedback_service),
+            lambda: SettingsTab(
+                self,
+                action_feedback_service=self.action_feedback_service,
+                defer_initial_load=True,
+            ),
         )
         self._sync_settings_runtime_status()
         self.launch_orchestrator = self.settings_tab.launch_orchestrator
@@ -336,7 +352,11 @@ class MainWindow(QMainWindow):
         self.js8_tab: JS8CallNetControlTab | None = None
         self.sop_tab = _construct_startup_component(
             "sop_tab",
-            lambda: SOPTab(self, plan_context_service=self.plan_context_service),
+            lambda: SOPTab(
+                self,
+                plan_context_service=self.plan_context_service,
+                defer_initial_load=True,
+            ),
         )
         if hasattr(self.sop_tab, "local_net_return_requested"):
             self.sop_tab.local_net_return_requested.connect(self._return_navigation_intent)
@@ -351,7 +371,11 @@ class MainWindow(QMainWindow):
         self._context_help_dialog: ContextHelpDialog | None = None
         self.controlfreq_tab = _construct_startup_component(
             "ops_center",
-            lambda: ControlFreqTab(self, plan_context_service=self.plan_context_service),
+            lambda: ControlFreqTab(
+                self,
+                plan_context_service=self.plan_context_service,
+                defer_initial_refresh=True,
+            ),
         )
         if hasattr(self.controlfreq_tab, "set_local_nets_outlook_provider"):
             self.controlfreq_tab.set_local_nets_outlook_provider(self._build_local_nets_outlook)
@@ -1056,6 +1080,16 @@ class MainWindow(QMainWindow):
             pass
         self._notify_startup_status("Starting scheduler services...")
         self.scheduler.start()
+        self.receiver_qualification = ReceiverQualificationCoordinator(
+            self.scheduler.shared_endpoint_lane_registry(),
+            receiver_control_client_from_profile,
+        )
+        self._shutdown_registry.register(
+            "receiver_qualification",
+            request_stop=self.receiver_qualification.stop,
+            is_stopped=self.receiver_qualification.is_stopped,
+        )
+        self.settings_tab.set_receiver_control_test_service_ready(True)
         self.background_ingest = _construct_startup_component(
             "background_ingest",
             lambda: BackgroundIngestController(
@@ -1215,6 +1249,13 @@ class MainWindow(QMainWindow):
         _connect_or_log("settings_saved -> background ingest", self.settings_tab.settings_saved, self.background_ingest.refresh_runtime_settings)
         _connect_or_log("settings_saved -> station health", self.settings_tab.settings_saved, self._on_station_health_settings_saved)
         _connect_or_log("settings_saved -> local mesh runtime", self.settings_tab.settings_saved, self._restart_mesh_runtime_if_needed)
+        receiver_test_signal = getattr(self.settings_tab, "receiver_control_test_requested", None)
+        if receiver_test_signal is not None:
+            _connect_or_log(
+                "receiver control test requested",
+                receiver_test_signal,
+                self._on_receiver_control_test_requested,
+            )
         mesh_connect_signal = getattr(self.settings_tab, "mesh_connect_requested", None)
         if mesh_connect_signal is not None:
             _connect_or_log("mesh connect requested", mesh_connect_signal, self._connect_saved_mesh_from_station_command)
@@ -7017,26 +7058,44 @@ class MainWindow(QMainWindow):
         expires = float(getattr(self, "_station_command_plan_cache_expires", 0.0) or 0.0)
         if isinstance(cache, tuple) and now < expires:
             return cache
+        # The command bar is a render path.  Its former fallback opened the
+        # settings database every 15 seconds (and after each forced refresh),
+        # so a busy message writer could freeze the entire Qt thread.  The
+        # scheduler already publishes the same plan/profile projection from a
+        # worker; derive the display cache exclusively from that immutable
+        # snapshot.
         assignments_by_radio: dict[int, dict[str, object]] = {}
         plans_by_id: dict[int, dict[str, object]] = {}
-        store = getattr(self, "multi_radio_store", None)
-        if store is not None:
+        try:
+            lanes = self._station_command_active_schedule_lanes(force=False)
+        except Exception:
+            lanes = {}
+        for radio_id, lane in lanes.items():
+            if not isinstance(lane, Mapping):
+                continue
             try:
-                for row in store.list_effective_assigned_plans():
-                    data = dict(row)
-                    radio_id = int(data.get("device_profile_id") or 0)
-                    if radio_id > 0:
-                        assignments_by_radio[radio_id] = data
+                plan_id = int(lane.get("frequency_plan_id") or 0)
             except Exception:
-                assignments_by_radio = {}
-            try:
-                for row in store.list_frequency_plans():
-                    data = dict(row)
-                    plan_id = int(data.get("id") or 0)
-                    if plan_id > 0:
-                        plans_by_id[plan_id] = data
-            except Exception:
-                plans_by_id = {}
+                plan_id = 0
+            if plan_id <= 0:
+                continue
+            assignments_by_radio[int(radio_id)] = {
+                "device_profile_id": int(radio_id),
+                "frequency_plan_id": plan_id,
+                "frequency_plan_name": str(lane.get("frequency_plan_name") or ""),
+            }
+            schedule_refs = [
+                dict(row)
+                for key in ("hf_rows", "net_rows")
+                for row in (lane.get(key) or ())
+                if isinstance(row, Mapping)
+            ]
+            plans_by_id[plan_id] = {
+                "id": plan_id,
+                "name": str(lane.get("frequency_plan_name") or ""),
+                "schedule_refs_json": json.dumps(schedule_refs, sort_keys=True, default=str),
+                "frequency_refs_json": "[]",
+            }
         cache = (assignments_by_radio, plans_by_id)
         self._station_command_plan_cache_data = cache
         self._station_command_plan_cache_expires = now + 15.0
@@ -11420,6 +11479,114 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self._refresh_station_overview(force=True)
+
+    @staticmethod
+    def _failed_receiver_verification(
+        profile: Mapping[str, object],
+        detail: str,
+    ) -> dict[str, object]:
+        try:
+            port = int(profile.get("sdr_port") or 0)
+        except (TypeError, ValueError):
+            port = 0
+        return {
+            "schema_version": 1,
+            "tested_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "adapter": str(profile.get("sdr_adapter") or "").strip().lower(),
+            "application": str(profile.get("sdr_application") or "").strip(),
+            "host": str(profile.get("sdr_host") or "").strip(),
+            "port": port,
+            "target": str(profile.get("sdr_target") or "").strip(),
+            "tune_readback_verified": False,
+            "restore_readback_verified": False,
+            "failure_detail": str(detail or "Receiver qualification failed.")[:240],
+        }
+
+    def _publish_receiver_qualification_result(
+        self,
+        profile: Mapping[str, object],
+        *,
+        verification_state: str,
+        detail: str,
+        verification: object = None,
+    ) -> None:
+        try:
+            profile_id = int(profile.get("id") or profile.get("device_profile_id") or 0)
+        except (TypeError, ValueError):
+            profile_id = 0
+        evidence = (
+            dict(verification)
+            if isinstance(verification, Mapping)
+            else self._failed_receiver_verification(profile, detail)
+        )
+        payload = {
+            "profile_id": profile_id,
+            "verification_state": str(verification_state or "failed").strip().lower(),
+            "detail": str(detail or "").strip(),
+            "verification": evidence,
+        }
+        signal = getattr(self.settings_tab, "receiver_control_test_completed", None)
+        if signal is not None:
+            signal.emit(payload)
+
+    def _on_receiver_control_test_requested(self, profile: object) -> None:
+        """Queue explicit SDR qualification; this UI slot performs no endpoint I/O."""
+
+        if self._shutting_down or not isinstance(profile, Mapping):
+            return
+        snapshot = dict(profile)
+        try:
+            profile_id = int(snapshot.get("id") or snapshot.get("device_profile_id") or 0)
+        except (TypeError, ValueError):
+            profile_id = 0
+        if profile_id > 0:
+            self._receiver_qualification_profiles[profile_id] = snapshot
+        try:
+            submission = self.receiver_qualification.request(
+                snapshot,
+                self._receiver_qualification_finished.emit,
+            )
+        except Exception as exc:
+            detail = str(exc).strip() or "Receiver qualification could not start."
+            self._publish_receiver_qualification_result(
+                snapshot,
+                verification_state="failed",
+                detail=detail,
+            )
+            return
+        if not submission.accepted:
+            detail = f"Receiver qualification was not started ({submission.disposition}); manual tuning remains available."
+            self._publish_receiver_qualification_result(
+                snapshot,
+                verification_state="failed",
+                detail=detail,
+            )
+
+    def _on_receiver_qualification_finished(self, result: object) -> None:
+        """Marshal an immutable endpoint result onto the Qt thread."""
+
+        if not isinstance(result, EndpointResult):
+            return
+        actual = result.actual_state()
+        try:
+            profile_id = int(actual.get("profile_id") or 0)
+        except (TypeError, ValueError):
+            profile_id = 0
+        profile = self._receiver_qualification_profiles.pop(profile_id, {"id": profile_id})
+        verification = actual.get("verification")
+        verified = bool(
+            result.status in {"applied_and_verified", "applied_unverified"}
+            and str(actual.get("verification_state") or "").strip().lower() == "verified"
+            and isinstance(verification, Mapping)
+            and bool(verification.get("tune_readback_verified"))
+            and bool(verification.get("restore_readback_verified"))
+        )
+        self._publish_receiver_qualification_result(
+            profile,
+            verification_state="verified" if verified else "failed",
+            detail=result.detail or ("Receiver control verified." if verified else result.reason_code),
+            verification=verification if isinstance(verification, Mapping) else None,
+        )
 
     def _on_runtime_settings_saved(self) -> None:
         self._rebuild_runtime_clients()

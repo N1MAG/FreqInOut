@@ -378,8 +378,19 @@ class ControlFreqTab(QWidget):
     local_net_dismiss_requested = Signal(object)
     local_net_open_sop_requested = Signal(object)
 
-    def __init__(self, parent=None, *, plan_context_service: Optional[PlanContextService] = None):
+    def __init__(
+        self,
+        parent=None,
+        *,
+        plan_context_service: Optional[PlanContextService] = None,
+        defer_initial_refresh: bool = False,
+    ):
         super().__init__(parent)
+        # The main shell creates Ops Center before it can paint.  Keep the
+        # constructor limited to widget/layout construction there; the first
+        # active-tab tick owns DB-backed projections and index maintenance.
+        # Standalone/test callers retain the historical eager behaviour.
+        self._defer_initial_refresh = bool(defer_initial_refresh)
         self.settings = SettingsManager()
         self.plan_context_service = plan_context_service
         self._sop_manager = SOPManager()
@@ -541,8 +552,15 @@ class ControlFreqTab(QWidget):
         refresh_hold_duration_combo(self.hold_duration_combo, self.settings, self._runtime_hold_duration_profile())
         self._restore_ui_state()
         self._apply_theme()
-        self._refresh_all()
-        QTimer.singleShot(0, self._schedule_focus_index_backfill)
+        if self._defer_initial_refresh:
+            # A clock-only first frame makes the dashboard immediately
+            # intelligible without opening SQLite, refreshing schedule views,
+            # or competing with startup ingestion for the database lock.
+            self._refresh_clock_display()
+            self._last_refresh_ts = 0.0
+        else:
+            self._refresh_all()
+            QTimer.singleShot(0, self._schedule_focus_index_backfill)
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -2367,7 +2385,11 @@ class ControlFreqTab(QWidget):
     def set_tab_active(self, active: bool) -> None:
         self._active = bool(active)
         if self._active:
-            QTimer.singleShot(0, self._schedule_focus_index_backfill)
+            # Give the stack switch and its first paint a chance to complete
+            # before its optional index maintenance begins.  The worker itself
+            # is bounded, but beginning it during shell construction can still
+            # contend with the startup message projection database work.
+            QTimer.singleShot(600, self._schedule_focus_index_backfill)
             self._reload_sop_manager_settings()
             if self._timer is None:
                 self._timer = QTimer(self)
@@ -2387,9 +2409,9 @@ class ControlFreqTab(QWidget):
             self._clock_timer.start(1000)
             # Keep tab switch snappy: defer initial refresh work until after
             # the screen change event has returned to the UI loop.
-            QTimer.singleShot(0, self._refresh_frequency_control_tick)
+            QTimer.singleShot(75, self._refresh_frequency_control_tick)
             # Slightly delay status probing so first paint is not blocked.
-            QTimer.singleShot(150, self._refresh_status_widgets)
+            QTimer.singleShot(175, self._refresh_status_widgets)
             QTimer.singleShot(0, self._refresh_clock_display)
             if self._sop_outlook_refresh_pending and bool(self._view_cards.get("schedule", True)):
                 self._sop_outlook_refresh_pending = False

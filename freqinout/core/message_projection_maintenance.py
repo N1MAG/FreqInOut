@@ -256,7 +256,10 @@ class MessageProjectionMaintenanceService:
         self._record_progress(progress)
         try:
             while not event.is_set() and (limit is None or progress.cycles < limit):
-                result = self._coordinator.run_once(reconcile=True)
+                result = self._coordinator.run_once(
+                    reconcile=True,
+                    cancel_event=event,
+                )
                 progress = _accumulate(progress, result)
                 self._record_progress(progress)
                 if progress.rebuild_id:

@@ -14,6 +14,7 @@ from freqinout.core.operator_identity import (
     ensure_operator_identity_schema,
     get_or_create_operator_identity,
 )
+from freqinout.core.sqlite_utils import connect_sqlite_readonly, table_exists
 
 ALLOWED_GROUP_ROLES = {"", "HUB", "HUB-ALT", "ALT-HUB", "NCS", "ANCS", "PEER"}
 GROUP_ROLE_ALIASES = {"ALT-HUB": "HUB-ALT"}
@@ -720,9 +721,14 @@ def get_all_operators() -> List[Dict[str, Any]]:
     if not db_path.exists():
         return []
 
+    conn: sqlite3.Connection | None = None
     try:
-        conn = sqlite3.connect(db_path)
-        _ensure_table(conn)
+        # This is a UI/search projection.  Startup owns schema assurance; a
+        # list operation must never wait for a write lock or run identity
+        # repairs merely because Settings/Spotter became visible.
+        conn = connect_sqlite_readonly(db_path)
+        if not table_exists(conn, "operator_checkins"):
+            return []
         cur = conn.cursor()
         cur.execute(
             """
@@ -778,12 +784,14 @@ def get_all_operators() -> List[Dict[str, Any]]:
                     "roster_region": roster_region or "",
                 }
             )
-        conn.close()
         return rows
 
     except Exception as e:
         log.error("checkin_db: get_all_operators failed: %s", e)
         return []
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _ensure_js8_links_seen(conn: sqlite3.Connection) -> None:

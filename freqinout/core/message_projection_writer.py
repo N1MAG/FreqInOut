@@ -38,7 +38,11 @@ from freqinout.core.sqlite_utils import connect_sqlite_runtime_write
 from freqinout.core.perf_metrics import emit_span
 
 
-MAX_BUNDLES_PER_TRANSACTION = 100
+# Difference/signature preparation happens before ``BEGIN IMMEDIATE`` and can
+# still monopolize the Python interpreter on large JSON artifacts.  Keep that
+# CPU-bound unit small as well as the transaction itself; the coordinator owns
+# the larger 100-identity catch-up budget.
+MAX_BUNDLES_PER_TRANSACTION = 25
 MAX_TRANSACTION_SECONDS = 0.050
 INITIAL_BUSY_RETRY_SECONDS = 0.050
 MAX_BUSY_RETRY_SECONDS = 2.0

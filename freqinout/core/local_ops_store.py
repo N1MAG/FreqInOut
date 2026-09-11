@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.logger import log
 from freqinout.core.message_intelligence import TOPIC_TAXONOMY, collect_topic_evidence
+from freqinout.core.sqlite_utils import connect_sqlite_readonly, table_exists
 
 
 SITREP_ALLOWED = {"GREEN", "YELLOW", "RED"}
@@ -276,9 +277,15 @@ def ensure_tables() -> None:
 
 
 def get_all_operators() -> List[Dict[str, Any]]:
-    ensure_tables()
-    conn = sqlite3.connect(_db_path())
+    db_path = _db_path()
+    if not db_path.exists():
+        return []
+    # Startup owns schema.  Keep lookup/autocomplete consumers read-only so an
+    # active projection writer cannot turn a tab click into schema work.
+    conn = connect_sqlite_readonly(db_path)
     try:
+        if not table_exists(conn, "local_operator_checkins"):
+            return []
         cur = conn.execute(
             """
             SELECT

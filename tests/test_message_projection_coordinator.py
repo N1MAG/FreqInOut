@@ -10,6 +10,8 @@ identity rather than timing-sensitive implementation details.
 from __future__ import annotations
 
 import sqlite3
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -89,6 +91,37 @@ def _insert_messages(db_path: Path, count: int, *, start: int = 1) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _insert_spotter_rows(db_path: Path, count: int) -> None:
+    """Add a second valid native source for global-discovery-cap coverage."""
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE spotter_traffic (
+                id INTEGER PRIMARY KEY,
+                read_ts REAL,
+                state TEXT,
+                flag_state INTEGER,
+                js8_instance_id TEXT,
+                source_radio_id INTEGER
+            )
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO spotter_traffic (
+                id, read_ts, state, flag_state, js8_instance_id, source_radio_id
+            ) VALUES (?, 0, 'NEW', 0, 'spotter-test', 1)
+            """,
+            [(row_id,) for row_id in range(1, count + 1)],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
 
 def _projection_counts(db_path: Path) -> tuple[int, int, int]:
     conn = sqlite3.connect(db_path)
@@ -179,6 +212,146 @@ def test_five_hundred_message_burst_drains_in_bounded_cycles(tmp_path) -> None:
         assert _projection_counts(db_path) == (500, 500, 0)
     finally:
         worker.close()
+
+
+def test_queue_first_catchup_limits_discovery_and_monotonically_drains_backlog(
+    tmp_path, monkeypatch
+) -> None:
+    """A historical scan cannot add more work than one cycle can consume."""
+
+    db_path = _db(tmp_path)
+    _insert_messages(db_path, 250)
+    # Simulate a pre-trigger historical source table: reconciliation must own
+    # first discovery rather than simply consuming insert-trigger work.
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("DELETE FROM message_projection_dirty")
+        conn.commit()
+    finally:
+        conn.close()
+    worker = MessageProjectionCoordinator(db_path)
+    try:
+        # The production coordinator passes one global cap, unlike the public
+        # reconciliation helper's deliberate per-source maintenance seam.
+        observed_limits: list[tuple[int, int | None]] = []
+        original_reconcile = coordinator_module.reconcile_native_source_changes
+
+        def traced_reconcile(path, **kwargs):
+            observed_limits.append((kwargs["limit_per_source"], kwargs.get("max_items")))
+            return original_reconcile(path, **kwargs)
+
+        monkeypatch.setattr(coordinator_module, "reconcile_native_source_changes", traced_reconcile)
+        first = worker.run_once(reconcile=True)
+        assert first.discovered == first.claimed == first.committed == 100
+        assert observed_limits == [(100, 100)]
+        assert queue_diagnostics(db_path)["depth"] == 0
+
+        # Seed a durable historical backlog.  Subsequent coordinator cycles
+        # must drain it first instead of discovering the remaining source rows.
+        assert reconcile_native_source_changes(db_path, limit_per_source=1000)["js8"] == 150
+        depths = [queue_diagnostics(db_path)["depth"]]
+        assert depths == [150]
+
+        def discovery_is_forbidden(*_args, **_kwargs):
+            raise AssertionError("discovery ran while durable projection work remained")
+
+        monkeypatch.setattr(coordinator_module, "reconcile_native_source_changes", discovery_is_forbidden)
+        while queue_diagnostics(db_path)["depth"]:
+            result = worker.run_once(reconcile=True)
+            assert result.claimed <= 100
+            assert result.committed == result.claimed
+            depths.append(queue_diagnostics(db_path)["depth"])
+        assert depths == sorted(depths, reverse=True)
+        assert depths[-1] == 0
+        assert _projection_counts(db_path) == (250, 250, 0)
+    finally:
+        worker.close()
+
+
+def test_global_discovery_cap_stops_before_a_second_native_source(tmp_path) -> None:
+    """One cycle cannot enqueue 100 rows for each available source table."""
+
+    db_path = _db(tmp_path)
+    _insert_messages(db_path, 100)
+    _insert_spotter_rows(db_path, 100)
+    discovered = reconcile_native_source_changes(
+        db_path,
+        sources=("js8", "spotter"),
+        limit_per_source=100,
+        max_items=100,
+    )
+    assert discovered == {"js8": 100, "spotter": 0}
+    assert queue_diagnostics(db_path)["depth"] == 100
+    conn = sqlite3.connect(db_path)
+    try:
+        js8_watermark = conn.execute(
+            "SELECT high_water_key FROM message_projection_source_state "
+            "WHERE source_id='native:js8_messages'"
+        ).fetchone()
+        spotter_watermark = conn.execute(
+            "SELECT high_water_key FROM message_projection_source_state "
+            "WHERE source_id='native:spotter_traffic'"
+        ).fetchone()
+        assert js8_watermark == ("100",)
+        assert spotter_watermark is None
+    finally:
+        conn.close()
+
+
+def test_prepare_slices_are_cancelable_and_release_durable_leases(tmp_path, monkeypatch) -> None:
+    """Cancellation stops between short prepare slices without losing work."""
+
+    db_path = _db(tmp_path)
+    _insert_messages(db_path, 100)
+    worker = MessageProjectionCoordinator(db_path)
+    cancelled = threading.Event()
+    prepared_sizes: list[int] = []
+    original_prepare = coordinator_module.prepare_native_message_bundles
+
+    def cancel_after_first_slice(conn, items):
+        prepared_sizes.append(len(items))
+        result = original_prepare(conn, items)
+        cancelled.set()
+        return result
+
+    monkeypatch.setattr(coordinator_module, "prepare_native_message_bundles", cancel_after_first_slice)
+    try:
+        result = worker.run_once(reconcile=False, cancel_event=cancelled)
+        assert result.state == "cancelled"
+        assert prepared_sizes == [25]
+        diagnostics = queue_diagnostics(db_path)
+        assert diagnostics["depth"] == 100
+        assert diagnostics["leased"] == 0
+        assert _projection_counts(db_path) == (0, 0, None)
+    finally:
+        worker.close()
+
+
+def test_nonblocking_close_cancels_an_inflight_prepare_slice_promptly(tmp_path, monkeypatch) -> None:
+    """Shutdown returns promptly while the current bounded slice unwinds."""
+
+    db_path = _db(tmp_path)
+    _insert_messages(db_path, 25)
+    worker = MessageProjectionCoordinator(db_path)
+    entered_prepare = threading.Event()
+    original_prepare = coordinator_module.prepare_native_message_bundles
+
+    def wait_for_shutdown(conn, items):
+        entered_prepare.set()
+        assert worker._cancel.wait(1.0)
+        return original_prepare(conn, items)
+
+    monkeypatch.setattr(coordinator_module, "prepare_native_message_bundles", wait_for_shutdown)
+    future = worker.submit_once(reconcile=False)
+    assert entered_prepare.wait(1.0)
+    started = time.monotonic()
+    worker.close(wait=False)
+    assert time.monotonic() - started < 0.25
+    result = future.result(timeout=1.0)
+    assert result.state == "cancelled"
+    diagnostics = queue_diagnostics(db_path)
+    assert diagnostics["depth"] == 25
+    assert diagnostics["leased"] == 0
 
 
 def test_restart_after_lease_release_has_no_loss_or_duplicate_projection(tmp_path) -> None:

@@ -1,7 +1,8 @@
 # Message Ingest, Projection, And UI Responsiveness Specification
 
 Status: implementation complete; MIP-0 through MIP-5 implementation exit gates
-passed; Linux production confirmation remains external release qualification
+passed; the September 10 production responsiveness remediation implementation
+gate passed; Linux production confirmation remains external release qualification
 
 Date: 2026-09-10
 
@@ -563,6 +564,40 @@ At minimum, test:
 - startup followed immediately by Messages, Map, Spotter, and Settings;
 - bounded shutdown with queued work; and
 - restart proof that committed evidence was neither lost nor duplicated.
+
+## September 10 Production Responsiveness Remediation
+
+The later Linux production capture is a stricter requalification of MIP-5, not
+a new feature slice. It showed that the original per-source reconciliation
+bound was not a global cycle bound: JS8, Spotter, VarAC, SitRep, and CommStat
+could each discover 100 identities in one cycle. A following cycle could then
+discover more work before draining the durable queue. Preparing 100 complex
+bundles at once also held the Python interpreter for seconds, and write batches
+were observed taking 33 to 108 seconds while unrelated Qt callbacks waited.
+
+The binding remediation is:
+
+- durable dirty work is always drained before any new historical discovery;
+- one reconciliation cycle may discover at most 100 identities across all
+  native sources combined, not 100 per source;
+- bundle preparation yields between 25-identity slices;
+- writer CPU and transaction units are capped at 25 bundles while retaining the
+  100-identity coordinator budget;
+- catch-up cancellation propagates through reconciliation, preparation,
+  writes, deletion, lease release, and nonblocking shutdown; and
+- a cancelled unit remains represented by its durable dirty identity and is
+  immediately reclaimable (or safely recoverable after its short lease).
+
+The ordering intentionally favors bounded latency over maximum historical
+throughput. A new source cursor is not advanced while older durable work exists.
+FIO Spotter Expect evaluation remains outside this lane.
+
+Automated requalification passes 134 message ingest/projection tests, including
+the global discovery cap, monotonic queue drain, cancellation/lease recovery,
+writer transaction slicing, restart, projection query, file pipeline, telemetry,
+and UI-async contracts. Live Linux startup, backlog-drain CPU, message latency,
+and idle confirmation remain external and must be measured before the production
+release gate is closed.
 
 ## Definition Of Done
 

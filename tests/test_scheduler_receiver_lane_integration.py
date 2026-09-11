@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import sqlite3
 from types import SimpleNamespace
 import threading
@@ -77,7 +78,7 @@ class _FakeReceiver:
 
 
 def _profile(profile_id: int = 4, *, enabled: bool = True, verified: bool = True):
-    return {
+    profile = {
         "id": profile_id,
         "name": f"SDR {profile_id}",
         "device_class": "observer",
@@ -90,6 +91,20 @@ def _profile(profile_id: int = 4, *, enabled: bool = True, verified: bool = True
         "sdr_control_enabled": 1 if enabled else 0,
         "sdr_verification_state": "verified" if verified else "unverified",
     }
+    if verified:
+        profile["sdr_verification_json"] = json.dumps(
+            {
+                "schema_version": 1,
+                "tested_at_utc": "2026-09-10T12:00:00+00:00",
+                "adapter": "sdrpp_rigctl",
+                "host": "127.0.0.1",
+                "port": 5000 + profile_id,
+                "target": "vfo-a",
+                "tune_readback_verified": True,
+                "restore_readback_verified": True,
+            }
+        )
+    return profile
 
 
 def _engine(monkeypatch, tmp_path) -> SchedulerEngine:
@@ -161,6 +176,10 @@ def test_receiver_profile_requires_verified_complete_config_before_enable(monkey
         store.save_device_profile(_profile(8, verified=False))
     with pytest.raises(ValueError, match="host, port"):
         store.save_device_profile({**_profile(8), "sdr_target": ""})
+    with pytest.raises(ValueError, match="exact adapter, host, port, and target"):
+        store.save_device_profile({**_profile(8), "sdr_host": "localhost"})
+    with pytest.raises(ValueError, match="exact adapter, host, port, and target"):
+        store.save_device_profile({**_profile(8), "sdr_verification_json": "{}"})
 
     saved = store.save_device_profile(_profile(8))
     assert saved["sdr_adapter"] == "sdrpp_rigctl"
@@ -182,8 +201,12 @@ def test_incomplete_or_unverified_receiver_binding_falls_back_to_manual() -> Non
 
 
 def test_enabled_receiver_requires_canonical_target() -> None:
+    profile = {**_profile(12), "sdr_target": "VFO A"}
+    evidence = json.loads(str(profile["sdr_verification_json"]))
+    evidence["target"] = "VFO A"
+    profile["sdr_verification_json"] = json.dumps(evidence)
     with pytest.raises(ValueError, match="canonical token"):
-        endpoint_binding_from_resolved_profile({**_profile(12), "sdr_target": "VFO A"})
+        endpoint_binding_from_resolved_profile(profile)
 
 
 def test_active_lane_routes_observer_around_transceiver_apply(monkeypatch, tmp_path) -> None:
@@ -244,7 +267,17 @@ def test_additive_receiver_columns_preserve_existing_profile(monkeypatch, tmp_pa
             conn.execute(f"ALTER TABLE device_profiles DROP COLUMN {column}")
         conn.commit()
 
-    migrated = MultiRadioStore(db_path).get_device_profile(int(saved["id"]))
+    # Schema repair belongs to the startup-owned writable boundary.  Runtime
+    # profile reads remain read-only and must not be relied on to heal a clone.
+    migrated_store = MultiRadioStore(db_path)
+    with migrated_store.connect() as startup_connection:
+        columns = {
+            str(row[1])
+            for row in startup_connection.execute("PRAGMA table_info(device_profiles)")
+        }
+    assert set(added_columns) <= columns
+
+    migrated = migrated_store.get_device_profile(int(saved["id"]))
     assert migrated is not None
     assert migrated["name"] == "Existing Manual Observer"
     assert migrated["sdr_host"] == "127.0.0.1"

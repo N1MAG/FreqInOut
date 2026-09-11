@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -89,7 +90,7 @@ def test_scheduler_stop_disconnects_qt_callbacks_and_start_reconnects(monkeypatc
         _shutdown_engine(engine)
 
 
-def test_scheduler_start_applies_lanes_before_timer_can_prompt(monkeypatch, tmp_path) -> None:
+def test_scheduler_start_queues_lanes_without_inline_apply(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
     SettingsManager()
     QCoreApplication.instance() or QCoreApplication([])
@@ -110,7 +111,9 @@ def test_scheduler_start_applies_lanes_before_timer_can_prompt(monkeypatch, tmp_
 
         engine.start()
 
-        assert observed == [False]
+        # Database-backed projection is deliberately asynchronous.  Startup
+        # returns with the timer active and no schedule apply on the caller.
+        assert observed == []
         assert engine.timer.isActive() is True
     finally:
         _shutdown_engine(engine)
@@ -143,6 +146,12 @@ def test_scheduler_start_clears_stale_manual_qsy_before_lane_apply(monkeypatch, 
         monkeypatch.setattr(engine, "_apply_active_schedule_lanes", fake_apply_lanes)
 
         engine.start()
+        deadline = time.monotonic() + 2.0
+        app = QCoreApplication.instance()
+        while not observed and time.monotonic() < deadline:
+            if app is not None:
+                app.processEvents()
+            time.sleep(0.005)
 
         assert observed == ["on_schedule"]
         assert engine._manual_qsy_active is False

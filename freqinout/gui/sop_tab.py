@@ -327,8 +327,20 @@ class _LegacySOPTab(QWidget):
     LAYER_COL_MODE = 7
     LAYER_COL_REMOVE = 8
 
-    def __init__(self, parent=None, *, plan_context_service: Optional[PlanContextService] = None):
+    def __init__(
+        self,
+        parent=None,
+        *,
+        plan_context_service: Optional[PlanContextService] = None,
+        defer_initial_load: bool = False,
+    ):
         super().__init__(parent)
+        # SOP is not part of the first visible shell.  MainWindow opts into a
+        # deferred data projection so profile/schedule queries cannot hold up
+        # the first paint.  Standalone/test construction remains eager.
+        self._defer_initial_load = bool(defer_initial_load)
+        self._initial_data_loaded = False
+        self._initial_data_load_pending = False
         self.settings = SettingsManager()
         self.plan_context_service = plan_context_service or PlanContextService()
         self.manager = SOPManager()
@@ -372,9 +384,8 @@ class _LegacySOPTab(QWidget):
 
         self._build_ui()
         self._set_save_dirty(False)
-        self._refresh_reference_data()
-        self._reload_profiles(select_id=None)
-        self.refresh_upcoming()
+        if not self._defer_initial_load:
+            self._load_initial_data_projection()
 
         self._timer = QTimer(self)
         self._timer.setInterval(30_000)
@@ -389,7 +400,36 @@ class _LegacySOPTab(QWidget):
         self._layer_sync_timer.setSingleShot(True)
         self._layer_sync_timer.setInterval(220)
         self._layer_sync_timer.timeout.connect(self._refresh_layer_sync_hint)
-        self._schedule_layer_sync_refresh()
+        if not self._defer_initial_load:
+            self._schedule_layer_sync_refresh()
+
+    def _load_initial_data_projection(self) -> None:
+        """Populate DB-backed SOP state only once the workspace is needed."""
+
+        if self._initial_data_loaded:
+            return
+        self._initial_data_loaded = True
+        self._initial_data_load_pending = False
+        self._refresh_reference_data()
+        self._reload_profiles(select_id=None)
+        self.refresh_upcoming()
+        refresh_workbench = getattr(self, "_refresh_sop_workbench_contracts", None)
+        if callable(refresh_workbench):
+            refresh_workbench()
+
+    def _ensure_initial_data_projection(self) -> None:
+        if not self._defer_initial_load or self._initial_data_loaded:
+            return
+        if not self._active:
+            self._initial_data_load_pending = False
+            return
+        try:
+            self._load_initial_data_projection()
+            self._schedule_layer_sync_refresh()
+            self.on_tab_activated()
+        except Exception as exc:
+            self._initial_data_load_pending = False
+            log.debug("SOP: initial deferred data projection failed: %s", exc)
 
     def _open_context_help(self, context_key: str) -> None:
         host = resolve_help_host(self)
@@ -440,7 +480,8 @@ class _LegacySOPTab(QWidget):
         )
         self.plan_context_label.setVisible(False)
         root.addWidget(self.plan_context_label)
-        self.plan_context_label.refresh_context(refresh=True)
+        if not self._defer_initial_load:
+            self.plan_context_label.refresh_context(refresh=True)
 
         header = QHBoxLayout()
         header.setSpacing(8)
@@ -4196,6 +4237,14 @@ class _LegacySOPTab(QWidget):
                 self._timer.start()
             if not self._clock_timer.isActive():
                 self._clock_timer.start()
+            if self._defer_initial_load and not self._initial_data_loaded:
+                if not self._initial_data_load_pending:
+                    self._initial_data_load_pending = True
+                    # The workspace is already selected.  Yield once before
+                    # its first data projection so the operator sees a stable
+                    # tab transition rather than a frozen shell.
+                    QTimer.singleShot(75, self._ensure_initial_data_projection)
+                return
             self.on_tab_activated()
             return
         for timer_name in (
@@ -4392,7 +4441,8 @@ class SOPTab(_LegacySOPTab):
         )
         self.plan_context_label.setVisible(False)
         root.addWidget(self.plan_context_label)
-        self.plan_context_label.refresh_context(refresh=True)
+        if not self._defer_initial_load:
+            self.plan_context_label.refresh_context(refresh=True)
         self.operating_plan_inputs_label = QLabel("")
         self.operating_plan_inputs_label.setObjectName("sopOperatingPlanInputsSummary")
         self.operating_plan_inputs_label.setWordWrap(True)
@@ -4400,7 +4450,8 @@ class SOPTab(_LegacySOPTab):
             "Read-only summary of the current radio, assigned Frequency Plan, and source inputs SOP Builder should review against."
         )
         root.addWidget(self.operating_plan_inputs_label)
-        self._refresh_operating_plan_inputs_summary()
+        if not self._defer_initial_load:
+            self._refresh_operating_plan_inputs_summary()
 
         self.local_net_context_bar = QGroupBox("Local Net reminder context", self.sop_scroll_content)
         local_net_context_layout = QHBoxLayout(self.local_net_context_bar)
@@ -4442,7 +4493,8 @@ class SOPTab(_LegacySOPTab):
         self._sop_traffic_layout = traffic_layout
         self._traffic_suggestion_decisions: List[Any] = []
         self._traffic_focus_context: Dict[str, str] = {}
-        QTimer.singleShot(0, self.refresh_traffic_suggestions)
+        if not self._defer_initial_load:
+            QTimer.singleShot(0, self.refresh_traffic_suggestions)
 
         self.sop_workbench_box = QGroupBox("SOP Workbench")
         sop_workbench_layout = QHBoxLayout(self.sop_workbench_box)
@@ -4871,7 +4923,8 @@ class SOPTab(_LegacySOPTab):
         self._load_activation_conflict_defaults_ui()
         self._apply_action_table_visual_order()
         self._apply_category_table_view()
-        self._refresh_sop_workbench_contracts()
+        if not self._defer_initial_load:
+            self._refresh_sop_workbench_contracts()
         outer.addWidget(self.sop_scroll, stretch=1)
         QTimer.singleShot(0, self._apply_sop_responsive_layout)
 

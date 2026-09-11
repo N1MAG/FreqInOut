@@ -3169,3 +3169,145 @@ radio-scoped Settings. Python compilation, HTML parsing, and `git diff --check`
 pass. No production database, external JS8 settings, or source message file was
 modified. Live Linux default/two-rig instance and single-Subspace qualification
 remains explicitly external.
+
+## 2026-09-10 — SDR receiver control SDR-0
+
+Status: SDR-0 implementation exit gate passed; no hardware combination is
+claimed as FIO-verified.
+
+FIO now has one immutable, versioned, bounded compatibility registry that keeps
+receiver-application hardware support separate from FIO control verification.
+RTL-SDR remains usable through SDR++, SDRangel, or Gqrx even before automated
+control is qualified. The four operator states are `FIO tuning ready`,
+`Connected; verify tuning`, `Manual tuning`, and `Receiver unavailable`.
+
+Observer / SDR setup now identifies the hardware and receiver application
+separately, saves an optional receiver/VFO label and application endpoint, and
+always retains a manual workflow. Saved endpoint fields are described as
+configuration rather than connection evidence. The Settings presenter is
+cache/data-only and never probes a receiver from the Qt thread.
+
+Model ownership:
+
+- High-reasoning primary model: product/capability architecture, delegated-diff
+  review, editable-combo correctness, acceptance gate, and documentation.
+- `gpt-5.6-terra` high: bounded Observer / SDR Settings and manual-guidance UI.
+- `gpt-5.6-luna` high: compatibility registry and focused registry/manual tests.
+
+Acceptance evidence: 22 focused registry, receive-only contract, Settings,
+persistence, responsiveness, hint, and no-I/O tests pass. Python compilation
+and `git diff --check` pass. No database migration, device discovery, socket
+probe, direct hardware driver, or production data mutation is part of SDR-0.
+
+## 2026-09-10 — SDR receiver control SDR-1 and SDR-2
+
+Status: SDR-1 exit gate passed; SDR-2 implementation and automated gates passed.
+SDR-2 remains open for the required live RTL-SDR/macOS/Linux hardware matrix, so
+SDR-3 has not begun.
+
+The receive-only core now has bounded capability probing, target enumeration,
+readback, cancellation, reversible tune/restore qualification, additive profile
+fields, and a zero-I/O manual fallback. Observer control runs on the scheduler's
+existing target-qualified endpoint lanes and cannot enter the transceiver/PTT
+path. Settings performs no receiver I/O while opening or editing.
+
+The first application adapter is SDR++ RigCTL. It controls SDR++'s selected VFO,
+not RTL-SDR hardware directly, and uses one bounded short-lived TCP connection
+per command. Frequency set/readback is required; mode is used only when SDR++
+advertises it. `Test control` briefly changes frequency, verifies it, restores
+the original, and verifies restoration in a worker lane. The operator must then
+explicitly enable and save FIO tuning. Verification evidence is bound to the
+exact adapter, host, port, and target and is independently enforced by the
+store, runtime, readiness presenter, and scheduler binding.
+
+Model ownership:
+
+- High-reasoning primary model: receive-only architecture and qualification
+  core, lane and lifecycle ownership, additive migration review/rehearsal,
+  qualification coordinator, exact-evidence safety enforcement, upstream SDR++
+  protocol audit, scheduler integration, delegated-diff review, documentation,
+  and final automated gate.
+- `gpt-5.6-terra` high: responsive Observer / SDR setup and verification UX.
+- `gpt-5.6-luna` high: receive-only contract, migration, cancellation, and
+  focused SDR-1 tests.
+- `gpt-5.6-terra` high: named SDR++ RigCTL adapter and protocol boundary.
+- `gpt-5.6-luna` high: fragmented TCP, malformed/oversized response, reconnect,
+  qualification serialization/supersession, and lifecycle tests.
+
+Acceptance evidence: the combined receiver/UI/integration partition passes 102
+tests. The broader endpoint identity, lane, status, fault, lifecycle, MES-4,
+soak, shutdown, and command-routing partition passes 111 tests with one
+intentional skip. An accelerated 1,800-cycle, eight-endpoint stress run accepted
+and completed 14,400/14,400 commands with zero unexpected failures, zero
+completion timeouts, no queue instability, no leaked threads or child processes,
+and 0.879 ms healthy p95 latency against the 250 ms budget. Python compilation
+and `git diff --check` pass. No production database, SDR application setting, or
+hardware was modified by automated acceptance. Live tune/readback,
+manual-before/after, restart/reconnect, timeout/shutdown, and 30-minute CPU/thread
+evidence remain the external SDR-2 gate.
+
+## 2026-09-10 — Release-blocking UI responsiveness remediation
+
+Status: implementation exit gate passed; Linux production requalification is
+required before release.
+
+Review of `freqinout (24).log`, `perf_metrics.log`, and seven supplied UI hang
+dumps confirmed five interacting causes: recurrent schedule/assignment and
+manual-state SQLite work on the Qt timer; live process inventory from scheduler
+availability logic; Station Control Bar plan-table reads during rendering; eager
+Settings/SOP/Ops projections before first paint; and native message catch-up that
+could discover 500 rows per cycle and prepare/write large CPU-heavy units while
+the queue was already backlogged.
+
+The scheduler now uses one dedicated serialized projection worker for schedule,
+plan, policy, and manual-state data. Timer, FLDigi presentation, construction,
+and Station Control Bar paths are cache-only; endpoint availability/application
+remains worker-owned and generation fenced. Settings and SOP data are deferred
+until first activation, Ops Center starts with a clock-only frame, and optional
+index/status work yields until after paint. A deferred unopened Settings surface
+cannot autosave blank controls during shutdown.
+
+Message catch-up now drains the durable queue before discovery, applies a global
+100-identity discovery cap across all sources, prepares in 25-identity slices,
+writes at most 25 bundles per CPU/transaction unit, and propagates cancellation
+through lease release and nonblocking close. Startup compatibility repair now
+filters for noncanonical group values in SQLite and rebuilds SitRep rollups only
+when rows changed. Shared/local operator list and autocomplete reads no longer
+run schema assurance or identity repair from a UI activation path.
+
+Model ownership:
+
+- High-reasoning primary model: production trace/hang attribution, scheduler and
+  Qt-thread architecture, read-only DB boundary, FLDigi worker dispatch, Station
+  Control Bar snapshot integration, startup repair optimization/benchmark,
+  delegated-diff review, specifications, and final integration gate.
+- `gpt-5.6-terra` high: bounded queue-first message projection, global discovery
+  cap, cancellation/lease handling, and focused tests.
+- `gpt-5.6-luna` high: deterministic scheduler responsiveness architecture and
+  endpoint-isolation acceptance tests.
+- `gpt-5.6-terra` high: Settings/SOP/Ops first-paint deferral and focused UI
+  regression tests.
+
+Acceptance evidence: 201 scheduler tests passed with one intentional skip; 134
+message ingest/projection tests passed; and 91 startup/SOP/Ops/Settings/UI tests
+passed. Focused startup/coordination/projection coverage also passed in isolated
+processes. A mixed non-Qt/Qt process reached 88 passing assertions before a
+PySide lifecycle abort during widget construction; the same partitions passed
+cleanly in isolated processes and no application assertion failed. `git diff
+--check` passes.
+
+A disposable copy of the 311 MB production database measured the bounded group
+repair at 85.208 ms across 17,658 relevant source rows and the full nets startup
+schema pass at 1,891.094 ms. The supplied Linux trace measured database init at
+79,747.936 ms. No source evidence, production database, external application
+settings, or hardware was modified. Live Linux first paint, every-tab/click p95,
+message backlog CPU, command-bar p95, idle CPU, and shutdown are still external
+release gates.
+
+A final isolated 30-second real-window navigation/resize soak passed with a
+701.6 ms first usable shell, 612.4 ms construction, 1.2 ms maximum event-loop
+lag across 114 samples, 25 interactions, 13 navigation switches, six resize
+cycles, and 62.8 ms shutdown. All Qt worker threads stopped cleanly. A separate
+Settings measurement on a disposable copy of the 311 MB store took 266.907 ms
+to construct its deferred widget surface and 89.014 ms to populate it on first
+activation after startup initialization.
