@@ -524,6 +524,13 @@ class SchedulerEngine(QObject):
         self._schedule_projection_forced_count: int = 0
         self._schedule_projection_completed_count: int = 0
         self._manual_states_by_radio: Dict[int, SchedulerManualControlState] = {}
+        self._published_busy_evidence_ids: Set[str] = set()
+        # Clear a possibly stale row from a previous process once, then keep
+        # the scheduler's idle path free of database writes.
+        self._busy_evidence_clear_checked_ids: Set[str] = set()
+        self._busy_evidence_published_ts: Dict[str, float] = {}
+        self._last_busy_skip_log_signature: str = ""
+        self._last_busy_skip_log_ts: float = 0.0
         self._control_future = None
         self._control_future_token: int = 0
         self._control_future_started_at: Optional[float] = None
@@ -1312,6 +1319,13 @@ class SchedulerEngine(QObject):
             return self._manual_control_service.get_state(int(radio_id))
         except Exception:
             return None
+
+    def manual_control_state_snapshot(
+        self, radio_id: Optional[int]
+    ) -> Optional[SchedulerManualControlState]:
+        """Return worker-published manual state without opening SQLite."""
+
+        return self._manual_state_for_radio(radio_id)
 
     def _clear_startup_manual_qsy_states(self) -> None:
         """Manual QSY is an in-session override; startup must follow assigned plans."""
@@ -4348,19 +4362,37 @@ class SchedulerEngine(QObject):
             return
         source_family, reason_code = self._external_busy_evidence_fields(kind, protected_busy=protected_busy)
         detail = str(reason or "busy").strip() or "busy"
-        now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        now_dt = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+        now = now_dt.isoformat().replace("+00:00", "Z")
+        evidence_id = self._external_busy_evidence_id(kind, radio_id)
+        published_at = getattr(self, "_busy_evidence_published_ts", {})
+        monotonic_now = self._monotonic_clock()
+        if monotonic_now - float(published_at.get(evidence_id, 0.0) or 0.0) < 30.0:
+            return
         try:
             self._busy_evidence_service.publish(
                 BusyEvidence(
-                    id=self._external_busy_evidence_id(kind, radio_id),
+                    id=evidence_id,
                     radio_profile_id=f"radio_{radio_id}",
                     source_family=source_family,
                     reason_code=reason_code,
                     severity="hard" if protected_busy else "soft",
                     evidence_timestamp_utc=now,
+                    expiration_timestamp_utc=(now_dt + datetime.timedelta(seconds=60))
+                    .isoformat()
+                    .replace("+00:00", "Z"),
                     description=detail,
                 )
             )
+            published = getattr(self, "_published_busy_evidence_ids", None)
+            if not isinstance(published, set):
+                published = set()
+                self._published_busy_evidence_ids = published
+            published.add(evidence_id)
+            if not isinstance(published_at, dict):
+                published_at = {}
+                self._busy_evidence_published_ts = published_at
+            published_at[evidence_id] = monotonic_now
         except Exception as exc:
             log.debug("SchedulerEngine: failed to publish external busy evidence: %s", exc)
 
@@ -4368,8 +4400,18 @@ class SchedulerEngine(QObject):
         radio_id = self._primary_manual_control_radio_id()
         if radio_id is None:
             return
+        evidence_id = self._external_busy_evidence_id(kind, radio_id)
+        published = getattr(self, "_published_busy_evidence_ids", set())
+        clear_checked = getattr(self, "_busy_evidence_clear_checked_ids", set())
+        if evidence_id not in published and evidence_id in clear_checked:
+            return
         try:
-            self._busy_evidence_service.clear(self._external_busy_evidence_id(kind, radio_id))
+            self._busy_evidence_service.clear(evidence_id)
+            published.discard(evidence_id)
+            clear_checked.add(evidence_id)
+            published_at = getattr(self, "_busy_evidence_published_ts", None)
+            if isinstance(published_at, dict):
+                published_at.pop(evidence_id, None)
         except Exception as exc:
             log.debug("SchedulerEngine: failed to clear external busy evidence: %s", exc)
 
@@ -4378,19 +4420,30 @@ class SchedulerEngine(QObject):
         if radio_id is None:
             return
         detail = str(reason or "RX activity").strip() or "RX activity"
-        now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        now_dt = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+        now = now_dt.isoformat().replace("+00:00", "Z")
+        evidence_id = self._fldigi_busy_evidence_id(radio_id)
+        published_at = getattr(self, "_busy_evidence_published_ts", {})
+        monotonic_now = self._monotonic_clock()
+        if monotonic_now - float(published_at.get(evidence_id, 0.0) or 0.0) < 30.0:
+            return
         try:
             self._busy_evidence_service.publish(
                 BusyEvidence(
-                    id=self._fldigi_busy_evidence_id(radio_id),
+                    id=evidence_id,
                     radio_profile_id=f"radio_{radio_id}",
                     source_family="fl",
                     reason_code="receive_decode",
                     severity="soft",
                     evidence_timestamp_utc=now,
+                    expiration_timestamp_utc=(now_dt + datetime.timedelta(seconds=60))
+                    .isoformat()
+                    .replace("+00:00", "Z"),
                     description=detail,
                 )
             )
+            self._published_busy_evidence_ids.add(evidence_id)
+            self._busy_evidence_published_ts[evidence_id] = monotonic_now
         except Exception as exc:
             log.debug("SchedulerEngine: failed to publish FLDigi busy evidence: %s", exc)
 
@@ -4398,8 +4451,17 @@ class SchedulerEngine(QObject):
         radio_id = self._primary_manual_control_radio_id()
         if radio_id is None:
             return
+        evidence_id = self._fldigi_busy_evidence_id(radio_id)
+        if (
+            evidence_id not in getattr(self, "_published_busy_evidence_ids", set())
+            and evidence_id in getattr(self, "_busy_evidence_clear_checked_ids", set())
+        ):
+            return
         try:
-            self._busy_evidence_service.clear(self._fldigi_busy_evidence_id(radio_id))
+            self._busy_evidence_service.clear(evidence_id)
+            self._published_busy_evidence_ids.discard(evidence_id)
+            self._busy_evidence_clear_checked_ids.add(evidence_id)
+            self._busy_evidence_published_ts.pop(evidence_id, None)
         except Exception as exc:
             log.debug("SchedulerEngine: failed to clear FLDigi busy evidence: %s", exc)
 
@@ -6836,6 +6898,9 @@ class SchedulerEngine(QObject):
                     "operating_profile_id": operating_id,
                     "frequency_plan_id": plan_assignment.get("frequency_plan_id"),
                     "frequency_plan_name": str(plan.get("name") or ""),
+                    "assignment_validation_status_json": str(
+                        plan_assignment.get("validation_status_json") or ""
+                    ),
                     "has_assigned_plan": bool(has_assigned_plan),
                     "hf_rows": hf_rows,
                     "net_rows": net_rows,
@@ -9200,11 +9265,20 @@ class SchedulerEngine(QObject):
 
         if busy_reasons:
             self._clear_coordination_prompt()
-            log.warning(
-                "SchedulerEngine: skipping frequency change for %s schedule due to activity: %s",
-                source,
-                "; ".join(busy_reasons),
-            )
+            busy_text = "; ".join(busy_reasons)
+            log_signature = f"{source}|{busy_text}"
+            log_now = self._monotonic_clock()
+            if (
+                log_signature != getattr(self, "_last_busy_skip_log_signature", "")
+                or log_now - float(getattr(self, "_last_busy_skip_log_ts", 0.0) or 0.0) >= 30.0
+            ):
+                log.warning(
+                    "SchedulerEngine: skipping frequency change for %s schedule due to activity: %s",
+                    source,
+                    busy_text,
+                )
+                self._last_busy_skip_log_signature = log_signature
+                self._last_busy_skip_log_ts = log_now
             self.active_entry_changed.emit(effective_entry, source)
             return
 

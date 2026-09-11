@@ -967,6 +967,7 @@ class StationRuntimeManager:
         runtime_status: Optional[MultiRigRuntimeStatus] = None,
         *,
         refresh_runtime_status: bool = False,
+        include_varac_sync_status: bool = True,
     ) -> None:
         settings_reload = getattr(self.settings, "reload", None)
         if callable(settings_reload):
@@ -1027,15 +1028,16 @@ class StationRuntimeManager:
         except Exception as exc:
             log.debug("StationRuntimeManager: failed loading VarAC cluster members: %s", exc)
             self._varac_cluster_members_by_device = {}
-        try:
-            self._varac_sync_by_source = {
-                str(key): dict(value)
-                for key, value in load_latest_varac_sync_status().items()
-                if isinstance(value, dict)
-            }
-        except Exception as exc:
-            log.debug("StationRuntimeManager: failed loading VarAC ingest status: %s", exc)
-            self._varac_sync_by_source = {}
+        if include_varac_sync_status:
+            try:
+                self._varac_sync_by_source = {
+                    str(key): dict(value)
+                    for key, value in load_latest_varac_sync_status().items()
+                    if isinstance(value, dict)
+                }
+            except Exception as exc:
+                log.debug("StationRuntimeManager: failed loading VarAC ingest status: %s", exc)
+                self._varac_sync_by_source = {}
         try:
             self._rf_conflict_policies = [
                 dict(row)

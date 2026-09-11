@@ -952,6 +952,12 @@ def _ensure_prop_contact_events(conn: sqlite3.Connection) -> None:
         """
     )
     cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_prop_contact_events_pooled_lookup
+        ON prop_contact_events(origin_grid6, target_type, band, ts_utc DESC)
+        """
+    )
+    cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_prop_contact_events_source ON prop_contact_events(source, ts_utc)"
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_prop_contact_events_inserted ON prop_contact_events(inserted_utc)")

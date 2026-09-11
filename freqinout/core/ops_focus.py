@@ -254,7 +254,12 @@ def _entity_values(record: object) -> tuple[tuple[str, str, str, dict[str, objec
     return tuple(found.values())
 
 
-def index_message_for_ops_focus(conn: sqlite3.Connection, record: object) -> None:
+def index_message_for_ops_focus(
+    conn: sqlite3.Connection,
+    record: object,
+    *,
+    identity_schema_ready: bool = False,
+) -> None:
     """Idempotently project one message into compact focus/entity tables."""
     message_id = str(_value(record, "message_id", "") or "").strip()
     if not message_id:
@@ -281,7 +286,12 @@ def index_message_for_ops_focus(conn: sqlite3.Connection, record: object) -> Non
     resolved_entities: list[tuple[str, str, str, dict[str, object]]] = []
     for kind, canonical_id, display_label, metadata in entities:
         if kind == "callsign":
-            identity = resolve_operator_identity(conn, canonical_id, at_utc=event_ts or received_ts)
+            identity = resolve_operator_identity(
+                conn,
+                canonical_id,
+                at_utc=event_ts or received_ts,
+                schema_ready=identity_schema_ready,
+            )
             if identity is not None:
                 metadata = dict(metadata)
                 metadata["matched_callsign"] = canonical_id
@@ -541,6 +551,7 @@ def backfill_ops_focus_index(conn: sqlite3.Connection, *, batch_size: int = 500)
         index_message_for_ops_focus(
             conn,
             row if isinstance(row, sqlite3.Row) else dict(zip(column_names, row)),
+            identity_schema_ready=True,
         )
     if rows:
         last_rowid = int(rows[-1][0])

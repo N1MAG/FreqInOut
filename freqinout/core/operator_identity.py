@@ -222,12 +222,13 @@ def resolve_operator_identity(
     callsign: object,
     *,
     at_utc: object | None = None,
+    schema_ready: bool = False,
 ) -> OperatorIdentity | None:
     """Resolve a current or former callsign with one indexed alias lookup."""
     normalized = canonical_callsign(callsign)
     if not normalized:
         return None
-    if not _identity_tables_exist(conn):
+    if not schema_ready and not _identity_tables_exist(conn):
         ensure_operator_identity_schema(conn, backfill_operator_rows=False)
     params: list[object] = [normalized]
     time_clause = ""

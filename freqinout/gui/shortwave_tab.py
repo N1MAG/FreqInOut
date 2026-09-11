@@ -1,19 +1,22 @@
 """Lazy, read-mostly Shortwave Explore and Data Sources workspace.
 
 All catalogue reads, provider parsing, downloads, previews, promotion, and
-rollback run in short-lived worker threads.  This module deliberately contains
+rollback run in serialized daemon task lanes. This module deliberately contains
 no radio, scheduler, launcher, or receiver-control action.
 """
 
 from __future__ import annotations
 
 import json
+import threading
+import time
 from collections.abc import Callable
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QThread, QTimer, Qt, Signal, Slot
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -57,6 +60,9 @@ from freqinout.core.shortwave_query import ShortwaveListingView, ShortwaveQuery,
 from freqinout.core.shortwave_store import ShortwaveStore
 from freqinout.core.shortwave_listening import ShortwaveListeningReminder, ShortwaveListeningStore
 from freqinout.core.multi_radio_store import MultiRadioStore
+from freqinout.core.logger import log
+from freqinout.core.perf_metrics import emit_span
+from freqinout.core.scheduler_serial_executor import DaemonSerialExecutor
 from freqinout.gui.help_registry import resolve_help_host
 
 
@@ -64,37 +70,112 @@ _DISPLAY_COLUMNS = (
     "Station / service", "Frequency", "UTC / local", "Days", "Language", "Target", "Listing state",
 )
 
+class _TaskBridge(QObject):
+    """Deliver daemon-lane results to the owning GUI thread."""
 
-class _TaskWorker(QObject):
-    """Run one Qt-free operation and report it back to the owning widget."""
-
-    completed = Signal(int, object)
+    completed = Signal(int, object, object)
     failed = Signal(int, str)
-    settled = Signal()
+    settled = Signal(int)
 
-    def __init__(self, generation: int, operation: Callable[[Callable[[], bool]], object]) -> None:
-        super().__init__()
-        self.generation = generation
-        self._operation = operation
-        self._cancelled = False
+
+_RETIRED_TASK_BRIDGES: set[_TaskBridge] = set()
+
+
+class _TaskHandle:
+    """Small compatibility handle with the prior QThread inspection surface."""
+
+    def __init__(self, cancelled: threading.Event) -> None:
+        self.cancelled = cancelled
+        self.future: object | None = None
 
     def cancel(self) -> None:
-        self._cancelled = True
+        self.cancelled.set()
 
-    @Slot()
-    def run(self) -> None:
+    def isRunning(self) -> bool:  # noqa: N802 - compatibility with QThread
+        future = self.future
+        return bool(future is not None and not future.done())
+
+
+def _init_task_lane(owner: object, name: str) -> None:
+    bridge = _TaskBridge(owner)
+    bridge.completed.connect(owner._task_completed)
+    bridge.failed.connect(owner._task_failed)
+    bridge.settled.connect(owner._task_settled_signal)
+    owner._task_bridge = bridge
+    owner._task_executor = DaemonSerialExecutor(max_workers=1, thread_name_prefix=name)
+
+
+def _start_task_lane(
+    owner: object,
+    generation: int,
+    operation: Callable[[Callable[[], bool]], object],
+    done: Callable[[object], None],
+) -> None:
+    handle = getattr(owner, "_task_thread", None)
+    if handle is not None and handle.isRunning():
+        handle.cancel()
+        owner._pending_task = (generation, operation, done)
+        return
+    cancelled = threading.Event()
+    handle = _TaskHandle(cancelled)
+    owner._task_thread = handle
+    owner._task_worker = handle
+    bridge = owner._task_bridge
+
+    def run() -> None:
+        started = time.monotonic()
         try:
-            result = self._operation(lambda: self._cancelled)
-            if self._cancelled:
-                return
-            self.completed.emit(self.generation, result)
+            result = operation(cancelled.is_set)
+            if not cancelled.is_set():
+                bridge.completed.emit(generation, result, done)
         except ShortwaveImportCancelled:
-            # Cancellation is expected and intentionally has no error toast.
-            return
-        except Exception as exc:  # Core services produce operator-safe messages.
-            self.failed.emit(self.generation, str(exc))
+            pass
+        except Exception as exc:
+            log.exception("Shortwave background operation failed")
+            bridge.failed.emit(generation, str(exc))
         finally:
-            self.settled.emit()
+            elapsed_ms = max(0.0, (time.monotonic() - started) * 1000.0)
+            emit_span(
+                "shortwave.worker",
+                elapsed_ms,
+                meta={"generation": generation, "cancelled": cancelled.is_set()},
+                level="warning" if elapsed_ms >= 500.0 else "debug",
+            )
+            bridge.settled.emit(generation)
+
+    handle.future = owner._task_executor.submit(run)
+
+
+def _shutdown_task_lane(owner: object) -> None:
+    handle = getattr(owner, "_task_thread", None)
+    if handle is not None:
+        handle.cancel()
+    owner._pending_task = None
+    future = getattr(handle, "future", None)
+    if future is not None and not future.done():
+        try:
+            future.result(timeout=0.05)
+        except FutureTimeoutError:
+            # The operation did not honor cancellation within the small UI
+            # grace. Keep its signal source alive but disconnect the closing
+            # page; the daemon task may finish safely in the background.
+            bridge = getattr(owner, "_task_bridge", None)
+            if isinstance(bridge, _TaskBridge):
+                for signal in (bridge.completed, bridge.failed, bridge.settled):
+                    try:
+                        signal.disconnect()
+                    except (RuntimeError, TypeError):
+                        pass
+                bridge.setParent(None)
+                _RETIRED_TASK_BRIDGES.add(bridge)
+        except Exception:
+            pass
+    executor = getattr(owner, "_task_executor", None)
+    owner._task_executor = None
+    if executor is not None:
+        executor.shutdown(wait=False, cancel_futures=True)
+    owner._task_thread = None
+    owner._task_worker = None
 
 
 class ShortwaveListingTableModel(QAbstractTableModel):
@@ -161,9 +242,10 @@ class ShortwaveExploreView(QWidget):
         self._db_path = Path(db_path)
         self._active = False
         self._query_generation = 0
-        self._task_thread: QThread | None = None
-        self._task_worker: _TaskWorker | None = None
+        self._task_thread: _TaskHandle | None = None
+        self._task_worker: _TaskHandle | None = None
         self._pending_task: tuple[int, Callable[[Callable[[], bool]], object], Callable[[object], None]] | None = None
+        _init_task_lane(self, "fio-shortwave-explore")
         self._current_result: ShortwaveQueryResult | None = None
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
@@ -339,7 +421,7 @@ class ShortwaveExploreView(QWidget):
             self._debounce.start()
 
     @property
-    def _workers(self) -> dict[int, tuple[QThread, _TaskWorker]]:
+    def _workers(self) -> dict[int, tuple[_TaskHandle, _TaskHandle]]:
         """Compatibility/introspection view of the sole active worker lane."""
         if self._task_thread is None or self._task_worker is None:
             return {}
@@ -463,25 +545,16 @@ class ShortwaveExploreView(QWidget):
         super().resizeEvent(event)
 
     def _start_task(self, generation: int, operation: Callable[[Callable[[], bool]], object], done: Callable[[object], None]) -> None:
-        if self._task_thread is not None and self._task_thread.isRunning():
-            if self._task_worker is not None:
-                self._task_worker.cancel()
-            self._pending_task = (generation, operation, done)
-            return
-        thread = QThread(self)
-        thread.setObjectName("shortwave_explore_worker")
-        worker = _TaskWorker(generation, operation)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.completed.connect(lambda received, result: self._finish_task(received, result, done))
-        worker.failed.connect(self._query_failed)
-        worker.settled.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self._task_finished)
-        self._task_thread = thread
-        self._task_worker = worker
-        thread.start()
+        _start_task_lane(self, generation, operation, done)
+
+    def _task_completed(self, generation: int, result: object, done: object) -> None:
+        self._finish_task(generation, result, done)
+
+    def _task_failed(self, generation: int, message: str) -> None:
+        self._query_failed(generation, message)
+
+    def _task_settled_signal(self, _generation: int) -> None:
+        self._task_finished()
 
     def _finish_task(self, generation: int, result: object, done: Callable[[object], None]) -> None:
         if self._active and generation == self._query_generation:
@@ -508,10 +581,7 @@ class ShortwaveExploreView(QWidget):
     def shutdown(self) -> None:
         self._active = False
         self._cancel_workers()
-        if self._task_thread is not None and self._task_thread.isRunning():
-            self._task_thread.requestInterruption()
-            self._task_thread.quit()
-            self._task_thread.wait(5500)
+        _shutdown_task_lane(self)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
         self.shutdown()
@@ -578,9 +648,10 @@ class ShortwaveListeningView(QWidget):
         self._receiver_profiles_provider = receiver_profiles_provider
         self._active = False
         self._generation = 0
-        self._task_thread: QThread | None = None
-        self._task_worker: _TaskWorker | None = None
+        self._task_thread: _TaskHandle | None = None
+        self._task_worker: _TaskHandle | None = None
         self._pending_task: tuple[int, Callable[[Callable[[], bool]], object], Callable[[object], None]] | None = None
+        _init_task_lane(self, "fio-shortwave-listening")
         self._receivers: dict[int, str] = {}
         self._current_review: object | None = None
         self._pending_focus_key: str | None = None
@@ -891,24 +962,16 @@ class ShortwaveListeningView(QWidget):
     def _run(self, operation: Callable[[Callable[[], bool]], object], done: Callable[[object], None]) -> None:
         self._generation += 1
         generation = self._generation
-        if self._task_thread is not None and self._task_thread.isRunning():
-            if self._task_worker is not None:
-                self._task_worker.cancel()
-            self._pending_task = (generation, operation, done)
-            return
-        thread = QThread(self)
-        thread.setObjectName("shortwave_listening_worker")
-        worker = _TaskWorker(generation, operation)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.completed.connect(lambda received, result: self._finished(received, result, done))
-        worker.failed.connect(self._failed)
-        worker.settled.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self._task_settled)
-        self._task_thread, self._task_worker = thread, worker
-        thread.start()
+        _start_task_lane(self, generation, operation, done)
+
+    def _task_completed(self, generation: int, result: object, done: object) -> None:
+        self._finished(generation, result, done)
+
+    def _task_failed(self, generation: int, message: str) -> None:
+        self._failed(generation, message)
+
+    def _task_settled_signal(self, _generation: int) -> None:
+        self._task_settled()
 
     def _finished(self, generation: int, result: object, done: Callable[[object], None]) -> None:
         if self._active and generation == self._generation:
@@ -934,10 +997,7 @@ class ShortwaveListeningView(QWidget):
     def shutdown(self) -> None:
         self._active = False
         self._cancel_workers()
-        if self._task_thread is not None and self._task_thread.isRunning():
-            self._task_thread.requestInterruption()
-            self._task_thread.quit()
-            self._task_thread.wait(2500)
+        _shutdown_task_lane(self)
 
 
 class ShortwaveDataSourcesView(QWidget):
@@ -948,9 +1008,10 @@ class ShortwaveDataSourcesView(QWidget):
         self._db_path = Path(db_path)
         self._active = False
         self._generation = 0
-        self._task_thread: QThread | None = None
-        self._task_worker: _TaskWorker | None = None
+        self._task_thread: _TaskHandle | None = None
+        self._task_worker: _TaskHandle | None = None
         self._pending_task: tuple[int, Callable[[Callable[[], bool]], object], Callable[[object], None]] | None = None
+        _init_task_lane(self, "fio-shortwave-sources")
         self._preview: ShortwaveImportPreview | None = None
         self._datasets: tuple[object, ...] = ()
         self._build_ui()
@@ -1195,25 +1256,16 @@ class ShortwaveDataSourcesView(QWidget):
     def _run(self, operation: Callable[[Callable[[], bool]], object], done: Callable[[object], None]) -> None:
         self._generation += 1
         generation = self._generation
-        if self._task_thread is not None and self._task_thread.isRunning():
-            if self._task_worker is not None:
-                self._task_worker.cancel()
-            self._pending_task = (generation, operation, done)
-            return
-        thread = QThread(self)
-        thread.setObjectName("shortwave_data_sources_worker")
-        worker = _TaskWorker(generation, operation)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.completed.connect(lambda received, result: self._finish(received, result, done))
-        worker.failed.connect(self._failed)
-        worker.settled.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self._task_finished)
-        self._task_thread = thread
-        self._task_worker = worker
-        thread.start()
+        _start_task_lane(self, generation, operation, done)
+
+    def _task_completed(self, generation: int, result: object, done: object) -> None:
+        self._finish(generation, result, done)
+
+    def _task_failed(self, generation: int, message: str) -> None:
+        self._failed(generation, message)
+
+    def _task_settled_signal(self, _generation: int) -> None:
+        self._task_finished()
 
     def _finish(self, generation: int, result: object, done: Callable[[object], None]) -> None:
         if self._active and generation == self._generation:
@@ -1242,10 +1294,7 @@ class ShortwaveDataSourcesView(QWidget):
     def shutdown(self) -> None:
         self._active = False
         self._cancel_workers()
-        if self._task_thread is not None and self._task_thread.isRunning():
-            self._task_thread.requestInterruption()
-            self._task_thread.quit()
-            self._task_thread.wait(5500)
+        _shutdown_task_lane(self)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
         self.shutdown()

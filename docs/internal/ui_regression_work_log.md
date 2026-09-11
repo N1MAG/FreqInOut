@@ -3482,3 +3482,55 @@ That run exposed two deferred ControlFreq presentation callbacks that could
 arrive after a short-lived page was destroyed. Both callbacks now treat QObject
 destruction as cancellation, with a direct lifecycle regression. The repeated
 combined gate then passed 420 tests with one intentional skip.
+
+## 2026-09-11 — Linux hotspot attribution and Shortwave native-crash remediation
+
+Status: implementation complete; automated focused gate passed. Linux production
+soak remains an external confirmation gate.
+
+The attached second-run evidence confirmed the previous forced scheduler
+projection loop is gone: request and completion counters remained matched and
+only one request was forced. It also isolated four remaining contention paths.
+The UI hang watchdog captured synchronous VarAC status loading during startup;
+CPU reports captured repeated settings schema assurance, a 500-row Ops Focus
+backfill, manual-control and RF Guard reads initiated by the Station Control Bar,
+and repeated busy-evidence writes. A separate hang captured propagation history
+modeling on the GUI thread. The Shortwave navigation completed in under one
+second, then the process log ended with no Python exception while Data Sources
+was being reviewed.
+
+Remediation now assures a settings-store schema only once per store, skips the
+nonessential VarAC filesystem/status scan during initial runtime synchronization,
+loads only the latest indexed VarAC status row per source when status is later
+requested instead of materializing the append-only history,
+uses scheduler-published manual and assignment snapshots in the command bar,
+limits Ops Focus maintenance to cooperative 25-row units with a 750 ms yield,
+and caches operator-identity schema knowledge for the batch. Busy evidence has a
+60-second expiry, refreshes at most every 30 seconds while unchanged, clears a
+possibly stale prior-process row once and thereafter writes only on a local
+state edge, and duplicate busy warning logs are limited to one per 30 seconds.
+
+Propagation history now has a bounded 1,000-event ceiling per band, a dedicated
+pooled lookup index and cutoff predicate, and one day-scoped empirical cache
+shared by the morning/day/night display windows. This retains historical signal
+evidence while removing repeated scans of the same rows during one presentation.
+
+Shortwave's three page-owned `QThread` lanes were replaced with serialized daemon
+workers and GUI-thread signal bridges. This was driven by a local native
+segmentation-fault reproduction, not inference from an absent traceback. Page
+shutdown is now nonblocking and cannot destroy a running Qt thread. Background
+failures and duration/cancellation state are recorded for future production
+diagnosis.
+
+Model ownership: the high-reasoning primary model performed log correlation,
+concurrency and UI-boundary review, implementation, native-crash reproduction,
+test authoring, and integration review. No delegated agent was used because this
+turn did not request delegation and the remediation required a single owner.
+
+Acceptance evidence at this checkpoint: 78 Shortwave and production-hotpath
+tests, 33 busy-evidence/scheduler lifecycle tests (one intentional skip), and
+119 of 122 broader Ops/runtime/multi-radio assertions passed. The three failures
+are the already-known Wave 3 assigned-plan tests whose synchronous fixture
+predates the scheduler's nonblocking projection contract; no new failure was
+introduced by this remediation. Python compilation and `git diff --check`
+passed. The RF Guard compatibility assertion passes.

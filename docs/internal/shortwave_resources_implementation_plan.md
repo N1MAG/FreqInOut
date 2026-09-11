@@ -237,3 +237,23 @@ For every completed package, append the work log with:
 - migration/rollback evidence when applicable;
 - responsive/theme/text/hardware matrix results; and
 - remaining human or Linux/hardware gates without inferring success.
+
+## September 11 Native Worker-Lifecycle Requalification
+
+Linux production ended abruptly while the operator opened Data Sources. The
+application log contained no Python exception or failed Shortwave parse record.
+A local reproduction subsequently produced a native segmentation fault in the
+short-lived Qt thread completion path. SW-2 and SW-3 therefore have this stronger
+binding implementation rule:
+
+- Explore, Listening, and Data Sources each own one serialized daemon task lane;
+- rapid requests cancel/coalesce to the newest generation;
+- completion is delivered to the owning GUI thread through a signal bridge;
+- closing or replacing a page cancels pending work and returns immediately;
+- no page owns or destroys a live `QThread`; and
+- every Shortwave operation emits a bounded duration/cancellation metric and logs
+  an actionable traceback on a Python failure.
+
+The source review exit gate includes repeated open/review/switch/close cycles,
+closing during a deliberately slow operation, and process-level proof that the
+test exits normally rather than merely asserting widget state before teardown.

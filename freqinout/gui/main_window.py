@@ -302,7 +302,7 @@ class MainWindow(QMainWindow):
                 receiver_client_factory=receiver_control_client_from_profile,
             ),
         )
-        self.station_runtime_manager.sync_with_store()
+        self.station_runtime_manager.sync_with_store(include_varac_sync_status=False)
         self._runtime_profile_signature: tuple[object, ...] | None = None
         self._active_runtime_profile = self._load_runtime_active_device_profile()
         try:
@@ -342,7 +342,10 @@ class MainWindow(QMainWindow):
                 defer_initial_load=True,
             ),
         )
-        self._sync_settings_runtime_status()
+        self._sync_settings_runtime_status(
+            refresh_store=False,
+            include_varac_sync_status=False,
+        )
         self.launch_orchestrator = self.settings_tab.launch_orchestrator
         self._launch_progress_dialog: QProgressDialog | None = None
         self._launch_progress_total = 0
@@ -1464,9 +1467,18 @@ class MainWindow(QMainWindow):
         dialog.destroyed.connect(lambda *_args: setattr(self, "_recent_actions_dialog", None))
         dialog.show()
 
-    def _sync_settings_runtime_status(self) -> None:
+    def _sync_settings_runtime_status(
+        self,
+        *,
+        refresh_store: bool = True,
+        include_varac_sync_status: bool = True,
+    ) -> None:
         try:
-            self.station_runtime_manager.sync_with_store(refresh_runtime_status=True)
+            if refresh_store:
+                self.station_runtime_manager.sync_with_store(
+                    refresh_runtime_status=True,
+                    include_varac_sync_status=include_varac_sync_status,
+                )
             status = self.station_runtime_manager.runtime_status()
         except Exception:
             status = None
@@ -6706,7 +6718,10 @@ class MainWindow(QMainWindow):
             self._update_nav_layout_metrics()
         except Exception:
             pass
-        self._sync_settings_runtime_status()
+        self._sync_settings_runtime_status(
+            refresh_store=False,
+            include_varac_sync_status=False,
+        )
 
     def _refresh_station_overview(self, *, force: bool = False) -> None:
         if not self._ui_refresh_allowed():
@@ -7369,14 +7384,17 @@ class MainWindow(QMainWindow):
         if radio_id <= 0:
             return None
         try:
-            service = getattr(getattr(self, "scheduler", None), "_manual_control_service", None)
-            return service.get_state(radio_id) if service is not None and hasattr(service, "get_state") else None
+            scheduler = getattr(self, "scheduler", None)
+            snapshot = getattr(scheduler, "manual_control_state_snapshot", None)
+            return snapshot(radio_id) if callable(snapshot) else None
         except Exception:
             return None
 
     def _station_command_manual_control_service_available(self) -> bool:
-        service = getattr(getattr(self, "scheduler", None), "_manual_control_service", None)
-        return service is not None and hasattr(service, "get_state")
+        snapshot = getattr(
+            getattr(self, "scheduler", None), "manual_control_state_snapshot", None
+        )
+        return callable(snapshot)
 
     @staticmethod
     def _station_command_manual_state_has_qsy_target(state: object | None) -> bool:
@@ -8354,14 +8372,28 @@ class MainWindow(QMainWindow):
         radio_id = self._station_command_snapshot_id(profile) if profile is not None else 0
         if radio_id <= 0:
             return []
+        lane = self._station_command_lane_for_radio(radio_id)
+        if not isinstance(lane, Mapping):
+            # Compatibility for isolated presenters/tests constructed without
+            # the production scheduler. A real MainWindow never performs this
+            # fallback during command-bar rendering.
+            if hasattr(self, "scheduler"):
+                return []
+            try:
+                assignment = self.multi_radio_store.get_effective_assigned_plan_for_device(radio_id)
+            except Exception:
+                assignment = None
+            if not isinstance(assignment, Mapping):
+                return []
+            lane = {
+                "assignment_validation_status_json": assignment.get(
+                    "validation_status_json", ""
+                )
+            }
         try:
-            assignment = self.multi_radio_store.get_effective_assigned_plan_for_device(radio_id)
-        except Exception:
-            assignment = None
-        if not isinstance(assignment, Mapping):
-            return []
-        try:
-            validation = json.loads(str(assignment.get("validation_status_json", "") or "{}"))
+            validation = json.loads(
+                str(lane.get("assignment_validation_status_json", "") or "{}")
+            )
         except Exception:
             validation = {}
         if not isinstance(validation, Mapping):

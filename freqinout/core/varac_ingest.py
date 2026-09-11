@@ -430,6 +430,12 @@ def _ensure_local_tables(conn: sqlite3.Connection) -> None:
     ):
         if col_name not in sync_cols:
             cur.execute(f"ALTER TABLE varac_sync_status ADD COLUMN {col_name} {col_type}")
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_varac_sync_status_source_started
+        ON varac_sync_status(ingest_source_key, run_started_ts DESC)
+        """
+    )
     _ensure_varac_messages_source_scope(conn)
     cur.execute("PRAGMA table_info(varac_messages)")
     cols = {row[1] for row in cur.fetchall()}
@@ -697,13 +703,67 @@ def load_latest_varac_sync_status(*, db_path: Optional[Path] = None) -> Dict[str
                 else "'' AS cluster_public_id"
             ),
         ]
-        rows = conn.execute(
-            f"""
-            SELECT {", ".join(select_fields)}
-              FROM varac_sync_status
-          ORDER BY COALESCE(run_finished_ts, run_started_ts) DESC, run_started_ts DESC
-            """
-        ).fetchall()
+        if "ingest_source_key" in cols:
+            # The status table is append-only and can become large on a
+            # continuously running station. Read one indexed row per source
+            # instead of materializing its complete history at UI startup.
+            qualified_fields = [
+                "s.run_started_ts",
+                "s.run_finished_ts",
+                "s.varac_db_path",
+                "s.success",
+                "s.rows_scanned",
+                "s.rows_written",
+                "COALESCE(s.error_text, '') AS error_text",
+                "COALESCE(s.ingest_source_key, 'legacy') AS ingest_source_key",
+                (
+                    "COALESCE(s.ingest_scope, 'legacy') AS ingest_scope"
+                    if "ingest_scope" in cols
+                    else "'legacy' AS ingest_scope"
+                ),
+                (
+                    "COALESCE(s.ingest_source_label, '') AS ingest_source_label"
+                    if "ingest_source_label" in cols
+                    else "'' AS ingest_source_label"
+                ),
+                (
+                    "COALESCE(s.cluster_name, '') AS cluster_name"
+                    if "cluster_name" in cols
+                    else "'' AS cluster_name"
+                ),
+                (
+                    "COALESCE(s.cluster_public_id, '') AS cluster_public_id"
+                    if "cluster_public_id" in cols
+                    else "'' AS cluster_public_id"
+                ),
+            ]
+            rows = conn.execute(
+                f"""
+                WITH latest AS (
+                    SELECT ingest_source_key AS source_key,
+                           MAX(run_started_ts) AS run_started_ts
+                      FROM varac_sync_status
+                  GROUP BY ingest_source_key
+                )
+                SELECT {", ".join(qualified_fields)}
+                  FROM varac_sync_status AS s
+                  JOIN latest
+                    ON s.ingest_source_key IS latest.source_key
+                   AND latest.run_started_ts = s.run_started_ts
+              ORDER BY COALESCE(s.run_finished_ts, s.run_started_ts) DESC,
+                       s.run_started_ts DESC
+                """
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"""
+                SELECT {", ".join(select_fields)}
+                  FROM varac_sync_status
+              ORDER BY COALESCE(run_finished_ts, run_started_ts) DESC,
+                       run_started_ts DESC
+                 LIMIT 1
+                """
+            ).fetchall()
     finally:
         conn.close()
     latest: Dict[str, Dict[str, object]] = {}

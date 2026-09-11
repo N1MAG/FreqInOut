@@ -608,3 +608,31 @@ startup, burst, idle, contention, and shutdown budgets pass; the September 10
 failure shapes are regression tests; logs are bounded/actionable; and specs,
 evidence, operator documentation, and the work log state every remaining external
 gate.
+
+## September 11 Cross-Service Contention Requalification
+
+Linux watchdog evidence showed that message projection was no longer the only
+source of responsiveness loss. The following cross-service rules are therefore
+part of the MIP-5 release gate:
+
+- an Ops Focus historical backfill is cooperative background maintenance, begins
+  only after the shell settles, processes at most 25 message and 25 observation
+  rows per unit, and yields at least 750 ms between incomplete units;
+- one row-level identity projection must not re-check or repair the operator
+  identity schema; startup authority establishes it once;
+- a `MultiRadioStore` instance may assure its compatibility schema once, but
+  repeated runtime connections must not repeat the complete DDL/column walk;
+- append-only runtime status history must be projected with a bounded/indexed
+  latest-row-per-source query; it must never be fully materialized by startup or
+  a visible status refresh;
+- Station Control Bar rendering consumes worker-published manual-control and
+  assignment-validation snapshots and must not open SQLite or resolve a database
+  path while painting; and
+- status/busy evidence is edge-triggered or cadence-limited. An unchanged busy
+  condition must not perform an upsert/delete or warning-log write every scheduler
+  tick.
+
+Production evidence must distinguish foreground UI latency from aggregate
+background CPU. A successful gate has no UI heartbeat stall, no sustained CPU
+dump naming schema assurance or Ops backfill as a continuously active frame, and
+no command-bar callback above 100 ms after the initial settled snapshot.

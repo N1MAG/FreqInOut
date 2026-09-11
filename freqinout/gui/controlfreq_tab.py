@@ -2460,7 +2460,10 @@ class ControlFreqTab(QWidget):
             # before its optional index maintenance begins.  The worker itself
             # is bounded, but beginning it during shell construction can still
             # contend with the startup message projection database work.
-            QTimer.singleShot(600, self._schedule_focus_index_backfill)
+            # Historical indexing is useful but never startup-critical. Give
+            # the shell and endpoint services time to settle before beginning
+            # small cooperative batches.
+            QTimer.singleShot(2500, self._schedule_focus_index_backfill)
             self._reload_sop_manager_settings()
             if self._timer is None:
                 self._timer = QTimer(self)
@@ -3037,18 +3040,18 @@ class ControlFreqTab(QWidget):
         self._focus_backfill_pending = True
 
         def _work() -> tuple[int, bool]:
-            perf_meta: Dict[str, object] = {"budget_ms": 200, "batch_size": 500}
+            perf_meta: Dict[str, object] = {"budget_ms": 150, "batch_size": 25}
             with perf_span("controlfreq.focus_index_backfill", meta=perf_meta, min_ms=0.0):
                 conn = connect_sqlite(db_path, timeout=1.5, busy_timeout_ms=1500)
                 try:
                     indexed = 0
                     messages_complete = False
                     observations_complete = False
-                    deadline = time.monotonic() + 0.20
+                    deadline = time.monotonic() + 0.15
                     while not (messages_complete and observations_complete) and time.monotonic() < deadline:
-                        message_count, messages_complete = backfill_ops_focus_index(conn, batch_size=500)
+                        message_count, messages_complete = backfill_ops_focus_index(conn, batch_size=25)
                         observation_count, observations_complete = backfill_ops_focus_observation_index(
-                            conn, batch_size=500
+                            conn, batch_size=25
                         )
                         indexed += message_count + observation_count
                         if message_count + observation_count == 0:
@@ -3081,7 +3084,7 @@ class ControlFreqTab(QWidget):
         if indexed and (self.search_edit.text() or "").strip():
             self._focus_autocomplete_timer.start(0)
         if not complete and self._active:
-            QTimer.singleShot(100, self._schedule_focus_index_backfill)
+            QTimer.singleShot(750, self._schedule_focus_index_backfill)
 
     def _configured_focus_entities(self) -> tuple[tuple[str, str, str], ...]:
         entities: list[tuple[str, str, str]] = []

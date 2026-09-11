@@ -4,6 +4,7 @@ import datetime
 import json
 import re
 import sqlite3
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional
@@ -5059,6 +5060,11 @@ def mirror_legacy_settings_into_runtime_active_device(
 class MultiRadioStore:
     def __init__(self, db_path: Optional[Path] = None) -> None:
         self.db_path = Path(db_path) if db_path else settings_db_path()
+        # Startup/explicit administration owns migration. Compatibility callers
+        # may still arrive first, so assure once per store instead of walking
+        # every settings table and column on every runtime operation.
+        self._schema_ready = False
+        self._schema_lock = threading.Lock()
 
     def _connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -5068,7 +5074,11 @@ class MultiRadioStore:
             conn.execute("PRAGMA foreign_keys=ON")
         except Exception:
             pass
-        ensure_multi_radio_settings_schema(conn)
+        if not self._schema_ready:
+            with self._schema_lock:
+                if not self._schema_ready:
+                    ensure_multi_radio_settings_schema(conn)
+                    self._schema_ready = True
         return conn
 
     def _connect_readonly(self) -> sqlite3.Connection:
