@@ -231,6 +231,10 @@ send complete message bodies through a Qt signal.
   projection and never invoke source scanning.
 - The first page is capped at 200 rows. Additional history uses explicit paging
   or virtualized fetch.
+- Default Inbox paging is newest-received first using effective received time;
+  embedded event/report time is provenance and a deterministic tie breaker,
+  not the primary bounded-page order. This requirement is refined by
+  `flmsg_inbox_arrival_visibility_correction_spec.md`.
 - A model diff updates changed rows and counts. Complete widget reconstruction
   is reserved for a structural column or theme change.
 

@@ -99,6 +99,13 @@ Required fields:
   is the default predicate for Inbox and attention queries.
 - Search: `search_text`, indexed enough for bounded LIKE/FTS migration.
 
+Source-family identity, not a provisional display/type label, controls Inbox
+source-focus membership. In particular, `flmsg` and `flamp` projections remain
+members of the FLMSG/FLAMP focus while metadata enrichment is pending. Default
+bounded Inbox order uses effective received time; embedded event time remains
+provenance and a deterministic tie breaker. The correction and regression gate
+are defined by `flmsg_inbox_arrival_visibility_correction_spec.md`.
+
 Large raw bodies, file payloads, and reconstructed artifacts belong in linked
 tables, not the hot projection row.
 

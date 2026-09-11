@@ -149,7 +149,10 @@ class MessageProjectionPageCursor:
     The cursor deliberately carries the complete durable order key instead of
     an offset.  A busy station may receive new traffic while an operator pages;
     an offset would then either repeat or skip rows and force SQLite to walk
-    every preceding result.  Projection rows own these scalar fields and the
+    every preceding result.  ``received_ts`` stores the effective received
+    timestamp (falling back to ``event_ts`` for legacy rows).  The attention
+    fields remain for cursor compatibility but are not part of the default
+    newest-received order.  Projection rows own these scalar fields and the
     corresponding model indexes are installed by the startup migration.
     """
 
@@ -711,6 +714,18 @@ def ensure_message_projection_schema(conn: sqlite3.Connection) -> None:
         "COALESCE(NULLIF(received_ts, 0), event_ts, 0) DESC, message_id DESC)"
     )
     cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_msg_projection_model_received_v2 "
+        "ON message_projection(inbox_visible, deleted, archived, "
+        "COALESCE(NULLIF(received_ts, 0), event_ts, 0) DESC, "
+        "event_ts DESC, message_id DESC)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_msg_projection_model_source_received_v2 "
+        "ON message_projection(source_family, inbox_visible, deleted, archived, "
+        "COALESCE(NULLIF(received_ts, 0), event_ts, 0) DESC, "
+        "event_ts DESC, message_id DESC)"
+    )
+    cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_msg_projection_model_from "
         "ON message_projection(from_call, inbox_visible, deleted, archived, "
         "operator_attention DESC, actionable DESC, event_ts DESC, received_ts DESC, message_id DESC)"
@@ -1195,29 +1210,25 @@ def query_projected_message_page(
     if cursor is not None:
         clauses.append(
             """(
-                operator_attention < ?
-                OR (operator_attention = ? AND actionable < ?)
-                OR (operator_attention = ? AND actionable = ? AND event_ts < ?)
-                OR (operator_attention = ? AND actionable = ? AND event_ts = ? AND received_ts < ?)
-                OR (operator_attention = ? AND actionable = ? AND event_ts = ? AND received_ts = ? AND message_id < ?)
+                COALESCE(NULLIF(received_ts, 0), event_ts, 0) < ?
+                OR (
+                    COALESCE(NULLIF(received_ts, 0), event_ts, 0) = ?
+                    AND event_ts < ?
+                )
+                OR (
+                    COALESCE(NULLIF(received_ts, 0), event_ts, 0) = ?
+                    AND event_ts = ?
+                    AND message_id < ?
+                )
             )"""
         )
         params.extend(
             (
-                int(cursor.operator_attention or 0),
-                int(cursor.operator_attention or 0),
-                int(cursor.actionable or 0),
-                int(cursor.operator_attention or 0),
-                int(cursor.actionable or 0),
-                float(cursor.event_ts or 0.0),
-                int(cursor.operator_attention or 0),
-                int(cursor.actionable or 0),
+                float(cursor.received_ts or 0.0),
+                float(cursor.received_ts or 0.0),
                 float(cursor.event_ts or 0.0),
                 float(cursor.received_ts or 0.0),
-                int(cursor.operator_attention or 0),
-                int(cursor.actionable or 0),
                 float(cursor.event_ts or 0.0),
-                float(cursor.received_ts or 0.0),
                 str(cursor.message_id or ""),
             )
         )
@@ -1244,8 +1255,8 @@ def query_projected_message_page(
                 SELECT *
                   FROM message_projection
                 {where}
-                 ORDER BY operator_attention DESC, actionable DESC, event_ts DESC,
-                          received_ts DESC, message_id DESC
+                 ORDER BY COALESCE(NULLIF(received_ts, 0), event_ts, 0) DESC,
+                          event_ts DESC, message_id DESC
                  LIMIT ?
                 """,
                 tuple(params + [bounded_size + 1]),
@@ -1413,11 +1424,13 @@ def _read_projected_rows(
 
 
 def _projected_page_cursor_from_row(row: sqlite3.Row) -> MessageProjectionPageCursor:
+    event_ts = float(row["event_ts"] or 0.0)
+    received_ts = float(row["received_ts"] or 0.0)
     return MessageProjectionPageCursor(
         operator_attention=int(row["operator_attention"] or 0),
         actionable=int(row["actionable"] or 0),
-        event_ts=float(row["event_ts"] or 0.0),
-        received_ts=float(row["received_ts"] or 0.0),
+        event_ts=event_ts,
+        received_ts=received_ts if received_ts else event_ts,
         message_id=str(row["message_id"] or ""),
     )
 

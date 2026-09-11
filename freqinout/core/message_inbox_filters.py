@@ -68,7 +68,7 @@ def row_matches_type_filter(row: MessageRowLike, type_sel: str) -> bool:
     if type_sel == "JS8Call":
         return origin == "js8"
     if type_sel == "FLMSG/FLAMP":
-        return msg_type.strip().upper() in {"FLMSG", "FLAMP"}
+        return _is_fast_light_row(row)
     if type_sel == "SitRep":
         return msg_type == "SitRep"
     if type_sel.startswith("SitRep/"):
@@ -78,6 +78,39 @@ def row_matches_type_filter(row: MessageRowLike, type_sel: str) -> bool:
         row_subtype = str(getattr(getattr(row, "payload", None), "subtype", "") or "").strip().upper()
         return row_subtype == subtype
     return msg_type == type_sel
+
+
+def _fast_light_source_family(row: MessageRowLike) -> str:
+    """Return the authoritative Fast Light source family for a row, if known.
+
+    ``msg_type`` and display labels can be safe fallbacks such as ``FLMsg
+    K2S`` while file metadata is still sparse.  They are presentation values,
+    not source identity.  Prefer the row origin, then the projected payload's
+    canonical source-family fields; a known non-Fast-Light origin deliberately
+    prevents a legacy type label from admitting (for example) a BBS row.
+    """
+
+    origin = _normalize_source_alias(message_source_value(row))
+    if origin:
+        return origin
+    payload = getattr(row, "payload", None)
+    for attr in ("source_family", "source_family_label"):
+        source = _normalize_source_alias(getattr(payload, attr, "") if payload is not None else "")
+        if source:
+            return source
+    return ""
+
+
+def _is_fast_light_row(row: MessageRowLike) -> bool:
+    """Match FLMsg/FLAmp by source identity, with a strict legacy fallback."""
+
+    source = _fast_light_source_family(row)
+    if source:
+        return source in {"flmsg", "flamp"}
+    # Pre-projection legacy rows did not always retain an origin.  Preserve
+    # their exact historical labels, but do not treat suffix-bearing fallback
+    # display labels as identity.
+    return str(getattr(row, "msg_type", "") or "").strip().upper() in {"FLMSG", "FLAMP"}
 
 
 def message_source_value(row: MessageRowLike) -> str:

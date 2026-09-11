@@ -14727,14 +14727,19 @@ class MessageViewerTab(QWidget):
         spotter_forms = sorted({t for t in type_vals if re.match(r"^F![0-9]{3}[A-Z]?$", t)})
         has_commstat = any((r.origin or "").strip().lower() == "commstat" for r in rows)
         has_js8call = any((r.origin or "").strip().lower() == "js8" for r in rows)
-        has_forms = any(str(r.msg_type or "").strip().upper() in {"FLMSG", "FLAMP"} for r in rows)
+        form_types = {
+            str(r.msg_type or "").strip()
+            for r in rows
+            if str(r.msg_type or "").strip() and _core_row_matches_type_filter(r, "FLMSG/FLAMP")
+        }
+        has_forms = bool(form_types)
         grouped_types = set(spotter_forms)
         if has_commstat:
             grouped_types.update(t for t in type_vals if str(t or "").startswith("CommStat"))
         if has_js8call:
             grouped_types.update(t for t in type_vals if str(t or "").strip().upper() in {"JS8", "JS8 MSG", "JS8CALL"})
         if has_forms:
-            grouped_types.update(t for t in type_vals if str(t or "").strip().upper() in {"FLMSG", "FLAMP"})
+            grouped_types.update(form_types)
         base_types = sorted([t for t in type_vals if t not in grouped_types])
         sitrep_subtypes = sorted(
             {

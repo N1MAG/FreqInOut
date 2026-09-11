@@ -5,6 +5,12 @@ performance, select-all visibility, newest-first sorting, CommStat semantics, an
 FIOSpotter administration is governed by
 `production_reliability_and_workflow_remediation_spec.md`.
 
+Arrival-time ordering and source-family-safe FLMSG/FLAMP focus membership are
+governed by `flmsg_inbox_arrival_visibility_correction_spec.md`. A supported
+file received inside the active age window must not be hidden because its
+embedded report date is older or because only a fallback display type is
+available.
+
 The production correction that keeps the ordinary multi-source Inbox primary
 while presenting pending JS8 retrievals as a bounded auxiliary workbench is
 governed by `production_inbox_bbs_correction_spec.md`. A pending retrieval is

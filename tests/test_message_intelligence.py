@@ -1664,6 +1664,28 @@ def test_inbox_focus_filters_operator_oriented_message_sets() -> None:
     assert row_matches_inbox_focus(varac, "bbs") is False
 
 
+def test_fast_light_focus_uses_source_family_for_fallback_file_labels() -> None:
+    flmsg_k2s = UnifiedMessage("FLMsg K2S", "NEW", "", "", 1.0, "", "form", "flmsg", object())
+    flamp_b2s = UnifiedMessage("FLAmp B2S", "NEW", "", "", 1.0, "", "transfer", "flamp", object())
+    projected_flmsg = UnifiedMessage(
+        "FLMsg B2S", "NEW", "", "", 1.0, "", "projected", "", SimpleNamespace(source_family="flmsg")
+    )
+    legacy = UnifiedMessage("FLMSG", "NEW", "", "", 1.0, "", "legacy", "", object())
+    bbs = UnifiedMessage("FLMSG", "NEW", "", "", 1.0, "", "not a form", "bbs", object())
+    varac = UnifiedMessage("FLAmp B2S", "NEW", "", "", 1.0, "", "not a form", "varac", object())
+
+    for row in (flmsg_k2s, flamp_b2s, projected_flmsg, legacy):
+        assert row_matches_type_filter(row, "FLMSG/FLAMP") is True
+        assert row_matches_inbox_focus(row, "forms") is True
+        assert row_matches_inbox_criteria(
+            row,
+            InboxFilterCriteria(focus="forms", age_filter_seconds=7 * 24 * 60 * 60, now_ts=2.0),
+        ) is True
+    for row in (bbs, varac):
+        assert row_matches_type_filter(row, "FLMSG/FLAMP") is False
+        assert row_matches_inbox_focus(row, "forms") is False
+
+
 def test_mesh_observation_presentation_routes_to_mesh_inbox_focus() -> None:
     observation = Observation(
         observation_id="meshcore:meshcore-field:private-1",

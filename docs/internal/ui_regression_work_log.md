@@ -3706,3 +3706,46 @@ Offscreen Dark/Large renders at 1280x720 and 900x560 confirm reachable actions,
 one policy summary, and no page-level horizontal overflow. Python compilation
 and `git diff --check` pass. There is no schema migration, production-data
 mutation, source-file operation, or BBS ownership/retention semantic change.
+
+## 2026-09-11 — FLMsg arrival visibility correction (FIV-0/FIV-1)
+
+Status: review/specification and automated implementation gates passed; Linux
+production confirmation remains operator-assisted.
+
+The supplied Linux log ruled out the configured NBEMS path, extensions, and
+file scanner as the observed cause. Incremental discovery advanced from 604 to
+605 files, the normalized projection generation advanced, and FIO loaded a
+`.k2s` file as `origin=flmsg` without scanner or projection errors. Under the
+FLMSG/FLAMP focus, however, the bounded query loaded 11 rows while the client
+criteria rendered only 2. Newly projected files can carry provisional labels
+such as `FLMsg K2S`; the second client filter accepted only exact `FLMSG` and
+`FLAMP` labels. The general 200-row page also sorted primarily by embedded
+event time, allowing an old report received today to be omitted despite the
+seven-day arrival filter.
+
+Source focus now follows canonical `flmsg`/`flamp` identity with a strict legacy
+type fallback, and form filter choices group provisional extension labels under
+FLMSG/FLAMP. Bounded Inbox selection is newest-effective-received first with
+event time and message ID tie breakers; the keyset cursor uses the identical
+order. Two idempotent additive indexes support the corrected read paths. There
+is no source-file operation, table rewrite, message mutation, synchronous GUI
+I/O, or destructive migration.
+
+Model ownership: the high-reasoning primary model correlated the production
+log, wrote the correction spec, owned query/cursor/index architecture and
+migration review, reviewed each delegated diff, refined filter presentation,
+and performed final integration. Terra implemented the bounded source-family
+focus matcher and focused unit coverage. Luna implemented the independent
+scanner-to-projection and received-first paging regressions.
+
+Acceptance evidence: the four exact filename shapes (`.k2s`, `.b2s`, and
+`.sig.b2s`) pass through scanner, incremental file projection, and the default
+bounded query with current arrival mtimes and deliberately old report times.
+The regression includes 205 competing newer-event records, the 200-row cap,
+repeat determinism, and disjoint keyset pages. The combined relevant gate passed
+292 tests; isolated Message Intelligence and PIC-1 partitions passed 191 and
+18 tests. Production-copy count-plus-page timing across 100 samples was 0.813
+ms median, 0.999 ms p95, and 1.143 ms maximum. Python compilation and
+`git diff --check` pass. A monolithic all-message Qt run still encounters the
+known cross-fixture native abort after accumulating scheduler-executor threads;
+the affected partitions pass when run in isolated processes.

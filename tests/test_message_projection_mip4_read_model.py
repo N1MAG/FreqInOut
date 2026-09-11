@@ -146,8 +146,8 @@ def test_mip4_filter_count_uses_migration_indexes_and_returns_matching_page(tmp_
             SELECT * FROM message_projection
              WHERE deleted=0 AND archived=0 AND inbox_visible=1
                AND source_family=?
-             ORDER BY operator_attention DESC, actionable DESC, event_ts DESC,
-                      received_ts DESC, message_id DESC
+             ORDER BY COALESCE(NULLIF(received_ts, 0), event_ts, 0) DESC,
+                      event_ts DESC, message_id DESC
              LIMIT 200
             """,
             ("commstat",),
@@ -159,7 +159,9 @@ def test_mip4_filter_count_uses_migration_indexes_and_returns_matching_page(tmp_
     assert "idx_msg_projection_model_source" in indexes
     assert "idx_msg_projection_model_group" in indexes
     assert "idx_msg_projection_model_received" in indexes
-    assert any("idx_msg_projection_model_source" in str(row) for row in plan)
+    assert "idx_msg_projection_model_received_v2" in indexes
+    assert "idx_msg_projection_model_source_received_v2" in indexes
+    assert any("idx_msg_projection_model_source_received_v2" in str(row) for row in plan)
 
 
 def test_mip4_page_applies_multi_group_identity_type_and_age_filters_before_limit(tmp_path) -> None:
