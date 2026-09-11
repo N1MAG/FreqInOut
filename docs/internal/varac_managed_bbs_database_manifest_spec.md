@@ -5,6 +5,10 @@ Status: Slice 2 implemented; automated exit gate passed 2026-09-06.
 The production remediation and delivery gates remain governed by
 `production_reliability_and_workflow_remediation_spec.md`.
 
+The production-height responsive correction for Radio Service and Locations &
+Access is governed by `production_inbox_bbs_correction_spec.md`. That correction
+does not change the station-owned catalog or publication model.
+
 ## Goal
 
 FreqInOut multi-rig owns one station Managed BBS catalog. A canonical artifact
@@ -108,6 +112,13 @@ Top-level `BBS` is the first-class station service. Its guided tabs are ordered
   publication health details;
 - compact reflow with opt-in details at 1000 pixels and below.
 
+Responsive mode must consider the actual tab viewport height and active font
+metrics as well as width. A wide but short production window must not retain a
+split layout that clips selectors, fields, or actions. Radio selection remains
+concise and path-free; location navigation shows identity/state while access and
+retention remain in the selected policy detail. Editors are progressive and do
+not consume the default read-only workspace.
+
 The `Radio Service` tab owns BBS-specific adapter controls for every configured
 VarAC radio. VarAC Settings retains the native launcher, inbox, outbox, and
 radio-specific inbound-safety configuration, plus a route to BBS. Existing
@@ -172,6 +183,14 @@ that configuration, membership, and source files are unchanged.
 - Visual review: Light/Normal at 1200x800 and Dark/Large Text at 900x560;
   compact details remain reachable without consuming the default artifact
   workspace.
+- Production correction review additionally covers 1280x720, 1000x700, and
+  900x560 in both themes and text sizes, with long labels/paths and no page-level
+  horizontal overflow on Radio Service or Locations & Access.
+- Production correction implementation replaces the fixed radio table with a
+  bounded state selector, keeps native paths behind a disclosure, collapses the
+  location editor by default, and uses viewport height plus font metrics for
+  compact mode. Its focused gate passes 58 tests; the combined Inbox/BBS gate
+  passes 397 with one platform-dependent skip.
 - Refinement contract: Keep survives recalculation/reconciliation, Republish
   uses an action-time retention window, Remove preserves source/catalog, staged
   publication edits require Apply, and extensionless helpers retain historical

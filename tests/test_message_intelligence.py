@@ -3165,6 +3165,57 @@ def test_message_viewer_pending_status_and_delete_are_source_scoped(tmp_path) ->
     assert rows == [("js8:fio-b", "WAITING")]
 
 
+def test_message_viewer_pending_query_filters_status_and_pages_at_100(tmp_path) -> None:
+    """The retrieval workbench never materializes historical completed rows."""
+
+    db_path = tmp_path / "freqinout_nets.db"
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    tab.settings = {}
+    tab._backlog_db_path = lambda: db_path
+    tab._pending_page_offset = 0
+    tab._pending_rows = []
+
+    MessageViewerTab._ensure_backlog_table(tab)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executemany(
+            """
+            INSERT INTO autoquery_backlog
+                (callsign, msg_id, kind, status, attempts, last_attempt_ts, created_ts,
+                 source_key, source_radio_id, js8_instance_id, source_path)
+            VALUES (?, ?, ?, ?, 0, 0, ?, 'js8:fio-a', '7', 'fio-a', '')
+            """,
+            [
+                (
+                    f"K{index:03d}ABC",
+                    str(index),
+                    "MSG",
+                    "RETRIEVED" if index % 13 == 0 else "PENDING",
+                    float(index),
+                )
+                for index in range(130)
+            ]
+            + [("K999ABC", "other", "OTHER", "PENDING", 1000.0)],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    first_page = MessageViewerTab._load_pending_rows(tab)
+
+    assert tab._pending_total_count == 120
+    assert len(first_page) == 100
+    assert first_page[0]["msg_id"] == "129"
+    assert all(row["status"] != "RETRIEVED" for row in first_page)
+
+    tab._pending_page_offset = 100
+    second_page = MessageViewerTab._load_pending_rows(tab)
+
+    assert len(second_page) == 20
+    assert second_page[0]["msg_id"] == "21"
+    assert second_page[-1]["msg_id"] == "1"
+
+
 def test_message_viewer_pending_mark_retrieved_sync_uses_source_inbox(tmp_path) -> None:
     inbox_a = tmp_path / "fio-a-inbox.db"
     inbox_b = tmp_path / "fio-b-inbox.db"

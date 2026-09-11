@@ -14,12 +14,13 @@ import platform
 import shutil
 import subprocess
 import tempfile
+import threading
 import xml.dom.minidom
 import time
 import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Optional, Sequence, Set, Mapping
+from typing import Any, Callable, Dict, List, Tuple, Optional, Sequence, Set, Mapping
 
 from PySide6.QtCore import (
     Qt,
@@ -86,6 +87,7 @@ MESSAGE_INBOX_FOCUS_MIN_WIDTH = 680
 MESSAGE_PROJECTION_QUEUE_POLL_SECONDS = 30
 MESSAGE_PROJECTION_VISIBLE_COALESCE_MS = 500
 MESSAGE_PROJECTION_HIDDEN_COALESCE_MS = 2000
+PENDING_RETRIEVAL_PAGE_SIZE = 100
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.multi_radio_store import MultiRadioStore
@@ -804,6 +806,12 @@ class _FileScanWorker(QObject):
 
     def _run_incremental(self) -> Tuple[Dict[str, List[FileRecord]], Dict[str, float]]:
         return self._scanner._run_incremental()
+
+
+class _PendingRetrievalActionBridge(QObject):
+    """Deliver one serialized retrieval action result back to the GUI thread."""
+
+    finished = Signal(object)
 
 
 class _BbsAutoArchiveWorker(QObject):
@@ -3241,6 +3249,10 @@ class MessageViewerTab(QWidget):
         self._bbs_copy_targets_cache_ts: float = 0.0
         self._bbs_published_index_cache: Dict[str, Set[str]] = {}
         self._bbs_published_index_cache_ts: float = 0.0
+        self._pending_action_thread: threading.Thread | None = None
+        self._pending_action_generation: int = 0
+        self._pending_action_bridge = _PendingRetrievalActionBridge(self)
+        self._pending_action_bridge.finished.connect(self._on_pending_action_finished)
         self._retired_worker_refs: List[object] = []
 
         # merge DB paths if present
@@ -5011,15 +5023,44 @@ class MessageViewerTab(QWidget):
         inbox_root.addWidget(self.inbox_body_scroll, 1)
         self.messages_mode_stack.addWidget(self.inbox_page)
 
-        self.pending_box = QGroupBox("Pending JS8 MSGs")
-        pending_layout = QVBoxLayout()
-        pending_header = QHBoxLayout()
+        # JS8 retrievals are a utility queue, not the message Inbox.  Keep the
+        # bounded review table in its own workbench so a large backlog cannot
+        # displace the ordinary multi-source Inbox below the fold.
+        self._pending_page_offset = 0
+        self._pending_total_count = 0
+        self.pending_retrieval_widget = QWidget()
+        self.pending_retrieval_widget.setAccessibleName("Pending JS8 retrievals")
+        pending_disclosure_layout = QHBoxLayout(self.pending_retrieval_widget)
+        pending_disclosure_layout.setContentsMargins(0, 0, 0, 4)
+        pending_disclosure_layout.setSpacing(8)
+        self.pending_retrieval_label = QLabel("JS8 retrievals ·")
         self.pending_count = QLabel("0 pending")
-        pending_header.addWidget(self.pending_count)
-        pending_header.addStretch()
-        pending_layout.addLayout(pending_header)
+        self.pending_count.setObjectName("messagePendingRetrievalCount")
+        self.pending_count.setWordWrap(True)
+        self.pending_review_btn = QPushButton("Review")
+        self.pending_review_btn.setObjectName("messagePendingRetrievalReview")
+        self.pending_review_btn.setAccessibleName("Review pending JS8 retrievals")
+        self.pending_review_btn.setToolTip("Review pending JS8 message retrievals without leaving the Inbox.")
+        self.pending_review_btn.clicked.connect(self._open_pending_review)
+        pending_disclosure_layout.addWidget(self.pending_retrieval_label)
+        pending_disclosure_layout.addWidget(self.pending_count)
+        pending_disclosure_layout.addWidget(self.pending_review_btn)
+        pending_disclosure_layout.addStretch()
+        self.pending_retrieval_widget.setVisible(False)
 
+        self.pending_review_dialog = QDialog(self)
+        self.pending_review_dialog.setObjectName("messagePendingRetrievalWorkbench")
+        self.pending_review_dialog.setAccessibleName("Pending JS8 retrievals")
+        self.pending_review_dialog.setWindowTitle("JS8 Retrievals")
+        self.pending_review_dialog.setModal(True)
+        pending_layout = QVBoxLayout(self.pending_review_dialog)
+        pending_layout.setContentsMargins(12, 12, 12, 12)
+        pending_layout.setSpacing(8)
+        self.pending_review_summary = QLabel("0 pending retrievals")
+        self.pending_review_summary.setWordWrap(True)
+        pending_layout.addWidget(self.pending_review_summary)
         self.pending_table = QTableWidget(0, 5)
+        self.pending_table.setAccessibleName("Pending JS8 retrieval queue")
         self.pending_table.setHorizontalHeaderLabels(
             ["Callsign", "Msg ID", "Last Seen (UTC)", "Status", "Actions"]
         )
@@ -5033,11 +5074,28 @@ class MessageViewerTab(QWidget):
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(4, QHeaderView.Stretch)
+        self.pending_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.pending_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.pending_table.setMaximumHeight(500)
         pending_layout.addWidget(self.pending_table)
-        self.pending_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-        self.pending_box.setLayout(pending_layout)
-        self.pending_box.setVisible(False)
-        body.addWidget(self.pending_box)
+        pending_paging = QHBoxLayout()
+        self.pending_previous_btn = QPushButton("Newer")
+        self.pending_next_btn = QPushButton("Older")
+        self.pending_previous_btn.setAccessibleName("Show newer JS8 retrievals")
+        self.pending_next_btn.setAccessibleName("Show older JS8 retrievals")
+        self.pending_page_label = QLabel("")
+        self.pending_previous_btn.clicked.connect(lambda: self._change_pending_page(-1))
+        self.pending_next_btn.clicked.connect(lambda: self._change_pending_page(1))
+        pending_paging.addWidget(self.pending_previous_btn)
+        pending_paging.addWidget(self.pending_next_btn)
+        pending_paging.addWidget(self.pending_page_label)
+        pending_paging.addStretch()
+        pending_layout.addLayout(pending_paging)
+        pending_buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        pending_buttons.rejected.connect(self.pending_review_dialog.reject)
+        pending_buttons.clicked.connect(lambda _button: self.pending_review_dialog.close())
+        pending_layout.addWidget(pending_buttons)
+        self.pending_review_dialog.finished.connect(self._on_pending_review_closed)
 
         messages_box = QGroupBox("Messages")
         messages_layout = QVBoxLayout()
@@ -5243,11 +5301,12 @@ class MessageViewerTab(QWidget):
         self.inbox_focus_widget.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
         messages_layout.insertWidget(1, self.inbox_focus_widget)
         messages_layout.insertWidget(2, self.message_funnel_widget)
-        messages_layout.insertWidget(3, self.message_scope_label)
-        messages_layout.insertWidget(4, self.traffic_action_summary)
-        messages_layout.insertWidget(5, self.message_intel_filter_widget)
-        messages_layout.insertWidget(6, self.map_context_filter_label)
-        messages_layout.insertWidget(7, self.bulk_selection_bar)
+        messages_layout.insertWidget(3, self.pending_retrieval_widget)
+        messages_layout.insertWidget(4, self.message_scope_label)
+        messages_layout.insertWidget(5, self.traffic_action_summary)
+        messages_layout.insertWidget(6, self.message_intel_filter_widget)
+        messages_layout.insertWidget(7, self.map_context_filter_label)
+        messages_layout.insertWidget(8, self.bulk_selection_bar)
 
         self._arrange_inbox_action_controls(compact=False)
         self._sync_inbox_focus_buttons()
@@ -5282,6 +5341,7 @@ class MessageViewerTab(QWidget):
             return
         mode = self._messages_responsive_mode_for_width(int(self.width() or 0))
         if mode == self._responsive_layout_mode and layout.count() > 0:
+            self._apply_inbox_primary_height_guard()
             if hasattr(self, "compose_splitter"):
                 compose_mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
                 compose_sidebar = compose_mode in {"nbems", "spotter", "commstat_rf"} and mode != "compact"
@@ -5293,6 +5353,7 @@ class MessageViewerTab(QWidget):
         self._responsive_layout_mode = mode
         compact = mode == "compact"
         self._arrange_inbox_action_controls(compact=compact)
+        self._apply_inbox_primary_height_guard()
         if hasattr(self, "compose_splitter"):
             compose_mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
             compose_sidebar = compose_mode in {"nbems", "spotter", "commstat_rf"} and not compact
@@ -5300,6 +5361,21 @@ class MessageViewerTab(QWidget):
                 self.compose_body_splitter.setOrientation(Qt.Horizontal if compose_sidebar else Qt.Vertical)
             self.compose_splitter.setOrientation(Qt.Vertical if (compact or compose_sidebar) else Qt.Horizontal)
             self._refresh_compose_layout_geometry_if_needed(force=True)
+
+    def _apply_inbox_primary_height_guard(self) -> None:
+        """Reserve a usable Inbox list viewport without growing ancillary UI."""
+
+        if str(getattr(self, "_messages_mode", "Inbox") or "Inbox") != "Inbox":
+            return
+        table = getattr(self, "messages_table", None)
+        if table is None:
+            return
+        required_viewport = 240 if int(self.height() or 0) >= 700 else 160
+        try:
+            chrome = int(table.horizontalHeader().sizeHint().height()) + (table.frameWidth() * 2) + 4
+            table.setMinimumHeight(required_viewport + chrome)
+        except Exception:
+            return
 
     def _arrange_inbox_action_controls(self, *, compact: bool) -> None:
         layout = getattr(self, "_inbox_actions_layout", None)
@@ -9237,6 +9313,10 @@ class MessageViewerTab(QWidget):
             self.inbox_focus_widget.setVisible(not compose_active)
         if hasattr(self, "message_funnel_widget"):
             self.message_funnel_widget.setVisible(not compose_active)
+        if hasattr(self, "pending_retrieval_widget"):
+            self._sync_pending_retrieval_disclosure(
+                int(getattr(self, "_pending_total_count", 0) or 0)
+            )
         if hasattr(self, "traffic_action_summary"):
             self.traffic_action_summary.setVisible(not compose_active)
         self._update_map_context_filter_label()
@@ -12840,30 +12920,53 @@ class MessageViewerTab(QWidget):
         self._ensure_backlog_table()
         self._update_pending_table()
 
-    def _load_pending_rows(self) -> List[Dict[str, str | float]]:
+    def _load_pending_rows(self, *, include_page: bool = True) -> List[Dict[str, str | float]]:
         db_path = self._backlog_db_path()
         if not db_path or not db_path.exists():
             self._pending_rows = []
+            self._pending_total_count = 0
             return []
-        self._ensure_backlog_table()
         try:
-            rows = fetch_all(
-                db_path,
-                """
-                SELECT callsign, msg_id, status, last_attempt_ts, created_ts,
-                       COALESCE(source_key, ''), COALESCE(source_radio_id, ''),
-                       COALESCE(js8_instance_id, ''), COALESCE(source_path, '')
-                FROM autoquery_backlog
-                WHERE kind='MSG'
-                ORDER BY created_ts DESC
-                """,
-                timeout=1.5,
-                busy_timeout_ms=1500,
-                span_name="messages.load_pending_backlog",
-            )
+            # Keep both count and page inside one read snapshot.  Filtering
+            # retrieved rows in SQL avoids materializing historical backlog
+            # entries merely to hide them in the UI.
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.5)
+            try:
+                conn.execute("PRAGMA busy_timeout=1500")
+                conn.execute("BEGIN")
+                total_row = conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM autoquery_backlog
+                    WHERE kind='MSG' AND UPPER(COALESCE(status, 'PENDING')) != 'RETRIEVED'
+                    """
+                ).fetchone()
+                total_count = int(total_row[0] or 0) if total_row else 0
+                offset = max(0, int(getattr(self, "_pending_page_offset", 0) or 0))
+                if total_count and offset >= total_count:
+                    offset = ((total_count - 1) // PENDING_RETRIEVAL_PAGE_SIZE) * PENDING_RETRIEVAL_PAGE_SIZE
+                rows = []
+                if include_page:
+                    rows = conn.execute(
+                        """
+                        SELECT callsign, msg_id, status, last_attempt_ts, created_ts,
+                               COALESCE(source_key, ''), COALESCE(source_radio_id, ''),
+                               COALESCE(js8_instance_id, ''), COALESCE(source_path, '')
+                        FROM autoquery_backlog
+                        WHERE kind='MSG' AND UPPER(COALESCE(status, 'PENDING')) != 'RETRIEVED'
+                        ORDER BY created_ts DESC, id DESC
+                        LIMIT ? OFFSET ?
+                        """,
+                        (PENDING_RETRIEVAL_PAGE_SIZE, offset),
+                    ).fetchall()
+                self._pending_page_offset = offset
+                self._pending_total_count = total_count
+            finally:
+                conn.close()
         except Exception as e:
             log.debug("MessageViewer: failed to load pending backlog: %s", e)
             self._pending_rows = []
+            self._pending_total_count = 0
             return []
         out: List[Dict[str, str | float]] = []
         for row in rows:
@@ -12882,15 +12985,30 @@ class MessageViewerTab(QWidget):
         self._pending_rows = out
         return out
 
-    def _update_pending_table(self) -> None:
-        rows = self._load_pending_rows()
-        rows = [row for row in rows if str(row.get("status", "")).upper() != "RETRIEVED"]
-        pending_count = len(rows)
-        self.pending_count.setText(f"{pending_count} pending")
-        if hasattr(self, "pending_box"):
-            self.pending_box.setVisible(pending_count > 0)
+    def _update_pending_table(self, *, include_page: bool | None = None) -> None:
+        if include_page is None:
+            include_page = bool(
+                hasattr(self, "pending_review_dialog")
+                and self.pending_review_dialog.isVisible()
+            )
+        rows = self._load_pending_rows(include_page=bool(include_page))
+        pending_count = int(getattr(self, "_pending_total_count", len(rows)) or 0)
+        if hasattr(self, "pending_count"):
+            self.pending_count.setText(f"{pending_count} pending")
+        if hasattr(self, "pending_review_summary"):
+            if pending_count:
+                self.pending_review_summary.setText(
+                    f"{pending_count} pending JS8 retrieval{'s' if pending_count != 1 else ''}. "
+                    "Newest retrievals are shown first."
+                )
+            else:
+                self.pending_review_summary.setText("No pending JS8 retrievals.")
+        self._sync_pending_retrieval_disclosure(pending_count)
+        if not include_page:
+            return
         rows_signature = json.dumps(rows, sort_keys=True, default=str)
         if rows_signature == self._pending_rows_signature:
+            self._update_pending_paging_controls(pending_count, len(rows))
             return
         self._pending_rows_signature = rows_signature
         self.pending_table.setRowCount(0)
@@ -12937,7 +13055,60 @@ class MessageViewerTab(QWidget):
             action_layout.addWidget(retrieved_btn)
             action_layout.addStretch()
             self.pending_table.setCellWidget(idx, 4, action_widget)
-        self._adjust_pending_table_height(len(rows))
+        self._update_pending_paging_controls(pending_count, len(rows))
+
+    def _sync_pending_retrieval_disclosure(self, pending_count: int) -> None:
+        visible = bool(pending_count > 0 and self._messages_mode == "Inbox")
+        if hasattr(self, "pending_retrieval_widget"):
+            self.pending_retrieval_widget.setVisible(visible)
+        if hasattr(self, "pending_review_btn"):
+            self.pending_review_btn.setEnabled(pending_count > 0)
+        if pending_count <= 0 and hasattr(self, "pending_review_dialog") and self.pending_review_dialog.isVisible():
+            self.pending_review_dialog.close()
+
+    def _update_pending_paging_controls(self, pending_count: int, page_rows: int) -> None:
+        offset = max(0, int(getattr(self, "_pending_page_offset", 0) or 0))
+        if hasattr(self, "pending_previous_btn"):
+            self.pending_previous_btn.setEnabled(offset > 0)
+        if hasattr(self, "pending_next_btn"):
+            self.pending_next_btn.setEnabled(offset + page_rows < pending_count)
+        if hasattr(self, "pending_page_label"):
+            if pending_count <= 0:
+                self.pending_page_label.setText("")
+            else:
+                self.pending_page_label.setText(
+                    f"Showing {offset + 1}–{offset + page_rows} of {pending_count}"
+                )
+
+    def _change_pending_page(self, direction: int) -> None:
+        current = max(0, int(getattr(self, "_pending_page_offset", 0) or 0))
+        self._pending_page_offset = max(0, current + (PENDING_RETRIEVAL_PAGE_SIZE * int(direction or 0)))
+        self._pending_rows_signature = ""
+        self._update_pending_table(include_page=True)
+
+    def _open_pending_review(self) -> None:
+        self._pending_page_offset = 0
+        self._pending_rows_signature = ""
+        if not int(getattr(self, "_pending_total_count", 0) or 0):
+            return
+        host = self.window()
+        available = host.size() if host is not None else self.size()
+        width = max(480, min(980, int(available.width() * 0.9)))
+        height = max(300, min(640, int(available.height() * 0.85)))
+        self.pending_review_dialog.resize(width, height)
+        self.pending_review_dialog.show()
+        self.pending_review_dialog.raise_()
+        self.pending_review_dialog.activateWindow()
+        # Let the workbench paint before its bounded page is materialized.
+        QTimer.singleShot(0, lambda: self._update_pending_table(include_page=True))
+
+    def _on_pending_review_closed(self, _result: int) -> None:
+        self._pending_page_offset = 0
+        self._pending_rows_signature = ""
+        if hasattr(self, "pending_table"):
+            self.pending_table.setRowCount(0)
+        if hasattr(self, "messages_table") and self._messages_mode == "Inbox":
+            self.messages_table.setFocus(Qt.OtherFocusReason)
 
     def apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
@@ -12986,7 +13157,11 @@ class MessageViewerTab(QWidget):
         self._update_clear_filters_style()
         self._update_mark_all_read_style()
         self._apply_accessibility_width_guards()
-        self._update_pending_table()
+        # Theme changes repaint retained queue rows but never read or resize the
+        # backlog.  The normal 30-second queue refresh owns that bounded query.
+        self._sync_pending_retrieval_disclosure(
+            int(getattr(self, "_pending_total_count", 0) or 0)
+        )
         self._update_messages_mode_ui()
         if hasattr(self, "compose_setup_help_btn"):
             self.compose_setup_help_btn.setStyleSheet(button_style("secondary", theme))
@@ -13289,21 +13464,6 @@ class MessageViewerTab(QWidget):
             except Exception:
                 pass
 
-    def _adjust_pending_table_height(self, rows: int) -> None:
-        header_h = self.pending_table.horizontalHeader().height()
-        frame = self.pending_table.frameWidth() * 2
-        if rows <= 0:
-            self.pending_table.setVisible(False)
-            self.pending_table.setMinimumHeight(0)
-            self.pending_table.setMaximumHeight(header_h + frame)
-            return
-        self.pending_table.setVisible(True)
-        self.pending_table.resizeRowsToContents()
-        total_rows = sum(self.pending_table.rowHeight(i) for i in range(rows))
-        total = header_h + total_rows + frame
-        self.pending_table.setMinimumHeight(total)
-        self.pending_table.setMaximumHeight(total)
-
     def _pending_set_status(self, callsign: str, msg_id: str, status: str, source_key: str = "") -> None:
         db_path = self._backlog_db_path()
         if not db_path:
@@ -13396,9 +13556,21 @@ class MessageViewerTab(QWidget):
         )
         if resp != QMessageBox.Yes:
             return
-        if self._send_js8_message(text, source_context=row):
-            self._pending_set_status(callsign, msg_id, "WAITING", str(row.get("source_key", "") or ""))
-        self._update_pending_table()
+        endpoint, source_label = self._pending_js8_endpoint(row)
+        source_key = str(row.get("source_key", "") or "")
+
+        def _send() -> dict[str, object]:
+            sent = self._send_js8_message_to_endpoint(text, endpoint=endpoint, source_label=source_label)
+            if sent:
+                self._pending_set_status(callsign, msg_id, "WAITING", source_key)
+            return {
+                "ok": sent,
+                "message": "Request sent; waiting for the JS8 retrieval."
+                if sent
+                else f"The retrieval request could not be sent through {source_label}.",
+            }
+
+        self._start_pending_action("Sending retrieval request…", _send)
 
     def _on_pending_mark_retrieved(self, callsign: str, msg_id: str) -> None:
         self._on_pending_mark_retrieved_row({"callsign": callsign, "msg_id": msg_id})
@@ -13409,25 +13581,128 @@ class MessageViewerTab(QWidget):
         source_key = str(row.get("source_key", "") or "").strip()
         if not callsign or not msg_id:
             return
-        if self.settings.get("js8_inbox_mark_retrieved_sync", False):
-            ok = self._mark_js8call_inbox_read(
-                callsign,
-                msg_id,
-                inbox_path=str(row.get("source_path", "") or "").strip() or None,
-            )
-            if not ok:
-                log.debug(
-                    "MessageViewer: JS8Call inbox mark READ failed (callsign=%s msg_id=%s)",
+        sync_inbox = bool(self.settings.get("js8_inbox_mark_retrieved_sync", False))
+        source_path = str(row.get("source_path", "") or "").strip() or None
+
+        def _mark_retrieved() -> dict[str, object]:
+            inbox_updated = True
+            if sync_inbox:
+                inbox_updated = self._mark_js8call_inbox_read(
                     callsign,
                     msg_id,
+                    inbox_path=source_path,
                 )
-        self._pending_delete(callsign, msg_id, source_key)
-        self._update_pending_table()
+                if not inbox_updated:
+                    log.debug(
+                        "MessageViewer: JS8Call inbox mark READ failed (callsign=%s msg_id=%s)",
+                        callsign,
+                        msg_id,
+                    )
+            self._pending_delete(callsign, msg_id, source_key)
+            return {
+                "ok": True,
+                "message": "Marked retrieved."
+                if inbox_updated
+                else "Removed from FIO retrievals; the JS8Call inbox could not be updated.",
+            }
+
+        self._start_pending_action("Marking retrieval complete…", _mark_retrieved)
+
+    def _start_pending_action(
+        self,
+        acknowledgement: str,
+        operation: Callable[[], Mapping[str, object]],
+    ) -> bool:
+        """Acknowledge immediately and serialize endpoint/storage work off the GUI thread."""
+
+        # Preserve the narrow headless/core compatibility seam used by source
+        # mutation tests and non-widget callers. A constructed UI always owns
+        # the bridge and therefore always takes the asynchronous path.
+        if not hasattr(self, "pending_review_summary") or not hasattr(self, "_pending_action_bridge"):
+            operation()
+            try:
+                self._update_pending_table()
+            except Exception:
+                pass
+            return True
+
+        current = getattr(self, "_pending_action_thread", None)
+        if current is not None and current.is_alive():
+            self.pending_review_summary.setText("Finish the current retrieval action before starting another.")
+            return False
+        self._pending_action_generation = int(getattr(self, "_pending_action_generation", 0) or 0) + 1
+        generation = self._pending_action_generation
+        self.pending_review_summary.setText(acknowledgement)
+        self.pending_table.setEnabled(False)
+        self.pending_previous_btn.setEnabled(False)
+        self.pending_next_btn.setEnabled(False)
+
+        def _run() -> None:
+            started = time.perf_counter()
+            try:
+                result = dict(operation() or {})
+                payload: dict[str, object] = {
+                    "generation": generation,
+                    "ok": bool(result.get("ok", True)),
+                    "message": str(result.get("message", "") or ""),
+                }
+            except Exception as exc:
+                log.warning("MessageViewer: pending retrieval action failed: %s", exc)
+                payload = {
+                    "generation": generation,
+                    "ok": False,
+                    "message": f"Retrieval action failed: {exc}",
+                }
+            payload["elapsed_ms"] = (time.perf_counter() - started) * 1000.0
+            try:
+                self._pending_action_bridge.finished.emit(payload)
+            except RuntimeError:
+                # The tab may have closed while bounded endpoint I/O drained.
+                return
+
+        thread = threading.Thread(
+            target=_run,
+            name=f"fio-js8-retrieval-{generation}",
+            daemon=True,
+        )
+        self._pending_action_thread = thread
+        thread.start()
+        return True
+
+    def _on_pending_action_finished(self, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        generation = int(data.get("generation", 0) or 0)
+        if generation != int(getattr(self, "_pending_action_generation", 0) or 0):
+            return
+        self._pending_action_thread = None
+        if getattr(self, "_is_shutting_down", False):
+            return
+        self.pending_table.setEnabled(True)
+        review_open = self.pending_review_dialog.isVisible()
+        self._pending_rows_signature = ""
+        self._update_pending_table(include_page=review_open)
+        message = str(data.get("message", "") or "").strip()
+        if message and review_open:
+            self.pending_review_summary.setText(message)
+        emit_span(
+            "messages.pending_retrieval_action",
+            float(data.get("elapsed_ms", 0.0) or 0.0),
+            settings=self.settings,
+            meta={"ok": bool(data.get("ok", False))},
+            min_ms=50.0,
+        )
 
     def _send_js8_message(self, text: str, *, source_context: Mapping[str, object] | None = None) -> bool:
         endpoint, source_label = self._pending_js8_endpoint(source_context or {})
-        host = endpoint.host
-        port = endpoint.port
+        return self._send_js8_message_to_endpoint(text, endpoint=endpoint, source_label=source_label)
+
+    @staticmethod
+    def _send_js8_message_to_endpoint(
+        text: str,
+        *,
+        endpoint: JS8ApiEndpoint,
+        source_label: str,
+    ) -> bool:
         try:
             client = JS8ApiClientRegistry.get(endpoint, timeout_s=1.0, auto_reconnect=True)
             result = send_js8_message_guarded(
@@ -16548,7 +16823,7 @@ class MessageViewerTab(QWidget):
         header_height = self.messages_header.sizeHint().height()
         target = (row_height * 5) + header_height + 12
         total = max(target * 3, 400)
-        self.messages_table.setMinimumHeight((row_height * 5) + 8)
+        self._apply_inbox_primary_height_guard()
         self.messages_splitter.setSizes([target, total - target])
         self._sync_header_widths()
 

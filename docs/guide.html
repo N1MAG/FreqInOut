@@ -123,8 +123,14 @@
       <tr>
         <td><a href="#messages">Messages</a></td>
         <td>This is the traffic inbox and outbound staging area.</td>
-        <td>Header actions manage scanning and exports. Pending JS8 MSGs are retrieval tasks. The main table is the inbox. Compose and Staging creates outbound form files. BBS Archive handles VarAC published-file hygiene.</td>
+        <td>Header actions manage scanning and exports. JS8 retrievals are reviewed from a compact auxiliary workbench. The main table is the multi-source inbox. Compose and Staging creates outbound form files. BBS Archive handles VarAC published-file hygiene.</td>
         <td>Messages is both an inbox and a source of status evidence. Rows you review here can affect Map, operator history, SitRep summaries, and BBS workflows.</td>
+      </tr>
+      <tr>
+        <td><a href="#fio-bbs">BBS</a></td>
+        <td>This is the station-owned FIO BBS administration service.</td>
+        <td>Radio Service chooses serving VarAC radios. Locations &amp; Access defines policy. Publishing manages catalog membership. Visitor Preview verifies what callers see. Visitor Helpers explains generated navigation files.</td>
+        <td>Use this service to administer one station catalog projected to one or more VarAC live folders. Native VarAC launch, inbox, and outbox paths remain in Radio Settings.</td>
       </tr>
       <tr>
         <td><a href="#map">Map</a></td>
@@ -230,7 +236,8 @@
       <tr><td><a href="#controlfreq-actions">ControlFreq Actions</a></td><td>Use these when you need to refresh the live picture, narrow it down, move frequency, or pause schedule control temporarily.</td></tr>
       <tr><td><a href="#controlfreq-tables">ControlFreq Tables</a></td><td>These tables explain why ControlFreq thinks the station is on schedule, busy, changing soon, or seeing activity.</td></tr>
       <tr><td><a href="#messages-header-actions">Messages Header Actions</a></td><td>These are inbox-wide tools: refresh, export, delete selected rows, mark traffic read, and hide noisy message types.</td></tr>
-      <tr><td><a href="#messages-pending">Pending JS8 MSGs</a></td><td>This is the to-do list for JS8 messages that have been announced but still need retrieval or acknowledgement.</td></tr>
+      <tr><td><a href="#messages-pending">JS8 Retrievals</a></td><td>This compact disclosure opens a bounded to-do list for JS8 messages that have been announced but still need retrieval or acknowledgement; it never replaces the main Inbox.</td></tr>
+      <tr><td><a href="#fio-bbs">FIO BBS</a></td><td>This guided station service configures serving radios, location policy, publication, the caller-facing preview, and visitor helpers.</td></tr>
       <tr><td><a href="#messages-main-table">Messages Table</a></td><td>This is the main traffic list. Use the filters first, then open, flag, archive, delete, or publish the rows that matter.</td></tr>
       <tr><td><a href="#messages-compose">Compose and Staging</a></td><td>This is where you build outbound form traffic and stage the files for FLMsg, FLAmp, VarAC Outbox, or VarAC BBS use.</td></tr>
       <tr><td><a href="#messages-bbs-archive">BBS Archive and Auto-Archive</a></td><td>This keeps the live VarAC BBS folder useful by moving old published files aside without losing them.</td></tr>
@@ -485,7 +492,7 @@
   <ul class="section-list">
     <li><strong>BBS concept</strong>: in VarAC, the <code>BBS Directory</code> is the live folder remote stations can browse and pull from. It is not the same as <code>Incoming Files</code>, which is where files addressed to you arrive, and it is not the same as <code>Outbox</code>, which is where files you want to send directly are staged.</li>
     <li><strong>Ordinary workflow</strong>: use <code>+BBS</code> or a compose-stage copy choice when you want a file offered through the VarAC BBS. Use <code>Outbox</code> when you want VarAC to send a file directly to a station instead of publishing it for later pickup.</li>
-    <li><strong>Manage VarAC BBS</strong>: opens <code>Settings &gt; VarAC Settings</code>, which is the authoritative place to configure BBS folders, access controls, Managed BBS Library, and INI sync.</li>
+    <li><strong>Manage FIO BBS</strong>: opens the top-level <code>BBS</code> service, which is authoritative for serving radios, locations, access, retention, publication, preview, and visitor helpers. Native VarAC launcher, inbox, outbox, and radio paths remain in Radio Settings.</li>
     <li><strong>Managed BBS Library concept</strong>: FreqInOut keeps shared BBS content in a managed library, then publishes a clean copy into each selected radio's live VarAC BBS folder. Think of the library as the source of truth and each live BBS folder as the radio-specific on-air copy.</li>
     <li><strong>Virtual folders</strong>: menu names such as <code>DOCDROP</code>, <code>INTEL</code>, <code>MISC</code>, and <code>ROOT</code> are virtual aliases, not real nested folders inside the live BBS directory.</li>
     <li><strong>When to use Managed BBS Library</strong>: use the normal BBS workflow when one live BBS folder is enough. Use Managed BBS Library when you need controlled alternate file sets, menu-style browsing, callsign-aware visibility, per-radio published copies, or FLAMP relay block support.</li>
@@ -496,6 +503,18 @@
     <li><strong>Archived rows</strong>: archived BBS files stay visible in Messages with an <code>[Archived]</code> title prefix so you can still <code>View</code> or <code>Delete</code> them from the archive folder.</li>
     <li><strong>Operational inspiration</strong>: FreqInOut's VarAC BBS management direction is informed by KG5RKW's Vault and BBS Access Guard workflows.</li>
   </ul>
+
+  <h2 id="fio-bbs">FIO BBS</h2>
+  <p><strong>Purpose</strong>: administer one station-owned BBS catalog and project its published view into each enabled VarAC radio's live folder.</p>
+  <p><strong>Why you use it</strong>: callers experience the BBS as one station service even when several radios serve it. FIO keeps catalog membership, access, and retention in one place; each radio retains only its own live VarAC folder and service state.</p>
+  <ol class="section-list">
+    <li><strong>Radio Service</strong>: choose a serving radio, review its Serving/Published/health state, enable the VarAC BBS, publish the FIO catalog, and optionally announce it. Use <code>Save Radio Service</code> to apply changes. Native VarAC launch, inbox, and outbox paths stay behind <code>Managed in Radio Settings</code>.</li>
+    <li><strong>Locations &amp; Access</strong>: select a location to read its enabled state, access rule, retention, and source-folder state. <code>Add</code> or <code>Edit</code> deliberately opens the policy editor; <code>Cancel</code> closes it without saving. Disabling a location preserves its history and source files.</li>
+    <li><strong>Publishing</strong>: select a location and stage catalog membership changes. Apply changes explicitly. Removing an artifact from BBS publication does not delete its source file.</li>
+    <li><strong>Visitor Preview</strong>: verify the files and locations visible to a caller under the current access rules. This is a read-only preview; it does not reveal or validate access codes.</li>
+    <li><strong>Visitor Helpers</strong>: review FIO-generated caller instructions separately from operator-published artifacts.</li>
+  </ol>
+  <p><strong>Compact screens</strong>: short or narrow windows use one selector above one full-width detail area. Tables and editors scroll locally; resize, theme, and text-size changes do not scan folders or republish content.</p>
 
   <h2 id="map">Map</h2>
   <p><strong>Purpose</strong>: map-based station, path, and propagation context.</p>

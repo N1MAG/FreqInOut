@@ -162,17 +162,21 @@ def test_station_bbs_reads_are_bounded_and_compact_layout_stacks(monkeypatch, tm
         assert calls and all(limit == MAX_ARTIFACT_ROWS for _location_id, limit in calls)
         assert tab.artifact_table.rowCount() <= MAX_ARTIFACT_ROWS
 
-        tab.resize(900, 620)
+        calls_before_resize = list(calls)
+        tab.resize(1280, 720)
         tab.show()
         tab.service_tabs.setCurrentWidget(tab.publishing_page)
         app.processEvents()
+        # The production-height workspace is compact even though the window is
+        # wide: responsive state derives from the tab viewport and font height.
         assert tab.splitter.orientation() == Qt.Vertical
+        assert calls == calls_before_resize
         assert not tab.detail_toggle_btn.isHidden()
         assert tab.detail_group.isHidden()
         tab.detail_toggle_btn.setChecked(True)
         app.processEvents()
         assert not tab.detail_group.isHidden()
-        tab.resize(1200, 620)
+        tab.resize(1280, 960)
         app.processEvents()
         assert tab.splitter.orientation() == Qt.Horizontal
         assert tab.detail_toggle_btn.isHidden()
@@ -423,8 +427,15 @@ def test_location_chips_have_width_without_waiting_for_a_window_resize(tmp_path)
 
         tab.service_tabs.setCurrentWidget(tab.locations_page)
         app.processEvents()
+        assert tab.location_editor.isHidden()
+        assert "Access:" in tab.location_context_label.text()
+        tab.location_edit_btn.click()
+        app.processEvents()
+        assert not tab.location_editor.isHidden()
         assert tab.location_name_edit.text() in {"Public", "Restricted"}
         assert "Editing station-owned location" in tab.location_editor_status.text()
+        tab.location_cancel_btn.click()
+        assert tab.location_editor.isHidden()
     finally:
         tab.close()
         tab.deleteLater()
@@ -446,7 +457,7 @@ def test_radio_service_saves_bbs_fields_without_changing_native_varac_paths(tmp_
     )
     tab = StationBbsTab(settings=settings)
     try:
-        assert tab.radio_service_table.rowCount() == 1
+        assert tab.radio_service_selector.count() == 1
         tab.radio_publish_enabled_chk.setChecked(True)
         tab.radio_service_enabled_chk.setChecked(False)
         tab.radio_live_dir_edit.setText(str(tmp_path / "live-bbs"))
@@ -484,7 +495,7 @@ def test_station_bbs_radio_service_rejects_enabling_without_live_folder(tmp_path
     )
     tab = StationBbsTab(settings=settings)
     try:
-        assert tab.radio_service_table.rowCount() == 1
+        assert tab.radio_service_selector.count() == 1
         tab.radio_service_enabled_chk.setChecked(True)
         tab.radio_publish_enabled_chk.setChecked(True)
         tab.radio_live_dir_edit.clear()

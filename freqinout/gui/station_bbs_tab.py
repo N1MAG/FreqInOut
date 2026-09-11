@@ -16,9 +16,10 @@ import re
 from pathlib import Path
 from typing import Iterable, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QButtonGroup,
     QCheckBox,
     QComboBox,
@@ -60,7 +61,8 @@ from freqinout.core.varac_bbs_library_store import (
     upsert_bbs_location,
 )
 from freqinout.core.varac_bbs_vault import hash_access_code
-from freqinout.gui.theme import button_style, resolve_theme
+from freqinout.gui.help_registry import resolve_help_host
+from freqinout.gui.theme import button_height_for_font, button_style, resolve_theme
 
 
 MAX_ARTIFACT_ROWS = 200
@@ -181,6 +183,7 @@ class StationBbsTab(QWidget):
         self._pending_publication: dict[tuple[str, str], bool] = {}
         self._artifact_filter = "in_bbs"
         self._compact_layout = False
+        self._responsive_signature: tuple[int, int, int] | None = None
         self._editing_location_id = ""
         self._location_editor_loading = False
         self._station_allowed_callsigns: set[str] = set()
@@ -200,6 +203,11 @@ class StationBbsTab(QWidget):
         title.setAccessibleName("FIO BBS")
         title_row.addWidget(title)
         title_row.addStretch(1)
+        self.help_btn = QPushButton("Help")
+        self.help_btn.setToolTip("Open the Managed BBS workflow help.")
+        self.help_btn.setAccessibleName("Managed BBS help")
+        self.help_btn.clicked.connect(self._open_context_help)
+        title_row.addWidget(self.help_btn)
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.setToolTip("Refresh the bounded Managed BBS catalog view.")
         self.refresh_btn.setAccessibleName("Refresh Managed BBS catalog")
@@ -228,10 +236,6 @@ class StationBbsTab(QWidget):
         self.service_tabs.setDocumentMode(True)
         layout.addWidget(self.service_tabs, 1)
 
-        self.overview_status_label = QLabel("Catalog status is loading…")
-        self.overview_status_label.setWordWrap(True)
-        self.overview_status_label.setAccessibleName("BBS overview status")
-
         self.radio_service_page = QWidget(self.service_tabs)
         radio_layout = QVBoxLayout(self.radio_service_page)
         radio_layout.setContentsMargins(10, 10, 10, 10)
@@ -246,37 +250,38 @@ class StationBbsTab(QWidget):
         radio_copy.setWordWrap(True)
         radio_copy.setAccessibleName("Radio Service summary")
         radio_layout.addWidget(radio_copy)
+        radio_selection_row = QHBoxLayout()
+        radio_selection_row.setContentsMargins(0, 0, 0, 0)
+        radio_selection_row.addWidget(QLabel("Serving radio"))
         self.radio_service_selector = QComboBox(self.radio_service_page)
         self.radio_service_selector.setAccessibleName("BBS radio selector")
-        self.radio_service_selector.setToolTip("Choose one of up to three configured radios to edit its BBS service.")
+        self.radio_service_selector.setToolTip("Choose a configured radio to review its BBS service state and settings.")
+        self.radio_service_selector.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.radio_service_selector.setMinimumContentsLength(28)
         self.radio_service_selector.currentIndexChanged.connect(self._on_radio_selector_changed)
-        self.radio_service_selector.setVisible(False)
-        radio_layout.addWidget(self.radio_service_selector)
-        self.radio_splitter = QSplitter(Qt.Horizontal, self.radio_service_page)
-        self.radio_splitter.setChildrenCollapsible(False)
-        radio_layout.addWidget(self.radio_splitter, 1)
-        self.radio_service_table = QTableWidget(0, 4, self.radio_splitter)
-        self.radio_service_table.setObjectName("stationBbsRadioServiceTable")
-        self.radio_service_table.setHorizontalHeaderLabels(["Radio", "FIO BBS", "Live folder", "Status"])
-        self.radio_service_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.radio_service_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.radio_service_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.radio_service_table.verticalHeader().setVisible(False)
-        self.radio_service_table.horizontalHeader().setStretchLastSection(True)
-        self.radio_service_table.itemSelectionChanged.connect(self._load_selected_radio_service)
-        self.radio_splitter.addWidget(self.radio_service_table)
-
-        radio_editor = QGroupBox("Selected radio BBS service", self.radio_splitter)
+        radio_selection_row.addWidget(self.radio_service_selector, 1)
+        radio_layout.addLayout(radio_selection_row)
+        self.radio_selector_summary = QLabel("Select a configured radio to review its service state.")
+        self.radio_selector_summary.setWordWrap(True)
+        self.radio_selector_summary.setAccessibleName("Selected radio service summary")
+        radio_layout.addWidget(self.radio_selector_summary)
+        radio_editor = QGroupBox("Selected radio BBS service", self.radio_service_page)
         radio_editor_layout = QGridLayout(radio_editor)
         radio_editor_layout.setContentsMargins(8, 8, 8, 8)
         radio_editor_layout.setHorizontalSpacing(8)
         radio_editor_layout.setVerticalSpacing(6)
+        service_options = QGroupBox("Service options", radio_editor)
+        service_options.setAccessibleName("Selected radio BBS service options")
+        service_options_layout = QVBoxLayout(service_options)
+        service_options_layout.setContentsMargins(8, 6, 8, 6)
+        service_options_layout.setSpacing(4)
         self.radio_service_enabled_chk = QCheckBox("Enable VarAC BBS")
         self.radio_publish_enabled_chk = QCheckBox("Publish the FIO catalog")
         self.radio_announce_enabled_chk = QCheckBox("Announce BBS")
-        radio_editor_layout.addWidget(self.radio_service_enabled_chk, 0, 0)
-        radio_editor_layout.addWidget(self.radio_publish_enabled_chk, 0, 1)
-        radio_editor_layout.addWidget(self.radio_announce_enabled_chk, 0, 2)
+        service_options_layout.addWidget(self.radio_service_enabled_chk)
+        service_options_layout.addWidget(self.radio_publish_enabled_chk)
+        service_options_layout.addWidget(self.radio_announce_enabled_chk)
+        radio_editor_layout.addWidget(service_options, 0, 0, 1, 3)
         radio_editor_layout.addWidget(QLabel("Live BBS folder"), 1, 0)
         self.radio_live_dir_edit = QLineEdit()
         self.radio_live_dir_edit.setPlaceholderText("VarAC live BBS folder for the selected radio")
@@ -285,35 +290,47 @@ class StationBbsTab(QWidget):
         self.radio_live_dir_browse_btn = QPushButton("Browse")
         self.radio_live_dir_browse_btn.clicked.connect(self._browse_radio_live_dir)
         radio_editor_layout.addWidget(self.radio_live_dir_browse_btn, 1, 2)
+        self.radio_native_paths_toggle = QToolButton(radio_editor)
+        self.radio_native_paths_toggle.setText("Managed in Radio Settings")
+        self.radio_native_paths_toggle.setCheckable(True)
+        self.radio_native_paths_toggle.setToolTip("Show the selected radio's managed VarAC install and outbox paths.")
+        self.radio_native_paths_toggle.setAccessibleName("Show managed VarAC paths")
+        radio_editor_layout.addWidget(self.radio_native_paths_toggle, 2, 0, 1, 3)
         self.radio_native_paths_label = QLabel("Select a configured radio.")
         self.radio_native_paths_label.setWordWrap(True)
+        self.radio_native_paths_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.radio_native_paths_label.setAccessibleName("Selected radio native VarAC path summary")
-        radio_editor_layout.addWidget(self.radio_native_paths_label, 2, 0, 1, 3)
+        self.radio_native_paths_label.setVisible(False)
+        self.radio_native_paths_toggle.toggled.connect(self.radio_native_paths_label.setVisible)
+        radio_editor_layout.addWidget(self.radio_native_paths_label, 3, 0, 1, 3)
         self.radio_service_save_btn = QPushButton("Save Radio Service")
         self.radio_service_save_btn.clicked.connect(self._save_selected_radio_service)
-        radio_editor_layout.addWidget(self.radio_service_save_btn, 3, 0)
         self.radio_settings_btn = QPushButton("Open Radio Settings")
         self.radio_settings_btn.clicked.connect(self._open_radio_settings)
-        radio_editor_layout.addWidget(self.radio_settings_btn, 3, 1)
+        radio_action_row = QHBoxLayout()
+        radio_action_row.setContentsMargins(0, 0, 0, 0)
+        radio_action_row.addWidget(self.radio_service_save_btn)
+        radio_action_row.addWidget(self.radio_settings_btn)
+        radio_action_row.addStretch(1)
+        radio_editor_layout.addLayout(radio_action_row, 4, 0, 1, 3)
         self.radio_service_status = QLabel("Select a configured VarAC radio to review its BBS service.")
         self.radio_service_status.setWordWrap(True)
         self.radio_service_status.setAccessibleName("Radio Service status")
-        radio_editor_layout.addWidget(self.radio_service_status, 4, 0, 1, 3)
-        self.radio_editor_scroll = QScrollArea(self.radio_splitter)
+        radio_editor_layout.addWidget(self.radio_service_status, 5, 0, 1, 3)
+        radio_editor_layout.setColumnStretch(1, 1)
+        self.radio_editor_scroll = QScrollArea(self.radio_service_page)
         self.radio_editor_scroll.setWidgetResizable(True)
         self.radio_editor_scroll.setFrameShape(QFrame.NoFrame)
+        self.radio_editor_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.radio_editor_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.radio_editor_scroll.setWidget(radio_editor)
-        self.radio_splitter.addWidget(self.radio_editor_scroll)
-        self.radio_splitter.setStretchFactor(0, 0)
-        self.radio_splitter.setStretchFactor(1, 1)
-        self.radio_splitter.setSizes([360, 620])
+        radio_layout.addWidget(self.radio_editor_scroll, 1)
         self._radio_profiles_by_id: dict[int, dict[str, object]] = {}
         self._radio_service_loading = False
 
         self.locations_page = QWidget(self.service_tabs)
         locations_layout = QVBoxLayout(self.locations_page)
         locations_layout.setContentsMargins(0, 0, 0, 0)
-        locations_layout.addWidget(self.overview_status_label)
         self.publishing_page = QWidget(self.service_tabs)
         publishing_layout = QVBoxLayout(self.publishing_page)
         publishing_layout.setContentsMargins(0, 0, 0, 0)
@@ -429,6 +446,11 @@ class StationBbsTab(QWidget):
         self.splitter = QSplitter(Qt.Horizontal, self.locations_page)
         self.splitter.setObjectName("stationBbsCatalogSplitter")
         self.splitter.setChildrenCollapsible(False)
+        # A broad native splitter grip rendered as a row of dots in compact
+        # mode and looked like damaged content.  The panes remain resizable,
+        # but the separator is deliberately quiet.
+        self.splitter.setHandleWidth(2)
+        self.splitter.setStyleSheet("QSplitter::handle { background: transparent; }")
         locations_layout.addWidget(self.splitter, 1)
 
         tree_panel = QWidget(self.splitter)
@@ -453,18 +475,28 @@ class StationBbsTab(QWidget):
         self.location_edit_btn.toggled.connect(self._set_location_editor_visible)
         tree_title_row.addWidget(self.location_edit_btn)
         tree_layout.addLayout(tree_title_row)
+        self.location_compact_selector = QComboBox(tree_panel)
+        self.location_compact_selector.setAccessibleName("Managed BBS location selector")
+        self.location_compact_selector.setToolTip("Choose a location to review its policy.")
+        self.location_compact_selector.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.location_compact_selector.setMinimumContentsLength(24)
+        self.location_compact_selector.currentIndexChanged.connect(self._on_location_compact_selector_changed)
+        self.location_compact_selector.setVisible(False)
+        tree_layout.addWidget(self.location_compact_selector)
         self.location_tree = QTreeWidget(tree_panel)
         self.location_tree.setObjectName("stationBbsLocationTree")
         self.location_tree.setHeaderHidden(True)
         self.location_tree.setAccessibleName("Managed BBS locations")
         self.location_tree.setToolTip("Select a location to review and change its artifact memberships.")
         self.location_tree.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.location_tree.setTextElideMode(Qt.ElideRight)
+        self.location_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.location_tree.itemSelectionChanged.connect(self._on_location_selection_changed)
         tree_layout.addWidget(self.location_tree, 1)
 
         self.location_editor = QFrame(tree_panel)
         self.location_editor.setObjectName("stationBbsLocationEditor")
-        self.location_editor.setVisible(True)
+        self.location_editor.setVisible(False)
         editor_layout = QVBoxLayout(self.location_editor)
         editor_layout.setContentsMargins(8, 8, 8, 8)
         editor_layout.setSpacing(5)
@@ -551,6 +583,11 @@ class StationBbsTab(QWidget):
         self.location_disable_btn.setToolTip("Safely disable this location without deleting its catalog history or source files.")
         self.location_disable_btn.clicked.connect(self._disable_location)
         editor_actions.addWidget(self.location_disable_btn)
+        self.location_cancel_btn = QPushButton("Cancel")
+        self.location_cancel_btn.setToolTip("Close the location editor without saving changes.")
+        self.location_cancel_btn.setAccessibleName("Cancel location editing")
+        self.location_cancel_btn.clicked.connect(self._cancel_location_edit)
+        editor_actions.addWidget(self.location_cancel_btn)
         editor_actions.addStretch(1)
         editor_layout.addLayout(editor_actions)
         self.location_editor_status = QLabel("")
@@ -573,8 +610,16 @@ class StationBbsTab(QWidget):
             "Select a location to review its access and retention labels. Use Edit to reveal the progressive location editor."
         )
         self.location_context_label.setWordWrap(True)
+        self.location_context_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.location_context_label.setAccessibleName("Selected location policy summary")
         location_context_layout.addWidget(self.location_context_label)
+        self.location_copy_path_btn = QToolButton(location_context_panel)
+        self.location_copy_path_btn.setText("Copy source path")
+        self.location_copy_path_btn.setToolTip("Copy the selected location's full source folder path.")
+        self.location_copy_path_btn.setAccessibleName("Copy selected location source path")
+        self.location_copy_path_btn.clicked.connect(self._copy_selected_location_source_path)
+        self.location_copy_path_btn.setVisible(False)
+        location_context_layout.addWidget(self.location_copy_path_btn, 0, Qt.AlignLeft)
         location_context_layout.addWidget(self.location_editor, 1)
         location_context_layout.addStretch(0)
         self.location_context_scroll.setWidget(location_context_panel)
@@ -691,12 +736,13 @@ class StationBbsTab(QWidget):
         self.service_tabs.addTab(self.publishing_page, "Publishing")
         self.service_tabs.addTab(self.visitor_preview_page, "Visitor Preview")
         self.service_tabs.addTab(self.helpers_page, "Visitor Helpers")
-        self.location_edit_btn.setChecked(True)
+        self._apply_responsive_layout(force=True)
         self.apply_theme()
         self._set_publication_status()
 
     def apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
+        self.help_btn.setStyleSheet(button_style("muted", theme))
         self.refresh_btn.setStyleSheet(button_style("muted", theme))
         self.radio_service_save_btn.setStyleSheet(button_style("primary", theme))
         self.radio_live_dir_browse_btn.setStyleSheet(button_style("muted", theme))
@@ -704,6 +750,7 @@ class StationBbsTab(QWidget):
         self.location_add_btn.setStyleSheet(button_style("muted", theme))
         self.location_save_btn.setStyleSheet(button_style("primary", theme))
         self.location_disable_btn.setStyleSheet(button_style("warning", theme))
+        self.location_cancel_btn.setStyleSheet(button_style("muted", theme))
         self.manage_locations_btn.setStyleSheet(button_style("muted", theme))
         self.apply_changes_btn.setStyleSheet(button_style("primary", theme))
         self.revert_changes_btn.setStyleSheet(button_style("muted", theme))
@@ -717,6 +764,27 @@ class StationBbsTab(QWidget):
         self.location_editor.setStyleSheet(
             f"QFrame#stationBbsLocationEditor {{ border: 1px solid {theme.get('border', '#d0d7de')}; border-radius: 4px; }}"
         )
+        for button in (
+            self.help_btn,
+            self.refresh_btn,
+            self.radio_live_dir_browse_btn,
+            self.radio_service_save_btn,
+            self.radio_settings_btn,
+            self.location_add_btn,
+            self.location_save_btn,
+            self.location_disable_btn,
+            self.location_cancel_btn,
+        ):
+            button.setMinimumHeight(button_height_for_font(button))
+        self._apply_responsive_layout(force=True)
+
+    def _open_context_help(self) -> None:
+        host = resolve_help_host(self)
+        if host is not None and hasattr(host, "open_context_help"):
+            try:
+                host.open_context_help("tab.bbs")
+            except Exception:
+                pass
 
     @staticmethod
     def _clear_chip_layout(layout: QHBoxLayout) -> None:
@@ -808,13 +876,41 @@ class StationBbsTab(QWidget):
         db_path = str(getattr(self.settings, "db_path", "") or "").strip()
         return MultiRadioStore(Path(db_path)) if db_path else MultiRadioStore()
 
+    @staticmethod
+    def _radio_service_state(profile: dict[str, object]) -> tuple[str, str, str]:
+        """Return concise, non-colour-only state for the serving-radio selector."""
+
+        use_varac = bool(profile.get("use_varac", False))
+        enabled = bool(profile.get("varac_bbs_enabled", False))
+        published = bool(profile.get("varac_bbs_vault_enabled", False))
+        live_dir = str(profile.get("varac_bbs_dir", "") or "").strip()
+        serving = "Serving" if use_varac and enabled else "Not serving"
+        publication = "Published" if published else "Paused"
+        if not use_varac:
+            health = "VarAC unavailable"
+        elif not live_dir:
+            health = "Live folder needed"
+        elif published and not enabled:
+            health = "Enable VarAC BBS"
+        elif enabled:
+            health = "Ready"
+        else:
+            health = "Service paused"
+        return serving, publication, health
+
+    @classmethod
+    def _radio_selector_text(cls, profile: dict[str, object]) -> str:
+        profile_id = int(profile.get("id", 0) or 0)
+        name = str(profile.get("name", "") or f"Radio {profile_id}")
+        serving, publication, health = cls._radio_service_state(profile)
+        return f"{name} · {serving} · {publication} · {health}"
+
     def _refresh_radio_services(self) -> None:
         selected_id = self._selected_radio_service_id()
         try:
             profiles = list(self._radio_store().list_device_profiles())
         except Exception as exc:
             self._radio_profiles_by_id = {}
-            self.radio_service_table.setRowCount(0)
             self.radio_service_status.setText(f"Radio BBS services could not be read: {exc}")
             self._set_radio_service_editor_enabled(False)
             return
@@ -827,42 +923,20 @@ class StationBbsTab(QWidget):
         try:
             self.radio_service_selector.blockSignals(True)
             self.radio_service_selector.clear()
-            self.radio_service_table.clearContents()
-            self.radio_service_table.setRowCount(len(profiles))
-            selected_row = -1
-            for row_index, profile in enumerate(profiles):
+            selected_index = -1
+            for profile_index, profile in enumerate(profiles):
                 profile_id = int(profile.get("id", 0) or 0)
-                name = str(profile.get("name", "") or f"Radio {profile_id}")
-                use_varac = bool(profile.get("use_varac", False))
-                publish = bool(profile.get("varac_bbs_vault_enabled", False))
-                live_dir = str(profile.get("varac_bbs_dir", "") or "").strip()
-                if not use_varac:
-                    service_text = "Unavailable"
-                    status = "Enable VarAC in Radio Settings"
-                elif not live_dir:
-                    service_text = "Not configured"
-                    status = "Live folder needed"
-                elif publish and bool(profile.get("varac_bbs_enabled", False)):
-                    service_text = "Published"
-                    status = "Ready"
-                elif publish:
-                    service_text = "Blocked"
-                    status = "Enable VarAC BBS"
-                else:
-                    service_text = "Paused"
-                    status = "Catalog publication off"
-                values = (name, service_text, live_dir or "—", status)
-                self.radio_service_selector.addItem(name, profile_id)
-                for column, value in enumerate(values):
-                    item = QTableWidgetItem(value)
-                    item.setData(_LOCATION_ID_ROLE, profile_id)
-                    item.setToolTip(value)
-                    self.radio_service_table.setItem(row_index, column, item)
+                selector_text = self._radio_selector_text(dict(profile))
+                self.radio_service_selector.addItem(selector_text, profile_id)
+                self.radio_service_selector.setItemData(
+                    self.radio_service_selector.count() - 1,
+                    selector_text,
+                    Qt.ToolTipRole,
+                )
                 if profile_id == selected_id:
-                    selected_row = row_index
+                    selected_index = profile_index
             if profiles:
-                self.radio_service_table.selectRow(selected_row if selected_row >= 0 else 0)
-                self.radio_service_selector.setCurrentIndex(selected_row if selected_row >= 0 else 0)
+                self.radio_service_selector.setCurrentIndex(selected_index if selected_index >= 0 else 0)
         finally:
             self.radio_service_selector.blockSignals(False)
             self._radio_service_loading = False
@@ -871,20 +945,17 @@ class StationBbsTab(QWidget):
     def _on_radio_selector_changed(self, index: int) -> None:
         if self._radio_service_loading:
             return
-        profile_id = int(self.radio_service_selector.itemData(index) or 0) if index >= 0 else 0
-        for row in range(self.radio_service_table.rowCount()):
-            item = self.radio_service_table.item(row, 0)
-            if item is not None and int(item.data(_LOCATION_ID_ROLE) or 0) == profile_id:
-                self.radio_service_table.selectRow(row)
-                break
+        self._load_selected_radio_service()
 
     def _selected_radio_service_id(self) -> int:
-        row_index = self.radio_service_table.currentRow() if hasattr(self, "radio_service_table") else -1
-        item = self.radio_service_table.item(row_index, 0) if row_index >= 0 else None
-        try:
-            return int(item.data(_LOCATION_ID_ROLE) or 0) if item is not None else 0
-        except (TypeError, ValueError):
-            return 0
+        if hasattr(self, "radio_service_selector"):
+            try:
+                selected = int(self.radio_service_selector.currentData() or 0)
+            except (TypeError, ValueError):
+                selected = 0
+            if selected:
+                return selected
+        return 0
 
     def _set_radio_service_editor_enabled(self, enabled: bool) -> None:
         for widget in (
@@ -909,6 +980,8 @@ class StationBbsTab(QWidget):
                 self.radio_announce_enabled_chk.setChecked(False)
                 self.radio_live_dir_edit.clear()
                 self.radio_native_paths_label.setText("Select a configured radio.")
+                self.radio_native_paths_label.setToolTip("")
+                self.radio_selector_summary.setText("No configured radio is selected.")
                 self.radio_service_status.setText("No configured radio is selected.")
                 self._set_radio_service_editor_enabled(False)
                 return
@@ -927,6 +1000,14 @@ class StationBbsTab(QWidget):
             outbox = str(profile.get("varac_outbox_dir", "") or "Not configured")
             self.radio_native_paths_label.setText(
                 f"Native VarAC paths (managed in Radio Settings) · Install: {install} · Outbox: {outbox}"
+            )
+            self.radio_native_paths_label.setToolTip(
+                f"Install path: {install}\nOutbox path: {outbox}\nSelect this text to copy it."
+            )
+            serving, publication, health = self._radio_service_state(profile)
+            radio_name = str(profile.get("name", "") or f"Radio {profile.get('id', '')}")
+            self.radio_selector_summary.setText(
+                f"{radio_name}: {serving}; {publication}; {health}."
             )
             self._set_radio_service_editor_enabled(use_varac)
             self.radio_settings_btn.setEnabled(True)
@@ -993,19 +1074,51 @@ class StationBbsTab(QWidget):
         self.radio_service_status.setText("Open Settings → Radios to configure the selected radio's native VarAC paths.")
 
     def _set_location_editor_visible(self, visible: bool) -> None:
-        self.location_editor.setVisible(bool(visible))
-        self.location_edit_btn.setText("Hide" if visible else "Edit")
-        self.location_edit_btn.setAccessibleName("Hide location editor" if visible else "Show location editor")
         if not visible:
+            self.location_editor.setVisible(False)
+            self.location_edit_btn.setText("Edit")
+            self.location_edit_btn.setAccessibleName("Show location editor")
             return
         location = self._locations_by_id.get(self._selected_location_id)
+        if location is None:
+            self.location_editor.setVisible(False)
+            self.location_edit_btn.blockSignals(True)
+            self.location_edit_btn.setChecked(False)
+            self.location_edit_btn.blockSignals(False)
+            self.location_edit_btn.setText("Edit")
+            self.location_edit_btn.setAccessibleName("Show location editor")
+            self.location_context_label.setText(
+                "Select a saved location to edit it, or choose Add to create a location policy."
+            )
+            return
+        self.location_editor.setVisible(True)
+        self.location_edit_btn.setText("Hide")
+        self.location_edit_btn.setAccessibleName("Hide location editor")
         self._load_location_editor(location)
 
     def _begin_new_location(self) -> None:
         if not self.location_edit_btn.isChecked():
+            self.location_edit_btn.blockSignals(True)
             self.location_edit_btn.setChecked(True)
+            self.location_edit_btn.blockSignals(False)
+        self.location_editor.setVisible(True)
+        self.location_edit_btn.setText("Hide")
+        self.location_edit_btn.setAccessibleName("Hide location editor")
         self._load_location_editor(None)
         self.location_name_edit.setFocus(Qt.OtherFocusReason)
+
+    def _cancel_location_edit(self) -> None:
+        """Close the progressive editor without changing the selected policy."""
+
+        self._editing_location_id = ""
+        self.location_edit_btn.setChecked(False)
+        self.location_editor_status.setText("Editing cancelled. No location policy or source folder was changed.")
+
+    def _copy_selected_location_source_path(self) -> None:
+        location = self._locations_by_id.get(self._selected_location_id)
+        source_dir = str(location.source_dir or "").strip() if location is not None else ""
+        if source_dir:
+            QApplication.clipboard().setText(source_dir)
 
     def _populate_parent_choices(self, current_id: str = "") -> None:
         selected_parent = self.location_parent_combo.currentData()
@@ -1194,16 +1307,42 @@ class StationBbsTab(QWidget):
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().resizeEvent(event)
-        compact = int(self.width() or 0) <= 1000
-        if compact == self._compact_layout:
+        self._apply_responsive_layout()
+
+    def changeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange:
+            self._apply_responsive_layout(force=True)
+
+    def _responsive_viewport(self) -> tuple[int, int, int]:
+        """Return the actual tab viewport and current text height, not window size."""
+
+        viewport = self.service_tabs.contentsRect()
+        width = int(viewport.width() or self.contentsRect().width() or self.width() or 0)
+        height = int(viewport.height() or self.contentsRect().height() or self.height() or 0)
+        line_height = max(1, int(self.fontMetrics().lineSpacing() or self.fontMetrics().height() or 1))
+        return width, height, line_height
+
+    def _apply_responsive_layout(self, *, force: bool = False) -> None:
+        """Arrange controls only; resize must never refresh the catalog or folders."""
+
+        width, height, line_height = self._responsive_viewport()
+        compact = (
+            width < max(840, line_height * 54)
+            # A 720px application window leaves roughly 630px for these tabs
+            # after the station shell and BBS header.  It needs the compact,
+            # single-detail layout even at ordinary text size.
+            or height < max(700, line_height * 40)
+        )
+        signature = (width, height, line_height)
+        if not force and compact == self._compact_layout and signature == self._responsive_signature:
             return
+        self._responsive_signature = signature
         self._compact_layout = compact
         self.splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)
         self.splitter.setSizes([160, 600] if compact else [320, 760])
-        self.radio_splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)
-        self.radio_service_selector.setVisible(compact)
-        self.radio_service_table.setVisible(not compact)
-        self.radio_splitter.setSizes([1, 760] if compact else [360, 620])
+        self.location_compact_selector.setVisible(compact)
+        self.location_tree.setVisible(not compact)
         for button in (
             self.apply_changes_btn,
             self.revert_changes_btn,
@@ -1258,7 +1397,6 @@ class StationBbsTab(QWidget):
             self._populate_helpers([])
             self._populate_visitor_preview([])
             self.summary_label.setText(f"Managed BBS catalog is unavailable: {exc}")
-            self.overview_status_label.setText(self.summary_label.text())
             return
         self._locations_by_id = {location.location_id: location for location in locations}
         self._station_allowed_callsigns = {
@@ -1366,8 +1504,29 @@ class StationBbsTab(QWidget):
 
     def _populate_locations(self, locations: Iterable[BbsLocationRecord]) -> None:
         location_rows = list(locations)
+        locations_by_id = {location.location_id: location for location in location_rows}
+
+        def _selector_label(location: BbsLocationRecord) -> str:
+            ancestors: list[str] = []
+            parent_id = location.parent_location_id
+            seen = {location.location_id}
+            while parent_id and parent_id not in seen:
+                seen.add(parent_id)
+                parent = locations_by_id.get(parent_id)
+                if parent is None:
+                    break
+                ancestors.append(parent.name)
+                parent_id = parent.parent_location_id
+            hierarchy = " / ".join(reversed(ancestors + [location.name]))
+            return f"{hierarchy}{' · Disabled' if not location.enabled else ''}"
+
+        self.location_compact_selector.blockSignals(True)
         self.location_tree.blockSignals(True)
         try:
+            self.location_compact_selector.clear()
+            self.location_compact_selector.addItem("Managed BBS Library", "")
+            for location in location_rows:
+                self.location_compact_selector.addItem(_selector_label(location), location.location_id)
             self.location_tree.clear()
             root = QTreeWidgetItem(["Managed BBS Library"])
             root.setData(0, _LOCATION_ID_ROLE, "")
@@ -1383,9 +1542,9 @@ class StationBbsTab(QWidget):
                     if location.parent_location_id and location.parent_location_id not in parents:
                         deferred.append(location)
                         continue
-                    label = f"{location.name} — {_access_text(location.access_rule)}; {_retention_text(location.retention_mode, location.retention_days)}"
+                    label = location.name
                     if not location.enabled:
-                        label += "; Disabled"
+                        label += " · Disabled"
                     item = QTreeWidgetItem([label])
                     item.setData(0, _LOCATION_ID_ROLE, location.location_id)
                     item.setToolTip(
@@ -1400,8 +1559,15 @@ class StationBbsTab(QWidget):
                 if not deferred or not progressed:
                     for location in deferred:
                         parent = root
-                        item = QTreeWidgetItem([f"{location.name} — {_access_text(location.access_rule)}; {_retention_text(location.retention_mode, location.retention_days)}"])
+                        label = f"{location.name}{' · Disabled' if not location.enabled else ''}"
+                        item = QTreeWidgetItem([label])
                         item.setData(0, _LOCATION_ID_ROLE, location.location_id)
+                        item.setToolTip(
+                            0,
+                            f"Location: {location.name}\nAccess: {_access_text(location.access_rule)}\n"
+                            f"Retention: {_retention_text(location.retention_mode, location.retention_days)}\n"
+                            f"Source: {location.source_dir or 'Not configured'}",
+                        )
                         parent.addChild(item)
                         parents[location.location_id] = item
                     break
@@ -1409,9 +1575,18 @@ class StationBbsTab(QWidget):
             root.setExpanded(True)
             wanted = parents.get(self._selected_location_id, root)
             self.location_tree.setCurrentItem(wanted)
+            selector_index = self.location_compact_selector.findData(self._selected_location_id)
+            self.location_compact_selector.setCurrentIndex(selector_index if selector_index >= 0 else 0)
         finally:
             self.location_tree.blockSignals(False)
+            self.location_compact_selector.blockSignals(False)
         self._sync_location_chips(location_rows)
+
+    def _on_location_compact_selector_changed(self, index: int) -> None:
+        location_id = str(self.location_compact_selector.itemData(index) or "") if index >= 0 else ""
+        item = self._location_tree_item(location_id)
+        if item is not None:
+            self.location_tree.setCurrentItem(item)
 
     def _sync_location_chips(self, locations: Iterable[BbsLocationRecord]) -> None:
         rows = [location for location in locations if location.enabled]
@@ -1476,6 +1651,11 @@ class StationBbsTab(QWidget):
     def _on_location_selection_changed(self) -> None:
         selected = self.location_tree.currentItem()
         self._selected_location_id = str(selected.data(0, _LOCATION_ID_ROLE) or "") if selected is not None else ""
+        selector_index = self.location_compact_selector.findData(self._selected_location_id)
+        if selector_index >= 0 and self.location_compact_selector.currentIndex() != selector_index:
+            self.location_compact_selector.blockSignals(True)
+            self.location_compact_selector.setCurrentIndex(selector_index)
+            self.location_compact_selector.blockSignals(False)
         # isVisible() is false while an ancestor tab is hidden; isHidden()
         # reflects the operator's actual Edit/Hide choice.
         if not self.location_editor.isHidden():
@@ -1483,19 +1663,37 @@ class StationBbsTab(QWidget):
         location = self._locations_by_id.get(self._selected_location_id)
         if location is None:
             self.location_context_label.setText(
-                "Select a location to review its access and retention labels. Use Edit to reveal the progressive location editor."
+                "Select a location to review its policy. Use Edit to change a saved policy or Add to create one."
             )
+            self.location_context_label.setToolTip("")
+            self.location_copy_path_btn.setVisible(False)
         else:
             status = "Disabled — it remains in the catalog and no source files were removed." if not location.enabled else "Enabled"
+            source_dir = str(location.source_dir or "").strip()
+            source_summary = self._elided_path(source_dir) if source_dir else "Not configured"
             self.location_context_label.setText(
-                f"{location.name}: {status}. Access: {_access_text(location.access_rule)}. "
-                f"Retention: {_retention_text(location.retention_mode, location.retention_days)}. "
-                f"Source folder: {location.source_dir or 'Not configured'}."
+                f"{location.name} — {status}\n"
+                f"Access: {_access_text(location.access_rule)} · "
+                f"Retention: {_retention_text(location.retention_mode, location.retention_days)}\n"
+                f"Source folder: {source_summary}"
             )
+            self.location_context_label.setToolTip(
+                f"Full source folder path: {source_dir}" if source_dir else "No source folder is configured."
+            )
+            self.location_copy_path_btn.setVisible(bool(source_dir))
             if location.enabled:
                 self._publishing_location_id = location.location_id
         self._sync_location_chips(self._locations_by_id.values())
         self._load_artifacts()
+
+    @staticmethod
+    def _elided_path(path: str, *, limit: int = 84) -> str:
+        """Keep policy detail compact while retaining the full path in a tooltip/copy action."""
+
+        if len(path) <= limit:
+            return path
+        edge = max(12, (limit - 1) // 2)
+        return f"{path[:edge]}…{path[-edge:]}"
 
     def _load_artifacts(self) -> None:
         try:
@@ -1513,7 +1711,6 @@ class StationBbsTab(QWidget):
             self._populate_artifacts([])
             self._populate_helpers([])
             self.summary_label.setText(f"Managed BBS catalog could not be read: {exc}")
-            self.overview_status_label.setText(self.summary_label.text())
             return
         helper_rows = [row for row in rows if is_fio_bbs_helper_file_name(row.display_name or row.source_path)]
         catalog_displays = self._display_artifacts(
@@ -1535,7 +1732,6 @@ class StationBbsTab(QWidget):
             f"{len(self._locations_by_id)} location{'s' if len(self._locations_by_id) != 1 else ''}; "
             f"{len(catalog_displays)} artifact{'s' if len(catalog_displays) != 1 else ''}{clipped}. {guidance}"
         )
-        self.overview_status_label.setText(self.summary_label.text())
 
     def _filter_artifact_displays(self, displays: Iterable[_ArtifactDisplay]) -> list[_ArtifactDisplay]:
         mode = self._artifact_filter

@@ -64,6 +64,12 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         title="Messages BBS Help",
         summary="BBS copy, archive, and auto-archive behavior for staged and received files.",
     ),
+    "tab.bbs": HelpContext(
+        key="tab.bbs",
+        anchor="fio-bbs",
+        title="FIO BBS Help",
+        summary="Configure serving radios, location access and retention, publication, the visitor view, and visitor helpers for the station BBS.",
+    ),
     "messages.compose-setup": HelpContext(
         key="messages.compose-setup",
         anchor="messages-compose",

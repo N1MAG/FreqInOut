@@ -3580,3 +3580,129 @@ still trigger the repository's known cross-fixture native abort, so those
 partitions were deliberately executed in isolated processes as the product does
 for a fresh launch. No schema or authoritative data migration is part of this
 change.
+
+## 2026-09-11 — Production Inbox and BBS correction review (PIC-0)
+
+Status: review/specification exit gate passed; no production implementation has
+started. P1 Inbox correction is the next authorized slice. P3 BBS presentation
+remains blocked until the P1 exit gate passes.
+
+The Linux production screenshot that appeared to show only JS8 traffic was
+traced to an auxiliary `Pending JS8 MSGs` queue inserted above the ordinary
+multi-source Inbox. Its table height grows to the complete loaded backlog, so 26
+rows consume the short production viewport and displace the real Inbox. The
+backlog load is also unbounded before client-side status filtering. A read-only
+check of the most recently active local lab database found mixed CommStat and
+SitRep rows in the default projection, supporting a presentation-masking cause,
+but the exact Linux production configuration root was not available. The P1
+gate therefore requires active-root and per-source verification before the
+finding is considered fully closed.
+
+The BBS screenshots expose a responsive-geometry regression against the existing
+BBS contract. The page chooses its side-by-side mode largely from width even
+though the usable tab height is short. A fixed four-column radio table, long raw
+paths, concatenated location policy labels, duplicated summary prose, and an
+always-open location editor then produce clipping and large unused regions.
+The correction retains the station-owned BBS model and makes radio/location
+selection concise, policy details readable, editing progressive, and responsive
+state dependent on the real tab viewport and font metrics.
+
+The new `production_inbox_bbs_correction_spec.md` defines four gated packages:
+PIC-0 review/specification, PIC-1 P1 Inbox correction, PIC-2 P3 BBS presentation,
+and PIC-3 Linux production qualification. It records query/render bounds,
+source/action scope, empty/degraded states, responsive geometry, Light/Dark and
+Normal/Large matrices, performance budgets, and the Operational View Framework
+design gates. No destructive migration or production data action is authorized.
+
+Model ownership: the high-reasoning primary model owned product hierarchy,
+source/data interpretation, concurrency and migration boundaries, slice order,
+specification integration, and final review. Terra performed the focused Inbox
+audit; Terra performed the focused BBS layout audit; Luna inventoried existing
+tests and designed the missing acceptance/performance matrix. All delegated work
+was read-only, so there were no delegated diffs to merge; the primary reviewed
+each report against the governing UI, message, BBS, and responsiveness contracts.
+
+PIC-0 acceptance evidence: all three production screenshots were reviewed at
+their original resolution; implementation and existing test seams were traced;
+the active-runtime uncertainty is explicitly carried into PIC-1; governing specs
+were cross-referenced; and `git diff --check` passes. Unrelated worktree files
+remain untouched.
+
+## 2026-09-11 — Production Inbox correction (PIC-1)
+
+Status: automated software exit gate passed; PIC-2 BBS presentation is now
+authorized. Linux interaction remains part of the later combined PIC-3 gate.
+
+The full-height inline `Pending JS8 MSGs` table has been replaced by a compact
+`JS8 retrievals · N pending · Review` disclosure inside the normal Messages
+workspace. The closed workbench performs a count-only read and creates no hidden
+row/action widgets. Review opens a bounded modal workbench, loads at most 100
+newest non-retrieved rows from one read snapshot, and provides Newer/Older paging
+while preserving source-key/radio/JS8-instance context for Get and Mark
+Retrieved. Theme changes and resize are geometry/paint-only for this surface.
+Get and Mark Retrieved acknowledge before work begins, then use one serialized
+daemon action lane for endpoint and storage I/O. A generation-fenced signal
+returns completion to the GUI thread, avoiding both event-loop blocking and Qt
+worker-thread shutdown ownership.
+
+The ordinary Inbox is always the primary viewport and has a usable font-aware
+minimum at the required production and compact heights. A direct offscreen
+1280x720 render showed the compact retrieval disclosure above the mixed-source
+table without displacing it. The available September 11 production database
+copy independently contains 6,197 CommStat, 6,175 SitRep, 2,059 Spotter, 555
+JS8, 477 BBS, 230 FLMsg, 187 VarAC, and 149 FLAMP projected rows, confirming that
+the source catalog itself is not JS8-only. One hundred count-plus-page samples
+against that 326 MB database and the active local runtime remained below 4 ms
+maximum and 1.4 ms p95, so no index or migration was added.
+
+Model ownership: Terra implemented the compact disclosure, review workbench,
+bounded SQL paging, and primary-height guard. Luna implemented mixed-source,
+action-scope, geometry, closed-workbench, theme, and text-size tests. The
+high-reasoning primary model reviewed both diffs, separated count refresh from
+hidden row materialization, added accessibility names, verified production-copy
+source evidence and query timing, reviewed the rendered UI, and ran integration.
+
+Acceptance evidence: 226 Inbox, Message Intelligence, and MIP-4 projection tests
+pass. Coverage includes 26 pending retrievals with five normal source families,
+100-row paging, server-side status filtering, Focus All/source semantics,
+source-scoped mutation, the 200-row Inbox model, coalescing, and the complete
+1280x720/1000x700/900x560 Light/Dark Normal/Large matrix. Python compilation and
+`git diff --check` pass. No schema, production data, BBS implementation, or
+external endpoint changed during PIC-1.
+
+## 2026-09-11 — Production BBS presentation correction (PIC-2)
+
+Status: automated software exit gate passed; PIC-3 Linux production
+qualification is ready and remains operator-assisted.
+
+Radio Service no longer spends the production-height workspace on a fixed
+four-column table. A bounded serving-radio selector presents concise name,
+serving, publication, and health state; one full-width selected-service editor
+keeps the live folder and service choices readable. Native VarAC paths are
+available behind `Managed in Radio Settings`, Save is the sole primary action,
+and Radio Settings remains an enabled recovery route when a profile needs
+configuration.
+
+Locations & Access now derives compact mode from the actual tab viewport and
+font height, uses a compact selector at short heights, and presents one selected
+policy summary. The Add/Edit editor is collapsed by default, internally
+scrollable when open, and includes explicit Save, Disable, and Cancel actions.
+Long source paths are safely elided with tooltip/copy access. A platform-native
+splitter grip that appeared as dotted/garbled content was made visually quiet.
+Resize, theme, and font-change handlers alter geometry only.
+
+Model ownership: Terra implemented the bounded Radio Service and progressive
+Locations & Access presentation. Luna implemented the three-size,
+two-theme/two-text-scale matrix and focused regressions. The high-reasoning
+primary model reviewed every shared-worktree diff, removed the retained hidden
+legacy radio table, corrected the recovery-route test expectation, added the
+BBS-specific Help route, refined action geometry and splitter presentation,
+reviewed offscreen renders, and ran integration.
+
+Acceptance evidence: all 58 focused BBS tests pass. The combined Inbox, Message
+Intelligence, MIP-4, BBS catalog/access/retention/publication, contextual-help,
+and font-rendering selection passes 397 tests with one platform-dependent skip.
+Offscreen Dark/Large renders at 1280x720 and 900x560 confirm reachable actions,
+one policy summary, and no page-level horizontal overflow. Python compilation
+and `git diff --check` pass. There is no schema migration, production-data
+mutation, source-file operation, or BBS ownership/retention semantic change.

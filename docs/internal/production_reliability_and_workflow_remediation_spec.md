@@ -4,8 +4,9 @@ Status: Slices 0–6 behavior implemented with automated gates passed; the
 September 10 responsiveness remediation implementation gate passed under
 `message_ingest_projection_performance_spec.md` and
 `multi_endpoint_scheduler_concurrency_spec.md`; Linux production confirmation is
-reopened; Slice 1 software gate passed 2026-09-06 with the T1000-E reconnect
-hardware exception documented
+reopened; the September 11 Inbox/BBS production correction has passed the PIC-1
+and PIC-2 automated gates and is ready for PIC-3 Linux qualification; Slice 1 software gate passed
+2026-09-06 with the T1000-E reconnect hardware exception documented
 
 Date: 2026-09-06
 
@@ -26,6 +27,7 @@ behavior not changed by this remediation:
 - `message_inbox_controls_spec.md`
 - `message_intelligence_projection_spec.md`
 - `message_ingest_projection_performance_spec.md`
+- `production_inbox_bbs_correction_spec.md`
 - `sop_schedule_plan_spec.md`
 - `ui_layout_standards.md`
 
