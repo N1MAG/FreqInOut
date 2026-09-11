@@ -520,6 +520,9 @@ class SchedulerEngine(QObject):
         self._schedule_projection_started_at: Optional[float] = None
         self._schedule_projection_refresh_interval_s: float = max(5.0, poll_interval_ms / 1000.0)
         self._schedule_projection_generation: int = 0
+        self._schedule_projection_request_count: int = 0
+        self._schedule_projection_forced_count: int = 0
+        self._schedule_projection_completed_count: int = 0
         self._manual_states_by_radio: Dict[int, SchedulerManualControlState] = {}
         self._control_future = None
         self._control_future_token: int = 0
@@ -1127,6 +1130,9 @@ class SchedulerEngine(QObject):
             self._schedule_projection_requested_at = 0.0
             self._schedule_projection_started_at = None
             self._schedule_projection_generation += 1
+            self._schedule_projection_request_count = 0
+            self._schedule_projection_forced_count = 0
+            self._schedule_projection_completed_count = 0
             self._fldigi_apply_future = None
             self._fldigi_apply_token += 1
         self._shutdown_requested = False
@@ -2379,6 +2385,15 @@ class SchedulerEngine(QObject):
                 )
                 if isinstance(projection_cache, dict)
                 else 0,
+                "request_count": int(
+                    getattr(self, "_schedule_projection_request_count", 0) or 0
+                ),
+                "forced_request_count": int(
+                    getattr(self, "_schedule_projection_forced_count", 0) or 0
+                ),
+                "completed_count": int(
+                    getattr(self, "_schedule_projection_completed_count", 0) or 0
+                ),
             },
             "status_metrics": (
                 status_registry.metrics_snapshot().as_dict()
@@ -5582,7 +5597,10 @@ class SchedulerEngine(QObject):
                 status_registry.poll()
             self._maybe_refresh_external_status_snapshot()
             self._request_active_schedule_lane_rows_refresh()
-            self._apply_cached_schedule_tick(now_utc=now_utc)
+            self._apply_cached_schedule_tick(
+                now_utc=now_utc,
+                request_projection_refresh=False,
+            )
         except Exception as e:
             log.error("SchedulerEngine timer tick failed: %s", e)
 
@@ -5591,13 +5609,18 @@ class SchedulerEngine(QObject):
         *,
         now_utc: Optional[datetime.datetime] = None,
         force: bool = False,
+        request_projection_refresh: bool = True,
     ) -> None:
         """Consume only worker-published state on the scheduler/Qt thread."""
 
         if self._shutdown_requested:
             return
         current_utc = now_utc or self._utc_now()
-        self._apply_active_schedule_lanes(now_utc=current_utc, force=force)
+        self._apply_active_schedule_lanes(
+            now_utc=current_utc,
+            force=force,
+            request_projection_refresh=request_projection_refresh,
+        )
         self._maybe_apply_fldigi()
         self._maybe_prompt_enforcement()
 
@@ -6884,6 +6907,9 @@ class SchedulerEngine(QObject):
                     return
                 self._schedule_projection_future = None
                 self._schedule_projection_started_at = None
+                self._schedule_projection_completed_count = int(
+                    getattr(self, "_schedule_projection_completed_count", 0) or 0
+                ) + 1
                 try:
                     result = done.result()
                 except Exception as exc:
@@ -6918,12 +6944,28 @@ class SchedulerEngine(QObject):
                     level="warning" if elapsed_ms >= 250.0 else "debug",
                 )
                 # Apply only the immutable snapshot on the scheduler/Qt thread.
-                self._apply_cached_schedule_tick(force=force)
+                # This callback publishes the refresh it just completed. Its
+                # consumer must not request another forced projection or one
+                # startup/settings refresh becomes a self-sustaining loop.
+                # A forced *data* refresh also does not imply a forced radio
+                # write: a changed entry key will apply normally, while an
+                # unchanged entry remains settled.
+                self._apply_cached_schedule_tick(
+                    force=False,
+                    request_projection_refresh=False,
+                )
 
             self._queue_scheduler_thread_call(_apply)
 
         try:
             self._schedule_projection_future = self._schedule_projection_executor.submit(_task)
+            self._schedule_projection_request_count = int(
+                getattr(self, "_schedule_projection_request_count", 0) or 0
+            ) + 1
+            if force:
+                self._schedule_projection_forced_count = int(
+                    getattr(self, "_schedule_projection_forced_count", 0) or 0
+                ) + 1
             self._schedule_projection_future.add_done_callback(_on_done)
         except RuntimeError:
             if not self._shutdown_requested:
@@ -6943,6 +6985,7 @@ class SchedulerEngine(QObject):
         *,
         force: bool = False,
         now_utc: Optional[datetime.datetime] = None,
+        request_refresh: bool = True,
     ) -> List[Dict[str, object]]:
         """
         Return the current schedule projection for every active radio.
@@ -6951,7 +6994,8 @@ class SchedulerEngine(QObject):
         by database/config mtime and active assignment identity, and each call
         only recomputes in-memory active/current/next selections.
         """
-        self._request_active_schedule_lane_rows_refresh(force=force)
+        if request_refresh:
+            self._request_active_schedule_lane_rows_refresh(force=force)
         if now_utc is None:
             now_utc = datetime.datetime.now(datetime.timezone.utc)
         lanes: List[Dict[str, object]] = []
@@ -7531,8 +7575,16 @@ class SchedulerEngine(QObject):
         *,
         now_utc: datetime.datetime,
         force: bool = False,
+        request_projection_refresh: bool = True,
     ) -> bool:
-        lanes = self.active_schedule_lanes(force=force, now_utc=now_utc)
+        if request_projection_refresh:
+            lanes = self.active_schedule_lanes(force=force, now_utc=now_utc)
+        else:
+            lanes = self.active_schedule_lanes(
+                force=force,
+                now_utc=now_utc,
+                request_refresh=False,
+            )
         writer_ids, blocked_ids = self._coordinated_schedule_writer_ids(
             lanes,
             now_utc=now_utc,
@@ -9226,18 +9278,6 @@ class SchedulerEngine(QObject):
             self.active_entry_changed.emit(effective_entry, source)
             return
 
-        log.info(
-            "SchedulerEngine applying entry (%s) from %s: radio=%s band=%s freq=%s vfo=%s mode=%s comment=%s",
-            control_mode,
-            source,
-            target_radio_id or "-",
-            band,
-            freq_text,
-            vfo or "-",
-            rig_mode or "-",
-            comment,
-        )
-
         fldigi_center = self._expected_fldigi_offset(effective_entry)
         js8_tune = None
         if not apply_fldigi:
@@ -9371,6 +9411,17 @@ class SchedulerEngine(QObject):
             )
 
         js8_offset = self._js8_offset_setting() if apply_js8_offset else None
+        log.info(
+            "SchedulerEngine applying entry (%s) from %s: radio=%s band=%s freq=%s vfo=%s mode=%s comment=%s",
+            control_mode,
+            source,
+            target_radio_id or "-",
+            band,
+            freq_text,
+            vfo or "-",
+            rig_mode or "-",
+            comment,
+        )
         queued = self._queue_control_action(
             control_mode=control_mode,
             rig_client=rig_client,

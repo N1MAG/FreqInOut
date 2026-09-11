@@ -371,12 +371,15 @@ class ControlFreqTab(QWidget):
     _focus_snapshot_ready = Signal(int, object, object)
     _focus_backfill_ready = Signal(bool, int)
     _local_nets_outlook_ready = Signal(int, object, object)
+    _shortwave_listening_outlook_ready = Signal(int, object, object)
+    _shortwave_listening_action_ready = Signal(object)
     # Local Nets are reminder-only.  The host owns persistence and typed routing;
     # this presentation seam deliberately carries the immutable projection item
     # back to the host instead of interpreting it as a scheduler row.
     local_net_details_requested = Signal(object)
     local_net_dismiss_requested = Signal(object)
     local_net_open_sop_requested = Signal(object)
+    shortwave_listening_details_requested = Signal(object)
 
     def __init__(
         self,
@@ -421,6 +424,14 @@ class ControlFreqTab(QWidget):
         self._local_nets_outlook_pending = False
         self._local_nets_outlook_followup = False
         self._local_nets_outlook_request_id = 0
+        self._shortwave_listening_outlook_items: Tuple[Any, ...] = ()
+        self._shortwave_listening_outlook_provider: Optional[Callable[[dt.datetime], Any]] = None
+        self._shortwave_listening_outlook_executor: Optional[ThreadPoolExecutor] = None
+        self._shortwave_listening_outlook_pending = False
+        self._shortwave_listening_outlook_followup = False
+        self._shortwave_listening_outlook_request_id = 0
+        self._shortwave_listening_dismiss_provider: Optional[Callable[[Any], None]] = None
+        self._shortwave_listening_action_pending = False
         self._force_hero_resync = False
         self._message_summary_target_height = 0
         self._freq_meta_full_text = "Scheduled: -- | Active: --"
@@ -543,6 +554,8 @@ class ControlFreqTab(QWidget):
         self._focus_snapshot_ready.connect(self._on_focus_snapshot_ready)
         self._focus_backfill_ready.connect(self._on_focus_backfill_ready)
         self._local_nets_outlook_ready.connect(self._on_local_nets_outlook_ready)
+        self._shortwave_listening_outlook_ready.connect(self._on_shortwave_listening_outlook_ready)
+        self._shortwave_listening_action_ready.connect(self._on_shortwave_listening_action_ready)
         self._focus_autocomplete_timer = QTimer(self)
         self._focus_autocomplete_timer.setSingleShot(True)
         self._focus_autocomplete_timer.setInterval(125)
@@ -1336,6 +1349,46 @@ class ControlFreqTab(QWidget):
         self.local_nets_outlook_list.setWidget(self.local_nets_outlook_list_container)
         local_nets_layout.addWidget(self.local_nets_outlook_list)
         schedule_layout.addWidget(self.local_nets_outlook_box)
+
+        # Shortwave is deliberately separate from both HF command rows and
+        # Local Net reminders.  It begins collapsed, and no provider query is
+        # made until an operator expands it.
+        self.shortwave_listening_outlook_box = QFrame(self.schedule_box)
+        self.shortwave_listening_outlook_box.setObjectName("controlfreqShortwaveListeningOutlook")
+        self.shortwave_listening_outlook_box.setFrameShape(QFrame.StyledPanel)
+        shortwave_layout = QVBoxLayout(self.shortwave_listening_outlook_box)
+        shortwave_layout.setContentsMargins(8, 6, 8, 6)
+        shortwave_layout.setSpacing(5)
+        shortwave_header = QHBoxLayout()
+        self.shortwave_listening_outlook_title = QLabel("Shortwave Listening · reminders")
+        self.shortwave_listening_outlook_title.setStyleSheet("font-weight: 700;")
+        self.shortwave_listening_outlook_title.setToolTip("Manual listening reminders. They never tune or control a radio or receiver.")
+        shortwave_header.addWidget(self.shortwave_listening_outlook_title)
+        shortwave_header.addStretch(1)
+        self.shortwave_listening_outlook_toggle = QToolButton()
+        self.shortwave_listening_outlook_toggle.setText("Show")
+        self.shortwave_listening_outlook_toggle.setCheckable(True)
+        self.shortwave_listening_outlook_toggle.setChecked(False)
+        self.shortwave_listening_outlook_toggle.setAccessibleName("Show Shortwave Listening reminders")
+        self.shortwave_listening_outlook_toggle.setToolTip("Show manual Shortwave Listening reminders.")
+        self.shortwave_listening_outlook_toggle.toggled.connect(self._set_shortwave_listening_outlook_visible)
+        shortwave_header.addWidget(self.shortwave_listening_outlook_toggle)
+        shortwave_layout.addLayout(shortwave_header)
+        self.shortwave_listening_outlook_list = QScrollArea(self.shortwave_listening_outlook_box)
+        self.shortwave_listening_outlook_list.setObjectName("controlfreqShortwaveListeningOutlookList")
+        self.shortwave_listening_outlook_list.setWidgetResizable(True)
+        self.shortwave_listening_outlook_list.setFrameShape(QFrame.NoFrame)
+        self.shortwave_listening_outlook_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.shortwave_listening_outlook_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.shortwave_listening_outlook_list.setMaximumHeight(220)
+        self.shortwave_listening_outlook_list_container = QWidget(self.shortwave_listening_outlook_list)
+        self.shortwave_listening_outlook_list_layout = QVBoxLayout(self.shortwave_listening_outlook_list_container)
+        self.shortwave_listening_outlook_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.shortwave_listening_outlook_list_layout.setSpacing(4)
+        self.shortwave_listening_outlook_list.setWidget(self.shortwave_listening_outlook_list_container)
+        self.shortwave_listening_outlook_list.setVisible(False)
+        shortwave_layout.addWidget(self.shortwave_listening_outlook_list)
+        schedule_layout.addWidget(self.shortwave_listening_outlook_box)
         self.schedule_table = QTableWidget(0, 5)
         self.schedule_table.setHorizontalHeaderLabels(["When/Day", "Type", "Group/Net", "Band/Freq", "Actions"])
         self._setup_table_defaults(self.schedule_table)
@@ -1488,7 +1541,14 @@ class ControlFreqTab(QWidget):
     def _update_responsive_layout(self) -> None:
         if not hasattr(self, "top_overview_row") or not hasattr(self, "top_splitter"):
             return
-        mode = self._controlfreq_responsive_mode_for_width(int(self.width() or 0))
+        # A zero-delay first-layout callback can remain queued while a short-
+        # lived test/page is being destroyed. Treat that lifecycle race as a
+        # cancelled presentation update rather than touching a deleted QObject.
+        try:
+            width = int(self.width() or 0)
+        except RuntimeError:
+            return
+        mode = self._controlfreq_responsive_mode_for_width(width)
         self._arrange_filter_controls(mode == "compact")
         self._apply_ops_table_column_layout(mode == "compact")
         compact = mode == "compact"
@@ -1757,6 +1817,10 @@ class ControlFreqTab(QWidget):
             log.debug("ControlFreq: failed to restore UI state: %s", e)
 
     def _finalize_restored_ui_state(self) -> None:
+        try:
+            self.objectName()
+        except RuntimeError:
+            return
         self._apply_saved_splitter_sizes()
         self._sync_view_controls_from_state()
         self._apply_view_state(animated=False)
@@ -2254,6 +2318,13 @@ class ControlFreqTab(QWidget):
                 )
                 self.local_nets_later_btn.setStyleSheet(button_style("muted", theme))
                 self.local_nets_outlook_toggle.setStyleSheet(button_style("muted", theme))
+            if hasattr(self, "shortwave_listening_outlook_box"):
+                bg, fg, border = self._semantic_panel_colors("panel")
+                self.shortwave_listening_outlook_box.setStyleSheet(
+                    f"QFrame#controlfreqShortwaveListeningOutlook {{ background: {bg}; color: {fg}; "
+                    f"border: 1px solid {border}; border-radius: 6px; }}"
+                )
+                self.shortwave_listening_outlook_toggle.setStyleSheet(button_style("muted", theme))
             self.effective_source_label.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
         except Exception:
             pass
@@ -2917,6 +2988,21 @@ class ControlFreqTab(QWidget):
 
     def _shutdown_background_executors(self) -> None:
         self._shutdown_message_summary_executor()
+        shortwave_executor = self._shortwave_listening_outlook_executor
+        self._shortwave_listening_outlook_executor = None
+        self._shortwave_listening_outlook_provider = None
+        self._shortwave_listening_outlook_pending = False
+        self._shortwave_listening_outlook_followup = False
+        self._shortwave_listening_outlook_request_id += 1
+        self._shortwave_listening_dismiss_provider = None
+        self._shortwave_listening_action_pending = False
+        if shortwave_executor is not None:
+            try:
+                shortwave_executor.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                shortwave_executor.shutdown(wait=False)
+            except Exception as exc:
+                log.debug("ControlFreq: Shortwave Listening executor shutdown failed: %s", exc)
         local_nets_executor = self._local_nets_outlook_executor
         self._local_nets_outlook_executor = None
         self._local_nets_outlook_provider = None
@@ -7458,6 +7544,198 @@ class ControlFreqTab(QWidget):
             row.addWidget(sop_btn)
         return frame
 
+    # ---- Shortwave Listening: distinct, manual-only reminder projection ----
+    def set_shortwave_listening_outlook_items(self, items: Any) -> None:
+        snapshot_items = getattr(items, "visible_items", items)
+        self._shortwave_listening_outlook_items = tuple(snapshot_items or ())[:52]
+        self._update_shortwave_listening_header()
+        if self.shortwave_listening_outlook_toggle.isChecked():
+            self._render_shortwave_listening_outlook()
+
+    def set_shortwave_listening_outlook_provider(self, provider: Optional[Callable[[dt.datetime], Any]]) -> None:
+        self._shortwave_listening_outlook_provider = provider
+        # Deliberately do not issue a DB request while the collapsed surface is hidden.
+        if provider is not None and self._active and self.shortwave_listening_outlook_toggle.isChecked():
+            self._schedule_shortwave_listening_outlook_refresh()
+
+    def set_shortwave_listening_dismiss_provider(self, provider: Optional[Callable[[Any], None]]) -> None:
+        """Install the host write operation; it runs on this bounded lane."""
+        self._shortwave_listening_dismiss_provider = provider
+
+    def refresh_shortwave_listening_outlook(self) -> None:
+        self._schedule_shortwave_listening_outlook_refresh()
+
+    def _schedule_shortwave_listening_outlook_refresh(self, now_utc: Optional[dt.datetime] = None) -> None:
+        if not self._active or not self.shortwave_listening_outlook_toggle.isChecked() or self._shortwave_listening_outlook_provider is None:
+            return
+        if self._shortwave_listening_outlook_pending:
+            self._shortwave_listening_outlook_followup = True
+            return
+        self._shortwave_listening_outlook_pending = True
+        self._shortwave_listening_outlook_request_id += 1
+        request_id = self._shortwave_listening_outlook_request_id
+        if self._shortwave_listening_outlook_executor is None:
+            self._shortwave_listening_outlook_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fio-shortwave-listening")
+        future = self._shortwave_listening_outlook_executor.submit(self._shortwave_listening_outlook_provider, now_utc or dt.datetime.now(dt.timezone.utc))
+
+        def done(completed: Future) -> None:
+            try:
+                payload, error = completed.result(), None
+            except Exception as exc:
+                payload, error = None, exc
+            try:
+                self._shortwave_listening_outlook_ready.emit(request_id, payload, error)
+            except RuntimeError:
+                return
+        future.add_done_callback(done)
+
+    def _on_shortwave_listening_outlook_ready(self, request_id: int, payload: object, error: object) -> None:
+        if request_id != self._shortwave_listening_outlook_request_id:
+            return
+        self._shortwave_listening_outlook_pending = False
+        if error is not None:
+            log.debug("ControlFreq: Shortwave Listening outlook unavailable: %s", error)
+        else:
+            self.set_shortwave_listening_outlook_items(payload)
+        if self._shortwave_listening_outlook_followup:
+            self._shortwave_listening_outlook_followup = False
+            self._schedule_shortwave_listening_outlook_refresh()
+
+    def _request_shortwave_listening_dismiss(self, item: Any) -> None:
+        provider = self._shortwave_listening_dismiss_provider
+        if provider is None or self._shortwave_listening_action_pending:
+            return
+        if self._shortwave_listening_outlook_executor is None:
+            self._shortwave_listening_outlook_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fio-shortwave-listening")
+        self._shortwave_listening_action_pending = True
+        future = self._shortwave_listening_outlook_executor.submit(provider, item)
+
+        def done(completed: Future) -> None:
+            try:
+                error: object = None
+                completed.result()
+            except Exception as exc:
+                error = exc
+            try:
+                self._shortwave_listening_action_ready.emit(error)
+            except RuntimeError:
+                return
+        future.add_done_callback(done)
+
+    def _on_shortwave_listening_action_ready(self, error: object) -> None:
+        self._shortwave_listening_action_pending = False
+        if error is not None:
+            log.debug("ControlFreq: Shortwave Listening action failed: %s", error)
+            return
+        self._schedule_shortwave_listening_outlook_refresh()
+
+    def _set_shortwave_listening_outlook_visible(self, visible: bool) -> None:
+        self.shortwave_listening_outlook_list.setVisible(bool(visible))
+        self.shortwave_listening_outlook_toggle.setText("Hide" if visible else "Show")
+        if visible:
+            self._schedule_shortwave_listening_outlook_refresh()
+            self._render_shortwave_listening_outlook()
+        self._fit_group_box_to_contents(self.schedule_box)
+
+    @staticmethod
+    def _shortwave_item_value(item: Any, name: str, default: Any = None) -> Any:
+        return item.get(name, default) if isinstance(item, dict) else getattr(item, name, default)
+
+    def _shortwave_item_start(self, item: Any) -> Optional[dt.datetime]:
+        value = self._shortwave_item_value(item, "start_utc")
+        if isinstance(value, dt.datetime):
+            return value.replace(tzinfo=dt.timezone.utc) if value.tzinfo is None else value.astimezone(dt.timezone.utc)
+        return None
+
+    def _update_shortwave_listening_header(self) -> None:
+        if not hasattr(self, "shortwave_listening_outlook_title"):
+            return
+        rows = tuple(self._shortwave_listening_outlook_items)
+        attention = sum(1 for row in rows if str(self._shortwave_item_value(row, "source_health", "")).lower() in {"changed", "missing"})
+        suffix = f" · {len(rows)} visible" if rows else " · manual reminders"
+        if attention:
+            suffix += f" · {attention} needs review"
+        self.shortwave_listening_outlook_title.setText("Shortwave Listening · reminders" + suffix)
+
+    def _render_shortwave_listening_outlook(self, now_utc: Optional[dt.datetime] = None) -> None:
+        if not self.shortwave_listening_outlook_toggle.isChecked():
+            self._update_shortwave_listening_header()
+            return
+        self._update_shortwave_listening_header()
+        layout = self.shortwave_listening_outlook_list_layout
+        self._clear_widget_layout(layout)
+        now = now_utc or dt.datetime.now(dt.timezone.utc)
+        rows = sorted(self._shortwave_listening_outlook_items, key=lambda row: self._shortwave_item_start(row) or now)[:52]
+        if not rows:
+            empty = QLabel("No saved Shortwave Listening reminders. Manual tuning only — FIO will not control a receiver.")
+            empty.setWordWrap(True)
+            layout.addWidget(empty)
+        else:
+            for item in rows:
+                layout.addWidget(self._build_shortwave_listening_row(item, now))
+        layout.addStretch(1)
+        self._fit_group_box_to_contents(self.schedule_box)
+
+    def _build_shortwave_listening_row(self, item: Any, now_utc: dt.datetime) -> QWidget:
+        start = self._shortwave_item_start(item) or now_utc
+        end = self._shortwave_item_value(item, "end_utc")
+        if not isinstance(end, dt.datetime):
+            end = start + dt.timedelta(minutes=60)
+        urgency = str(self._shortwave_item_value(item, "urgency_text", "Upcoming listening reminder"))
+        name = str(self._shortwave_item_value(item, "name", "Shortwave listing"))
+        station = str(self._shortwave_item_value(item, "station_name", ""))
+        frequency = self._shortwave_item_value(item, "frequency_hz", 0)
+        try:
+            freq_text = f"{int(frequency) / 1_000_000:.3f} MHz"
+        except (TypeError, ValueError):
+            freq_text = "Frequency not supplied"
+        health = str(self._shortwave_item_value(item, "source_health_text", ""))
+        frame = QFrame(self.shortwave_listening_outlook_list_container)
+        frame.setObjectName("controlfreqShortwaveListeningOutlookRow")
+        state = str(self._shortwave_item_value(item, "urgency", ""))
+        role = "warning" if state in {"active", "reminding"} else "secondary" if state == "soon" else "panel"
+        bg, fg, border = self._semantic_panel_colors(role)
+        frame.setStyleSheet(
+            f"QFrame#controlfreqShortwaveListeningOutlookRow {{ background: {bg}; color: {fg}; "
+            f"border-left: 3px solid {border}; border-top: 1px solid {border}; "
+            f"border-right: 1px solid {border}; border-bottom: 1px solid {border}; border-radius: 5px; }}"
+        )
+        row = QHBoxLayout(frame)
+        row.setContentsMargins(8, 5, 8, 5)
+        row.setSpacing(8)
+        icon = QLabel("◉")
+        icon.setAccessibleName("Shortwave listening reminder")
+        icon.setToolTip("Manual Shortwave listening reminder")
+        row.addWidget(icon)
+        text = QVBoxLayout()
+        headline = QLabel(f"<b>{urgency}</b> · Manual listening · {self._format_display_time(start, True, self._get_display_tz())}")
+        headline.setTextFormat(Qt.RichText)
+        headline.setWordWrap(True)
+        text.addWidget(headline)
+        summary = QLabel(f"{name} · {station} · {freq_text}")
+        summary.setWordWrap(True)
+        text.addWidget(summary)
+        if health:
+            health_label = QLabel(f"Source: {health}")
+            health_label.setWordWrap(True)
+            text.addWidget(health_label)
+        notice = QLabel("Manual tuning only; no radio or receiver control.")
+        notice.setWordWrap(True)
+        text.addWidget(notice)
+        row.addLayout(text, 1)
+        details = QPushButton("Details")
+        details.setToolTip("Open this saved Shortwave reminder.")
+        details.setStyleSheet(button_style("secondary", self._theme()))
+        details.clicked.connect(lambda _checked=False, payload=item: self.shortwave_listening_details_requested.emit(payload))
+        row.addWidget(details)
+        if state in {"active", "reminding"}:
+            dismiss = QPushButton("Dismiss")
+            dismiss.setToolTip("Dismiss this occurrence only; the saved listening reminder remains enabled.")
+            dismiss.setStyleSheet(button_style("muted", self._theme()))
+            dismiss.clicked.connect(lambda _checked=False, payload=item: self._request_shortwave_listening_dismiss(payload))
+            row.addWidget(dismiss)
+        return frame
+
     def _refresh_schedule_outlook(self) -> None:
         if not bool(self._view_cards.get("schedule", True)):
             return
@@ -7540,6 +7818,12 @@ class ControlFreqTab(QWidget):
         # receives its cheap header invalidation inside its own renderer.
         self._schedule_local_nets_outlook_refresh(now_utc)
         self._refresh_local_nets_outlook(now_utc)
+        # Shortwave Listening remains entirely dormant while collapsed.  When
+        # open, it shares the same bounded minute-level outlook cadence but is
+        # never merged into the commandable schedule rows.
+        if self.shortwave_listening_outlook_toggle.isChecked():
+            self._schedule_shortwave_listening_outlook_refresh(now_utc)
+            self._render_shortwave_listening_outlook(now_utc)
         self.schedule_table.setRowCount(0)
         self._schedule_entries_by_row.clear()
         self._append_section_row_to(self.schedule_table, "Today")

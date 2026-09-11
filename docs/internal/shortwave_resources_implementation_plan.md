@@ -1,10 +1,17 @@
 # Shortwave Resources Implementation Plan
 
-Status: proposed; packages are sequential and stop at each exit gate
+Status: R-1 and SW-1 through SW-3 complete with automated exit gates passed.
+SW-4 remains excluded pending separate authorization and hardware acceptance;
+platform soak evidence remains part of release qualification.
 
 Date: 2026-09-10
 
 Authority: `shortwave_resources_spec.md`
+
+SDR receiver work is governed and ordered by
+`sdr_receiver_control_implementation_plan.md`. SDR control is the implementation
+priority before Shortwave packages. The Shortwave data model remains independent
+and cannot create a second receiver-control path.
 
 ## Delivery Rules
 
@@ -21,6 +28,8 @@ Authority: `shortwave_resources_spec.md`
   copy before production use.
 
 ## Package R-1 — Resources Navigation And Export Preview
+
+Status: complete — exit gate passed 2026-09-10.
 
 Purpose: implement the clarified navigation and correct the existing export
 workflow independently of Shortwave data.
@@ -66,6 +75,8 @@ workflow independently of Shortwave data.
 - Existing Resources/HF/Local Nets regression suites pass.
 
 ## Package SW-1 — EiBi Provider, Schema, And Transactional Import
+
+Status: complete — exit gate passed 2026-09-10.
 
 Prerequisites: dataset distribution and update-policy decisions are confirmed.
 
@@ -113,6 +124,9 @@ Prerequisites: dataset distribution and update-policy decisions are confirmed.
 
 ## Package SW-2 — Shortwave Explore And Data Sources UI
 
+Status: complete — automated exit gate passed 2026-09-10; macOS/Linux
+interactive soak remains release evidence, not an implementation blocker.
+
 Prerequisite: SW-1 passes and initial broadcast/utility content decision is
 confirmed.
 
@@ -149,6 +163,9 @@ confirmed.
 - Responsive/theme/accessibility matrix and source update/rollback workflows pass.
 
 ## Package SW-3 — Receive-Only Listening Calendar
+
+Status: complete — automated exit gate passed 2026-09-10; macOS/Linux
+30-minute interactive soak remains release evidence.
 
 Prerequisite: the Listening behavior decision is confirmed.
 
@@ -200,25 +217,13 @@ This package is excluded until separately authorized and hardware-tested.
   a known state.
 - No unsupported radio displays an actionable Tune control.
 
-## Package SW-5 — Optional Named SDR Adapter
+## SDR Receiver Dependency
 
-This package is excluded until the user names the first supported SDR application
-and control API.
-
-### Work
-
-- Define one adapter with capability discovery, tune/mode contract, lifecycle,
-  timeout, cancellation, reconnection, and readback.
-- Introduce an explicit receiver-control capability while keeping observer SDR
-  identity separate from proven tuning capability. An endpoint alone cannot
-  enable `control_via`, scheduler ownership, PTT, or auto-tune.
-- Expose actions only when a live adapter reports the required capability.
-
-### Exit gate
-
-- Real hardware/application acceptance passes on its supported OS matrix.
-- No UI claims tuning success without readback.
-- Disconnect/restart/shutdown do not leak threads, timers, or endpoints.
+The former generic SW-5 placeholder is replaced by the separately gated packages
+in `sdr_receiver_control_implementation_plan.md`. Shortwave integrates only the
+shared receiver chooser, universal manual card, and adapters that have already
+passed their hardware/platform gates. Adding another SDR application does not
+require a new Shortwave-specific adapter.
 
 ## Release Evidence
 

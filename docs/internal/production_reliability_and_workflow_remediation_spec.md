@@ -219,6 +219,18 @@ same interaction budgets unless an OS-controlled prompt is active.
   `QThread` destruction warning.
 - Background CPU when idle: source timers must coalesce; no repeated full process
   snapshots or unchanged-file traversal.
+- Repeated unchanged scheduler intent must settle: projection completion cannot
+  request another projection or turn a data refresh into forced endpoint writes.
+- Runtime CPU attribution must not depend on an operator reproducing the fault
+  under a profiler. After sustained process CPU above the configured threshold,
+  FIO writes a bounded, redacted stack and cached-service report to
+  `cpu_hotspots` under its configuration directory. Normal samples produce no
+  log traffic and perform no database, network, Qt, endpoint, or process-list
+  work.
+- High-rate service events are coalesced before presentation. Configuration or
+  endpoint problems remain visible as stable status with explicit recovery
+  actions; they cannot drive per-event control-bar reconstruction or alternating
+  transient messages.
 
 Performance spans must distinguish queue wait, source I/O, database work,
 projection, model fetch, and paint. Each span includes row/file/device counts so

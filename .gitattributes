@@ -2,6 +2,7 @@
 *.py text eol=lf
 *.md text eol=lf
 *.html text eol=lf
+config/shortwave/eibi/* binary
 tests/ export-ignore
 SPEC.md export-ignore
 .github/ export-ignore

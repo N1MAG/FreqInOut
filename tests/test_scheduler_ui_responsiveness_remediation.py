@@ -81,6 +81,7 @@ def test_scheduler_timer_is_a_nonblocking_dispatch_boundary() -> None:
     # request their worker equivalent, but must not invoke them itself.
     assert "_evaluate" not in called
     assert "_apply_active_schedule_lanes" not in called
+    assert "request_projection_refresh=False" in source
 
 
 def test_schedule_projection_worker_never_borrows_ui_settings_manager() -> None:
@@ -190,6 +191,49 @@ class _ManualExecutor:
             future.set_result(function())
         except BaseException as exc:  # pragma: no cover - exercised by registry
             future.set_exception(exc)
+
+
+def test_forced_projection_completion_does_not_refresh_or_force_radio_again() -> None:
+    """A published forced snapshot is a terminal consumer, not a feedback loop."""
+
+    executor = _ManualExecutor()
+    scheduler = SchedulerEngine.__new__(SchedulerEngine)
+    scheduler._shutdown_requested = False
+    scheduler._schedule_projection_executor = executor
+    scheduler._schedule_projection_future = None
+    scheduler._schedule_projection_requested_at = 0.0
+    scheduler._schedule_projection_started_at = None
+    scheduler._schedule_projection_refresh_interval_s = 5.0
+    scheduler._schedule_projection_generation = 0
+    scheduler._active_schedule_lane_rows_cache = None
+    scheduler._manual_states_by_radio = {}
+    scheduler._monotonic_clock = lambda: 100.0
+    scheduler.settings = SimpleNamespace(all=lambda: {})
+    scheduler._load_active_schedule_lane_rows = lambda **_kwargs: []
+    scheduler._clear_startup_manual_qsy_states = lambda: None
+    scheduler._manual_control_service = SimpleNamespace(list_active_states=lambda: ())
+    scheduler._queue_scheduler_thread_call = lambda callback: callback()
+    applied: list[dict[str, object]] = []
+    scheduler._apply_cached_schedule_tick = lambda **kwargs: applied.append(dict(kwargs))
+
+    SchedulerEngine._request_active_schedule_lane_rows_refresh(scheduler, force=True)
+    assert len(executor.pending) == 1
+    executor.run_endpoint(0)
+
+    assert applied == [{"force": False, "request_projection_refresh": False}]
+    assert executor.pending == []
+    assert scheduler._schedule_projection_future is None
+
+
+def test_scheduler_status_signal_is_coalesced_before_rendering() -> None:
+    """Endpoint bursts must not repaint the status/control surfaces per event."""
+
+    source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
+    assert "active_entry_changed.connect(self._on_scheduler_active_entry_changed)" in source
+    assert "active_entry_changed.connect(self._refresh_scheduler_status_panel)" not in source
+    assert "_scheduler_status_signal_refresh_pending" in source
+    assert "min_interval_sec = 2.0" in source
+    assert "QTimer.singleShot(delay_ms, self._flush_scheduler_status_signal_refresh)" in source
 
 
 def _status_key(port: int) -> EndpointKey:

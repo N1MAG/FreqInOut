@@ -124,6 +124,12 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         title="Tools & Resources Help",
         summary="Reusable frequency and net-directory reference data, safe updates, retirement, and preview-first import/export.",
     ),
+    "tab.shortwave": HelpContext(
+        key="tab.shortwave",
+        anchor="shortwave",
+        title="Shortwave Help",
+        summary="Source-attributed Shortwave listings, accepted manual listening reminders, UTC/local schedule interpretation, data-source preview/rollback, and receive-only safety boundaries.",
+    ),
     "tab.hf-peers": HelpContext(
         key="tab.hf-peers",
         anchor="hf-peers",

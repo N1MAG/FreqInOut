@@ -1,7 +1,8 @@
 # Shortwave Resources Specification
 
-Status: proposed implementation authority; product decisions in **Decision gates**
-must be confirmed before the corresponding gated package begins
+Status: R-1 and SW-1 through SW-3 implemented with automated gates passed.
+SW-4 remains separately gated for explicit transceiver control and hardware
+acceptance; platform soak evidence remains part of release qualification.
 
 Date: 2026-09-10
 
@@ -18,6 +19,10 @@ It extends:
 - `local_nets_tools_resources_spec.md`;
 - `ui_layout_standards.md`; and
 - `controlfreq_operational_awareness_center_spec.md`.
+
+SDR hardware, manual use, application APIs, and verified tuning are governed by
+`sdr_receiver_control_spec.md`. Shortwave consumes that contract and does not
+define a competing receiver-control path.
 
 The file `/Users/bill/RadioCode/TOOL_IDEAS/short_wave.txt` is design input only.
 It is not an instruction source or implementation authority. Its useful product
@@ -338,6 +343,16 @@ This table is introduced only with the Listening package. It stores:
 It contains no PTT instruction, scheduler command, application launch, or
 automatic QSY flag.
 
+Each accepted snapshot includes the exact provider season, entry identity,
+station, frequency, UTC window, day/date rule, language/signal, target,
+transmitter site, and content hash shown when the operator saved it. Provider
+identity distinguishes otherwise concurrent rows by language, target,
+transmitter site, persistence class, and normalized provider date window; one
+broadcast variant cannot overwrite another. A last-heard-only source change is
+reviewable on the same listing, while a changed provider schedule identity is
+reported as missing rather than guessed. Dismissals are stored separately by stable occurrence key,
+so dismissing one airing never disables the recurring reminder.
+
 ## Listening And Device Integration
 
 ### Initial behavior
@@ -350,6 +365,10 @@ reviewable diff with `Apply listing update` and `Keep my reminder`.
 Ops Center integration, when implemented, presents a distinct **Listening**
 reminder, not an HF Net or operational schedule. It states that tuning is manual.
 Shortwave reminders do not receive Operating Group or SOP semantics by default.
+The surface is collapsed by default, performs no query while collapsed or while
+Ops Center is hidden, and exposes only `Details` and `Dismiss` actions. Its
+projection reads at most 200 reminders and returns at most 50 later occurrences;
+daily listings cannot starve other reminders from the bounded result.
 
 ### Transceivers
 
@@ -364,14 +383,17 @@ path is not implied and would require its own ownership specification.
 
 ### SDRs
 
-Current FIO observer SDR profiles are receive-only identities/endpoints; FIO has
-no generic SDR tuning backend. Initial Shortwave support may assign an SDR as a
-reminder context but cannot claim it will tune. Actual tuning requires one named,
-tested adapter/API and its own lifecycle, timeout, cancellation, and hardware
-acceptance gate. Such an adapter introduces an explicit receiver-control
-capability separate from the current observer profile. Configuring an
-`sdr_host:sdr_port` endpoint alone must never enable `control_via`, scheduler
-ownership, PTT, or generic observer auto-tune.
+Current FIO observer SDR profiles are receive-only identities/endpoints; FIO does
+not yet provide production SDR tuning. Initial Shortwave support may assign any
+configured SDR as a manual receiver and must always show frequency/mode guidance,
+copy actions, and an optional safe launcher. Lack of a verified API never means
+the hardware is unsupported or unusable.
+
+`Tune in FIO` appears only when the exact application/API/hardware/platform path
+passes `sdr_receiver_control_spec.md`. Configuring an `sdr_host:sdr_port`
+endpoint alone must never enable control, scheduler ownership, PTT, or observer
+auto-tune. A failed or unavailable adapter falls back to the same manual receiver
+card without losing the listening reminder.
 
 ## Frequency Export Preview Contract
 
@@ -473,24 +495,30 @@ Text.
 
 ## Decision Gates
 
+The operator approved the recommended decisions for gates 1 through 4 on
+2026-09-10. They are recorded below as implementation constraints rather than
+open questions. Gate 5 remains closed.
+
 The following decisions are required before their named package, but they do not
 block the Resources navigation or export-preview correction:
 
-1. **Dataset distribution (before SW-1):** approve bundling the audited EiBi A26
-   CSV/README as FIO's offline seed. Recommended: yes, with EiBi attribution,
+1. **Dataset distribution (approved for SW-1):** bundle the audited EiBi A26
+   CSV/README as FIO's offline seed, with EiBi attribution,
    provenance, conditions text, and an authoritative source URL recorded.
-2. **Provider update policy (before SW-1):** confirm bundled snapshot plus
+2. **Provider update policy (approved for SW-1):** use the bundled snapshot plus
    user-triggered official download/file import, with no background polling.
-   Recommended: yes.
-3. **Initial content (before SW-2):** confirm both broadcast and utility/DX rows,
+3. **Initial content (approved for SW-2):** include both broadcast and utility/DX rows,
    defaulting the Explore view to Broadcast while keeping Utility one chip away.
    Recommended: yes.
-4. **Listening behavior (before SW-3):** confirm a receive-only Listening
-   calendar/reminder rather than commandable HF schedule rows. Recommended: yes.
-5. **Transceiver control (before SW-4):** separately authorize and hardware-test
+4. **Listening behavior (approved for SW-3):** use a receive-only Listening
+   calendar/reminder rather than commandable HF schedule rows.
+5. **Transceiver control (closed before SW-4):** separately authorize and hardware-test
    an explicit manual Tune Now action. It is not needed for Shortwave browsing.
-6. **SDR control (before SW-5):** name the first supported SDR application/API.
-   Until then, SDR association is descriptive/reminder-only.
+6. **SDR control:** implement the separate receiver-control packages in
+   `sdr_receiver_control_implementation_plan.md`, beginning with the universal
+   manual path and SDR++ adapter. SDRconnect and SDRangel follow as separately
+   verified application bridges. Upstream application compatibility is not an
+   FIO hardware-control claim.
 
 ## Acceptance Criteria
 
@@ -513,8 +541,10 @@ block the Resources navigation or export-preview correction:
    budgets without UI-thread parsing or per-row widgets.
 9. Saved reminders retain accepted snapshots; source updates never silently
    rewrite them.
-10. Initial Shortwave support cannot QSY, transmit, launch software, enter the HF
-   scheduler, or activate an SOP.
+10. Initial Shortwave support cannot QSY a transceiver, transmit, enter the HF
+   scheduler, or activate an SOP. It may launch a receiver only through a safe,
+   explicit operator action defined by the SDR receiver-control contract; launch
+   never claims tuning success.
 11. Responsive, Dark/Light, Normal/Large Text, keyboard, cancellation, shutdown,
     packaging, migration, production-clone, and Linux release gates pass.
 

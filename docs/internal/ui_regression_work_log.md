@@ -3311,3 +3311,174 @@ cycles, and 62.8 ms shutdown. All Qt worker threads stopped cleanly. A separate
 Settings measurement on a disposable copy of the 311 MB store took 266.907 ms
 to construct its deferred widget surface and 89.014 ms to populate it on first
 activation after startup initialization.
+
+## 2026-09-10 — Shortwave Resources R-1 and SW-1
+
+R-1 is complete. Resources is a workflow master whose implemented child is
+Frequencies; Frequency Catalog, Net Directory, and Import / Export remain
+internal browser tabs. Catalog export is now contextual, multi-select, bounded,
+preview-first, non-mutating on cancel, and revalidated before its one file
+write. The R-1 gate passed 82 focused Resources/HF/Local Nets tests.
+
+SW-1 is complete. The additive, startup-owned Shortwave schema, immutable
+dataset lifecycle, atomic current-pointer promotion, cancellation, rollback,
+bounded read store, EiBi Latin-1 provider, fixed-host HTTPS downloader, and
+offline A26 seed packaging are implemented. The parser preserved all 9,442
+audited A26 rows in approximately 76 ms, retained the one exact duplicate for
+audit, produced explicit diagnostics for ambiguous/rejected input, and matched
+both specification hashes. A real 10,000-row import/query test remained bounded
+and below the 100 ms warm-query gate.
+
+Model ownership: the high-reasoning primary model owned architecture, schema,
+transactions, migration rehearsal, concurrency boundaries, delegated-diff
+review, and integration gates; `gpt-5.6-terra` implemented bounded R-1 UI and
+the Qt-free EiBi adapter/packaging; `gpt-5.6-luna` implemented focused fixtures,
+malformed-input, downloader, migration, rollback, and performance tests.
+
+The combined R-1/SW-1 acceptance gate passed 104 tests. `py_compile` and
+`git diff --check` passed. An isolated 326 MB production-database copy reached
+canonical authority with all Shortwave tables present, no current dataset
+fabricated, and no production data modified. The additive startup migration
+took 2,179.4 ms on the first copied run; the broader pre-existing catalog/startup
+path dominated that measurement. Shortwave performs no import or network work
+at startup or from tab activation. Clean frozen-build packaging is represented
+in both `MANIFEST.in` and `FreqInOut.spec`; a platform bundle build remains a
+release-environment gate.
+
+## 2026-09-10 — Shortwave Resources SW-2
+
+Status: implementation and automated exit gate passed; interactive macOS/Linux
+theme, accessibility, and idle-CPU soak remain release evidence.
+
+Shortwave is now a lazy Resources child with bounded Explore and Data Sources
+workspaces. Explore normalizes conventional frequency input, distinguishes
+Scheduled now from Starting soon across UTC midnight and winter seasons,
+filters broadcast/utility/time/other content, presents decoded home country,
+transmitter site, target, language, source age, provenance, and separate
+UTC/local times, and keeps provider codes behind Technical details. Data Sources
+supports bundled, fixed-host official, and local-file review, explicit atomic
+Apply, retained rollback, and bounded diagnostics export. It performs no
+automatic download or import.
+
+The two UI task lanes are single-flight and generation-fenced: rapid changes
+retain at most one active operation and one newest pending operation. Hidden
+pages do not poll, parsing/querying stays off the GUI thread, official download
+has a global five-second deadline and cooperative cancellation, and shutdown is
+bounded.
+
+Model ownership: the high-reasoning primary model owned schedule evaluation,
+query bounds, source semantics, downloader/shutdown review, identity review,
+and final integration; `gpt-5.6-terra` implemented the responsive Explore/Data
+Sources UI and help; `gpt-5.6-luna` implemented the real-corpus now/soon,
+cross-midnight/winter, filters, p95, and Qt worker-lifecycle tests.
+
+Acceptance evidence: 23 focused SW-2 tests passed, including a real 9,442-row
+A26 warm-query p95 below 100 ms, rapid-refresh coalescing, Data Sources pending
+task regression, hidden technical details, distinct UTC/local presentation,
+and clean worker shutdown. The combined R-1/SW-1/SW-2 suite passed 52 tests
+before SW-3 opened. Python compilation and `git diff --check` passed.
+
+## 2026-09-10 — Shortwave Resources SW-3
+
+Status: implementation and automated exit gate passed; the macOS/Linux
+30-minute interactive soak remains release evidence.
+
+The Shortwave workspace now provides a receive-only Listening calendar. A user
+can add a complete Explore result, retain an immutable accepted listing
+snapshot, label the reminder, set lead time and notes, and optionally associate
+a configured receiver as informational context. Saved receiver identities that
+later disappear remain visible as unavailable rather than being silently
+cleared. Duplicate adds open the existing reminder without overwriting local
+choices.
+
+Source refresh is explicit and safe. Current, changed, missing, and intentionally
+kept states are distinguished; changed fields and the proposed current listing
+are shown before `Apply listing update`, while `Keep my reminder` preserves the
+accepted snapshot. Import promotion and rollback update review state in one
+transaction without mutating accepted snapshots. Provider identity includes the
+schedule, station, language, target, site, and date-window fields needed to keep
+concurrent listings distinct while allowing a last-heard-only change to be
+reviewed.
+
+Ops Center has a separate collapsed Shortwave Listening surface. It does no
+database query while collapsed or while Ops is inactive, projects at most 200
+reminders and 50 later occurrences with fair per-reminder bounds, and offers
+only Details and occurrence-scoped Dismiss. No tune, QSY, launch, PTT, scheduler,
+Operating Group, SOP, or automated radio path is reachable from Shortwave.
+Cross-midnight and cross-year winter recurrences are covered.
+
+Model ownership:
+
+- High-reasoning primary model: accepted-snapshot and source-version
+  architecture, additive schema/migration, provider identity, bounded recurrence
+  and fairness, import transaction integration, worker/concurrency and radio
+  safety boundaries, delegated-diff review, compact/dark-theme review,
+  specifications, and final integration gate.
+- `gpt-5.6-terra` high: bounded Listening editor and Ops reminder presentation,
+  source/provider mechanics, responsive layout, help, and main-window wiring.
+- `gpt-5.6-luna` high: source-diff, recurrence, dismissal, performance,
+  scheduler-isolation, collapsed/no-query, receiver-label, worker-lifecycle, and
+  responsive-layout tests.
+
+Acceptance evidence: 72 focused R-1/SW-1/SW-2/SW-3 tests and 78 additional
+Resources/HF/Local Nets regressions passed (150 total). The real 9,442-row A26
+corpus retained 9,441 distinct user listings plus its one exact audit duplicate;
+bounded reminder refresh and outlook projection remained below the 100 ms gate.
+On a disposable production-database copy, the additive schema completed in
+5.30 ms on first application and 1.36 ms idempotently, `PRAGMA integrity_check`
+returned `ok`, and no current dataset was fabricated. Python compilation and
+`git diff --check` passed. A broader Phase 7 shell run passed 118 assertions;
+nine existing Station Control Bar assigned-plan fixture failures remain outside
+the Shortwave diff and scope. No production database, external application,
+radio, or receiver hardware was modified.
+
+## 2026-09-11 — Scheduler projection CPU spin and production attribution
+
+Status: root cause remediated; automated exit gate passed. Settled-idle Linux
+confirmation remains a production observation gate.
+
+The local runtime log provided a deterministic signature rather than a generic
+CPU symptom. Between 06:39:20 and 06:39:41, FIO wrote 4,165 lines, completed 303
+schedule projections (almost all marked forced), logged 307 radio-8 and 301
+radio-9 applications, and repeatedly issued unchanged FLRig, FLDigi, and JS8
+commands. Projection completion was consuming its snapshot through a path that
+requested another forced projection. The same `force` flag then bypassed settled
+entry deduplication, producing a self-sustaining worker/control/UI signal loop.
+
+The projection completion path is now one-way: it publishes and consumes the
+new immutable snapshot without requesting a successor and without forcing
+unchanged endpoint state. Changed schedule keys still apply normally. The
+application log moved behind deduplication so it describes an actual queued
+command. Cache-only diagnostics now expose projection request, forced-request,
+and completion counters. Active-entry UI signals are initially coalesced for
+350 ms and status rendering is capped at one pass per two seconds, while the
+Station Control Bar continues to enforce its existing bounded refresh cadence.
+This makes configuration or endpoint faults visible without allowing their
+event rate to become the presentation rate.
+
+A new default-on process CPU watchdog samples only `process_time` against
+`monotonic` once per second. Three consecutive samples at or above 75% of one
+logical core produce one bounded, credential-redacted report in
+`<FIO config>/cpu_hotspots`, including cached scheduler/message-projection
+diagnostics and bounded Python thread stacks. Reports observe a 60-second
+cooldown and retain at most ten files. Normal samples do not log or inspect the
+database, network, endpoints, Qt, filesystem tree, or process list. Set
+`FREQINOUT_CPU_WATCHDOG=0` only when explicitly disabling this diagnostic.
+
+Model ownership: the high-reasoning primary model performed log quantification,
+root-cause/concurrency review, implementation, specification reconciliation,
+and final integration. No subagent was used because this request did not ask for
+delegation and the scheduler feedback boundary required single-owner review.
+
+Acceptance evidence: 227 scheduler, health, watchdog, and message-telemetry
+tests passed with one intentional skip. Coverage includes the
+forced-projection terminal-consumer regression, status-signal coalescing,
+CPU threshold/reset/cooldown behavior, bounded reports, and secret redaction.
+No migration or production data change was introduced.
+
+Pre-push integration combined Shortwave, Resources, Local Nets, Ops Center,
+scheduler, health, watchdog, and message-telemetry coverage in one Qt process.
+That run exposed two deferred ControlFreq presentation callbacks that could
+arrive after a short-lived page was destroyed. Both callbacks now treat QObject
+destruction as cancellation, with a direct lifecycle regression. The repeated
+combined gate then passed 420 tests with one intentional skip.

@@ -44,6 +44,7 @@ from freqinout.core.logger import log
 from freqinout.core.logger import set_log_level
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.resource_catalog_migration import resource_catalog_authority_state
+from freqinout.core.shortwave_store import ShortwaveStore
 from freqinout.core.multi_radio_store import MultiRadioStore, SUPPORTED_RUNTIME_CONTROL_BACKENDS
 from freqinout.core.navigation_intent import NavigationIntent
 from freqinout.core.perf_metrics import emit_span, span as perf_span
@@ -100,7 +101,7 @@ from freqinout.core.source_control_rail import (
     source_control_mesh_items_from_configs,
 )
 from freqinout.radio_interface.js8_api_client import JS8ApiClientRegistry
-from freqinout.core.ui_watchdog import UiEventLoopWatchdog
+from freqinout.core.ui_watchdog import ProcessCpuWatchdog, UiEventLoopWatchdog
 from freqinout.core.worker_lifecycle import WorkerShutdownRegistry
 from freqinout.core.view_contracts import (
     compose_intent_from_mapping,
@@ -379,12 +380,18 @@ class MainWindow(QMainWindow):
         )
         if hasattr(self.controlfreq_tab, "set_local_nets_outlook_provider"):
             self.controlfreq_tab.set_local_nets_outlook_provider(self._build_local_nets_outlook)
+        if hasattr(self.controlfreq_tab, "set_shortwave_listening_outlook_provider"):
+            self.controlfreq_tab.set_shortwave_listening_outlook_provider(self._build_shortwave_listening_outlook)
+        if hasattr(self.controlfreq_tab, "set_shortwave_listening_dismiss_provider"):
+            self.controlfreq_tab.set_shortwave_listening_dismiss_provider(self._dismiss_shortwave_listening_occurrence)
         if hasattr(self.controlfreq_tab, "local_net_details_requested"):
             self.controlfreq_tab.local_net_details_requested.connect(self._open_local_net_details)
         if hasattr(self.controlfreq_tab, "local_net_dismiss_requested"):
             self.controlfreq_tab.local_net_dismiss_requested.connect(self._dismiss_local_net_occurrence)
         if hasattr(self.controlfreq_tab, "local_net_open_sop_requested"):
             self.controlfreq_tab.local_net_open_sop_requested.connect(self._open_local_net_sop)
+        if hasattr(self.controlfreq_tab, "shortwave_listening_details_requested"):
+            self.controlfreq_tab.shortwave_listening_details_requested.connect(self._open_shortwave_listening_details)
         self.command_palette_shortcut = QShortcut(QKeySequence("Ctrl+K"), self)
         self.command_palette_shortcut.setContext(Qt.ApplicationShortcut)
         self.command_palette_shortcut.activated.connect(self._open_command_palette)
@@ -421,6 +428,7 @@ class MainWindow(QMainWindow):
             "Managed BBS": self._create_station_bbs_tab,
             "FIO Spotter": self._create_fio_spotter_tab,
             "Resources": self._create_resources_tab,
+            "Shortwave": self._create_shortwave_tab,
             "HF Operators": self._create_operator_history_tab,
             "Local Operators": self._create_local_operator_tab,
             "Local Reports": self._create_local_report_history_tab,
@@ -436,6 +444,7 @@ class MainWindow(QMainWindow):
             ("Managed BBS", self._placeholder_widget("Managed BBS")),
             ("FIO Spotter", self._placeholder_widget("FIO Spotter")),
             ("Resources", self._placeholder_widget("Resources")),
+            ("Shortwave", self._placeholder_widget("Shortwave")),
             ("FreqPlanner", self._placeholder_widget("FreqPlanner")),
             ("SOP", self.sop_tab),
             ("Messages", self._placeholder_widget("Messages")),
@@ -494,7 +503,7 @@ class MainWindow(QMainWindow):
             ("HF Callsigns", "HF Operators"),
             ("Local Callsigns", "Local Operators"),
             ("Local Reports", "Local Reports"),
-            ("Resources", "Resources"),
+            ("Frequencies", "Resources"),
             ("Plan Builder", "FreqPlanner"),
             ("SOP Builder", "SOP"),
             ("HF Daily", "HF Schedule"),
@@ -508,7 +517,11 @@ class MainWindow(QMainWindow):
             ("Help", "Help"),
         ]
         if resource_catalog_authority_state(get_config_dir() / "config" / "freqinout_nets.db") != "canonical":
-            self._nav_specs.remove(("Resources", "Resources"))
+            self._nav_specs.remove(("Frequencies", "Resources"))
+        elif ShortwaveStore(get_config_dir() / "config" / "freqinout_nets.db").schema_available():
+            # The Shortwave route is shown only after startup has established
+            # both canonical resource ownership and the additive SW schema.
+            self._nav_specs.insert(self._nav_specs.index(("Frequencies", "Resources")) + 1, ("Shortwave", "Shortwave"))
         self._nav_screen_index_map: dict[int, int] = {}
         self._nav_base_labels: list[str] = []
 
@@ -583,7 +596,7 @@ class MainWindow(QMainWindow):
         self._nav_group_bodies: dict[str, QWidget] = {}
         self._nav_group_layouts: dict[str, QVBoxLayout] = {}
         self._nav_group_sections: dict[str, QWidget] = {}
-        self._nav_group_order: list[str] = ["Messages", "NCS", "Operators", "Plan Builder", "Station", "Settings"]
+        self._nav_group_order: list[str] = ["Messages", "NCS", "Operators", "Resources", "Plan Builder", "Station", "Settings"]
         self._nav_group_states: dict[str, bool] = self._load_nav_group_states()
         self._suppress_initial_nav_group_auto_expand = True
 
@@ -609,11 +622,9 @@ class MainWindow(QMainWindow):
             elif screen_label == "Messages" and button_label == "Compose":
                 btn.clicked.connect(lambda _=False: self.open_messages_section("compose"))
             elif screen_label == "Resources":
-                section = {
-                    "Frequency Catalog": "frequency_catalog",
-                    "Net Directory": "net_directory",
-                    "Import / Export": "import_export",
-                }.get(button_label, "frequency_catalog")
+                # Frequencies represents the Resources browser; its contextual
+                # Catalog/Directory/Import routes remain internal browser tabs.
+                section = "last"
                 btn.clicked.connect(lambda _=False, key=section: self.open_resources_section(key))
             else:
                 btn.clicked.connect(lambda _=False, i=screen_idx: self._set_screen(i))
@@ -634,11 +645,7 @@ class MainWindow(QMainWindow):
             elif screen_label == "Messages" and button_label == "Compose":
                 self._messages_nav_button_indices["compose"] = btn_idx
             elif screen_label == "Resources":
-                section = {
-                    "Frequency Catalog": "frequency_catalog",
-                    "Net Directory": "net_directory",
-                    "Import / Export": "import_export",
-                }.get(button_label, "frequency_catalog")
+                section = "frequency_catalog"
                 # One main-navigation button represents every browser tab so a
                 # contextual deep link still highlights Resources.
                 for resource_section in ("frequency_catalog", "net_directory", "import_export"):
@@ -994,6 +1001,8 @@ class MainWindow(QMainWindow):
         self._apply_app_theme()
         self._ui_watchdog = UiEventLoopWatchdog(self)
         self._ui_watchdog.start()
+        self._cpu_watchdog = ProcessCpuWatchdog()
+        self._cpu_watchdog.start()
         self._sop_next_due_cache_ts = 0.0
         self._sop_next_due_minutes = None
         self._sop_next_action_label = ""
@@ -1181,7 +1190,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
-            self.scheduler.active_entry_changed.connect(self._refresh_scheduler_status_panel)
+            self.scheduler.active_entry_changed.connect(self._on_scheduler_active_entry_changed)
         except Exception:
             pass
         self._refresh_ncs_activity_from_snapshots()
@@ -1555,6 +1564,49 @@ class MainWindow(QMainWindow):
             return
         self._station_command_refresh_pending = True
         QTimer.singleShot(90, self._flush_station_command_bar_refresh)
+
+    def _on_scheduler_active_entry_changed(self, *_args) -> None:
+        """Coalesce endpoint events into a calm, bounded UI presentation."""
+
+        self._schedule_station_command_bar_refresh("scheduler_active_entry", force=False)
+        entry = _args[0] if _args and isinstance(_args[0], Mapping) else {}
+        source = str(_args[1] if len(_args) > 1 else "").strip().upper()
+        signature = (
+            source,
+            entry.get("target_device_profile_id"),
+            str(entry.get("group") or entry.get("group_name") or "").strip(),
+            str(entry.get("band") or "").strip(),
+            str(entry.get("frequency") or entry.get("freq") or "").strip(),
+        )
+        now = time.monotonic()
+        if (
+            signature == getattr(self, "_scheduler_status_signal_signature", None)
+            and now
+            - float(getattr(self, "_scheduler_status_signal_last_monotonic", 0.0) or 0.0)
+            < 5.0
+        ):
+            return
+        self._scheduler_status_signal_signature = signature
+        self._scheduler_status_signal_last_monotonic = now
+        if getattr(self, "_scheduler_status_signal_refresh_pending", False):
+            return
+        self._scheduler_status_signal_refresh_pending = True
+        last_rendered = float(
+            getattr(self, "_scheduler_status_signal_rendered_monotonic", 0.0) or 0.0
+        )
+        min_interval_sec = 2.0
+        delay_ms = 350
+        if last_rendered > 0.0 and now - last_rendered < min_interval_sec:
+            delay_ms = max(delay_ms, int((min_interval_sec - (now - last_rendered)) * 1000.0))
+        QTimer.singleShot(delay_ms, self._flush_scheduler_status_signal_refresh)
+
+    def _flush_scheduler_status_signal_refresh(self) -> None:
+        self._scheduler_status_signal_refresh_pending = False
+        self._scheduler_status_signal_rendered_monotonic = time.monotonic()
+        self._run_timed_ui_refresh(
+            "scheduler_status_signal",
+            self._refresh_scheduler_status_panel,
+        )
 
     def _flush_station_command_bar_refresh(self) -> None:
         self._station_command_refresh_pending = False
@@ -3225,6 +3277,11 @@ class MainWindow(QMainWindow):
                 self._ui_watchdog.stop()
         except Exception:
             pass
+        try:
+            if hasattr(self, "_cpu_watchdog"):
+                self._cpu_watchdog.stop()
+        except Exception:
+            pass
         self._stop_mesh_runtime()
         try:
             shutdown_dependency_status_service()
@@ -3727,14 +3784,9 @@ class MainWindow(QMainWindow):
                     getattr(self, "_settings_nav_context", "main")
                 )
             elif screen_label == "Resources":
-                expected_context = {
-                    "Frequency Catalog": "frequency_catalog",
-                    "Net Directory": "net_directory",
-                    "Import / Export": "import_export",
-                }.get(button_label, "frequency_catalog")
-                is_current = is_current and expected_context == str(
-                    getattr(self, "_resources_nav_context", "frequency_catalog")
-                )
+                # Frequencies represents the entire internal Resources browser;
+                # its last-open catalog tab is intentionally remembered.
+                is_current = is_current and button_label == "Frequencies"
             action.setChecked(is_current)
             action.triggered.connect(
                 lambda _checked=False, label=button_label, screen=screen_label: self._activate_navigation_item(label, screen)
@@ -4285,10 +4337,21 @@ class MainWindow(QMainWindow):
             self._set_screen(idx)
 
     def open_resources_section(self, section: str | NavigationIntent = "frequency_catalog") -> None:
-        """Open one implemented Tools & Resources workspace."""
+        """Open an implemented Resources route without exposing unfinished ones."""
+        # ``resources.shortwave`` remains a typed contextual route even when a
+        # legacy or failed-startup profile cannot expose its navigation child.
         intent = section if isinstance(section, NavigationIntent) else None
         requested = intent.destination_route.rsplit(".", 1)[-1] if intent else section
         key = str(requested or "frequency_catalog").strip().lower()
+        if key in {"last", "frequencies"}:
+            remembered = str(getattr(self, "_resources_nav_context", "frequency_catalog") or "frequency_catalog")
+            key = remembered if remembered in {"frequency_catalog", "net_directory", "import_export"} else "frequency_catalog"
+        if key == "shortwave":
+            shortwave_index = self._screen_index_by_label.get("Shortwave", -1)
+            if shortwave_index >= 0 and ("Shortwave", "Shortwave") in self._nav_specs:
+                self._set_screen(shortwave_index)
+                return
+            key = "frequency_catalog"
         if key not in {"frequency_catalog", "net_directory", "import_export"}:
             key = "frequency_catalog"
         self._resources_nav_context = key
@@ -4349,6 +4412,50 @@ class MainWindow(QMainWindow):
             now_utc,
             horizon_days=30,
             later_limit=50,
+        )
+
+    def _shortwave_receiver_profiles(self) -> list[dict[str, object]]:
+        """Read configured device identities for the manual Shortwave label only.
+
+        The Shortwave UI calls this on its worker lane.  The returned identity
+        is not a capability grant and is never used to tune/control a device.
+        """
+        return [dict(row) for row in self.multi_radio_store.list_device_profiles()]
+
+    def _build_shortwave_listening_outlook(self, now_utc: datetime.datetime) -> object:
+        from freqinout.core.shortwave_listening import ShortwaveListeningStore, build_shortwave_listening_outlook
+        from freqinout.core.known_operating_groups import net_resources_db_path
+
+        return build_shortwave_listening_outlook(
+            ShortwaveListeningStore(net_resources_db_path()), now_utc, horizon_days=30, later_limit=50,
+        )
+
+    @staticmethod
+    def _shortwave_listening_item_value(item: object, name: str) -> object:
+        return item.get(name) if isinstance(item, Mapping) else getattr(item, name, None)
+
+    def _open_shortwave_listening_details(self, item: object) -> None:
+        reminder_key = self._shortwave_listening_item_value(item, "reminder_key")
+        index = self._screen_index_by_label.get("Shortwave", -1)
+        if not reminder_key or index < 0:
+            return
+        self._set_screen(index)
+        tab = self._get_tab_by_label("Shortwave")
+        if tab is not None and hasattr(tab, "focus_reminder"):
+            QTimer.singleShot(0, lambda target=tab, key=str(reminder_key): target.focus_reminder(key))
+
+    def _dismiss_shortwave_listening_occurrence(self, item: object) -> None:
+        """Dismiss only the surfaced occurrence; it never changes source/schedule state."""
+        from freqinout.core.shortwave_listening import ShortwaveListeningStore
+        from freqinout.core.known_operating_groups import net_resources_db_path
+
+        reminder_key = self._shortwave_listening_item_value(item, "reminder_key")
+        occurrence_key = self._shortwave_listening_item_value(item, "occurrence_key")
+        start_utc = self._shortwave_listening_item_value(item, "start_utc")
+        if not reminder_key or not occurrence_key or not isinstance(start_utc, datetime.datetime):
+            return
+        ShortwaveListeningStore(net_resources_db_path()).dismiss_occurrence(
+            str(reminder_key), str(occurrence_key), start_utc, note="Dismissed from Ops Center",
         )
 
     def _open_local_net_details(self, item: object) -> None:
@@ -5801,6 +5908,18 @@ class MainWindow(QMainWindow):
             self.resources_tab = tab
             return tab
 
+    def _create_shortwave_tab(self) -> QWidget:
+        from freqinout.gui.shortwave_tab import ShortwaveWorkspace
+
+        with perf_span("main_window.create_shortwave_tab", settings=self.settings, min_ms=5.0):
+            tab = ShortwaveWorkspace(
+                self,
+                db_path=get_config_dir() / "config" / "freqinout_nets.db",
+                receiver_profiles_provider=self._shortwave_receiver_profiles,
+            )
+            self.shortwave_tab = tab
+            return tab
+
     def _create_fio_spotter_tab(self) -> QWidget:
         with perf_span("main_window.create_fio_spotter_tab", settings=self.settings, min_ms=5.0):
             tab = FioSpotterTab(
@@ -6339,8 +6458,15 @@ class MainWindow(QMainWindow):
             )
 
     def _publish_watchdog_diagnostic_snapshot(self) -> None:
-        watchdog = getattr(self, "_ui_watchdog", None)
-        if watchdog is None or not hasattr(watchdog, "publish_diagnostic_snapshot"):
+        watchdogs = tuple(
+            watchdog
+            for watchdog in (
+                getattr(self, "_ui_watchdog", None),
+                getattr(self, "_cpu_watchdog", None),
+            )
+            if watchdog is not None and hasattr(watchdog, "publish_diagnostic_snapshot")
+        )
+        if not watchdogs:
             return
         scheduler_snapshot: Mapping[str, object] = {}
         projection_snapshot: Mapping[str, object] = {}
@@ -6356,9 +6482,12 @@ class MainWindow(QMainWindow):
                 projection_snapshot = service.diagnostic_snapshot()
         except Exception:
             projection_snapshot = {"state": "unavailable"}
-        watchdog.publish_diagnostic_snapshot(
-            {"scheduler": scheduler_snapshot, "message_projection": projection_snapshot}
-        )
+        snapshot = {
+            "scheduler": scheduler_snapshot,
+            "message_projection": projection_snapshot,
+        }
+        for watchdog in watchdogs:
+            watchdog.publish_diagnostic_snapshot(snapshot)
 
     @staticmethod
     def _suppressed_screens_for_runtime(profile: object, policy: object) -> set[str]:
@@ -11789,6 +11918,7 @@ class MainWindow(QMainWindow):
             "Messages": False,
             "NCS": False,
             "Operators": False,
+            "Resources": False,
             "Plan Builder": False,
             "Station": False,
             "Settings": False,
@@ -11829,6 +11959,8 @@ class MainWindow(QMainWindow):
             return "Messages"
         if screen in {"HF Operators", "Local Operators", "Local Reports"}:
             return "Operators"
+        if screen in {"Resources", "Shortwave"}:
+            return "Resources"
         if screen == "Settings":
             return "Settings"
         txt = str(button_label or "").strip()
@@ -11913,6 +12045,13 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self._update_nav_layout_metrics()
+        # A group can change the rail width without a window resize. Reflow the
+        # cache-only station command bar immediately so compact controls stay
+        # reachable rather than waiting for a later resize event.
+        try:
+            QTimer.singleShot(0, self._reflow_adaptive_station_shell)
+        except Exception:
+            pass
 
     def _update_nav_group_header_styles(self, theme: dict) -> None:
         align_style = self._nav_button_alignment_style()

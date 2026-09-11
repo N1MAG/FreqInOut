@@ -7,6 +7,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ('config\\leaflet', 'config\\leaflet'),
+        ('config\\shortwave\\eibi', 'config\\shortwave\\eibi'),
         ('assets', 'assets'),
         ('docs\\guide.html', 'docs'),
         ('third_party\\js8net', 'third_party\\js8net'),

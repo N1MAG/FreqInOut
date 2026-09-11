@@ -146,7 +146,8 @@ def test_main_navigation_has_one_resources_entry_and_compact_route() -> None:
             nav_items.append((str(label), str(target)))
 
     resources = [(label, target) for label, target in nav_items if target == "Resources"]
-    assert resources == [("Resources", "Resources")]
+    # Resources is the master group header; Frequencies is its only R-1 child.
+    assert resources == [("Frequencies", "Resources")]
     assert all(label not in {"Frequency Catalog", "Net Directory", "Import / Export"} for label, _ in nav_items)
 
     source_text = source.read_text(encoding="utf-8")
@@ -173,7 +174,7 @@ def test_frequency_display_uses_decimal_mhz_without_thousands_separator(tmp_path
     try:
         view.show()
         app.processEvents()
-        assert view.table.item(0, 2).text() == "7.115 MHz"
+        assert view.table.item(0, 3).text() == "7.115 MHz"
     finally:
         view.close()
         view.deleteLater()

@@ -1,0 +1,16 @@
+kHz:75;Time(UTC):93;Days:59;ITU:49;Station:201;Lng:49;Target:62;Remarks:135;P:35;Start:60;Stop:60;
+9955;0000-2400;;USA;BUE Latin-1 station;EN;NA;USA;1;;
+9955;2330-0130;MoWeFr;USA;Cross midnight broadcast;EN;NA;USA;0;;[0923]
+12000.5;1200-1330;1245;DEU;Numeric weekday service;DE;EUR;/RUS-s;90;;
+15000;0400-0500;irr;GB;Special irregular service;-CW;AF;GB;90;;
+15100;0600-0700;15Sep;VAT;Fixed date service;IT;EUR;VAT;1;1509;1509
+15200;0700-0800;Last7;JPN;Monthly special;JA;JPN;JPN;1;;
+15300;0800-0900;USB;CHN;Unsupported signal rule;ZH;EAS;CHN;90;;
+15400;0900-1000;??;USA;Unknown day rule;EN;NA;USA;1;;
+15500;1000-1000;Mo;USA;Same time review;EN;NA;USA;1;;
+15600;1100-1200;Mo;USA;Malformed date review;EN;NA;USA;6;3213;3213
+15700;1200-1300;Mo;USA;Inactive row;EN;NA;USA;8;;
+15800;1300-1400;Mo;USA;Duplicate row;EN;NA;USA;1;;
+15800;1300-1400;Mo;USA;Duplicate row;EN;NA;USA;1;;
+bad-frequency;1400-1500;Mo;USA;Malformed frequency;EN;NA;USA;1;;
+15900;2460-1500;Mo;USA;Malformed time;EN;NA;USA;1;;

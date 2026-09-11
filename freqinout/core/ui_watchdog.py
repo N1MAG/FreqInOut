@@ -9,6 +9,8 @@ import platform
 import sys
 import threading
 import time
+import traceback
+from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -218,3 +220,184 @@ class UiEventLoopWatchdog(QObject):
             log.error("UI watchdog detected an event-loop stall; wrote %s", path)
         except Exception as e:
             log.error("UI watchdog failed to write hang dump: %s", e)
+
+
+class ProcessCpuWatchdog:
+    """Capture bounded evidence when FIO consumes sustained process CPU.
+
+    Sampling uses Python's process and monotonic clocks only.  It performs no
+    database, endpoint, process-list, or Qt work, and it emits nothing during
+    normal operation.  A sustained threshold crossing writes one redacted
+    diagnostic/stack report, then observes a cooldown.
+    """
+
+    def __init__(
+        self,
+        *,
+        sample_interval_sec: float = 1.0,
+        high_cpu_percent: float = 75.0,
+        consecutive_samples: int = 3,
+        report_cooldown_sec: float = 60.0,
+        max_reports: int = 10,
+    ) -> None:
+        self._sample_interval_sec = max(0.25, float(sample_interval_sec))
+        self._high_cpu_percent = max(5.0, float(high_cpu_percent))
+        self._consecutive_samples_required = max(1, int(consecutive_samples))
+        self._report_cooldown_sec = max(5.0, float(report_cooldown_sec))
+        self._max_reports = max(1, int(max_reports))
+        self._lock = threading.Lock()
+        self._diagnostic_snapshot: Optional[dict[str, object]] = None
+        self._running = False
+        self._stop_event = threading.Event()
+        self._monitor_thread: Optional[threading.Thread] = None
+        self._last_wall_time = 0.0
+        self._last_process_time = 0.0
+        self._last_report = 0.0
+        self._consecutive_high = 0
+        self._sample_error_reported = False
+
+    def publish_diagnostic_snapshot(self, snapshot: Mapping[str, object] | None) -> None:
+        safe = cache_safe_diagnostic_snapshot(snapshot or {})
+        with self._lock:
+            self._diagnostic_snapshot = safe
+
+    def start(self) -> None:
+        if self._running or str(os.getenv("FREQINOUT_CPU_WATCHDOG", "1")).strip().lower() in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }:
+            return
+        self._running = True
+        self._stop_event.clear()
+        self._last_wall_time = time.monotonic()
+        self._last_process_time = time.process_time()
+        self._monitor_thread = threading.Thread(
+            target=self._monitor_loop,
+            name="freqinout-cpu-watchdog",
+            daemon=True,
+        )
+        self._monitor_thread.start()
+        log.info(
+            "CPU watchdog started (threshold=%.0f%%, samples=%d, interval=%.1fs)",
+            self._high_cpu_percent,
+            self._consecutive_samples_required,
+            self._sample_interval_sec,
+        )
+
+    def stop(self) -> None:
+        self._running = False
+        self._stop_event.set()
+        monitor = self._monitor_thread
+        if monitor is not None and monitor is not threading.current_thread():
+            monitor.join(timeout=0.25)
+        self._monitor_thread = None
+
+    def _monitor_loop(self) -> None:
+        while self._running:
+            if self._stop_event.wait(self._sample_interval_sec):
+                break
+            wall_now = time.monotonic()
+            process_now = time.process_time()
+            wall_delta = max(0.000001, wall_now - self._last_wall_time)
+            process_delta = max(0.0, process_now - self._last_process_time)
+            self._last_wall_time = wall_now
+            self._last_process_time = process_now
+            cpu_percent = (process_delta / wall_delta) * 100.0
+            try:
+                self._observe_cpu(cpu_percent, wall_now)
+            except Exception as exc:
+                # Never let diagnostic instrumentation create a retry/log loop.
+                if not self._sample_error_reported:
+                    self._sample_error_reported = True
+                    log.warning("CPU watchdog sample failed; further errors suppressed: %s", exc)
+                if self._stop_event.wait(self._sample_interval_sec):
+                    break
+
+    def _observe_cpu(self, cpu_percent: float, now_monotonic: float) -> bool:
+        if float(cpu_percent) < self._high_cpu_percent:
+            self._consecutive_high = 0
+            return False
+        self._consecutive_high += 1
+        if self._consecutive_high < self._consecutive_samples_required:
+            return False
+        if now_monotonic - self._last_report < self._report_cooldown_sec:
+            return False
+        self._last_report = now_monotonic
+        self._consecutive_high = 0
+        path = self._write_hotspot_dump(float(cpu_percent))
+        if path is not None:
+            log.warning(
+                "CPU_HOTSPOT|process_cpu_percent=%.1f|dump=%s",
+                cpu_percent,
+                path,
+            )
+            return True
+        return False
+
+    def _diagnostics_for_dump(self) -> dict[str, object]:
+        with self._lock:
+            cached = dict(self._diagnostic_snapshot or {})
+        return cache_safe_diagnostic_snapshot(cached) if cached else {"state": "not_published"}
+
+    @staticmethod
+    def _thread_stack_snapshot(*, max_threads: int = 64, max_frames: int = 32) -> tuple[str, dict[str, int]]:
+        frames = sys._current_frames()
+        names = {
+            int(thread.ident): str(thread.name)
+            for thread in threading.enumerate()
+            if thread.ident is not None
+        }
+        sections: list[str] = []
+        hot_locations: Counter[str] = Counter()
+        for ident, frame in itertools.islice(frames.items(), max(1, int(max_threads))):
+            name = names.get(int(ident), "unknown")
+            extracted = traceback.extract_stack(frame, limit=max(1, int(max_frames)))
+            sections.append(f'\nThread {name!r} id={ident}:\n')
+            sections.extend(traceback.format_list(extracted))
+            for entry in reversed(extracted):
+                normalized = str(entry.filename).replace("\\", "/")
+                if "/freqinout/" in normalized and not normalized.endswith("/ui_watchdog.py"):
+                    hot_locations[f"{Path(normalized).name}:{entry.lineno}:{entry.name}"] += 1
+                    break
+        return "".join(sections), dict(hot_locations.most_common(24))
+
+    def _write_hotspot_dump(self, cpu_percent: float) -> Optional[Path]:
+        try:
+            dump_dir = Path(get_config_dir()) / "cpu_hotspots"
+            dump_dir.mkdir(parents=True, exist_ok=True)
+            existing = sorted(dump_dir.glob("fio_cpu_hotspot_*.txt"))
+            for stale in existing[: max(0, len(existing) - self._max_reports + 1)]:
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
+            stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S-%fZ")
+            path = dump_dir / f"fio_cpu_hotspot_{stamp}_{os.getpid()}.txt"
+            stacks, hot_locations = self._thread_stack_snapshot()
+            with path.open("w", encoding="utf-8") as handle:
+                handle.write("FreqInOut sustained CPU hotspot report\n")
+                handle.write(f"UTC: {stamp}\n")
+                handle.write(f"PID: {os.getpid()}\n")
+                handle.write(f"Python: {sys.version.replace(chr(10), ' ')}\n")
+                handle.write(f"Platform: {platform.platform()}\n")
+                handle.write(f"Process CPU: {cpu_percent:.1f}% of one logical core\n")
+                handle.write("\nLikely active FIO locations (one bounded frame per thread):\n")
+                handle.write(json.dumps(hot_locations, indent=2, sort_keys=True)[:12000])
+                handle.write("\n\nCached service diagnostics:\n")
+                handle.write(
+                    json.dumps(
+                        self._diagnostics_for_dump(),
+                        indent=2,
+                        sort_keys=True,
+                        default=str,
+                    )[:24000]
+                )
+                handle.write("\n\nBounded Python thread stacks:\n")
+                handle.write(stacks[:120000])
+                handle.write("\n")
+            return path
+        except Exception as exc:
+            log.error("CPU watchdog failed to write hotspot dump: %s", exc)
+            return None

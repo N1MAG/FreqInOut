@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 import uuid
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -53,11 +53,15 @@ def hz_from_text(value: str) -> int | None:
 class FrequencyCatalogView(QWidget):
     """Frequency catalog browser/editor. All reads are bounded store calls."""
 
+    review_export_requested = Signal(object)
+
     def __init__(self, store: ResourceCatalogStore, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.store = store
         self._selected: FrequencyResource | None = None
         self._editing_key: str | None = None
+        self._export_selected_keys: set[str] = set()
+        self._populating_results = False
         self._build_ui()
         self.refresh_results()
 
@@ -93,16 +97,32 @@ class FrequencyCatalogView(QWidget):
         refresh.clicked.connect(self.refresh_results)
         filters.addWidget(refresh)
         layout.addLayout(filters)
+        export_actions = QHBoxLayout()
+        self.export_selection_label = QLabel("No frequencies selected for export.", self)
+        self.export_selection_label.setAccessibleName("Frequency export selection summary")
+        export_actions.addWidget(self.export_selection_label, 1)
+        self.clear_export_selection_btn = QPushButton("Clear export selection", self)
+        self.clear_export_selection_btn.setAccessibleName("Clear selected frequencies for export")
+        self.clear_export_selection_btn.clicked.connect(self.clear_export_selection)
+        export_actions.addWidget(self.clear_export_selection_btn)
+        self.review_export_btn = QPushButton("Review export…", self)
+        self.review_export_btn.setAccessibleName("Review selected frequencies for export")
+        self.review_export_btn.setToolTip("Preview selected frequencies and included catalog dependencies before choosing a file.")
+        self.review_export_btn.clicked.connect(self.request_export_review)
+        export_actions.addWidget(self.review_export_btn)
+        layout.addLayout(export_actions)
         self.splitter = QSplitter(Qt.Horizontal, self)
         self.splitter.setChildrenCollapsible(False)
         layout.addWidget(self.splitter, 1)
-        self.table = QTableWidget(0, 5, self.splitter)
-        self.table.setHorizontalHeaderLabels(["Label", "Service", "Frequency", "Catalog source", "Listing"])
+        self.table = QTableWidget(0, 6, self.splitter)
+        self.table.setHorizontalHeaderLabels(["Export", "Label", "Service", "Frequency", "Catalog source", "Listing"])
+        self.table.setAccessibleName("Frequency catalog results")
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.table.itemSelectionChanged.connect(self._selection_changed)
+        self.table.itemChanged.connect(self._export_item_changed)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         detail = QWidget(self.splitter)
         detail_layout = QVBoxLayout(detail)
@@ -177,22 +197,34 @@ class FrequencyCatalogView(QWidget):
             search=self.search_edit.text(), service=self.service_filter.currentData(),
             active=self.status_filter.currentData(), limit=MAX_RESULTS,
         )
-        self.table.setRowCount(len(rows))
-        source_labels = source_display_labels(self.store, (row.source_key for row in rows))
-        for row_index, resource in enumerate(rows):
-            values = (
-                resource.label,
-                resource.service,
-                frequency_where_text(resource),
-                source_labels[resource.source_key],
-                resource_status_text(resource),
-            )
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                if column == 0:
-                    item.setData(Qt.UserRole, resource)
-                self.table.setItem(row_index, column, item)
+        self._populating_results = True
+        try:
+            self.table.setRowCount(len(rows))
+            source_labels = source_display_labels(self.store, (row.source_key for row in rows))
+            for row_index, resource in enumerate(rows):
+                export_item = QTableWidgetItem()
+                export_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+                export_item.setData(Qt.UserRole, resource.frequency_resource_key)
+                export_item.setCheckState(
+                    Qt.Checked if resource.frequency_resource_key in self._export_selected_keys else Qt.Unchecked
+                )
+                self.table.setItem(row_index, 0, export_item)
+                values = (
+                    resource.label,
+                    resource.service,
+                    frequency_where_text(resource),
+                    source_labels[resource.source_key],
+                    resource_status_text(resource),
+                )
+                for column, value in enumerate(values, start=1):
+                    item = QTableWidgetItem(value)
+                    if column == 1:
+                        item.setData(Qt.UserRole, resource)
+                    self.table.setItem(row_index, column, item)
+        finally:
+            self._populating_results = False
         self.status_label.setText(f"Showing {len(rows)} bounded result{'s' if len(rows) != 1 else ''} (maximum {MAX_RESULTS}).")
+        self._update_export_selection_state()
         if rows:
             self.table.selectRow(0)
         else:
@@ -205,7 +237,8 @@ class FrequencyCatalogView(QWidget):
         selected = self.table.selectedItems()
         if not selected:
             return
-        resource = self.table.item(selected[0].row(), 0).data(Qt.UserRole)
+        resource_item = self.table.item(selected[0].row(), 1)
+        resource = resource_item.data(Qt.UserRole) if resource_item is not None else None
         if isinstance(resource, FrequencyResource):
             self._selected = resource
             usage = self.store.frequency_usage(resource.frequency_resource_key)
@@ -220,6 +253,38 @@ class FrequencyCatalogView(QWidget):
             impacts = ", ".join(f"{name.replace('_', ' ')} {count}" for name, count in usage.by_kind.items()) or "none"
             self.usage_label.setText(f"Used by: {usage.total_references} ({impacts})")
             self._set_action_state()
+
+    def _export_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._populating_results or item.column() != 0:
+            return
+        key = str(item.data(Qt.UserRole) or "").strip()
+        if not key:
+            return
+        if item.checkState() == Qt.Checked:
+            self._export_selected_keys.add(key)
+        else:
+            self._export_selected_keys.discard(key)
+        self._update_export_selection_state()
+
+    def _update_export_selection_state(self) -> None:
+        count = len(self._export_selected_keys)
+        self.export_selection_label.setText(
+            "No frequencies selected for export."
+            if count == 0
+            else f"{count} frequenc{'y' if count == 1 else 'ies'} selected for export."
+        )
+        self.review_export_btn.setEnabled(count > 0)
+        self.clear_export_selection_btn.setEnabled(count > 0)
+
+    def clear_export_selection(self) -> None:
+        if not self._export_selected_keys:
+            return
+        self._export_selected_keys.clear()
+        self.refresh_results()
+
+    def request_export_review(self) -> None:
+        if self._export_selected_keys:
+            self.review_export_requested.emit(tuple(sorted(self._export_selected_keys)))
 
     def _set_action_state(self) -> None:
         has_selection = self._selected is not None

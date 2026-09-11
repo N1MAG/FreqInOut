@@ -1029,6 +1029,21 @@
 
   <h3 id="operating-groups-resource-context">Operating Groups in resource workflows</h3>
   <p>Operating Groups describe the group context of an activity; they do not prove membership, authority, licensing, or a radio assignment. In Local Nets, choose a configured group to make the reminder easier to filter and recognize in Ops Center. Frequency Catalog and Net Directory records may carry group context as reference information. Keep a local activity unassigned when no configured group applies.</p>
+
+  <h2 id="shortwave">Resources: Shortwave</h2>
+  <p><strong>Purpose</strong>: Shortwave helps identify what a named source lists now, soon, or in a selected season. It is schedule intelligence, not evidence that you received a signal, that a transmitter is active, or that a station identity is confirmed.</p>
+  <ul class="section-list">
+    <li><strong>Explore</strong>: use station/service, frequency, language, target, band, and source-season filters. <code>Scheduled now</code> and <code>Starting soon</code> are shown only for complete, supported UTC/day/date rules. <code>Listed</code> makes no current-time claim. Frequency input accepts conventional forms such as <code>9955</code>, <code>9.955</code>, and <code>9955 kHz</code>.</li>
+    <li><strong>Time and place</strong>: UTC is the source rule; the detail view also gives a local-time equivalent where available. Station home country, transmitter site, target audience, and language are separate provider fields and should not be treated as interchangeable.</li>
+    <li><strong>Special / review</strong>: ambiguous, irregular, inactive, or unsupported provider rules remain visible with their interpretation state, but they are never presented as confidently Scheduled now or Starting soon. Open <code>Technical details</code> for raw provider codes and row diagnostics.</li>
+    <li><strong>Source age and provenance</strong>: every detail identifies the provider, season bounds, provider update date, FIO import date, and the source caveat. An old season is not silently treated as current.</li>
+    <li><strong>Data Sources</strong>: opening Shortwave never downloads or imports anything. Review the bundled snapshot, reviewed official update, or chosen local EiBi files first. The preview reports changes, duplicates, invalid/special/inactive rows, and diagnostics. <code>Apply reviewed import</code> is the only promotion action; canceling or a failed review leaves the current dataset unchanged.</li>
+    <li><strong>Listening</strong>: choose a complete Explore listing and select <code>Add to Listening</code> to save its accepted source snapshot as a manual reminder. You may add a label, note, optional configured receiver identity, lead time, or pause it. The receiver identity is informational only; it never grants control.</li>
+    <li><strong>Source changes</strong>: a later source update never rewrites a saved Listening reminder. The reminder shows whether the source is current, changed, missing, or intentionally kept. Review it, then choose <code>Apply listing update</code> or <code>Keep my reminder</code> explicitly.</li>
+    <li><strong>Ops Center</strong>: the collapsed <code>Shortwave Listening</code> reminder surface remains distinct from HF schedules and Local Nets. It offers only <code>Details</code> and occurrence <code>Dismiss</code>; it does not tune, QSY, launch software, key PTT, enter the scheduler, or activate an SOP.</li>
+    <li><strong>Rollback and diagnostics</strong>: retained immutable datasets can be restored explicitly without deleting rows. Export diagnostics when review needs support evidence; raw source codes and hashes are diagnostic material, not normal operating labels.</li>
+    <li><strong>Safety boundary</strong>: Shortwave browsing does not tune a receiver, assign a radio, transmit, enter the HF scheduler, launch software, or activate an SOP. Tune/transmit decisions remain separate, explicit, operator-controlled workflows.</li>
+  </ul>
   <p>Group context helps answer <em>why this reminder matters</em>; the Station Control Bar and the active workspace remain responsible for showing the current radio and operational state.</p>
 
   <h2 id="hf-peers">Schedules: HF Peers</h2>

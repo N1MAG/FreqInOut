@@ -5,3 +5,4 @@ include CREDITS.md
 include CHANGELOG.md
 recursive-include docs *.md *.yaml
 recursive-include freqinout *.py
+recursive-include config/shortwave/eibi *.csv *.TXT

@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -24,9 +25,12 @@ from freqinout.core.known_operating_groups import net_resources_db_path
 from freqinout.core.navigation_intent import NavigationIntent
 from freqinout.core.resource_catalog_store import MAX_RESULTS, ResourceCatalogStore
 from freqinout.core.resource_catalog_transfer import (
+    ExportPreview,
     ImportPreview,
+    StaleExportPreviewError,
     apply_import_preview,
-    export_selected_resources,
+    confirm_export_preview,
+    preview_resource_export,
     preview_json_import,
 )
 from freqinout.gui.frequency_catalog_view import FrequencyCatalogView
@@ -57,27 +61,50 @@ class ResourceImportExportView(QWidget):
         refresh = QPushButton("Refresh Catalog Summary", self)
         refresh.clicked.connect(self.refresh_summary)
         layout.addWidget(refresh)
+        self.export_selection_summary = QLabel("Select frequencies in the Frequency Catalog, then review the export.", self)
+        self.export_selection_summary.setWordWrap(True)
+        self.export_selection_summary.setAccessibleName("Resource export selection summary")
+        layout.addWidget(self.export_selection_summary)
+        export_actions = QHBoxLayout()
+        self.review_export_btn = QPushButton("Review export…", self)
+        self.review_export_btn.setAccessibleName("Review selected resources for export")
+        self.review_export_btn.setToolTip("Show selected resources and required dependencies before any file can be written.")
+        self.save_reviewed_export_btn = QPushButton("Save reviewed export…", self)
+        self.save_reviewed_export_btn.setAccessibleName("Save the reviewed resource export")
+        self.cancel_export_preview_btn = QPushButton("Cancel export review", self)
+        self.cancel_export_preview_btn.setAccessibleName("Cancel the current resource export review")
+        for button in (self.review_export_btn, self.save_reviewed_export_btn, self.cancel_export_preview_btn):
+            export_actions.addWidget(button)
+        export_actions.addStretch(1)
+        layout.addLayout(export_actions)
+        self.technical_toggle = QToolButton(self)
+        self.technical_toggle.setText("Technical selection entry")
+        self.technical_toggle.setCheckable(True)
+        self.technical_toggle.setToolTip("Enter stable resource keys only when a contextual catalog selection is not available.")
+        self.technical_toggle.setAccessibleName("Show technical resource selection entry")
+        layout.addWidget(self.technical_toggle)
         exchange = QWidget(self)
         form = QFormLayout(exchange)
         self.export_frequency_keys = QLineEdit(exchange)
         self.export_frequency_keys.setPlaceholderText("Frequency keys, comma separated")
         self.export_net_entry_keys = QLineEdit(exchange)
         self.export_net_entry_keys.setPlaceholderText("Net entry keys, comma separated")
-        self.import_source_key = QLineEdit(exchange)
+        self.import_source_key = QLineEdit(self)
         self.import_source_key.setText("source_imported_transfer")
         self.import_source_key.setAccessibleName("Import target source key")
-        form.addRow("Export frequencies", self.export_frequency_keys)
-        form.addRow("Export nets", self.export_net_entry_keys)
-        form.addRow("Import target source", self.import_source_key)
-        action_row = QHBoxLayout()
-        self.export_btn = QPushButton("Export Selected…", exchange)
-        self.preview_btn = QPushButton("Preview Import…", exchange)
-        self.cancel_preview_btn = QPushButton("Cancel Preview", exchange)
-        self.apply_btn = QPushButton("Apply Preview", exchange)
-        for button in (self.export_btn, self.preview_btn, self.cancel_preview_btn, self.apply_btn):
-            action_row.addWidget(button)
-        form.addRow(action_row)
+        self.import_source_key.setVisible(False)
+        form.addRow("Export frequencies (technical)", self.export_frequency_keys)
+        form.addRow("Export nets (technical)", self.export_net_entry_keys)
+        exchange.setVisible(False)
         layout.addWidget(exchange)
+        import_actions = QHBoxLayout()
+        self.preview_btn = QPushButton("Preview import…", self)
+        self.cancel_preview_btn = QPushButton("Cancel import preview", self)
+        self.apply_btn = QPushButton("Apply import preview", self)
+        for button in (self.preview_btn, self.cancel_preview_btn, self.apply_btn):
+            import_actions.addWidget(button)
+        import_actions.addStretch(1)
+        layout.addLayout(import_actions)
         self.diagnostics = QPlainTextEdit(self)
         self.diagnostics.setReadOnly(True)
         self.diagnostics.setLineWrapMode(QPlainTextEdit.WidgetWidth)
@@ -86,12 +113,22 @@ class ResourceImportExportView(QWidget):
         self.diagnostics.setAccessibleName("Resource transfer preview diagnostics")
         layout.addWidget(self.diagnostics, 1)
         self._preview: ImportPreview | None = None
-        self.export_btn.clicked.connect(self.export_selected)
+        self._export_preview: ExportPreview | None = None
+        self._export_frequency_keys: tuple[str, ...] = ()
+        self._export_net_entry_keys: tuple[str, ...] = ()
+        self.review_export_btn.clicked.connect(self.review_export)
+        self.save_reviewed_export_btn.clicked.connect(self.save_reviewed_export)
+        self.cancel_export_preview_btn.clicked.connect(self.cancel_export_preview)
+        self.technical_toggle.toggled.connect(exchange.setVisible)
+        self.export_frequency_keys.textChanged.connect(self._technical_selection_changed)
+        self.export_net_entry_keys.textChanged.connect(self._technical_selection_changed)
         self.preview_btn.clicked.connect(self.choose_import_and_preview)
         self.cancel_preview_btn.clicked.connect(self.cancel_preview)
         self.apply_btn.clicked.connect(self.apply_preview)
         self.cancel_preview_btn.setEnabled(False)
         self.apply_btn.setEnabled(False)
+        self.save_reviewed_export_btn.setEnabled(False)
+        self.cancel_export_preview_btn.setEnabled(False)
         layout.addStretch(1)
         self.refresh_summary()
 
@@ -107,21 +144,111 @@ class ResourceImportExportView(QWidget):
     def _keys(value: str) -> tuple[str, ...]:
         return tuple(key.strip() for key in value.split(",") if key.strip())
 
-    def export_selected(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "Export Catalog Resources", "resource_catalog.json", "JSON files (*.json)")
+    def set_export_selection(
+        self,
+        *,
+        frequency_resource_keys: tuple[str, ...] | list[str] = (),
+        net_entry_keys: tuple[str, ...] | list[str] = (),
+    ) -> None:
+        """Receive the contextual catalog selection without exposing raw keys."""
+        self._export_frequency_keys = tuple(dict.fromkeys(str(key).strip() for key in frequency_resource_keys if str(key).strip()))
+        self._export_net_entry_keys = tuple(dict.fromkeys(str(key).strip() for key in net_entry_keys if str(key).strip()))
+        self.export_frequency_keys.blockSignals(True)
+        self.export_net_entry_keys.blockSignals(True)
+        try:
+            self.export_frequency_keys.setText(", ".join(self._export_frequency_keys))
+            self.export_net_entry_keys.setText(", ".join(self._export_net_entry_keys))
+        finally:
+            self.export_frequency_keys.blockSignals(False)
+            self.export_net_entry_keys.blockSignals(False)
+        self.cancel_export_preview()
+        self._update_export_selection_summary()
+
+    def _technical_selection_changed(self) -> None:
+        self._export_frequency_keys = self._keys(self.export_frequency_keys.text())
+        self._export_net_entry_keys = self._keys(self.export_net_entry_keys.text())
+        self.cancel_export_preview()
+        self._update_export_selection_summary()
+
+    def _update_export_selection_summary(self) -> None:
+        count = len(self._export_frequency_keys) + len(self._export_net_entry_keys)
+        if count:
+            self.export_selection_summary.setText(
+                f"{count} directly selected catalog record{'s' if count != 1 else ''}. Review shows dependencies before save."
+            )
+        else:
+            self.export_selection_summary.setText("Select frequencies in the Frequency Catalog, then review the export.")
+        self.review_export_btn.setEnabled(count > 0)
+
+    def review_export(self) -> None:
+        if not (self._export_frequency_keys or self._export_net_entry_keys):
+            self.diagnostics.setPlainText("Select a catalog record before reviewing an export.")
+            return
+        try:
+            self._export_preview = preview_resource_export(
+                self.store,
+                frequency_resource_keys=self._export_frequency_keys,
+                net_entry_keys=self._export_net_entry_keys,
+            )
+        except (ValueError, OSError) as exc:
+            self._export_preview = None
+            self.diagnostics.setPlainText(f"Cannot review export: {exc}")
+            return
+        self._render_export_preview(self._export_preview)
+        self.save_reviewed_export_btn.setEnabled(True)
+        self.cancel_export_preview_btn.setEnabled(True)
+
+    def _render_export_preview(self, preview: ExportPreview) -> None:
+        lines = [
+            "Export review — no file has been written.",
+            f"Selected: {preview.direct_count}; dependencies: {preview.dependency_count}; total: {preview.total_count} / {preview.max_items}.",
+            f"Projected payload: {preview.payload_size:,} / {preview.max_bytes:,} bytes.",
+        ]
+        for warning in preview.warnings:
+            lines.append(f"Warning: {warning}")
+        for item in preview.items:
+            line = f"{item.item_type} · {item.relationship}: {item.label} · Source: {item.source_label}"
+            if item.usage_summary:
+                line += f" · Used by — not included in export: {item.usage_summary}"
+            lines.append(line)
+        self.diagnostics.setPlainText("\n".join(lines))
+
+    def cancel_export_preview(self) -> None:
+        self._export_preview = None
+        self.save_reviewed_export_btn.setEnabled(False)
+        self.cancel_export_preview_btn.setEnabled(False)
+
+    def save_reviewed_export(self) -> None:
+        preview = self._export_preview
+        if preview is None:
+            return
+        if QMessageBox.question(
+            self,
+            "Save reviewed catalog export",
+            "Save exactly the reviewed resource export? The catalog will be checked again before choosing a destination.",
+        ) != QMessageBox.Yes:
+            return
+        try:
+            payload = confirm_export_preview(self.store, preview)
+        except StaleExportPreviewError as exc:
+            self.cancel_export_preview()
+            self.diagnostics.appendPlainText(f"\nExport review is no longer current: {exc}")
+            return
+        except (ValueError, OSError) as exc:
+            self.diagnostics.appendPlainText(f"\nExport cannot be confirmed: {exc}")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save Reviewed Catalog Export", "resource_catalog.json", "JSON files (*.json)")
         if not path:
             return
-        payload = export_selected_resources(
-            self.store,
-            frequency_resource_keys=self._keys(self.export_frequency_keys.text()),
-            net_entry_keys=self._keys(self.export_net_entry_keys.text()),
-        )
         try:
             Path(path).write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
         except OSError as exc:
             self.diagnostics.setPlainText(f"Export failed: {exc}")
             return
-        self.diagnostics.setPlainText(f"Exported {len(payload['frequencies'])} frequency record(s), {len(payload['net_entries'])} net(s), and {len(payload['sessions'])} net meeting(s).")
+        self.diagnostics.appendPlainText(
+            f"\nExported {len(payload['frequencies'])} frequency record(s), {len(payload['net_entries'])} net(s), and {len(payload['sessions'])} net meeting(s)."
+        )
+        self.cancel_export_preview()
 
     def choose_import_and_preview(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Preview Catalog Import", "", "JSON files (*.json)")
@@ -242,6 +369,7 @@ class ResourcesTab(QWidget):
             return
         if index == 0:
             page: QWidget = FrequencyCatalogView(self.store, self.tabs)
+            page.review_export_requested.connect(self._open_frequency_export_review)
         elif index == 1:
             page = NetDirectoryView(self.store, self.tabs)
             page.add_to_hf_nets_requested.connect(self.add_to_hf_nets_requested.emit)
@@ -255,6 +383,14 @@ class ResourcesTab(QWidget):
         old.deleteLater()
         self.tabs.insertTab(index, page, self.TAB_LABELS[index])
         self.tabs.setCurrentIndex(index)
+
+    def _open_frequency_export_review(self, frequency_keys: object) -> None:
+        """Carry an explicit catalog selection into the shared export review."""
+        keys = tuple(str(key).strip() for key in (frequency_keys or ()) if str(key).strip())
+        page = self.open_section("import_export")
+        if isinstance(page, ResourceImportExportView):
+            page.set_export_selection(frequency_resource_keys=keys)
+            page.review_export()
 
     def refresh_catalog(self) -> None:
         """Refresh already-open pages only; unopened tabs remain lazy."""

@@ -19,6 +19,7 @@ from freqinout.core.message_projection_queue import ensure_source_dirty_triggers
 from freqinout.core.multi_radio_store import ensure_multi_radio_settings_schema
 from freqinout.core.operator_activity import ensure_js8_callsign_stats
 from freqinout.core.resource_catalog_migration import cutover_resource_catalog_to_canonical
+from freqinout.core.shortwave_store import ensure_shortwave_schema
 from freqinout.core.sqlite_utils import connect_sqlite
 from freqinout.core.varac_ingest import ensure_varac_local_tables
 from freqinout.core.varac_bbs_library_store import (
@@ -2145,4 +2146,20 @@ def ensure_nets_tables() -> None:
         # Cutover is transactional and backup-first; failure leaves the legacy
         # schedule surfaces usable and Resources navigation stays hidden.
         log.error("Resource catalog cutover failed safely; legacy resources remain active: %s", exc)
+        report = None
+    if report is not None and report.authority_state == "canonical":
+        nets_path = config_dir / "freqinout_nets.db"
+        try:
+            shortwave_conn = connect_sqlite(nets_path)
+            try:
+                with shortwave_conn:
+                    ensure_shortwave_schema(shortwave_conn)
+            finally:
+                shortwave_conn.close()
+        except Exception as exc:
+            # Shortwave is an additive, independently gated resource surface.
+            # Its failure must not misreport or roll back a completed canonical
+            # catalog cutover; the UI verifies schema availability before
+            # exposing Shortwave.
+            log.error("Shortwave schema initialization failed safely; Shortwave remains unavailable: %s", exc)
     log.info("DB init: ensured nets tables.")

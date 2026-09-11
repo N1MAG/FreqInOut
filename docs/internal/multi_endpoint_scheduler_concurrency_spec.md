@@ -785,6 +785,44 @@ FLDigi cache boundary, and Station Control Bar plan cache so synchronous I/O
 cannot silently return. Live Linux timer cadence and the physical endpoint gates
 remain external.
 
+## September 11 Projection Feedback-Loop Remediation
+
+Local production evidence exposed a forced-refresh feedback loop that violated
+the requalification boundary above. In a 21-second interval, FIO emitted 4,165
+log lines, completed 303 schedule projections, attempted roughly 600 schedule
+applications across two radios, and repeatedly wrote unchanged FLRig, FLDigi,
+and JS8 state. The endpoint workers remained isolated, but projection completion
+incorrectly requested another forced projection and treated a forced data read
+as permission to force device writes. The resulting CPU, I/O, log, and Qt signal
+load made the Station Control Bar appear unstable.
+
+The following are binding scheduler invariants:
+
+1. A projection completion publishes and consumes its immutable snapshot exactly
+   once. Consuming that snapshot cannot request another projection.
+2. A forced projection means "refresh authority now"; it does not mean "write
+   unchanged state to every endpoint." A changed entry key still applies through
+   normal endpoint-lane semantics.
+3. "Applying entry" is logged only after deduplication and immediately before a
+   command is actually queued. Skipped settled intent must remain quiet.
+4. Projection request, forced-request, and completion counters are present in
+   cache-only scheduler diagnostics so a future request/completion storm is
+   visible without querying SQLite or an endpoint.
+5. Scheduler active-entry signals are coalesced before status presentation. The
+   Station Control Bar retains its bounded refresh cadence even during an event
+   burst.
+6. A process-level CPU watchdog samples only monotonic/process clocks. After
+   sustained high CPU it writes one bounded, credential-redacted diagnostic and
+   Python stack report under the FIO configuration directory's `cpu_hotspots`
+   folder, then observes a cooldown. It performs no database, network, process
+   inventory, Qt, or endpoint work while sampling and emits no normal-sample log.
+
+Automated qualification for this follow-up requires a regression proving that a
+forced projection completion neither requests a successor nor forces another
+radio application, the full scheduler regression package, CPU-report redaction
+and cooldown coverage, and scheduler-signal UI coalescing. Production Linux must
+confirm settled idle CPU and the absence of repeated schedule-application logs.
+
 Thread-concurrency tests must use deterministic barriers/events rather than
 timing-only sleeps wherever possible. Hardware tests supplement; they do not
 replace fault-injection tests.

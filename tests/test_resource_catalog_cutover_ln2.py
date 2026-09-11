@@ -99,7 +99,8 @@ def test_navigation_declares_one_direct_resources_destination_and_compact_icon()
     source = (ROOT / "freqinout/gui/main_window.py").read_text(encoding="utf-8")
 
     assert '"Resources": self._create_resources_tab' in source
-    assert '("Resources", "Resources")' in source
+    # Resources is the master group; Frequencies is its only R-1 child.
+    assert '("Frequencies", "Resources")' in source
     for destination in ("Frequency Catalog", "Net Directory", "Import / Export"):
         assert f'("{destination}", "Resources")' not in source
     assert '("Resources", "Tools and Resources", "Resources", "resources.svg")' in source
