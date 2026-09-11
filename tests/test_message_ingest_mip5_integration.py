@@ -70,7 +70,30 @@ def test_projection_batch_progress_coalesces_visible_inbox_queries() -> None:
     )
     assert "_message_projection_progressed.connect" in constructor
     assert "_request_projected_message_query" in progress
-    assert "delay_ms=500" in progress
+    assert "delay_ms=1000" in progress
+
+
+def test_projection_maintenance_is_paced_and_defers_while_message_ingest_runs() -> None:
+    main_window = ROOT / "freqinout" / "gui" / "main_window.py"
+    constructor = _method_source(main_window, "MainWindow", "__init__")
+    request = _method_source(
+        main_window, "MainWindow", "request_message_projection_catchup"
+    )
+    finished = _method_source(
+        main_window, "MainWindow", "_on_message_projection_cycle_finished"
+    )
+    assert "_message_projection_followup_timer" in constructor
+    assert 'has_inflight_jobs("messages")' in request
+    assert "_schedule_message_projection_followup" in request
+    assert 'state in {"sliced", "deferred"}' in finished
+
+
+def test_projection_coordinator_keeps_cycles_and_parse_slices_small() -> None:
+    coordinator = (
+        ROOT / "freqinout" / "core" / "message_projection_coordinator.py"
+    ).read_text(encoding="utf-8-sig")
+    assert "MAX_CYCLE_ITEMS = 25" in coordinator
+    assert "PREPARE_ITEMS_PER_SLICE = 10" in coordinator
 
 
 def test_deep_rebuild_ui_states_scope_and_source_preservation() -> None:

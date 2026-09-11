@@ -3534,3 +3534,49 @@ are the already-known Wave 3 assigned-plan tests whose synchronous fixture
 predates the scheduler's nonblocking projection contract; no new failure was
 introduced by this remediation. Python compilation and `git diff --check`
 passed. The RF Guard compatibility assertion passes.
+
+## 2026-09-11 — Message ingest/projection CPU convoy remediation
+
+Status: implementation and focused automated gate complete; Linux production
+CPU/latency confirmation remains external.
+
+The third Linux capture showed higher aggregate CPU even though the scheduler
+feedback loop remained fixed. Startup reached its first usable shell in 45.74
+seconds; database initialization consumed 13.86 seconds and Settings construction
+8.65 seconds. CPU watchdog reports then measured 95.6%, 162.9%, and 158.6%.
+The two sustained samples independently showed `freqinout-ingest_0` importing
+JS8 directed traffic while `fio-message-projection` prepared or wrote derived
+message bundles. The catch-up lane issued 317 batches in roughly 111 seconds:
+1,363 identities prepared, 1,363 bundles submitted, 452 transactions, and 1,313
+message/reference upserts. A 100-item write reached 4.142 seconds, and the lane
+then chased individual rows as the source importer committed them.
+
+Ordinary projection is now application-paced: one future performs one cycle,
+the cycle ceiling is 25 identities, parsing yields every 10, and sliced or
+deferred work resumes after a one-second single-shot interval. Projection waits
+while the background `messages` job is queued or running, preventing the source
+writer and derived writer from competing for the same SQLite database. The JS8
+directed storage path also removes a redundant connection/query and relies on
+the already-present semantic duplicate check and atomic source-identity conflict
+guard. Inbox refresh remains coalesced at one second. Explicit deep rebuild behavior
+is unchanged.
+
+Startup database initialization now emits named spans for each high-level schema
+or repair family so the next production capture can identify the 8–20 second
+variance without adding speculative repairs or destructive migration work.
+
+Model ownership: the high-reasoning primary model correlated the logs and stack
+dumps, designed the concurrency boundary, implemented the remediation and tests,
+and performed integration review. No subagent was used because this turn did not
+request delegation and the ingest/projection ownership boundary needed one
+reviewer.
+
+Acceptance evidence: the complete message ingest/projection selection passed
+172 tests with one intentional skip; independent startup partitions passed 15;
+and the scheduler/UI/performance integration selection passed 59 with one
+intentional skip (246 passed, two skipped in total). Python compilation and
+`git diff --check` passed. Running all Qt startup partitions in one process can
+still trigger the repository's known cross-fixture native abort, so those
+partitions were deliberately executed in isolated processes as the product does
+for a fresh launch. No schema or authoritative data migration is part of this
+change.

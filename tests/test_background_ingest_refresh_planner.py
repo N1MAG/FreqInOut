@@ -215,6 +215,21 @@ def test_background_submit_job_records_duplicate_running_skip_reason():
     assert status["skip_reasons"]["messages"] == "already_running"
 
 
+def test_background_inflight_snapshot_is_bounded_to_requested_jobs():
+    controller = BackgroundIngestController(_Settings())  # type: ignore[arg-type]
+    pending = Future()
+    complete = Future()
+    complete.set_result(None)
+    controller._job_futures.update(
+        {"messages": pending, "varac": complete, "peer_schedules": pending}
+    )
+
+    assert controller.has_inflight_jobs("messages") is True
+    assert controller.has_inflight_jobs("varac") is False
+    assert controller.has_inflight_jobs("sitreps") is False
+    assert controller.has_inflight_jobs() is False
+
+
 def test_background_submit_job_records_backoff_skip_reason(monkeypatch):
     controller = BackgroundIngestController(_Settings())  # type: ignore[arg-type]
     controller._running = True

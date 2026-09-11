@@ -636,3 +636,48 @@ Production evidence must distinguish foreground UI latency from aggregate
 background CPU. A successful gate has no UI heartbeat stall, no sustained CPU
 dump naming schema assurance or Ops backfill as a continuously active frame, and
 no command-bar callback above 100 ms after the initial settled snapshot.
+
+## September 11 Message-Ingest/Projection Convoy Requalification
+
+The subsequent Linux production capture makes the message writer boundary more
+restrictive. Scheduler recursion remained absent, but process CPU rose from
+95.6% to 162.9% and 158.6%. Concurrent stacks showed the background JS8
+DIRECTED.TXT importer opening/writing `js8_messages` while the projection
+prepare/writer lanes read, classified, indexed operator identity, and committed
+the corresponding derived rows. In about 111 seconds, 317 projection batches
+requested 1,363 identities and performed 452 write transactions. Several
+100-identity units required 2.0 to 4.1 seconds, followed by a near-continuous
+stream of one-to-three-item units as newly ingested rows immediately became
+dirty. This is prohibited even though each individual transaction is bounded.
+
+The binding production behavior is now:
+
+- ordinary catch-up performs exactly one coordinator cycle per submitted task;
+- one ordinary cycle claims or discovers at most 25 identities, with parsing in
+  chunks of at most 10;
+- incomplete ordinary work is resumed by an application-owned single-shot timer
+  after at least 1,000 ms, rather than by a worker-owned drain loop;
+- catch-up is deferred while the JS8 `messages` source job is queued or running,
+  so the source writer and its derived projection do not form a SQLite convoy;
+- requests arriving during an active cycle remain coalesced and use the same
+  paced continuation path;
+- visible Inbox invalidation is delayed/coalesced and is never a per-row paint;
+- explicit operator-requested deep rebuild remains resumable and may drain on
+  its maintenance lane, because it is not a normal startup or idle behavior;
+- directed JS8 storage uses its existing semantic duplicate check plus atomic
+  `(source_key, source_id)` conflict guard in one insert path; it must not open a
+  second database connection for a redundant pre-check; and
+- shutdown stops both reconciliation and paced-follow-up timers before worker
+  ownership is released.
+
+Database initialization must emit separate duration evidence for the nets
+schema, propagation, SitRep ingest/fusion, operator check-ins, message
+projection, JS8 links, VarAC, dirty triggers, Expect, Ops indexes, SitRep group
+repair, resource-catalog cutover, and Shortwave schema. These measurements are
+diagnostic only and must not add database reads beyond the work being measured.
+
+Automated exit criteria require bounded-cycle, repeated-resume, ingest-deferral,
+request-coalescing, duplicate-storage, shutdown, and existing message projection
+tests to pass. The final gate still requires a Linux production launch showing
+no sustained projection/ingest overlap, a falling dirty queue, responsive tab
+navigation, and settled CPU appropriate to enabled endpoint services.

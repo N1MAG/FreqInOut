@@ -137,12 +137,13 @@ def _projection_counts(db_path: Path) -> tuple[int, int, int]:
 
 
 def _drain(db_path: Path, *, expected: int, coordinator: MessageProjectionCoordinator) -> list:
+    cycle_limit = coordinator_module.MAX_CYCLE_ITEMS
     cycles = []
     while queue_diagnostics(db_path)["depth"]:
         result = coordinator.run_once(reconcile=False)
         cycles.append(result)
-        assert result.claimed <= 100
-        assert len(cycles) <= expected // 100 + 2
+        assert result.claimed <= cycle_limit
+        assert len(cycles) <= (expected + cycle_limit - 1) // cycle_limit + 2
     return cycles
 
 
@@ -206,7 +207,7 @@ def test_five_hundred_message_burst_drains_in_bounded_cycles(tmp_path) -> None:
     worker = MessageProjectionCoordinator(db_path)
     try:
         cycles = _drain(db_path, expected=500, coordinator=worker)
-        assert len(cycles) == 5
+        assert len(cycles) == 20
         assert sum(result.claimed for result in cycles) == 500
         assert all(result.committed == result.claimed for result in cycles)
         assert _projection_counts(db_path) == (500, 500, 0)
@@ -242,15 +243,15 @@ def test_queue_first_catchup_limits_discovery_and_monotonically_drains_backlog(
 
         monkeypatch.setattr(coordinator_module, "reconcile_native_source_changes", traced_reconcile)
         first = worker.run_once(reconcile=True)
-        assert first.discovered == first.claimed == first.committed == 100
-        assert observed_limits == [(100, 100)]
+        assert first.discovered == first.claimed == first.committed == 25
+        assert observed_limits == [(25, 25)]
         assert queue_diagnostics(db_path)["depth"] == 0
 
         # Seed a durable historical backlog.  Subsequent coordinator cycles
         # must drain it first instead of discovering the remaining source rows.
-        assert reconcile_native_source_changes(db_path, limit_per_source=1000)["js8"] == 150
+        assert reconcile_native_source_changes(db_path, limit_per_source=1000)["js8"] == 225
         depths = [queue_diagnostics(db_path)["depth"]]
-        assert depths == [150]
+        assert depths == [225]
 
         def discovery_is_forbidden(*_args, **_kwargs):
             raise AssertionError("discovery ran while durable projection work remained")
@@ -258,7 +259,7 @@ def test_queue_first_catchup_limits_discovery_and_monotonically_drains_backlog(
         monkeypatch.setattr(coordinator_module, "reconcile_native_source_changes", discovery_is_forbidden)
         while queue_diagnostics(db_path)["depth"]:
             result = worker.run_once(reconcile=True)
-            assert result.claimed <= 100
+            assert result.claimed <= coordinator_module.MAX_CYCLE_ITEMS
             assert result.committed == result.claimed
             depths.append(queue_diagnostics(db_path)["depth"])
         assert depths == sorted(depths, reverse=True)
@@ -318,7 +319,7 @@ def test_prepare_slices_are_cancelable_and_release_durable_leases(tmp_path, monk
     try:
         result = worker.run_once(reconcile=False, cancel_event=cancelled)
         assert result.state == "cancelled"
-        assert prepared_sizes == [25]
+        assert prepared_sizes == [coordinator_module.PREPARE_ITEMS_PER_SLICE]
         diagnostics = queue_diagnostics(db_path)
         assert diagnostics["depth"] == 100
         assert diagnostics["leased"] == 0
@@ -420,21 +421,27 @@ def test_projector_version_reset_replays_in_bounded_resumable_batches(tmp_path, 
         state = _source_state(db_path)
         assert state[0:3] == ("100", 99, 99)
         assert queue_diagnostics(db_path)["depth"] == 100
-        assert worker.run_once(reconcile=False).claimed == 100
+        assert sum(
+            result.claimed for result in _drain(db_path, expected=100, coordinator=worker)
+        ) == 100
 
         second = reconcile_native_source_changes(db_path, limit_per_source=100)
         assert second["js8"] == 100
         state = _source_state(db_path)
         assert state[0:3] == ("200", 99, 99)
         assert queue_diagnostics(db_path)["depth"] == 100
-        assert worker.run_once(reconcile=False).claimed == 100
+        assert sum(
+            result.claimed for result in _drain(db_path, expected=100, coordinator=worker)
+        ) == 100
 
         third = reconcile_native_source_changes(db_path, limit_per_source=100)
         assert third["js8"] == 50
         state = _source_state(db_path)
         assert state[0:3] == ("250", 99, 99)
         assert queue_diagnostics(db_path)["depth"] == 50
-        assert worker.run_once(reconcile=False).claimed == 50
+        assert sum(
+            result.claimed for result in _drain(db_path, expected=50, coordinator=worker)
+        ) == 50
         assert _projection_counts(db_path) == (250, 250, 0)
     finally:
         worker.close()

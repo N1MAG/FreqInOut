@@ -244,6 +244,7 @@ class MainWindow(QMainWindow):
         self._background_ingest_start_pending = False
         self._message_projection_future = None
         self._message_projection_catchup_pending = False
+        self._message_projection_followup_reason = ""
         self._message_projection_refresh_sequence = 0
         self._receiver_qualification_profiles: dict[int, dict[str, object]] = {}
         self._message_projection_cycle_finished.connect(
@@ -1142,6 +1143,12 @@ class MainWindow(QMainWindow):
         self._message_projection_reconcile_timer.setSingleShot(True)
         self._message_projection_reconcile_timer.timeout.connect(
             self._on_message_projection_reconcile_timer
+        )
+        self._message_projection_followup_timer = QTimer(self)
+        self._message_projection_followup_timer.setSingleShot(True)
+        self._message_projection_followup_timer.setInterval(1000)
+        self._message_projection_followup_timer.timeout.connect(
+            self._on_message_projection_followup_timer
         )
         try:
             self.background_ingest.condition_sop_invocation_audited.connect(
@@ -3304,6 +3311,16 @@ class MainWindow(QMainWindow):
                 self._sop_data_refresh_timer.stop()
         except Exception:
             pass
+        for timer_name in (
+            "_message_projection_followup_timer",
+            "_message_projection_reconcile_timer",
+        ):
+            try:
+                timer = getattr(self, timer_name, None)
+                if timer is not None:
+                    timer.stop()
+            except Exception:
+                pass
         try:
             if hasattr(self, "_hold_state_timer"):
                 self._hold_state_timer.stop()
@@ -6381,6 +6398,15 @@ class MainWindow(QMainWindow):
         service = getattr(self, "message_projection_maintenance", None)
         if service is None:
             return None
+        background = getattr(self, "background_ingest", None)
+        if background is not None and hasattr(background, "has_inflight_jobs"):
+            try:
+                if background.has_inflight_jobs("messages"):
+                    self._message_projection_catchup_pending = True
+                    self._schedule_message_projection_followup(reason=f"after:{reason}")
+                    return None
+            except Exception:
+                pass
         try:
             future = service.start_post_shell_catchup()
         except Exception as exc:
@@ -6436,21 +6462,33 @@ class MainWindow(QMainWindow):
         self.request_message_projection_catchup(reason="idle_reconcile")
         self._schedule_message_projection_reconcile()
 
+    def _schedule_message_projection_followup(
+        self, *, reason: str = "paced_followup", delay_ms: int = 1000
+    ) -> None:
+        timer = getattr(self, "_message_projection_followup_timer", None)
+        if timer is None or self._shutting_down:
+            return
+        self._message_projection_followup_reason = str(reason or "paced_followup")
+        if not timer.isActive():
+            timer.start(max(250, int(delay_ms)))
+
+    def _on_message_projection_followup_timer(self) -> None:
+        if self._shutting_down:
+            return
+        reason = self._message_projection_followup_reason or "paced_followup"
+        self._message_projection_followup_reason = ""
+        self._message_projection_catchup_pending = False
+        self.request_message_projection_catchup(reason=reason)
+
     def _on_message_projection_cycle_finished(self, payload: object) -> None:
         if self._shutting_down:
             return
         data = payload if isinstance(payload, Mapping) else {}
         self._publish_watchdog_diagnostic_snapshot()
-        changed = int(data.get("committed", 0) or 0) + int(data.get("deleted", 0) or 0)
-        viewer = getattr(self, "message_viewer_tab", None)
-        if changed and viewer is not None and hasattr(viewer, "_request_projected_message_query"):
-            try:
-                viewer._request_projected_message_query(force=False, delay_ms=0)
-            except Exception as exc:
-                log.debug("MainWindow: message projection UI invalidation failed: %s", exc)
-        if self._message_projection_catchup_pending:
+        state = str(data.get("state", "") or "").strip().lower()
+        if self._message_projection_catchup_pending or state in {"sliced", "deferred"}:
             self._message_projection_catchup_pending = False
-            self.request_message_projection_catchup(reason="coalesced_followup")
+            self._schedule_message_projection_followup(reason="coalesced_followup")
 
     def _on_message_projection_progressed(self, progress: object) -> None:
         """Coalesce committed batch progress into bounded visible Inbox reads."""
@@ -6466,7 +6504,7 @@ class MainWindow(QMainWindow):
         ):
             viewer._request_projected_message_query(
                 force=False,
-                delay_ms=500,
+                delay_ms=1000,
             )
 
     def _publish_watchdog_diagnostic_snapshot(self) -> None:

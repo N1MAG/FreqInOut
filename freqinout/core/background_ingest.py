@@ -457,6 +457,29 @@ class BackgroundIngestController(QObject):
             realtime_pending = any(not future.done() for future in self._realtime_job_futures.values())
         return not background_pending and not realtime_pending
 
+    def has_inflight_jobs(self, *job_names: str) -> bool:
+        """Return whether any named background job is queued or running.
+
+        This lightweight snapshot lets downstream projection avoid competing
+        with the source writer that is creating its work.  A queued future is
+        deliberately considered in flight: the background executor is serial,
+        so starting projection while a message scan is waiting would recreate
+        the same SQLite convoy a few moments later.
+        """
+
+        wanted = {
+            str(name or "").strip().lower()
+            for name in job_names
+            if str(name or "").strip()
+        }
+        if not wanted:
+            return False
+        with self._executor_lock:
+            return any(
+                str(name).strip().lower() in wanted and not future.done()
+                for name, future in self._job_futures.items()
+            )
+
     def _cancel_checkpoint(self) -> None:
         self._cancel_token.checkpoint()
 

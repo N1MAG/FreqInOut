@@ -220,9 +220,10 @@ def test_post_shell_start_does_not_implicitly_resume_rebuild_checkpoint(tmp_path
     )
     try:
         result = resumed.start_post_shell_catchup().result(timeout=2.0)
-        assert result.state == "complete"
+        assert result.state == "sliced"
         assert result.rebuild_id == ""
-        assert result.committed == 200
+        assert result.committed == 100
+        assert coordinator.calls == 1
         assert ":requested:" in get_message_projection_checkpoint(
             db_path, DEEP_REBUILD_CHECKPOINT_SOURCE
         ).content_fingerprint
@@ -250,6 +251,24 @@ def test_post_shell_start_never_reads_rebuild_checkpoint(
         future = service.start_post_shell_catchup()
         assert time.perf_counter() - started < 0.1
         assert future.result(timeout=2.0).state == "complete"
+    finally:
+        service.close()
+
+
+def test_ordinary_post_shell_requests_run_one_cooperative_cycle_each(tmp_path) -> None:
+    db_path = _empty_db(tmp_path)
+    coordinator = _BatchCoordinator(2)
+    service = MessageProjectionMaintenanceService(
+        db_path, coordinator=coordinator, yield_seconds=0
+    )
+    try:
+        first = service.start_post_shell_catchup().result(timeout=2.0)
+        second = service.start_post_shell_catchup().result(timeout=2.0)
+        final = service.start_post_shell_catchup().result(timeout=2.0)
+        assert first.state == "sliced"
+        assert second.state == "sliced"
+        assert final.state == "complete"
+        assert coordinator.calls == 3
     finally:
         service.close()
 

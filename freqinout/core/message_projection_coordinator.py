@@ -109,8 +109,11 @@ _SOURCE_SPECS: Mapping[str, Mapping[str, str]] = {
 # catch-up.  Discovery must never fill the durable queue faster than this same
 # cycle can drain it.  Preparation uses smaller chunks so parsing/classifying a
 # large source row set yields the interpreter before the writer starts.
-MAX_CYCLE_ITEMS = 100
-PREPARE_ITEMS_PER_SLICE = 25
+# Ordinary maintenance runs on the same SQLite database as live source ingest.
+# Keep each cooperative cycle small enough to release CPU and database access
+# promptly; the application schedules additional cycles with an idle gap.
+MAX_CYCLE_ITEMS = 25
+PREPARE_ITEMS_PER_SLICE = 10
 
 
 def native_projection_source_state_specs() -> tuple[tuple[str, str, str], ...]:

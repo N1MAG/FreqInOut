@@ -18,6 +18,7 @@ from freqinout.core.message_projection_store import ensure_message_projection_sc
 from freqinout.core.message_projection_queue import ensure_source_dirty_triggers
 from freqinout.core.multi_radio_store import ensure_multi_radio_settings_schema
 from freqinout.core.operator_activity import ensure_js8_callsign_stats
+from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.resource_catalog_migration import cutover_resource_catalog_to_canonical
 from freqinout.core.shortwave_store import ensure_shortwave_schema
 from freqinout.core.sqlite_utils import connect_sqlite
@@ -1878,9 +1879,12 @@ def _ensure_nets_db() -> None:
         )
 
         # Propagation outcomes (offline scoring support)
-        _ensure_propagation_outcome_tables(conn)
-        _ensure_sitrep_ingest_tables(conn)
-        _ensure_sitrep_fusion_tables(conn)
+        with perf_span("startup.database.nets.propagation", min_ms=10.0):
+            _ensure_propagation_outcome_tables(conn)
+        with perf_span("startup.database.nets.sitrep_ingest", min_ms=10.0):
+            _ensure_sitrep_ingest_tables(conn)
+        with perf_span("startup.database.nets.sitrep_fusion", min_ms=10.0):
+            _ensure_sitrep_fusion_tables(conn)
 
         # SOP profiles/actions/state
         cur.execute(
@@ -2099,15 +2103,24 @@ def _ensure_nets_db() -> None:
                ON local_net_occurrence_state(local_net_schedule_key, occurrence_start_utc)"""
         )
 
-        _ensure_operator_checkins(conn)
-        _ensure_local_operator_tables(conn)
-        ensure_message_projection_schema(conn)
-        _ensure_js8_links(conn)
-        ensure_varac_local_tables(conn)
-        ensure_source_dirty_triggers(conn)
-        _ensure_js8_expect_tables(conn)
-        _ensure_controlfreq_support_indexes(conn)
-        _repair_sitrep_commstat_groups(conn)
+        with perf_span("startup.database.nets.operator_checkins", min_ms=10.0):
+            _ensure_operator_checkins(conn)
+        with perf_span("startup.database.nets.local_operators", min_ms=10.0):
+            _ensure_local_operator_tables(conn)
+        with perf_span("startup.database.nets.message_projection", min_ms=10.0):
+            ensure_message_projection_schema(conn)
+        with perf_span("startup.database.nets.js8_links", min_ms=10.0):
+            _ensure_js8_links(conn)
+        with perf_span("startup.database.nets.varac", min_ms=10.0):
+            ensure_varac_local_tables(conn)
+        with perf_span("startup.database.nets.dirty_triggers", min_ms=10.0):
+            ensure_source_dirty_triggers(conn)
+        with perf_span("startup.database.nets.expect", min_ms=10.0):
+            _ensure_js8_expect_tables(conn)
+        with perf_span("startup.database.nets.ops_indexes", min_ms=10.0):
+            _ensure_controlfreq_support_indexes(conn)
+        with perf_span("startup.database.nets.sitrep_group_repair", min_ms=10.0):
+            _repair_sitrep_commstat_groups(conn)
 
         conn.commit()
     finally:
@@ -2135,13 +2148,15 @@ def ensure_nets_tables() -> None:
     """
     Public entry point to ensure nets DB tables and migrations are applied.
     """
-    _ensure_nets_db()
+    with perf_span("startup.database.nets.schema", min_ms=10.0):
+        _ensure_nets_db()
     config_dir = _config_dir()
     try:
-        report = cutover_resource_catalog_to_canonical(
-            config_dir / "freqinout_nets.db",
-            config_dir / "freqinout.db",
-        )
+        with perf_span("startup.database.nets.resource_catalog", min_ms=10.0):
+            report = cutover_resource_catalog_to_canonical(
+                config_dir / "freqinout_nets.db",
+                config_dir / "freqinout.db",
+            )
         log.info(
             "Resource catalog: %s (%d legacy row(s), %d review required).",
             report.authority_state,
@@ -2159,7 +2174,8 @@ def ensure_nets_tables() -> None:
             shortwave_conn = connect_sqlite(nets_path)
             try:
                 with shortwave_conn:
-                    ensure_shortwave_schema(shortwave_conn)
+                    with perf_span("startup.database.nets.shortwave", min_ms=10.0):
+                        ensure_shortwave_schema(shortwave_conn)
             finally:
                 shortwave_conn.close()
         except Exception as exc:

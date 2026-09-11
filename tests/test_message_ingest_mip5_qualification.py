@@ -82,14 +82,15 @@ def _create_db(tmp_path: Path, *, rows: int) -> Path:
 
 
 def _drain(coordinator: MessageProjectionCoordinator, db_path: Path, *, expected: int) -> int:
+    cycle_limit = coordinator_module.MAX_CYCLE_ITEMS
     cycles = 0
     committed = 0
     while queue_diagnostics(db_path)["depth"]:
         result = coordinator.run_once(reconcile=False)
         cycles += 1
         committed += result.committed
-        assert result.claimed <= 100
-        assert cycles <= expected // 100 + 2
+        assert result.claimed <= cycle_limit
+        assert cycles <= (expected + cycle_limit - 1) // cycle_limit + 2
     return committed
 
 
@@ -152,7 +153,7 @@ def test_mip5_scheduler_lane_remains_responsive_while_projection_prepares_burst(
         assert completed.wait(0.5)
         assert results == ["applied_unverified"]
         release_preparation.set()
-        assert projection_future.result(timeout=5.0).committed == 100
+        assert projection_future.result(timeout=5.0).committed == coordinator_module.MAX_CYCLE_ITEMS
     finally:
         release_preparation.set()
         scheduler.shutdown(wait=True)
@@ -196,7 +197,7 @@ def test_mip5_mesh_retry_and_bbs_reconcile_remain_independent_during_projection(
         assert time.perf_counter() - started < 0.5
 
         release_preparation.set()
-        assert projection_future.result(timeout=5.0).committed == 100
+        assert projection_future.result(timeout=5.0).committed == coordinator_module.MAX_CYCLE_ITEMS
     finally:
         release_preparation.set()
         _close(coordinator)
@@ -291,7 +292,7 @@ def test_mip5_expect_fast_path_is_independent_of_saturated_projection_queue(
             )
         ]
         release_preparation.set()
-        assert projection_future.result(timeout=5.0).committed == 100
+        assert projection_future.result(timeout=5.0).committed == coordinator_module.MAX_CYCLE_ITEMS
     finally:
         release_preparation.set()
         _close(coordinator)
@@ -302,15 +303,15 @@ def test_mip5_shutdown_and_restart_preserve_queued_work_without_duplicate_rows(t
     reconcile_native_source_changes(db_path, sources=("js8",), limit_per_source=1000)
     first = MessageProjectionCoordinator(db_path)
     try:
-        assert first.run_once(reconcile=False).committed == 100
+        assert first.run_once(reconcile=False).committed == coordinator_module.MAX_CYCLE_ITEMS
     finally:
         first.close()
         close_projection_writers()
-    assert queue_diagnostics(db_path)["depth"] == 105
+    assert queue_diagnostics(db_path)["depth"] == 205 - coordinator_module.MAX_CYCLE_ITEMS
 
     restarted = MessageProjectionCoordinator(db_path)
     try:
-        assert _drain(restarted, db_path, expected=205) == 105
+        assert _drain(restarted, db_path, expected=205) == 205 - coordinator_module.MAX_CYCLE_ITEMS
         conn = sqlite3.connect(db_path)
         try:
             assert conn.execute("SELECT COUNT(*) FROM message_projection").fetchone()[0] == 205

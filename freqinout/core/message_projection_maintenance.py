@@ -120,9 +120,19 @@ class MessageProjectionMaintenanceService:
             self._progress_callback = callback if callable(callback) else None
 
     def start_post_shell_catchup(self) -> Future:
-        """Schedule ordinary catch-up without implicitly starting a rebuild."""
+        """Schedule one ordinary, bounded catch-up cycle.
 
-        return self._submit(rebuild_id="", source_rows_estimate=0)
+        Application-owned pacing decides when another cycle may run.  Keeping
+        this call to one cycle prevents a large or actively-growing inbox from
+        monopolizing a CPU core and contending continuously with source ingest.
+        Explicit deep rebuilds retain their drain-to-completion behavior.
+        """
+
+        return self._submit(
+            rebuild_id="",
+            source_rows_estimate=0,
+            max_cycles=1,
+        )
 
     def request_deep_rebuild(
         self, *, preview: DeepRebuildPreview | None = None
@@ -436,7 +446,13 @@ class MessageProjectionMaintenanceService:
                     lambda _future: self._coordinator.close(wait=False)
                 )
 
-    def _submit(self, *, rebuild_id: str, source_rows_estimate: int) -> Future:
+    def _submit(
+        self,
+        *,
+        rebuild_id: str,
+        source_rows_estimate: int,
+        max_cycles: int | None = None,
+    ) -> Future:
         with self._lock:
             if self._closed:
                 future: Future = Future()
@@ -449,6 +465,7 @@ class MessageProjectionMaintenanceService:
                 self.run_post_shell_catchup,
                 rebuild_id=rebuild_id,
                 source_rows_estimate=source_rows_estimate,
+                max_cycles=max_cycles,
                 cancel_event=self._cancel,
             )
             return self._inflight

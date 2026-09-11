@@ -2439,25 +2439,10 @@ class MessageIngestor:
 
     def _store_directed_js8_message(self, row: Mapping[str, Any]) -> bool:
         try:
-            db_path = self._local_js8_db()
-            if not db_path:
-                return False
-            conn = sqlite3.connect(db_path)
-            try:
-                existing = conn.execute(
-                    "SELECT 1 FROM js8_messages WHERE source_key=? AND source_id=? LIMIT 1",
-                    (str(row.get("source_key") or ""), int(row.get("source_id", row.get("msg_id", 0)) or 0)),
-                ).fetchone()
-                if existing is not None:
-                    conn.close()
-                    return False
-                conn.close()
-            except Exception:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-                return False
+            # _insert_js8_local already performs the semantic duplicate check
+            # and an atomic ON CONFLICT(source_key, source_id) guard.  A second
+            # connection and lookup here doubled SQLite work for every line in
+            # a JS8 catch-up scan and raced message projection unnecessarily.
             inserted = self._insert_js8_local(
                 row.get("msg_id", 0),
                 str(row.get("from_call") or "").strip().upper(),
