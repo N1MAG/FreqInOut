@@ -521,11 +521,13 @@ def test_js8call_multisettings_reader_handles_fully_qualified_qsettings_profile_
     assert fio_b["CATNetworkPort"] == "127.0.0.1:12346"
 
 
-def test_js8call_file_discovery_reads_profile_savedir_logs(tmp_path) -> None:
+def test_js8call_file_discovery_keeps_savedir_separate_from_message_storage(tmp_path) -> None:
     save_dir = tmp_path / "js8" / "fio-c"
     save_dir.mkdir(parents=True)
-    directed = save_dir / "DIRECTED.TXT"
-    all_txt = save_dir / "ALL.TXT"
+    data_root = tmp_path / ".local" / "share" / "JS8Call"
+    data_root.mkdir(parents=True)
+    directed = data_root / "DIRECTED.TXT"
+    all_txt = data_root / "ALL.TXT"
     directed.write_text("directed traffic\n", encoding="utf-8")
     all_txt.write_text("all traffic\n", encoding="utf-8")
     ini_path = tmp_path / "JS8Call.ini"
@@ -540,18 +542,20 @@ def test_js8call_file_discovery_reads_profile_savedir_logs(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    profiles = discover_js8call_file_profiles(ini_path=ini_path)
+    profiles = discover_js8call_file_profiles(ini_path=ini_path, platform="Linux", home=tmp_path)
 
     assert len(profiles) == 1
     assert profiles[0].name == "FIO-C"
     assert profiles[0].tcp_server_port == "2444"
     assert profiles[0].directed_path == str(directed)
     assert profiles[0].all_path == str(all_txt)
+    assert profiles[0].save_dir == str(save_dir)
+    assert profiles[0].application_data_root == str(data_root)
     assert profiles[0].confidence == "verified"
-    assert "SaveDir" in profiles[0].reason
+    assert "SaveDir is separate" in profiles[0].reason
 
 
-def test_js8call_file_discovery_suggests_directed_path_when_save_dir_exists(tmp_path) -> None:
+def test_js8call_file_discovery_does_not_suggest_logs_from_savedir(tmp_path) -> None:
     save_dir = tmp_path / "js8" / "fio-b"
     save_dir.mkdir(parents=True)
     ini_path = tmp_path / "JS8Call.ini"
@@ -566,12 +570,13 @@ def test_js8call_file_discovery_suggests_directed_path_when_save_dir_exists(tmp_
         encoding="utf-8",
     )
 
-    profiles = discover_js8call_file_profiles(ini_path=ini_path)
+    profiles = discover_js8call_file_profiles(ini_path=ini_path, platform="Linux", home=tmp_path)
     selected = select_js8call_file_profile(profiles, tcp_port="2443")
 
-    assert selected is not None
-    assert selected.confidence == "partial"
-    assert selected.directed_path == str(save_dir / "DIRECTED.TXT")
+    assert selected is None
+    assert profiles[0].confidence == "not_found"
+    assert profiles[0].directed_path == ""
+    assert profiles[0].save_dir == str(save_dir)
 
 
 def test_js8call_file_profile_selection_prefers_matching_tcp_port(tmp_path) -> None:
@@ -579,8 +584,9 @@ def test_js8call_file_profile_selection_prefers_matching_tcp_port(tmp_path) -> N
     save_c = tmp_path / "c"
     save_a.mkdir()
     save_c.mkdir()
-    (save_a / "DIRECTED.TXT").write_text("a\n", encoding="utf-8")
-    (save_c / "DIRECTED.TXT").write_text("c\n", encoding="utf-8")
+    data_root = tmp_path / ".local" / "share" / "JS8Call"
+    data_root.mkdir(parents=True)
+    (data_root / "DIRECTED.TXT").write_text("shared application instance\n", encoding="utf-8")
     ini_path = tmp_path / "JS8Call.ini"
     ini_path.write_text(
         "\n".join(
@@ -597,12 +603,12 @@ def test_js8call_file_profile_selection_prefers_matching_tcp_port(tmp_path) -> N
         encoding="utf-8",
     )
 
-    profiles = discover_js8call_file_profiles(ini_path=ini_path)
+    profiles = discover_js8call_file_profiles(ini_path=ini_path, platform="Linux", home=tmp_path)
     selected = select_js8call_file_profile(profiles, tcp_port="2444")
 
     assert selected is not None
     assert selected.name == "FIO-C"
-    assert selected.directed_path == str(save_c / "DIRECTED.TXT")
+    assert selected.directed_path == str(data_root / "DIRECTED.TXT")
     assert select_js8call_file_profile(profiles) is None
     fallback_selected = select_js8call_file_profile(profiles, tcp_port="2445", profile_name="FIO-C")
     assert fallback_selected is not None
@@ -614,8 +620,9 @@ def test_js8call_file_profile_selection_falls_back_to_name_when_port_drifted(tmp
     save_c = tmp_path / "fio-c"
     save_b.mkdir()
     save_c.mkdir()
-    (save_b / "DIRECTED.TXT").write_text("b\n", encoding="utf-8")
-    (save_c / "DIRECTED.TXT").write_text("c\n", encoding="utf-8")
+    data_root = tmp_path / ".local" / "share" / "JS8Call"
+    data_root.mkdir(parents=True)
+    (data_root / "DIRECTED.TXT").write_text("application instance\n", encoding="utf-8")
     ini_path = tmp_path / "JS8Call.ini"
     ini_path.write_text(
         "\n".join(
@@ -632,12 +639,12 @@ def test_js8call_file_profile_selection_falls_back_to_name_when_port_drifted(tmp
         encoding="utf-8",
     )
 
-    profiles = discover_js8call_file_profiles(ini_path=ini_path)
+    profiles = discover_js8call_file_profiles(ini_path=ini_path, platform="Linux", home=tmp_path)
     selected = select_js8call_file_profile(profiles, tcp_port="2243", profile_name="FIO-B")
 
     assert selected is not None
     assert selected.name == "FIO-B"
-    assert selected.directed_path == str(save_b / "DIRECTED.TXT")
+    assert selected.directed_path == str(data_root / "DIRECTED.TXT")
 
 
 def test_js8call_file_profile_selection_prefers_exact_name_over_conflicting_port(tmp_path) -> None:
@@ -645,8 +652,9 @@ def test_js8call_file_profile_selection_prefers_exact_name_over_conflicting_port
     save_b = tmp_path / "fio-b"
     save_a.mkdir()
     save_b.mkdir()
-    (save_a / "DIRECTED.TXT").write_text("a\n", encoding="utf-8")
-    (save_b / "DIRECTED.TXT").write_text("b\n", encoding="utf-8")
+    data_root = tmp_path / ".local" / "share" / "JS8Call"
+    data_root.mkdir(parents=True)
+    (data_root / "DIRECTED.TXT").write_text("application instance\n", encoding="utf-8")
     ini_path = tmp_path / "JS8Call.ini"
     ini_path.write_text(
         "\n".join(
@@ -663,13 +671,13 @@ def test_js8call_file_profile_selection_prefers_exact_name_over_conflicting_port
         encoding="utf-8",
     )
 
-    profiles = discover_js8call_file_profiles(ini_path=ini_path)
+    profiles = discover_js8call_file_profiles(ini_path=ini_path, platform="Linux", home=tmp_path)
     selected = select_js8call_file_profile(profiles, tcp_port="2443", profile_name="FIO-A")
 
     assert selected is not None
     assert selected.name == "FIO-A"
     assert selected.tcp_server_port == "2442"
-    assert selected.directed_path == str(save_a / "DIRECTED.TXT")
+    assert selected.directed_path == str(data_root / "DIRECTED.TXT")
 
 
 def test_js8call_file_profile_selection_does_not_use_partial_name_when_port_drifted(tmp_path) -> None:
@@ -698,8 +706,9 @@ def test_js8call_file_profile_selection_uses_name_when_port_matches_multiple_pro
     save_b = tmp_path / "b"
     default_save.mkdir()
     save_b.mkdir()
-    (default_save / "DIRECTED.TXT").write_text("default\n", encoding="utf-8")
-    (save_b / "DIRECTED.TXT").write_text("b\n", encoding="utf-8")
+    data_root = tmp_path / ".local" / "share" / "JS8Call"
+    data_root.mkdir(parents=True)
+    (data_root / "DIRECTED.TXT").write_text("application instance\n", encoding="utf-8")
     ini_path = tmp_path / "JS8Call.ini"
     ini_path.write_text(
         "\n".join(
@@ -716,12 +725,12 @@ def test_js8call_file_profile_selection_uses_name_when_port_matches_multiple_pro
         encoding="utf-8",
     )
 
-    profiles = discover_js8call_file_profiles(ini_path=ini_path)
+    profiles = discover_js8call_file_profiles(ini_path=ini_path, platform="Linux", home=tmp_path)
     selected = select_js8call_file_profile(profiles, tcp_port="2443", profile_name="FIO-B")
 
     assert selected is not None
     assert selected.name == "FIO-B"
-    assert selected.directed_path == str(save_b / "DIRECTED.TXT")
+    assert selected.directed_path == str(data_root / "DIRECTED.TXT")
     assert select_js8call_file_profile(profiles, tcp_port="2443") is None
 
 
@@ -763,14 +772,33 @@ def test_default_js8call_ini_paths_include_named_macos_instances(tmp_path) -> No
     assert all("*" not in str(path) for path in paths)
 
 
+def test_default_js8call_ini_paths_include_rig_named_linux_instances(tmp_path) -> None:
+    config_dir = tmp_path / ".config"
+    config_dir.mkdir(parents=True)
+    subspace_named = config_dir / "JS8Call-MOBL2.ini"
+    improved_named = config_dir / "JS8Call - field-radio.ini"
+    unrelated = config_dir / "Unrelated.ini"
+    for path in (subspace_named, improved_named, unrelated):
+        path.write_text("[Configuration]\n", encoding="utf-8")
+
+    paths = default_js8call_ini_paths(platform="Linux", home=tmp_path)
+
+    assert subspace_named in paths
+    assert improved_named in paths
+    assert unrelated not in paths
+    assert all("*" not in str(path) for path in paths)
+
+
 def test_js8call_file_profile_labels_are_operator_readable_for_supported_variants(tmp_path) -> None:
     named = tmp_path / "JS8Call - fio-b.ini"
+    subspace_named = tmp_path / "JS8Call-MOBL2.ini"
     improved = tmp_path / "JS8Call-improved.ini"
     subspace = tmp_path / "Subspace.ini"
     js8_subspace = tmp_path / "JS8Call Subspace.ini"
     profile = discover_js8call_file_profiles(ini_path=named)
 
     assert js8call_ini_family_label(named) == "JS8Call fio-b"
+    assert js8call_ini_family_label(subspace_named) == "JS8Call MOBL2"
     assert js8call_ini_family_label(improved) == "JS8Call-improved"
     assert js8call_ini_family_label(subspace) == "JS8Call Subspace"
     assert js8call_ini_family_label(js8_subspace) == "JS8Call Subspace"
@@ -794,7 +822,9 @@ def test_autoconfig_proposal_includes_default_js8_file_profiles(tmp_path, monkey
     home = tmp_path / "home"
     save_dir = home / "Radio" / "JS8Call" / "FIO-C"
     save_dir.mkdir(parents=True)
-    directed = save_dir / "DIRECTED.TXT"
+    data_root = home / "Library" / "Application Support" / "JS8Call"
+    data_root.mkdir(parents=True)
+    directed = data_root / "DIRECTED.TXT"
     directed.write_text("directed traffic\n", encoding="utf-8")
     ini_path = home / "Library" / "Preferences" / "JS8Call.ini"
     ini_path.parent.mkdir(parents=True)

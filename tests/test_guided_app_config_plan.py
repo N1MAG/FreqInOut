@@ -127,7 +127,10 @@ def test_guided_external_app_config_plan_describes_js8_profile_and_ports(tmp_pat
     assert [action.instance_name for action in js8_actions] == ["fio-a", "fio-b"]
     assert js8_actions[0].summary == "Prepare JS8Call profile fio-a with FLRig 127.0.0.1:12345 and API port 2442."
     assert js8_actions[0].details["executable_path"] == "/apps/js8call"
-    assert js8_actions[0].details["directed_path"].endswith("managed-instances/fio-a/js8call/DIRECTED.TXT")
+    assert js8_actions[0].details["directed_path"].endswith("DIRECTED.TXT")
+    assert js8_actions[0].details["directed_path"].startswith(js8_actions[0].details["application_data_root"])
+    assert js8_actions[0].details["save_dir"] != js8_actions[0].details["application_data_root"]
+    assert js8_actions[0].details["rig_name"]
     assert js8_actions[1].details["flrig_port"] == "12346"
     assert js8_actions[1].details["tcp_port"] == "2443"
     assert "backup of the existing JS8Call.ini" in " ".join(js8_actions[0].notes)

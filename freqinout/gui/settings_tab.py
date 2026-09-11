@@ -265,6 +265,7 @@ from freqinout.core.multi_radio_store import (
     rf_guard_mode_label,
 )
 from freqinout.core.multi_rig_guardrails import MultiRigGuardrailWarning, collect_multi_rig_guardrail_warnings
+from freqinout.core.js8_storage import expected_storage_mode, rig_name_collision_key, storage_collisions
 from freqinout.core.multi_rig_runtime_status import (
     STARTUP_DEFERRED,
     STARTUP_EXISTING_UNMIGRATED,
@@ -6012,6 +6013,29 @@ class SettingsTab(QWidget):
         self.js8_scope_label.setWordWrap(True)
         js8_v.addWidget(self.js8_scope_label)
 
+        js8_storage_row = QHBoxLayout()
+        js8_storage_row.setSpacing(8)
+        js8_storage_row.setContentsMargins(0, 0, 0, 0)
+        js8_storage_label = QLabel("Message storage:")
+        js8_storage_label.setFixedWidth(js8_label_width)
+        js8_storage_row.addWidget(js8_storage_label)
+        self.js8_storage_state_label = QLabel("Needs verification")
+        self.js8_storage_state_label.setWordWrap(True)
+        self.js8_storage_state_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.js8_storage_state_label.setToolTip(
+            "Message storage owns JS8Call ALL.TXT, DIRECTED.TXT, and inbox.db3. "
+            "The Save folder is separate and changing it does not relocate those message files."
+        )
+        js8_storage_row.addWidget(self.js8_storage_state_label, 1)
+        self.js8_storage_review_btn = QPushButton("Review JS8 configurations")
+        self.js8_storage_review_btn.setToolTip(
+            "Review the affected radio configurations when message storage is shared or duplicated."
+        )
+        self.js8_storage_review_btn.setVisible(False)
+        self.js8_storage_review_btn.clicked.connect(self._review_js8_storage_configuration)
+        js8_storage_row.addWidget(self.js8_storage_review_btn)
+        js8_v.addLayout(js8_storage_row)
+
         js8_host_row = QHBoxLayout()
         js8_host_row.setSpacing(8)
         js8_host_row.setContentsMargins(0, 0, 0, 0)
@@ -6177,18 +6201,18 @@ class SettingsTab(QWidget):
             return w
 
         self.js8call_path_edit = QLineEdit()
-        self.js8call_path_edit.setPlaceholderText("Folder containing JS8Call")
+        self.js8call_path_edit.setPlaceholderText("JS8Call application or executable path")
         js8call_autofill_btn = self._make_contextual_autofill_button(
             "js8call_core",
             "Auto-Fill",
             "js8",
             ["path_js8call", "js8_directed_path"],
             base_edit=self.js8call_path_edit,
-            tooltip="Use the JS8Call install folder to find related JS8Call paths for the selected radio.",
+            tooltip="Use the JS8Call application or executable path to find related JS8Call paths for the selected radio.",
         )
         js8_v.addWidget(
             build_js8_path_row(
-                "JS8Call Install Folder:",
+                "JS8Call Application:",
                 self.js8call_path_edit,
                 self._choose_js8call_install_path,
                 js8call_autofill_btn,
@@ -6196,14 +6220,15 @@ class SettingsTab(QWidget):
         )
 
         self.js8_profile_edit = QLineEdit()
-        self.js8_profile_edit.setPlaceholderText("Folder containing this radio's JS8Call save files")
+        self.js8_profile_edit.setPlaceholderText("Folder used for this radio's JS8Call saved files")
         self.js8_profile_edit.setToolTip(
-            "JS8Call profile/save folder for the selected radio. FIO uses this with DIRECTED.TXT, ALL.TXT, "
-            "and inbox.db3 to keep multi-rig JS8 traffic scoped to the correct radio."
+            "Save folder (JS8Call SaveDir) for operator-saved or received transfer files. "
+            "This is separate from Message storage: changing the save folder does not relocate "
+            "ALL.TXT, DIRECTED.TXT, or inbox.db3."
         )
         js8_v.addWidget(
             build_js8_path_row(
-                "JS8Call Profile Folder:",
+                "Save folder:",
                 self.js8_profile_edit,
                 self._choose_js8_profile_path,
             )
@@ -14560,7 +14585,12 @@ class SettingsTab(QWidget):
             if not db_path:
                 return ()
             with sqlite3.connect(db_path) as conn:
-                return tuple(multi_rig_guardrail_warnings(conn))
+                messages = tuple(multi_rig_guardrail_warnings(conn))
+            return messages + tuple(
+                str(getattr(warning, "message", "") or "").strip()
+                for warning in self._js8_storage_collisions()
+                if str(getattr(warning, "message", "") or "").strip()
+            )
         except Exception as exc:
             self._last_multi_rig_guardrail_collection_error = str(exc) or exc.__class__.__name__
             log.exception("SettingsTab: failed to collect multi-rig guardrail warnings.")
@@ -14573,7 +14603,8 @@ class SettingsTab(QWidget):
             if not db_path:
                 return ()
             with sqlite3.connect(db_path) as conn:
-                return tuple(collect_multi_rig_guardrail_warnings(conn))
+                warnings = tuple(collect_multi_rig_guardrail_warnings(conn))
+            return warnings + self._js8_storage_collisions()
         except Exception as exc:
             self._last_multi_rig_guardrail_collection_error = str(exc) or exc.__class__.__name__
             log.exception("SettingsTab: failed to collect structured multi-rig guardrail warnings.")
@@ -17339,6 +17370,7 @@ class SettingsTab(QWidget):
                 )
         if hasattr(self, "js8_scope_label"):
             self.js8_scope_label.setText(scope_text)
+        self._refresh_js8_storage_ui(profile)
         if hasattr(self, "fast_light_scope_label"):
             self.fast_light_scope_label.setText(scope_text)
         if hasattr(self, "varac_scope_label"):
@@ -17351,6 +17383,146 @@ class SettingsTab(QWidget):
             self.launch_control_scope_label.setText(
                 f"{scope_text} Launch Control reviews and starts this selected radio's configured software."
             )
+
+    @staticmethod
+    def _js8_storage_display_state(profile: Optional[Mapping[str, Any]]) -> str:
+        if not isinstance(profile, Mapping):
+            return "Needs verification"
+        mode = str(profile.get("js8_storage_mode", profile.get("storage_mode", "")) or "").strip().lower()
+        variant = profile.get("js8_variant_family", profile.get("variant_family", "unknown"))
+        version = profile.get("js8_variant_version", profile.get("variant_version", ""))
+        expected_mode = expected_storage_mode(variant, version)
+        if mode == "shared" or expected_mode == "shared":
+            return "Shared"
+        evidence = str(profile.get("js8_storage_evidence", profile.get("storage_evidence", "")) or "").strip()
+        verified = evidence.startswith(("operator_confirmed", "runtime_verified")) or bool(
+            str(profile.get("js8_storage_verified_utc", profile.get("storage_verified_utc", "")) or "").strip()
+        )
+        rig_name = str(profile.get("js8_rig_name", profile.get("rig_name", "")) or "").strip()
+        if (mode == "rig_scoped" or (not mode and expected_mode == "rig_scoped")) and verified:
+            return f"Isolated · {rig_name or 'default'}"
+        return "Needs verification"
+
+    @classmethod
+    def _js8_storage_detail_text(cls, profile: Optional[Mapping[str, Any]]) -> str:
+        if not isinstance(profile, Mapping):
+            return (
+                "Message storage needs verification before launch. Review the JS8Call variant, rig name, "
+                "and application-data root; do not run concurrent local instances until verified."
+            )
+        root = str(profile.get("js8_message_storage_root", profile.get("application_data_root", "")) or "").strip() or "not resolved"
+        state = cls._js8_storage_display_state(profile)
+        mode = "shared" if state == "Shared" else "rig_scoped" if state.startswith("Isolated") else "unverified"
+        if mode == "shared":
+            consequence = "Only one local Subspace instance is supported because its message files are shared."
+        elif mode == "rig_scoped":
+            consequence = (
+                "Concurrent local launch requires a stable unique --rig-name; API port, MultiSettings name, "
+                "and Save folder do not isolate message files."
+            )
+        else:
+            consequence = "Do not run concurrent local instances until FIO verifies this message-storage namespace."
+        return (
+            f"Message storage root: {root}. {consequence} "
+            "The Save folder is separate; changing it does not relocate ALL.TXT, DIRECTED.TXT, or inbox.db3."
+        )
+
+    def _js8_storage_collisions(self) -> tuple[MultiRigGuardrailWarning, ...]:
+        instances = []
+        rigs: Dict[str, List[tuple[int, str, str]]] = {}
+        for profile in getattr(self, "device_profiles", ()) or ():
+            if not isinstance(profile, Mapping) or not self._radio_software_enabled(profile, "js8call"):
+                continue
+            if int(profile.get("runtime_active", 0) or 0) != 1:
+                continue
+            host = str(profile.get("js8_host", "127.0.0.1") or "127.0.0.1").strip().lower()
+            if host not in {"127.0.0.1", "localhost", "::1"}:
+                continue
+            radio_id = int(profile.get("id", 0) or 0)
+            radio_name = self._profile_display_name(dict(profile))
+            rig_name = str(profile.get("js8_rig_name", profile.get("rig_name", "")) or "").strip()
+            if rig_name:
+                try:
+                    rigs.setdefault(rig_name_collision_key(rig_name), []).append((radio_id, radio_name, rig_name))
+                except ValueError:
+                    pass
+            root = str(profile.get("js8_message_storage_root", profile.get("application_data_root", "")) or "").strip()
+            if not root:
+                continue
+            instances.append(
+                {
+                    "id": radio_id,
+                    "radio_name": radio_name,
+                    "application_data_root": root,
+                }
+            )
+        warnings = []
+        for collision in storage_collisions(instances):
+            names = tuple(collision.labels)
+            warnings.append(
+                MultiRigGuardrailWarning(
+                    warning_type="duplicate_js8_message_storage_root",
+                    resource_type="JS8Call message-storage root",
+                    resource_value=collision.canonical_root,
+                    affected_radio_ids=tuple(int(item or 0) for item in collision.instance_ids),
+                    affected_radio_names=names,
+                    severity="warning",
+                    message=(
+                        f"JS8Call message storage is shared by {', '.join(names)}. "
+                        "Review both radio configurations before launching concurrent local instances."
+                    ),
+                )
+            )
+        for rows in rigs.values():
+            if len(rows) < 2:
+                continue
+            names = tuple(row[1] for row in rows)
+            warnings.append(
+                MultiRigGuardrailWarning(
+                    warning_type="duplicate_js8_rig_name",
+                    resource_type="JS8Call rig name",
+                    resource_value=rows[0][2],
+                    affected_radio_ids=tuple(row[0] for row in rows),
+                    affected_radio_names=names,
+                    severity="warning",
+                    message=(
+                        f"JS8Call rig name '{rows[0][2]}' is used by {', '.join(names)}. "
+                        "Review both radio configurations before launching concurrent local instances."
+                    ),
+                )
+            )
+        return tuple(warnings)
+
+    def _refresh_js8_storage_ui(self, profile: Optional[Mapping[str, Any]]) -> None:
+        state_label = getattr(self, "js8_storage_state_label", None)
+        if state_label is None:
+            return
+        state = self._js8_storage_display_state(profile)
+        state_label.setText(state)
+        state_label.setToolTip(self._js8_storage_detail_text(profile))
+        selected_id = int(profile.get("id", 0) or 0) if isinstance(profile, Mapping) else 0
+        selected_collision = next(
+            (
+                warning
+                for warning in self._js8_storage_collisions()
+                if selected_id in tuple(getattr(warning, "affected_radio_ids", ()) or ())
+            ),
+            None,
+        )
+        review_btn = getattr(self, "js8_storage_review_btn", None)
+        if review_btn is not None:
+            review_btn.setVisible(selected_collision is not None)
+            review_btn.setEnabled(selected_collision is not None)
+            review_btn.setToolTip(
+                str(getattr(selected_collision, "message", "") or "Review affected radio configurations.")
+            )
+
+    def _review_js8_storage_configuration(self) -> None:
+        if self._current_multi_rig_guardrail_details():
+            self._review_device_profile_guardrail_conflicts()
+            return
+        profile = self._selected_software_radio_profile()
+        self._focus_guardrail_conflict(int(profile.get("id", 0) or 0) if isinstance(profile, Mapping) else 0, "js8_section_group")
 
     def _refresh_radio_context_labels(self) -> None:
         self._refresh_software_scope_labels()
@@ -17368,6 +17540,7 @@ class SettingsTab(QWidget):
             "js8_host": str(profile.get("js8_host", "") or "").strip() or "127.0.0.1",
             "js8_port": str(profile.get("js8_port", "") or "2442"),
             "js8_offset_hz": str(profile.get("js8_offset_hz", 0) or 0),
+            "js8_profile_path": str(profile.get("js8_profile_path", "") or "").strip(),
             "js8_directed_path": str(profile.get("js8_directed_path", "") or "").strip(),
             "js8_forms_path": str(profile.get("js8_forms_path", "") or "").strip(),
             "path_js8call": str(profile.get("js8_install_path", "") or "").strip(),
@@ -17454,6 +17627,7 @@ class SettingsTab(QWidget):
             "js8_host": self.js8_host_edit.text().strip() or "127.0.0.1",
             "js8_port": self.js8_port_edit.text().strip() or "2442",
             "js8_offset_hz": self.js8_offset_edit.text().strip() or "0",
+            "js8_profile_path": self.js8_profile_edit.text().strip(),
             "js8_directed_path": self.js8_directed_edit.text().strip(),
             "js8_forms_path": self.js8_forms_edit.text().strip(),
             "path_js8call": self.js8call_path_edit.text().strip(),
@@ -17548,6 +17722,7 @@ class SettingsTab(QWidget):
             self.js8_host_edit.setText(str(state.get("js8_host", "") or "").strip() or "127.0.0.1")
             self.js8_port_edit.setText(str(state.get("js8_port", "") or "2442"))
             self.js8_offset_edit.setText(str(coerce_js8_offset_hz(state.get("js8_offset_hz", ""))))
+            self.js8_profile_edit.setText(str(state.get("js8_profile_path", "") or ""))
             self.js8_directed_edit.setText(str(state.get("js8_directed_path", "") or ""))
             self.js8_forms_edit.setText(str(state.get("js8_forms_path", "") or ""))
             self.js8call_path_edit.setText(str(state.get("path_js8call", "") or "").strip())
@@ -17846,7 +18021,7 @@ class SettingsTab(QWidget):
                     "host": _txt("js8_host", "127.0.0.1") or "127.0.0.1",
                     "port": _num("js8_port", 2442),
                     "offset_hz": _num("js8_offset_hz", coerce_js8_offset_hz(0)),
-                    "profile_path": str(profile.get("js8_profile_path", "") or "").strip(),
+                    "profile_path": _txt("js8_profile_path", str(profile.get("js8_profile_path", "") or "").strip()),
                     "directed_path": _txt("js8_directed_path"),
                     "forms_path": _txt("js8_forms_path"),
                     "install_path": _txt("path_js8call"),
@@ -21793,7 +21968,7 @@ class SettingsTab(QWidget):
 
             def _browse() -> None:
                 start = edit.text().strip() or str(Path.home())
-                if mode == "folder":
+                if mode == "folder" or (mode == "app" and platform.system() == "Darwin"):
                     chosen = QFileDialog.getExistingDirectory(self, title, start)
                 else:
                     chosen, _selected_filter = QFileDialog.getOpenFileName(self, title, start, file_filter)
@@ -22431,7 +22606,11 @@ class SettingsTab(QWidget):
         _add_form_row(connection_form, "JS8Call TCP:", js8_wrap, "Host and port for the JS8Call TCP API for this radio.")
 
         js8_install_edit = QLineEdit(str((existing or {}).get("js8_install_path", "") or ""))
-        js8_install_wrap = _make_browse_row(js8_install_edit, title="Select JS8Call app", mode="folder")
+        js8_install_wrap = _make_browse_row(
+            js8_install_edit,
+            title="Select JS8Call application or executable",
+            mode="app",
+        )
         _add_form_row(connection_form, "JS8Call App:", js8_install_wrap, "Optional JS8Call executable or app path associated with this radio.")
 
         js8_profile_edit = QLineEdit(str((existing or {}).get("js8_profile_path", "") or ""))
@@ -22800,7 +22979,7 @@ class SettingsTab(QWidget):
                     self,
                     f"Select {app_label} executable",
                     start,
-                    "Executables (*.exe *.bat *.cmd *.sh);;All Files (*)",
+                    "Application/executable files (*);;All Files (*)",
                 )
             if not chosen:
                 return
@@ -30984,7 +31163,15 @@ class SettingsTab(QWidget):
 
     def _choose_js8call_install_path(self):
         start = self.js8call_path_edit.text().strip() if hasattr(self, "js8call_path_edit") else ""
-        fn = QFileDialog.getExistingDirectory(self, "Select JS8Call install folder", start)
+        if platform.system() == "Darwin":
+            fn = QFileDialog.getExistingDirectory(self, "Select JS8Call application or folder", start)
+        else:
+            fn, _selected_filter = QFileDialog.getOpenFileName(
+                self,
+                "Select JS8Call executable",
+                start,
+                "Application/executable files (*);;All Files (*)",
+            )
         if not fn:
             return
         self.js8call_path_edit.setText(fn)

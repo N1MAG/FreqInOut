@@ -205,6 +205,26 @@ def test_rx_hub_can_start_two_native_api_endpoints() -> None:
         server_b.stop()
 
 
+def test_rx_hub_bounds_native_events_and_discards_improved_tx_frames() -> None:
+    QCoreApplication.instance() or QCoreApplication([])
+    hub = JS8RxHub.instance("127.0.0.1", 29998)
+    try:
+        hub._on_api_message({"type": "TX.FRAME", "value": "tones", "params": {"TONES": "1,2,3"}})
+        for index in range(2055):
+            hub._on_api_message({"type": "RX.DIRECTED", "value": str(index), "params": {}})
+
+        stats = hub.queue_stats()
+        assert stats == {
+            "queued": 2048,
+            "capacity": 2048,
+            "overflow_dropped": 7,
+            "disposable_dropped": 1,
+        }
+        assert hub._api_queue.get_nowait()["value"] == "7"
+    finally:
+        JS8RxHub.shutdown_all()
+
+
 def test_rx_hub_recreates_deleted_qtimer_on_start(monkeypatch) -> None:
     app = QCoreApplication.instance() or QCoreApplication([])
     hub = JS8RxHub.instance("127.0.0.1", 29999)
@@ -331,6 +351,37 @@ def test_native_client_collects_station_closing_event() -> None:
     finally:
         client.stop()
         server.stop()
+
+
+def test_native_client_bounds_unconsumed_push_event_backlog_without_blocking_listeners() -> None:
+    client = JS8ApiClient(JS8ApiEndpoint("127.0.0.1", 2442), auto_reconnect=False)
+    seen: List[str] = []
+    client.add_listener(lambda message: seen.append(message.value))
+
+    for index in range(2055):
+        client._handle_message(JS8ApiMessage(type="RX.ACTIVITY", value=str(index), received_ts=time.time()))
+
+    snapshot = client.status_snapshot()
+    queued = client.drain_events(limit=3000)
+    assert snapshot.queued_event_count == 2048
+    assert len(seen) == 2055
+    assert queued[0].value == "7"
+    assert queued[-1].value == "2054"
+
+
+def test_native_client_surfaces_subspace_tx_refusal_without_delaying_legacy_send() -> None:
+    client = JS8ApiClient(JS8ApiEndpoint("127.0.0.1", 2442), auto_reconnect=False)
+
+    client._handle_message(
+        JS8ApiMessage(
+            type="TX.SEND_MESSAGE",
+            params={"_ID": -1, "REFUSED": True, "REASON": "auto_route_active"},
+            received_ts=time.time(),
+        )
+    )
+
+    assert client.last_error == "tx_refused:auto_route_active"
+    assert client.get_event_nowait().type == "TX.SEND_MESSAGE"
 
 
 def test_native_client_station_closing_drains_pending_request() -> None:

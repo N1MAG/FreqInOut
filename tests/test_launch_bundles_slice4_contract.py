@@ -16,6 +16,9 @@ import pytest
 from freqinout.core.config_backup import ConfigBackupItem, ConfigBackupResult
 from freqinout.core.launch_bundle_store import LaunchBundleStore
 from freqinout.core.station_launch_planner import LaunchPlan, PlannedInstance, StationLaunchPlanner
+from freqinout.core.launch_orchestrator import LaunchOrchestrator
+from freqinout.core import launch_orchestrator as launch_module
+from freqinout.core import js8_storage as js8_storage_module
 
 
 def _item(
@@ -334,8 +337,8 @@ def test_startup_planner_deduplicates_exact_shared_identity() -> None:
 
 def test_startup_planner_keeps_distinct_js8_ports_as_separate_instances() -> None:
     profiles = [
-        {"id": 1, "name": "Alpha", "runtime_active": 1, "launch_enabled": True, "js8_port": 2442},
-        {"id": 2, "name": "Bravo", "runtime_active": 1, "launch_enabled": True, "js8_port": 2443},
+        {"id": 1, "name": "Alpha", "runtime_active": 1, "launch_enabled": True, "js8_port": 2442, "js8_instance_system_key": "js8-alpha", "js8_instance_name": "JS8 Alpha"},
+        {"id": 2, "name": "Bravo", "runtime_active": 1, "launch_enabled": True, "js8_port": 2443, "js8_instance_system_key": "js8-bravo", "js8_instance_name": "JS8 Bravo"},
     ]
     planner = StationLaunchPlanner()
     plan = planner.plan_startup(
@@ -350,6 +353,36 @@ def test_startup_planner_keeps_distinct_js8_ports_as_separate_instances() -> Non
     assert len({instance.instance_identity for instance in plan.instances}) == 2
     assert {instance.launch_path_override for instance in plan.instances} == {"/apps/js8call"}
     assert all(len(instance.radio_ids) == 1 for instance in plan.instances)
+
+
+def test_startup_planner_blocks_multiple_local_subspace_instances_with_shared_data() -> None:
+    profiles = [
+        {"id": 1, "name": "Alpha", "runtime_active": 1, "js8_port": 2442, "js8_instance_system_key": "js8-alpha", "js8_instance_name": "JS8 Alpha"},
+        {"id": 2, "name": "Bravo", "runtime_active": 1, "js8_port": 2443, "js8_instance_system_key": "js8-bravo", "js8_instance_name": "JS8 Bravo"},
+    ]
+    bundles = {
+        1: {"launch_enabled": True, "items": [_item("JS8Call", path="/usr/bin/js8call-subspace")]},
+        2: {"launch_enabled": True, "items": [_item("JS8Call", path="/usr/bin/js8call-subspace")]},
+    }
+
+    with pytest.raises(ValueError, match="one shared local JS8Call message store"):
+        StationLaunchPlanner().plan_startup(profiles, bundles)
+
+
+def test_startup_planner_allows_one_scoped_subspace_instance() -> None:
+    profiles = [
+        {"id": 1, "name": "Alpha", "runtime_active": 1, "js8_port": 2442, "js8_instance_system_key": "js8-alpha", "js8_instance_name": "JS8 Alpha"},
+        {"id": 2, "name": "Bravo", "runtime_active": 1, "js8_port": 2443, "js8_instance_system_key": "js8-bravo", "js8_instance_name": "JS8 Bravo"},
+    ]
+    bundles = {
+        1: {"launch_enabled": True, "items": [_item("JS8Call", path="/usr/bin/js8call-subspace")]},
+        2: {"launch_enabled": True, "items": [_item("JS8Call", path="/usr/bin/js8call-subspace")]},
+    }
+
+    plan = StationLaunchPlanner().plan_startup(profiles, bundles, scope_radio_id=1)
+
+    assert len(plan.instances) == 1
+    assert plan.instances[0].radio_names == ("Alpha",)
 
 
 def test_startup_planner_keeps_distinct_flrig_endpoints_and_varac_commands() -> None:
@@ -382,7 +415,7 @@ def test_startup_planner_keeps_distinct_flrig_endpoints_and_varac_commands() -> 
 def test_startup_planner_scope_limits_to_selected_radio() -> None:
     profiles = [
         {"id": 1, "name": "Alpha", "runtime_active": 1, "launch_enabled": True},
-        {"id": 2, "name": "Bravo", "runtime_active": 1, "launch_enabled": True},
+        {"id": 2, "name": "Bravo", "runtime_active": 1, "launch_enabled": True, "js8_instance_system_key": "js8-bravo", "js8_instance_name": "JS8 Bravo"},
     ]
     bundles = {
         1: {"launch_enabled": True, "items": [_item("CommStat", path="/apps/a/commstat")]},
@@ -479,3 +512,175 @@ def test_executor_requires_dependency_success_for_every_shared_radio() -> None:
     ]
 
     assert orchestrator._blocked_dependency_for(orchestrator._queue[-1]) == "JS8Call"
+
+
+def test_js8_planner_manages_stable_rig_names_and_storage_preview_without_numeric_ids(tmp_path: Path) -> None:
+    profiles = [
+        {"id": 91, "name": "Alpha", "runtime_active": 1, "js8_port": 2442, "js8_instance_system_key": "field-alpha", "js8_instance_name": "Alpha Instance", "js8_variant_family": "js8call", "js8_variant_version": "2.2.0", "js8_message_storage_root": str(tmp_path / "alpha"), "js8_storage_evidence": "operator_confirmed:fixture"},
+        {"id": 4, "name": "Bravo", "runtime_active": 1, "js8_port": 2443, "js8_instance_system_key": "field-bravo", "js8_instance_name": "Bravo Instance", "js8_variant_family": "js8call_improved", "js8_variant_version": "3.0.3", "js8_message_storage_root": str(tmp_path / "bravo"), "js8_storage_evidence": "operator_confirmed:fixture"},
+    ]
+    bundles = {
+        91: {"launch_enabled": True, "items": [_item("JS8Call", path="/apps/JS8Call")]},
+        4: {"launch_enabled": True, "items": [_item("JS8Call", path="/apps/JS8Call")]},
+    }
+
+    queue = StationLaunchPlanner().plan_startup(profiles, bundles).queue()
+
+    assert [row["launch_arguments"][0] for row in queue] == ["--rig-name", "--rig-name"]
+    assert all("91" not in str(row["rig_name"]) for row in queue)
+    assert len({row["rig_name"] for row in queue}) == 2
+    assert {row["application_data_root"] for row in queue} == {str(tmp_path / "alpha"), str(tmp_path / "bravo")}
+
+
+def test_js8_command_override_preserves_one_rig_name_and_rejects_duplicates() -> None:
+    profile = {"id": 1, "name": "Alpha", "runtime_active": 1, "js8_instance_system_key": "field-alpha", "js8_instance_name": "Alpha Instance"}
+    bundle = {1: {"launch_enabled": True, "items": [_item("JS8Call", command="/apps/JS8Call --rig-name 'Manual Alpha'")]}}
+
+    row = StationLaunchPlanner().plan_startup([profile], bundle).queue()[0]
+    assert row["rig_name"] == "Manual Alpha"
+    assert row["rig_name_source"] == "command_override"
+    assert row["launch_arguments"] == []
+
+    duplicate = {1: {"launch_enabled": True, "items": [_item("JS8Call", command="/apps/JS8Call -r alpha --rig-name bravo")]}}
+    with pytest.raises(ValueError, match="duplicate or conflicting"):
+        StationLaunchPlanner().plan_startup([profile], duplicate)
+
+
+def test_js8_changed_rig_name_does_not_reuse_prior_verified_storage_root(tmp_path: Path) -> None:
+    prior_root = tmp_path / "prior-rig"
+    profile = {
+        "id": 1,
+        "name": "Alpha",
+        "runtime_active": 1,
+        "js8_port": 2442,
+        "js8_instance_system_key": "field-alpha",
+        "js8_instance_name": "Alpha Instance",
+        "js8_variant_family": "js8call",
+        "js8_variant_version": "2.2.0",
+        "js8_rig_name": "prior",
+        "js8_message_storage_root": str(prior_root),
+        "js8_storage_evidence": "runtime_verified:message_files",
+    }
+    bundle = {
+        1: {
+            "launch_enabled": True,
+            "items": [_item("JS8Call", command="/apps/JS8Call --rig-name replacement")],
+        }
+    }
+
+    row = StationLaunchPlanner().plan_startup([profile], bundle).queue()[0]
+
+    assert row["rig_name"] == "replacement"
+    assert row["application_data_root"] != str(prior_root)
+    assert str(row["application_data_root"]).endswith("JS8Call - replacement")
+
+
+def test_subspace_specific_launch_target_conservatively_uses_shared_root() -> None:
+    profile = {
+        "id": 1,
+        "name": "Alpha",
+        "runtime_active": 1,
+        "js8_port": 2442,
+        "js8_instance_system_key": "field-alpha",
+        "js8_instance_name": "Alpha Instance",
+        "js8_variant_family": "unknown",
+    }
+    bundle = {
+        1: {
+            "launch_enabled": True,
+            "items": [_item("JS8Call", path="/usr/bin/js8call-subspace")],
+        }
+    }
+
+    row = StationLaunchPlanner().plan_startup([profile], bundle).queue()[0]
+
+    assert row["expected_storage_mode"] == "shared"
+    assert row["storage_mode"] == "shared"
+    assert str(row["application_data_root"]).endswith("JS8Call")
+
+
+def test_js8_launch_planning_does_not_probe_filesystem_message_evidence(monkeypatch) -> None:
+    monkeypatch.setattr(
+        js8_storage_module,
+        "_has_message_evidence",
+        lambda _path: (_ for _ in ()).throw(AssertionError("launch preview performed filesystem I/O")),
+    )
+    profile = {
+        "id": 1,
+        "name": "Alpha",
+        "runtime_active": 1,
+        "js8_instance_system_key": "field-alpha",
+        "js8_instance_name": "Alpha Instance",
+        "js8_variant_family": "js8call",
+        "js8_variant_version": "2.2.0",
+    }
+    bundle = {1: {"launch_enabled": True, "items": [_item("JS8Call", path="/apps/JS8Call")]}}
+
+    row = StationLaunchPlanner().plan_startup([profile], bundle).queue()[0]
+
+    assert row["application_data_root"]
+
+
+def test_js8_planner_blocks_duplicate_rigs_and_rig_scoped_storage_roots(tmp_path: Path) -> None:
+    base = {"runtime_active": 1, "js8_variant_family": "js8call", "js8_variant_version": "2.2.0", "js8_storage_evidence": "operator_confirmed:fixture"}
+    duplicate_rigs = [
+        {**base, "id": 1, "name": "Alpha", "js8_port": 2442, "js8_instance_system_key": "alpha", "js8_message_storage_root": str(tmp_path / "a")},
+        {**base, "id": 2, "name": "Bravo", "js8_port": 2443, "js8_instance_system_key": "bravo", "js8_message_storage_root": str(tmp_path / "b")},
+    ]
+    same_rig_bundles = {
+        1: {"launch_enabled": True, "items": [_item("JS8Call", command="/apps/JS8Call -r shared")]},
+        2: {"launch_enabled": True, "items": [_item("JS8Call", command="/apps/JS8Call --rig-name shared")]},
+    }
+    with pytest.raises(ValueError, match="same effective rig name"):
+        StationLaunchPlanner().plan_startup(duplicate_rigs, same_rig_bundles)
+
+    same_root_profiles = [
+        {**base, "id": 1, "name": "Alpha", "js8_port": 2442, "js8_instance_system_key": "alpha", "js8_message_storage_root": str(tmp_path / "shared")},
+        {**base, "id": 2, "name": "Bravo", "js8_port": 2443, "js8_instance_system_key": "bravo", "js8_message_storage_root": str(tmp_path / "shared")},
+    ]
+    managed_bundles = {
+        1: {"launch_enabled": True, "items": [_item("JS8Call", path="/apps/JS8Call")]},
+        2: {"launch_enabled": True, "items": [_item("JS8Call", path="/apps/JS8Call")]},
+    }
+    with pytest.raises(ValueError, match="same message-storage root"):
+        StationLaunchPlanner().plan_startup(same_root_profiles, managed_bundles)
+
+
+def test_js8_bundle_command_appends_planned_arguments_after_bundle_resolution(tmp_path: Path, monkeypatch) -> None:
+    executable = tmp_path / "JS8Call.app" / "Contents" / "MacOS" / "JS8Call"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    monkeypatch.setattr(launch_module.platform, "system", lambda: "Darwin")
+
+    command, _description = orchestrator._resolve_launch_command({"name": "JS8Call", "launch_path_override": str(tmp_path / "JS8Call.app"), "launch_arguments": ["--rig-name", "field-alpha"]})
+
+    assert command == [str(executable), "--rig-name", "field-alpha"]
+
+
+def test_js8_preview_queue_exposes_the_exact_effective_command() -> None:
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    plan = LaunchPlan(
+        trigger="startup",
+        scope_radio_id=None,
+        instances=(
+            PlannedInstance(
+                name="JS8Call",
+                instance_key="JS8Call",
+                instance_identity="alpha",
+                radio_ids=(1,),
+                radio_names=("Alpha",),
+                launch_command_override="/apps/JS8Call",
+                launch_arguments=("--rig-name", "field-alpha"),
+                rig_name="field-alpha",
+                application_data_root="/storage/field-alpha",
+                storage_mode="rig_scoped",
+            ),
+        ),
+    )
+
+    queue = orchestrator._with_effective_launch_preview(plan).queue()
+
+    assert queue[0]["effective_command"] == ["/apps/JS8Call", "--rig-name", "field-alpha"]
+    assert queue[0]["rig_name"] == "field-alpha"
+    assert queue[0]["application_data_root"] == "/storage/field-alpha"

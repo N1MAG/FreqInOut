@@ -3094,3 +3094,78 @@ thread leak, and a 12.845 ms maximum projection transaction. The external Linux
 qualification boundary is recorded in
 `message_ingest_projection_mip5_evidence_2026-09-10.md`. No production database
 or authoritative source was modified.
+
+## 2026-09-10 — Modern JS8Call variant compatibility
+
+Status: all JSV-S1 through JSV-S4 implementation gates passed; Linux
+package/multi-instance hardware confirmation remains external release
+qualification.
+
+FIO's JS8Call integration was reviewed against the supplied source for
+JS8Call-Improved 3.0.3 and Subspace Edition 4.1.0.478. Linux discovery and
+launch resolution now cover canonical Improved, package-installed Subspace,
+case variants, direct executables, and the Improved user-install path. Settings
+uses application/executable language and generated profiles enable both the TCP
+listener and command acceptance. Bounded configuration discovery also includes
+Improved and Subspace rig-named settings-file conventions on Linux, macOS, and
+Windows.
+
+Native millisecond timestamps are preserved, Ultra and Subspace speed values
+have stable names, the Subspace selected-call command is preferred without
+removing legacy aliases, and asynchronous Subspace send refusals are visible in
+client health. Native polling queues are bounded; the shared hub discards unused
+Improved `TX.FRAME` tone arrays and exposes bounded drop counters. Launch
+planning rejects multiple local Subspace instances because upstream currently
+shares its message store, while one radio-scoped instance remains valid.
+
+The completed storage package adds an additive, idempotent JS8 instance schema;
+stable persisted rig names; deterministic platform Qt data-root resolution;
+and separate application, settings, lock, message-storage, and SaveDir
+identities. Launch previews show the exact effective command and storage
+consequence. Duplicate local rig names, duplicate isolated roots, and multiple
+local Subspace plans fail before process launch.
+
+Runtime ingestion now owns one cursor per canonical root. Verified isolated
+roots retain radio/instance provenance, while shared and unverified file
+evidence is retained once without an invented radio attribution. Locked inbox
+reads use a short read-only timeout so another source proceeds. Bounded
+background reconciliation checks only the three known JS8 message artifacts,
+does no history scan, stays write-free when unchanged, and preserves legacy
+explicit paths and previously verified mappings.
+
+Settings now shows `Isolated · <rig>`, `Shared`, or `Needs verification`, keeps
+Save folder distinct from Message storage, and routes duplicate-root or
+duplicate-rig warnings naming both affected radios to configuration review. The
+presenter is cache/persistence-only and performs no filesystem work on the Qt
+thread.
+
+Model ownership:
+
+- High-reasoning primary model: architecture, migrations, storage resolver,
+  runtime reconciliation, provenance/concurrency, safety refinements,
+  delegated-diff review, documentation, and final integration gate.
+- `gpt-5.6-terra` high: read-only Subspace source/package/API audit.
+- `gpt-5.6-terra` high: read-only JS8Call-Improved 3.0.3 source/API audit.
+- `gpt-5.6-luna` high: JSV-S1 namespace/migration fixture tests.
+- `gpt-5.6-terra` high: JSV-S2 launch planning and exact-command implementation.
+- `gpt-5.6-terra` high: JSV-S3 provenance, lock-isolation, and restart tests.
+- `gpt-5.6-luna` high: JSV-S4 Settings storage-state/collision UI and help.
+- `gpt-5.6-terra` high: JSV-S4 additive migration and round-trip tests.
+
+No destructive migration or production data mutation is part of this work.
+The complete contract and remaining production qualification are recorded in
+`js8call_modern_variant_compatibility_spec.md`.
+
+Acceptance evidence: 568 tests passed and 27 were skipped across three clean,
+non-overlapping partitions: 196 discovery/storage/launch/status tests, 175
+native API/send/ingest/concurrency tests, and 197 Settings/UI/control tests.
+Coverage includes managed and explicit rig names, default/rig-named roots,
+symlink collisions, additive migration, legacy-file immutability, API-observed
+variant identity, exact commands, shared/unverified attribution, identical
+multi-source traffic, locked inbox isolation, restart checkpoints, native API
+framing/backpressure, UTC, speed display, selected-target compatibility,
+Subspace refusal reporting, JS8 send/Expect/FLAMP, software status, and
+radio-scoped Settings. Python compilation, HTML parsing, and `git diff --check`
+pass. No production database, external JS8 settings, or source message file was
+modified. Live Linux default/two-rig instance and single-Subspace qualification
+remains explicitly external.

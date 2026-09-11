@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Mapping, Sequence, Tuple
 
 from freqinout.core.config_autodiscovery import LOCALHOST, RadioInstanceProposal
+from freqinout.core.js8_storage import (
+    js8_application_name,
+    qt_data_root_candidates,
+    stable_managed_rig_name,
+)
 
 
 @dataclass(frozen=True)
@@ -18,6 +23,11 @@ class JS8CallManagedProfilePlan:
     save_dir: Path
     forms_dir: Path
     directed_path: Path
+    all_path: Path
+    inbox_path: Path
+    application_data_root: Path
+    rig_name: str
+    application_name: str
     flrig_host: str
     flrig_port: int
     tcp_host: str
@@ -37,6 +47,8 @@ def build_js8call_managed_profile_plans(
     grid: str = "",
     control_route: str = "flrig",
     radio_label: str = "",
+    platform: str | None = None,
+    storage_home: Path | None = None,
 ) -> Tuple[JS8CallManagedProfilePlan, ...]:
     plans = []
     route_key = str(control_route or "flrig").strip().lower()
@@ -47,12 +59,28 @@ def build_js8call_managed_profile_plans(
         profile_root = Path(config_root) / "managed-instances" / proposal.instance_name / "js8call"
         save_dir = profile_root / "save"
         forms_dir = profile_root / "forms"
-        directed_path = profile_root / "DIRECTED.TXT"
+        rig_name = stable_managed_rig_name(
+            system_key=proposal.instance_name,
+            name=proposal.name,
+        )
+        application_name = js8_application_name(rig_name)
+        application_data_root = qt_data_root_candidates(
+            application_name=application_name,
+            platform=platform,
+            home=storage_home,
+        )[0]
+        directed_path = application_data_root / "DIRECTED.TXT"
+        all_path = application_data_root / "ALL.TXT"
+        inbox_path = application_data_root / "inbox.db3"
         flrig_port = ports.get("flrig", 12345)
         tcp_port = ports.get("js8call", 2442)
         udp_port = ports.get("js8call_udp", 2242)
         settings = {
             "TCPEnabled": "true",
+            # Modern JS8Call variants separate listening from command
+            # authorization.  Without this flag they accept the socket but
+            # silently ignore FIO's API requests.
+            "AcceptTCPRequests": "true",
             "TCPServer": LOCALHOST,
             "TCPServerPort": str(tcp_port),
             "TCPMaxConnections": "2",
@@ -86,6 +114,11 @@ def build_js8call_managed_profile_plans(
                 save_dir=save_dir,
                 forms_dir=forms_dir,
                 directed_path=directed_path,
+                all_path=all_path,
+                inbox_path=inbox_path,
+                application_data_root=application_data_root,
+                rig_name=rig_name,
+                application_name=application_name,
                 flrig_host=LOCALHOST,
                 flrig_port=flrig_port,
                 tcp_host=LOCALHOST,

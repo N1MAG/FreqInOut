@@ -47,7 +47,7 @@ from freqinout.core.js8_spotter_forms import (
 from freqinout.core.message_ingest import MessageIngestor
 from freqinout.core.ingest_runtime_status import active_runtime_ingest_inventory
 from freqinout.core.js8_ncs_offsets import ncs_offset_keys_for_directed_path
-from freqinout.core.js8_send_service import send_js8_message_guarded
+from freqinout.core.js8_send_service import js8_speed_name, send_js8_message_guarded
 from freqinout.core.js8_source_context import resolve_js8_source_context
 from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.ncs_session_contract import NcsSessionSnapshot, write_ncs_session_snapshot
@@ -1382,9 +1382,7 @@ class JS8CallNetControlTab(QWidget):
                             speed_guess = self._call_last_speed.get(self._base_callsign(call_primary))
                             mode_name = ""
                             if speed_guess is not None:
-                                mode_name = {0: "Normal", 1: "Fast", 2: "Turbo", 4: "Slow"}.get(
-                                    speed_guess, str(speed_guess)
-                                )
+                                mode_name = js8_speed_name(speed_guess)
                             base_call = self._base_callsign(call_primary) if call_primary else ""
                             if base_call and self._checkins.get(base_call, {}).get("offset") is not None:
                                 offset_line = None
@@ -2869,9 +2867,7 @@ class JS8CallNetControlTab(QWidget):
                             if speed_val is not None:
                                 try:
                                     sval = int(speed_val)
-                                    mode_name = {0: "Normal", 1: "Fast", 2: "Turbo", 4: "Slow"}.get(
-                                        sval, str(speed_val)
-                                    )
+                                    mode_name = js8_speed_name(sval)
                                 except Exception:
                                     mode_name = str(speed_val)
                                 if sval is not None:

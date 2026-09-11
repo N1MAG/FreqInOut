@@ -16,6 +16,7 @@ _FIELD_LIMIT = 256
 _VALUE_LIMIT = 65536
 _DEFAULT_TIMEOUT_S = 1.5
 _RECONNECT_BACKOFF_STEPS_S = (1.0, 2.0, 5.0, 10.0)
+_DEFAULT_EVENT_QUEUE_LIMIT = 2048
 
 
 def _safe_text(value: object, *, limit: int = _VALUE_LIMIT) -> str:
@@ -224,7 +225,11 @@ class JS8ApiClient:
         self._pending: Dict[str, "queue.Queue[JS8ApiMessage]"] = {}
         self._pending_expected: Dict[str, frozenset[str]] = {}
         self._listeners: List[Callable[[JS8ApiMessage], None]] = []
-        self._events: "queue.Queue[JS8ApiMessage]" = queue.Queue()
+        # Push traffic can be continuous on busy JS8 networks.  Keep the
+        # optional polling backlog bounded; registered listeners still see
+        # each event immediately.  Dropping the oldest queued event prevents
+        # an unattended consumer from growing memory without limit.
+        self._events: "queue.Queue[JS8ApiMessage]" = queue.Queue(maxsize=_DEFAULT_EVENT_QUEUE_LIMIT)
         self._next_id = int(time.time() * 1000) % 1_000_000_000
         self.last_error: str = ""
         self.last_error_ts: float = 0.0
@@ -523,6 +528,9 @@ class JS8ApiClient:
             )
         if message.type == "API.ERROR":
             self._record_error(message.value or "API.ERROR")
+        if message.type == "TX.SEND_MESSAGE" and bool(message.params.get("REFUSED")):
+            reason = _safe_text(message.params.get("REASON") or message.value, limit=512).strip()
+            self._record_error(f"tx_refused:{reason or 'JS8Call refused the send request'}")
         msg_id = message.id
         if msg_id:
             with self._state_lock:
@@ -555,7 +563,17 @@ class JS8ApiClient:
                 except queue.Full:
                     pass
                 return
-        self._events.put(message)
+        try:
+            self._events.put_nowait(message)
+        except queue.Full:
+            try:
+                self._events.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._events.put_nowait(message)
+            except queue.Full:
+                pass
         with self._state_lock:
             listeners = list(self._listeners)
         for listener in listeners:

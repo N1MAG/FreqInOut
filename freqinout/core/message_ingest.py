@@ -39,6 +39,7 @@ from freqinout.core.message_projection_queue import ensure_source_dirty_triggers
 from freqinout.core.observation_projection import observation_from_message_intelligence
 from freqinout.core.observation_store import upsert_observation_conn
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.sqlite_utils import connect_sqlite_readonly
 from freqinout.core.traffic_actionability import configured_group_names, load_operator_traffic_context
 from freqinout.core.varac_bbs_vault import (
     flamp_transfer_index_status,
@@ -57,6 +58,53 @@ SPOTTER_STATUS_FORMS = {"104", "301", "304"}
 MCF304_EXPECTED_RESPONSES = 8
 SPOTTER_PROMPT_RE = re.compile(r"([A-Z0-9]{2})\[(.*?)\]\s*", re.IGNORECASE)
 SPOTTER_TOKEN_RE = re.compile(r"\s*#[A-Z0-9]{3,}\s*", re.IGNORECASE)
+
+
+def parse_js8_api_utc(value: object) -> tuple[str, float]:
+    """Normalize a native JS8 API UTC value to text and epoch seconds.
+
+    Subspace emits epoch milliseconds, while older JS8 API/event sources have
+    emitted epoch seconds or ``YYYY-MM-DD HH:MM:SS`` text.  This helper is
+    intentionally used only for API events; on-disk JS8 inbox timestamps keep
+    their existing file-ingest semantics.
+    """
+
+    if value is None or isinstance(value, bool):
+        return "", 0.0
+
+    if isinstance(value, (int, float)):
+        try:
+            numeric = float(value)
+        except Exception:
+            numeric = 0.0
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return "", 0.0
+        if re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)", text):
+            try:
+                numeric = float(text)
+            except Exception:
+                numeric = 0.0
+        else:
+            try:
+                dt_value = datetime.datetime.strptime(text[:19], "%Y-%m-%d %H:%M:%S").replace(
+                    tzinfo=datetime.timezone.utc
+                )
+            except Exception:
+                return "", 0.0
+            return dt_value.strftime("%Y-%m-%d %H:%M:%S"), dt_value.timestamp()
+
+    if numeric <= 0:
+        return "", 0.0
+    timestamp = numeric / 1000.0 if numeric >= 100_000_000_000 else numeric
+    try:
+        dt_value = datetime.datetime.fromtimestamp(timestamp, tz=datetime.timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return "", 0.0
+    return dt_value.strftime("%Y-%m-%d %H:%M:%S"), timestamp
+
+
 class JS8FormDecoder:
     def __init__(self, settings: SettingsManager):
         self.settings = settings
@@ -203,26 +251,25 @@ class MessageIngestor:
             self._js8_ingest_checkpoint(source_key=effective_source_key),
         )
         try:
-            conn = sqlite3.connect(inbox_path)
-            cur = conn.cursor()
-            queries = [
-                ("inbox_v1", "id, json, type, value"),
-                ("inbox_v1", "rowid as id, json, type, value"),
-                ("inbox_v1", "id, message, type, value"),
-                ("inbox_v1", "id, blob"),
-                ("inbox", "id, json, type, value"),
-                ("inbox", "rowid as id, json, type, value"),
-                ("inbox", "id, message, type, value"),
-            ]
-            rows = []
-            for table, cols in queries:
-                try:
-                    cur.execute(f"SELECT {cols} FROM {table} WHERE id > ? ORDER BY 1", (max_local_id,))
-                    rows = cur.fetchall()
-                    break
-                except Exception:
-                    rows = []
-            conn.close()
+            with connect_sqlite_readonly(inbox_path, timeout=0.10, busy_timeout_ms=100) as conn:
+                cur = conn.cursor()
+                queries = [
+                    ("inbox_v1", "id, json, type, value"),
+                    ("inbox_v1", "rowid as id, json, type, value"),
+                    ("inbox_v1", "id, message, type, value"),
+                    ("inbox_v1", "id, blob"),
+                    ("inbox", "id, json, type, value"),
+                    ("inbox", "rowid as id, json, type, value"),
+                    ("inbox", "id, message, type, value"),
+                ]
+                rows = []
+                for table, cols in queries:
+                    try:
+                        cur.execute(f"SELECT {cols} FROM {table} WHERE id > ? ORDER BY 1", (max_local_id,))
+                        rows = cur.fetchall()
+                        break
+                    except Exception:
+                        rows = []
         except Exception as e:
             log.debug("MessageIngest: JS8 ingest read failed: %s", e)
             rows = []
@@ -1159,15 +1206,9 @@ class MessageIngestor:
                     default=str,
                 ).encode("utf-8")
             ).hexdigest()
-        utc_ts = time.time()
-        raw_utc = str(params.get("UTC") or event.get("time") or "").strip()
-        if raw_utc:
-            try:
-                utc_ts = datetime.datetime.strptime(
-                    raw_utc[:19], "%Y-%m-%d %H:%M:%S"
-                ).replace(tzinfo=datetime.timezone.utc).timestamp()
-            except Exception:
-                utc_ts = time.time()
+        _utc_str, utc_ts = parse_js8_api_utc(params.get("UTC") or event.get("time"))
+        if utc_ts <= 0:
+            utc_ts = time.time()
         return {
             "q_id": query.q_id,
             "confidence": query.confidence,
@@ -1609,13 +1650,7 @@ class MessageIngestor:
         if raw_form.endswith("\u2662"):
             raw_form = raw_form[:-1].rstrip()
         token_match = re.search(r"(#[A-Z0-9]{3,})", raw_form.upper())
-        utc_str = str(params.get("UTC") or event.get("time") or "").strip()
-        utc_ts = 0.0
-        if utc_str:
-            try:
-                utc_ts = datetime.datetime.strptime(utc_str[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc).timestamp()
-            except Exception:
-                utc_ts = 0.0
+        utc_str, utc_ts = parse_js8_api_utc(params.get("UTC") or event.get("time"))
         if utc_ts <= 0:
             utc_ts = time.time()
             utc_str = datetime.datetime.fromtimestamp(utc_ts, tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -2354,15 +2389,7 @@ class MessageIngestor:
             sender = de_match.group(1).strip().upper()
         if not self._directed_js8_target_matches(dest, directed_callsigns, directed_groups):
             return None
-        utc_str = str(params.get("UTC") or event.get("time") or "").strip()
-        utc_ts = 0.0
-        if utc_str:
-            try:
-                utc_ts = datetime.datetime.strptime(utc_str[:19], "%Y-%m-%d %H:%M:%S").replace(
-                    tzinfo=datetime.timezone.utc
-                ).timestamp()
-            except Exception:
-                utc_ts = 0.0
+        utc_str, utc_ts = parse_js8_api_utc(params.get("UTC") or event.get("time"))
         if utc_ts <= 0:
             utc_ts = float(time.time())
             utc_str = datetime.datetime.fromtimestamp(utc_ts, tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -2500,9 +2527,10 @@ class MessageIngestor:
                       AND UPPER(COALESCE(to_call, ''))=UPPER(?)
                       AND COALESCE(raw_text, '')=?
                       AND ABS(COALESCE(utc_ts, 0)-?) <= 1.0
+                      AND COALESCE(source_key, '')=COALESCE(?, '')
                     LIMIT 1
                     """,
-                    (from_call, to_call, raw_text, float(utc_ts)),
+                    (from_call, to_call, raw_text, float(utc_ts), source_key),
                 ).fetchone()
                 if existing is not None:
                     conn.close()

@@ -17,15 +17,23 @@ def test_js8call_managed_profile_plans_map_each_radio_to_flrig_and_api_ports(tmp
         js8call_path="/Applications/JS8Call.app",
         callsign="n1mag",
         grid="dm79",
+        platform="Linux",
+        storage_home=tmp_path,
     )
 
     assert [plan.profile_name for plan in plans] == ["fio-a", "fio-b", "fio-c"]
     assert plans[0].executable_path == "/Applications/JS8Call.app"
     assert plans[0].config_dir == tmp_path / "fio-config" / "managed-instances" / "fio-a" / "js8call"
     assert plans[0].directed_path.name == "DIRECTED.TXT"
+    assert plans[0].directed_path.parent == tmp_path / ".local" / "share" / plans[0].application_name
+    assert plans[0].all_path.parent == plans[0].application_data_root
+    assert plans[0].inbox_path.parent == plans[0].application_data_root
+    assert len({plan.rig_name for plan in plans}) == 3
+    assert len({plan.application_data_root for plan in plans}) == 3
     assert plans[0].settings["Rig"] == "FLRig FLRig"
     assert plans[0].settings["CATNetworkPort"] == "127.0.0.1:12345"
     assert plans[0].settings["TCPServerPort"] == "2442"
+    assert plans[0].settings["AcceptTCPRequests"] == "true"
     assert plans[0].settings["UDPServerPort"] == "2242"
     assert plans[0].settings["MyCall"] == "N1MAG"
     assert plans[0].settings["MyGrid"] == "DM79"
@@ -96,6 +104,7 @@ def test_render_js8call_multisettings_preserves_existing_sections_and_updates_ma
     assert "ObscureExistingKey = keep" in rendered
     assert "CATNetworkPort = 127.0.0.1:12345" in rendered
     assert "TCPServerPort = 2442" in rendered
+    assert "AcceptTCPRequests = true" in rendered
     assert "[MultiSettings/fio-b]" in rendered
     assert "CATNetworkPort = 127.0.0.1:12346" in rendered
     assert "TCPServerPort = 2443" in rendered

@@ -59,48 +59,49 @@ def ingest_js8_messages_for_runtime_sources(
         str(profile.get("id", "") or profile.get("system_key", "") or "").strip(): profile
         for profile in profile_rows
     }
-    directed_sources_by_radio = {
-        str(source.radio_id or ""): source
-        for source in runtime_inventory.sources_for_family("js8call")
-        if source.source_type == "file" and str((source.metadata or {}).get("role", "") or "") == "directed"
-    }
     js8_count = 0
     spotter_count = 0
     spotter_inserted = 0
     labels: list[str] = []
-    for instance in js8_instances:
-        radio_id = str(instance.radio_id or "").strip()
+    sources = tuple(runtime_inventory.sources_for_family("js8call"))
+    for source in sources:
+        metadata = dict(source.metadata or {})
+        role = str(metadata.get("role", "") or "").strip().lower()
+        if role not in {"inbox", "directed"}:
+            continue
+        radio_id = str(source.radio_id or "").strip()
         profile = profiles_by_id.get(radio_id)
-        directed_source = directed_sources_by_radio.get(radio_id)
         if profile is None:
-            profile = _profile_from_instance(instance, directed_source)
-        profile_settings = RuntimeProfileSettings(profile, settings)  # type: ignore[arg-type]
-        js8_instance_id = str((instance.metadata or {}).get("js8_instance_id", "") or instance.source_id)
-        label = str(instance.label or (directed_source.label if directed_source is not None else "") or instance.source_id)
-        labels.append(label)
-        inbox_path = inbox_path_from_profile(profile) or inbox_path_for_directed_source(directed_source)
-        if inbox_path is not None:
+            candidate_ids = tuple(str(value or "").strip() for value in metadata.get("candidate_radio_ids", ()) if str(value or "").strip())
+            profile = next((profiles_by_id.get(value) for value in candidate_ids if profiles_by_id.get(value) is not None), {})
+        profile_settings = RuntimeProfileSettings(profile or {}, settings)  # type: ignore[arg-type]
+        js8_instance_id = str(metadata.get("js8_instance_id", "") or "") if radio_id else ""
+        label = str(source.label or source.source_id)
+        if label not in labels:
+            labels.append(label)
+        if role == "inbox" and source.path:
             try:
+                projection_source_key = str(source.app_instance_id or source.source_id)
                 MessageIngestor(profile_settings).ingest_js8_messages(
-                    inbox_path=inbox_path,
+                    inbox_path=Path(source.path).expanduser(),
                     source_radio_id=radio_id,
                     js8_instance_id=js8_instance_id,
-                    source_key=instance.source_id,
+                    source_key=projection_source_key,
                 )
                 js8_count += 1
             except Exception as exc:
                 log.debug("JS8 runtime messages: inbox ingest failed for %s: %s", label, exc)
-        else:
-            log.debug("JS8 runtime messages: skipping inbox ingest for %s; no source-specific inbox path", label)
-        if directed_source is None or not directed_source.path:
+            continue
+        if role != "directed" or not source.path:
             continue
         try:
+            projection_source_key = str(source.app_instance_id or source.source_id)
             inserted = MessageIngestor(profile_settings).ingest_spotter_from_directed(
-                directed_path=Path(str(directed_source.path or "")).expanduser(),
+                directed_path=Path(str(source.path or "")).expanduser(),
                 source_radio_id=radio_id,
                 js8_instance_id=js8_instance_id,
-                source_key=directed_source.source_id,
-                offset_key=f"spotter_directed_offset_{directed_source.source_id}",
+                source_key=projection_source_key,
+                offset_key=f"spotter_directed_offset_{source.source_id}",
                 evaluate_expect=evaluate_expect,
                 force_rebuild=force_rebuild,
             )

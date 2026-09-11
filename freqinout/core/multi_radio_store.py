@@ -10,6 +10,12 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.js8_defaults import coerce_js8_offset_hz
+from freqinout.core.js8_storage import (
+    STORAGE_MODES,
+    canonicalize_storage_path,
+    normalize_rig_name,
+    normalize_variant_family,
+)
 from freqinout.core.logger import log
 from freqinout.core.sqlite_utils import connect_sqlite_readonly
 from freqinout.core.multi_rig_guardrails import (
@@ -564,6 +570,16 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             inbox_path TEXT,
             forms_path TEXT,
             install_path TEXT,
+            variant_family TEXT NOT NULL DEFAULT 'unknown',
+            variant_version TEXT,
+            rig_name TEXT,
+            rig_name_source TEXT,
+            application_data_root TEXT,
+            all_path TEXT,
+            save_dir TEXT,
+            storage_mode TEXT NOT NULL DEFAULT 'unverified',
+            storage_verified_utc TEXT,
+            storage_evidence TEXT,
             spotter_launch_path TEXT,
             commstat_launch_path TEXT,
             created_utc TEXT NOT NULL,
@@ -582,6 +598,16 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             "inbox_path": "TEXT",
             "forms_path": "TEXT",
             "install_path": "TEXT",
+            "variant_family": "TEXT NOT NULL DEFAULT 'unknown'",
+            "variant_version": "TEXT",
+            "rig_name": "TEXT",
+            "rig_name_source": "TEXT",
+            "application_data_root": "TEXT",
+            "all_path": "TEXT",
+            "save_dir": "TEXT",
+            "storage_mode": "TEXT NOT NULL DEFAULT 'unverified'",
+            "storage_verified_utc": "TEXT",
+            "storage_evidence": "TEXT",
             "spotter_launch_path": "TEXT",
             "commstat_launch_path": "TEXT",
             "created_utc": "TEXT NOT NULL",
@@ -2975,8 +3001,24 @@ def _save_js8_instance_conn(conn: sqlite3.Connection, values: Mapping[str, Any])
     payload.setdefault("port", 2442)
     record_id = _coerce_optional_int(payload.get("id"))
     existing = _record_by_id(conn, "js8_instances", record_id) if record_id is not None else None
+    if not existing:
+        payload.setdefault("variant_family", "unknown")
+        payload.setdefault("storage_mode", "unverified")
     if "offset_hz" in payload or not existing:
         payload["offset_hz"] = coerce_js8_offset_hz(payload.get("offset_hz"))
+    if "variant_family" in payload or not existing:
+        payload["variant_family"] = normalize_variant_family(
+            payload.get("variant_family", "unknown"), payload.get("variant_version", "")
+        )
+    if "rig_name" in payload:
+        payload["rig_name"] = normalize_rig_name(payload.get("rig_name"))
+    if "storage_mode" in payload:
+        storage_mode = _coerce_text(payload.get("storage_mode", "unverified"), "unverified").lower()
+        if storage_mode not in STORAGE_MODES:
+            raise ValueError(f"Unsupported JS8 message storage mode: {storage_mode}")
+        payload["storage_mode"] = storage_mode
+    if "application_data_root" in payload:
+        payload["application_data_root"] = canonicalize_storage_path(payload.get("application_data_root"))
     return _save_simple_record(
         conn,
         "js8_instances",
@@ -2992,6 +3034,16 @@ def _save_js8_instance_conn(conn: sqlite3.Connection, values: Mapping[str, Any])
             "inbox_path",
             "forms_path",
             "install_path",
+            "variant_family",
+            "variant_version",
+            "rig_name",
+            "rig_name_source",
+            "application_data_root",
+            "all_path",
+            "save_dir",
+            "storage_mode",
+            "storage_verified_utc",
+            "storage_evidence",
             "spotter_launch_path",
             "commstat_launch_path",
         ),
@@ -3594,13 +3646,26 @@ def _resolve_device_profile_links_conn(conn: sqlite3.Connection, profile: Mappin
     if js8_instance_id is not None:
         js8_row = _record_by_id(conn, "js8_instances", int(js8_instance_id))
         if js8_row:
+            data["js8_instance_system_key"] = _coerce_text(js8_row.get("system_key", ""), "")
+            data["js8_instance_name"] = _coerce_text(js8_row.get("name", ""), "")
             data["js8_host"] = _coerce_text(js8_row.get("host", ""), "127.0.0.1") or "127.0.0.1"
             data["js8_port"] = _coerce_optional_int(js8_row.get("port"), 2442)
             data["js8_offset_hz"] = _coerce_optional_int(js8_row.get("offset_hz"), 0)
             data["js8_profile_path"] = _coerce_text(js8_row.get("profile_path", ""), "")
             data["js8_directed_path"] = _coerce_text(js8_row.get("directed_path", ""), "")
+            data["js8_inbox_path"] = _coerce_text(js8_row.get("inbox_path", ""), "")
             data["js8_forms_path"] = _coerce_text(js8_row.get("forms_path", ""), "")
             data["js8_install_path"] = _coerce_text(js8_row.get("install_path", ""), "")
+            data["js8_variant_family"] = _coerce_text(js8_row.get("variant_family", "unknown"), "unknown")
+            data["js8_variant_version"] = _coerce_text(js8_row.get("variant_version", ""), "")
+            data["js8_rig_name"] = _coerce_text(js8_row.get("rig_name", ""), "")
+            data["js8_rig_name_source"] = _coerce_text(js8_row.get("rig_name_source", ""), "")
+            data["js8_message_storage_root"] = _coerce_text(js8_row.get("application_data_root", ""), "")
+            data["js8_all_path"] = _coerce_text(js8_row.get("all_path", ""), "")
+            data["js8_save_dir"] = _coerce_text(js8_row.get("save_dir", ""), "")
+            data["js8_storage_mode"] = _coerce_text(js8_row.get("storage_mode", "unverified"), "unverified")
+            data["js8_storage_verified_utc"] = _coerce_text(js8_row.get("storage_verified_utc", ""), "")
+            data["js8_storage_evidence"] = _coerce_text(js8_row.get("storage_evidence", ""), "")
             data["spotter_launch_path"] = _coerce_text(js8_row.get("spotter_launch_path", ""), "")
             data["commstat_launch_path"] = _coerce_text(js8_row.get("commstat_launch_path", ""), "")
             if _coerce_text(data.get("control_backend", ""), "").lower() == "js8call":
@@ -3938,6 +4003,7 @@ def _normalize_runtime_primary_device(
 
 
 def _seed_js8_defaults(settings_values: Mapping[str, Any]) -> Dict[str, Any]:
+    legacy_directed = _settings_text(settings_values, "js8_directed_path", "")
     return {
         "system_key": DEFAULT_JS8_INSTANCE_SYSTEM_KEY,
         "name": DEFAULT_JS8_INSTANCE_NAME,
@@ -3945,9 +4011,13 @@ def _seed_js8_defaults(settings_values: Mapping[str, Any]) -> Dict[str, Any]:
         "port": _settings_int(settings_values, "js8_port", 2442),
         "offset_hz": coerce_js8_offset_hz(_settings_int(settings_values, "js8_offset_hz", 0)),
         "profile_path": _settings_text(settings_values, "js8_profile_path", ""),
-        "directed_path": _settings_text(settings_values, "js8_directed_path", ""),
+        "directed_path": legacy_directed,
+        "inbox_path": _settings_text(settings_values, "js8_inbox_path", ""),
         "forms_path": _settings_text(settings_values, "js8_forms_path", ""),
         "install_path": _settings_text(settings_values, "path_js8call", ""),
+        "variant_family": "unknown",
+        "storage_mode": "unverified",
+        "storage_evidence": "legacy_explicit_path" if legacy_directed else "",
         "spotter_launch_path": _settings_text(settings_values, "path_js8spotter", ""),
         "commstat_launch_path": _settings_text(settings_values, "path_commstat", ""),
     }

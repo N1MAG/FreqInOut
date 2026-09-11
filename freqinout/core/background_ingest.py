@@ -20,7 +20,7 @@ from freqinout.core.dependency_health import get_dependency_health_registry
 from freqinout.core.ingest_health import source_health_key
 from freqinout.core.ingest_refresh_planner import ingest_sources_fingerprint, plan_ingest_refresh
 from freqinout.core.js8_expect_runtime import ExpectAutomationCoordinator, GuardPreflightCallback
-from freqinout.core.js8_runtime_messages import inbox_path_for_directed_source, inbox_path_from_profile
+from freqinout.core.js8_storage_reconciliation import reconcile_js8_storage_profile
 from freqinout.core.ingest_runtime_status import active_runtime_ingest_inventory
 from freqinout.core.ingest_source_model import IngestSourceDescriptor, IngestSourceInventory, js8_ingest_sources
 from freqinout.core.logger import log
@@ -1091,57 +1091,96 @@ class BackgroundIngestController(QObject):
             worker_settings.close()
 
     def _run_multi_radio_js8_message_ingest(self) -> None:
+        active_profiles = self._active_js8_spotter_profiles()
+        reconcile_store = MultiRadioStore()
+        mapping_changed = False
+        for profile in active_profiles:
+            try:
+                outcome = reconcile_js8_storage_profile(reconcile_store, profile)
+                mapping_changed = mapping_changed or outcome.state == "verified"
+                if outcome.state == "mismatch":
+                    log.warning(
+                        "BackgroundIngest: JS8 storage needs attention for %s: %s",
+                        profile.get("name", "JS8Call"),
+                        outcome.detail,
+                    )
+            except Exception as exc:
+                log.debug("BackgroundIngest: JS8 storage reconciliation failed: %s", exc)
+        if mapping_changed:
+            self._runtime_inventory_cache = None
+            self._runtime_inventory_cache_ts = 0.0
         inventory = self._runtime_ingest_inventory()
-        instances = [instance for instance in inventory.app_instances if instance.family == "js8call"]
-        if not instances:
+        inbox_sources = [
+            source
+            for source in inventory.sources_for_family("js8call")
+            if source.source_type == "sqlite"
+            and str((source.metadata or {}).get("role", "") or "") == "inbox"
+        ]
+        if not inbox_sources:
+            # Preserve the legacy diagnostic contract: a configured DIRECTED
+            # source with no discovered sibling inbox is visible as a missing
+            # inbox source, even though no speculative SQLite source is built.
+            for directed_source in inventory.sources_for_family("js8call"):
+                if (
+                    directed_source.source_type != "file"
+                    or str((directed_source.metadata or {}).get("role", "") or "") != "directed"
+                ):
+                    continue
+                health_key = f"{source_health_key(directed_source)}:inbox"
+                self._record_source_skip(
+                    health_key,
+                    directed_source,
+                    "missing",
+                    source_type="js8-inbox",
+                    path=str(directed_source.path or ""),
+                )
             return
-        store = MultiRadioStore()
-        profiles = {str(profile.get("id", "") or profile.get("system_key", "") or ""): profile for profile in self._active_js8_spotter_profiles()}
-        for instance in instances:
+        store = reconcile_store
+        profiles = {str(profile.get("id", "") or profile.get("system_key", "") or ""): profile for profile in active_profiles}
+        for inbox_source in inbox_sources:
             self._cancel_checkpoint()
-            profile = profiles.get(str(instance.radio_id or ""))
-            if profile is None:
-                continue
-            source_by_role = {
-                str(source.metadata.get("role", "") or ""): source
-                for source in js8_ingest_sources(instance)
-            }
-            directed_source = source_by_role.get("directed")
-            if directed_source is None:
-                continue
-            inbox_source = source_by_role.get("inbox")
-            health_source = inbox_source or directed_source
-            health_key = f"{source_health_key(health_source)}:inbox"
-            inbox_path = inbox_path_from_profile(profile) or inbox_path_for_directed_source(directed_source)
-            if inbox_path is None:
+            metadata = dict(inbox_source.metadata or {})
+            radio_id = str(inbox_source.radio_id or "").strip()
+            candidate_radios = tuple(
+                str(value or "").strip()
+                for value in metadata.get("candidate_radio_ids", ())
+                if str(value or "").strip()
+            )
+            profile = profiles.get(radio_id) or next(
+                (profiles[value] for value in candidate_radios if value in profiles),
+                {},
+            )
+            health_key = f"{source_health_key(inbox_source)}:inbox"
+            inbox_path = Path(str(inbox_source.path or "")).expanduser()
+            if not inbox_path.is_file():
                 log.debug(
-                    "BackgroundIngest: skipping JS8 inbox ingest for %s; no source-specific inbox path",
-                    health_source.label,
+                    "BackgroundIngest: skipping JS8 inbox ingest for %s; source path missing",
+                    inbox_source.label,
                 )
                 self._health.record_failure(
                     health_key,
                     owner="BackgroundIngest",
-                    error="source-specific inbox path missing",
+                    error="source path missing",
                     metadata={
-                        "label": health_source.label,
-                        "family": health_source.family,
+                        "label": inbox_source.label,
+                        "family": inbox_source.family,
                         "source_type": "js8-inbox",
-                        "path": str(health_source.path or directed_source.path or ""),
+                        "path": str(inbox_path),
                     },
                 )
                 self._record_source_skip(
                     health_key,
-                    health_source,
+                    inbox_source,
                     "missing",
                     source_type="js8-inbox",
-                    path=str(health_source.path or directed_source.path or ""),
+                    path=str(inbox_path),
                 )
                 continue
             may_run, health = self._health.may_run(health_key, owner="BackgroundIngest")
             if not may_run:
                 self._record_source_skip(
                     health_key,
-                    health_source,
+                    inbox_source,
                     "backoff",
                     health,
                     source_type="js8-inbox",
@@ -1154,9 +1193,9 @@ class BackgroundIngestController(QObject):
                 ingestor = MessageIngestor(profile_settings)  # type: ignore[arg-type]
                 ingestor.ingest_js8_messages(
                     inbox_path=inbox_path,
-                    source_radio_id=instance.radio_id,
-                    js8_instance_id=str(instance.metadata.get("js8_instance_id", "") or instance.source_id),
-                    source_key=instance.source_id,
+                    source_radio_id=radio_id,
+                    js8_instance_id=str(metadata.get("js8_instance_id", "") or "") if radio_id else "",
+                    source_key=str(inbox_source.app_instance_id or inbox_source.source_id),
                 )
                 self._health.record_success(
                     health_key,
@@ -1164,8 +1203,8 @@ class BackgroundIngestController(QObject):
                     duration_ms=(time.time() - started_at) * 1000.0,
                     slow_ms=5000.0,
                     metadata={
-                        "label": health_source.label,
-                        "family": health_source.family,
+                        "label": inbox_source.label,
+                        "family": inbox_source.family,
                         "source_type": "js8-inbox",
                         "path": str(inbox_path),
                     },
@@ -1178,13 +1217,13 @@ class BackgroundIngestController(QObject):
                     error=str(exc),
                     duration_ms=(time.time() - started_at) * 1000.0,
                     metadata={
-                        "label": health_source.label,
-                        "family": health_source.family,
+                        "label": inbox_source.label,
+                        "family": inbox_source.family,
                         "source_type": "js8-inbox",
                         "path": str(inbox_path),
                     },
                 )
-                log.debug("BackgroundIngest: JS8 inbox source ingest failed for %s: %s", health_source.label, exc)
+                log.debug("BackgroundIngest: JS8 inbox source ingest failed for %s: %s", inbox_source.label, exc)
             finally:
                 try:
                     profile_settings.fallback_settings.close()
@@ -1405,10 +1444,16 @@ class BackgroundIngestController(QObject):
         if not profiles:
             return
         inventory = self._runtime_ingest_inventory()
-        directed_sources_by_radio = {
-            str(source.radio_id or ""): source
+        directed_sources = tuple(
+            source
             for source in inventory.sources_for_family("js8call")
-            if source.source_type == "file" and str(source.metadata.get("role", "") or "") == "directed"
+            if source.source_type == "file"
+            and str(source.metadata.get("role", "") or "") == "directed"
+            and source.path
+        )
+        profiles_by_id = {
+            str(profile.get("id", "") or profile.get("system_key", "") or "").strip(): profile
+            for profile in profiles
         }
         store = MultiRadioStore()
         worker_settings = self._new_worker_settings()
@@ -1417,59 +1462,63 @@ class BackgroundIngestController(QObject):
             profiles=profiles,
             guard_preflight=self.expect_guard_preflight,
         )
-        for profile in profiles:
-            radio_id = int(profile.get("id", 0) or 0)
-            directed_source = directed_sources_by_radio.get(str(radio_id))
-            directed = str((directed_source.path if directed_source is not None else "") or profile.get("js8_directed_path", "") or "").strip()
-            if radio_id <= 0 or not directed:
+        for directed_source in directed_sources:
+            metadata = dict(directed_source.metadata or {})
+            radio_id_text = str(directed_source.radio_id or "").strip()
+            candidate_radios = tuple(
+                str(value or "").strip()
+                for value in metadata.get("candidate_radio_ids", ())
+                if str(value or "").strip()
+            )
+            profile = profiles_by_id.get(radio_id_text) or next(
+                (profiles_by_id[value] for value in candidate_radios if value in profiles_by_id),
+                {},
+            )
+            directed = str(directed_source.path or "").strip()
+            directed_source_id = str(directed_source.app_instance_id or directed_source.source_id or "").strip()
+            radio_id = int(radio_id_text) if radio_id_text.isdigit() else 0
+            health_key = f"{source_health_key(directed_source)}:spotter"
+            may_run, health = self._health.may_run(health_key, owner="BackgroundIngest")
+            if not may_run:
+                self._record_source_skip(
+                    health_key,
+                    directed_source,
+                    "backoff",
+                    health,
+                    source_type="spotter-directed",
+                    path=directed,
+                )
                 continue
-            directed_source_id = str(getattr(directed_source, "source_id", "") or "").strip() if directed_source is not None else ""
-            health_key = f"{source_health_key(directed_source)}:spotter" if directed_source is not None else ""
-            if health_key:
-                may_run, health = self._health.may_run(health_key, owner="BackgroundIngest")
-                if not may_run:
-                    self._record_source_skip(
-                        health_key,
-                        directed_source,
-                        "backoff",
-                        health,
-                        source_type="spotter-directed",
-                        path=directed,
-                    )
-                    continue
-                if not Path(directed).expanduser().exists():
-                    self._health.record_failure(
-                        health_key,
-                        owner="BackgroundIngest",
-                        error="source path missing",
-                        metadata={
-                            "label": directed_source.label,
-                            "family": directed_source.family,
-                            "source_type": "spotter-directed",
-                            "path": directed_source.path,
-                        },
-                    )
-                    self._record_source_skip(
-                        health_key,
-                        directed_source,
-                        "missing",
-                        source_type="spotter-directed",
-                        path=directed,
-                    )
-                    continue
+            if not Path(directed).expanduser().exists():
+                self._health.record_failure(
+                    health_key,
+                    owner="BackgroundIngest",
+                    error="source path missing",
+                    metadata={
+                        "label": directed_source.label,
+                        "family": directed_source.family,
+                        "source_type": "spotter-directed",
+                        "path": directed_source.path,
+                    },
+                )
+                self._record_source_skip(
+                    health_key,
+                    directed_source,
+                    "missing",
+                    source_type="spotter-directed",
+                    path=directed,
+                )
+                continue
             started_at = time.time()
-            profile_settings = _DeviceProfileVaultSettings(profile, self._new_worker_settings(), store)
+            profile_fallback = self._new_worker_settings()
+            profile_settings = _DeviceProfileVaultSettings(profile, profile_fallback, store)
             try:
                 ingestor = MessageIngestor(
                     profile_settings,  # type: ignore[arg-type]
                     expect_dispatch_client_factory=coordinator.client_factory_for_ingest(),
                     expect_auto_reply_enabled=coordinator.runtime_unattended_enabled(),
                 )
-                js8_instance_id = str(
-                    profile.get("js8_instance_id", "")
-                    or profile.get("name", "")
-                    or radio_id
-                )
+                js8_instance_id = str(metadata.get("js8_instance_id", "") or "") if radio_id_text else ""
                 inserted = ingestor.ingest_spotter_from_directed(
                     directed_path=Path(directed).expanduser(),
                     source_radio_id=radio_id,
@@ -1507,12 +1556,9 @@ class BackgroundIngestController(QObject):
                             "path": directed_source.path,
                         },
                     )
-                log.debug("BackgroundIngest: spotter ingest failed for radio %s: %s", radio_id, exc)
+                log.debug("BackgroundIngest: spotter ingest failed for %s: %s", directed_source.label, exc)
             finally:
-                try:
-                    profile_settings.fallback_settings.close()
-                except Exception:
-                    pass
+                profile_fallback.close()
         try:
             coordinator.close()
         finally:

@@ -10,6 +10,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
+from freqinout.core.js8_storage import (
+    js8_application_name,
+    qt_data_root_candidates,
+    rig_name_from_settings_path,
+)
+
 
 LOCALHOST = "127.0.0.1"
 
@@ -110,6 +116,10 @@ class JS8CallFileProfile:
     all_path: str
     confidence: str
     reason: str
+    inbox_path: str = ""
+    application_data_root: str = ""
+    rig_name: str = ""
+    storage_mode: str = "unverified"
 
     @property
     def family_label(self) -> str:
@@ -252,11 +262,18 @@ def default_app_search_paths(
         "js8call": (
             Path("/usr/bin/js8call"),
             Path("/usr/local/bin/js8call"),
+            Path("/usr/bin/JS8Call"),
+            Path("/usr/local/bin/JS8Call"),
+            user_home / ".local" / "bin" / "JS8Call",
             Path("/opt/js8call/js8call"),
             Path("/usr/bin/js8call-improved"),
             Path("/usr/local/bin/js8call-improved"),
             Path("/opt/js8call-improved/js8call"),
+            Path("/opt/JS8Call-improved/bin/JS8Call"),
+            Path("/usr/bin/js8call-subspace"),
+            Path("/usr/local/bin/js8call-subspace"),
             Path("/opt/js8call-subspace/js8call"),
+            Path("/opt/JS8Call Subspace/JS8Call"),
         ),
         "js8spotter": (
             Path("/usr/bin/js8spotter"),
@@ -331,9 +348,14 @@ def app_search_paths_with_radio_apps_base(
             "flamp": (root / "flamp", root / "FLAmp" / "flamp"),
             "js8call": (
                 root / "js8call",
+                root / "JS8Call",
                 root / "JS8Call" / "js8call",
+                root / "JS8Call" / "JS8Call",
                 root / "JS8Call-improved" / "js8call",
+                root / "JS8Call-improved" / "JS8Call",
                 root / "JS8Call Subspace" / "js8call",
+                root / "JS8Call Subspace" / "JS8Call",
+                root / "js8call-subspace",
             ),
             "js8spotter": (root / "js8spotter", root / "JS8Spotter" / "js8spotter"),
             "commstat": (root / "commstat", root / "CommStat" / "commstat"),
@@ -584,17 +606,24 @@ def default_js8call_ini_paths(
         for env_key in ("LOCALAPPDATA", "APPDATA"):
             raw = str(os.environ.get(env_key, "") or "").strip()
             if raw:
-                env_paths.extend(_js8call_ini_name_candidates(Path(raw) / "JS8Call"))
-        env_paths.extend(_js8call_ini_name_candidates(user_home / "AppData" / "Local" / "JS8Call"))
+                directory = Path(raw) / "JS8Call"
+                env_paths.extend(_js8call_ini_name_candidates(directory))
+                env_paths.extend(_js8call_named_ini_files(directory))
+        home_directory = user_home / "AppData" / "Local" / "JS8Call"
+        env_paths.extend(_js8call_ini_name_candidates(home_directory))
+        env_paths.extend(_js8call_named_ini_files(home_directory))
         return _unique_paths(env_paths)
-    return _unique_paths(
-        (
-            *_js8call_ini_name_candidates(user_home / ".config"),
-            *_js8call_ini_name_candidates(user_home / ".config" / "JS8Call"),
-            *_js8call_ini_name_candidates(user_home / ".local" / "share" / "JS8Call"),
-            *_js8call_ini_name_candidates(user_home / ".var" / "app" / "org.js8call.JS8Call" / "config"),
-        )
+    linux_directories = (
+        user_home / ".config",
+        user_home / ".config" / "JS8Call",
+        user_home / ".local" / "share" / "JS8Call",
+        user_home / ".var" / "app" / "org.js8call.JS8Call" / "config",
     )
+    linux_paths = []
+    for directory in linux_directories:
+        linux_paths.extend(_js8call_ini_name_candidates(directory))
+        linux_paths.extend(_js8call_named_ini_files(directory))
+    return _unique_paths(linux_paths)
 
 
 def _js8call_ini_name_candidates(directory: Path) -> Tuple[Path, ...]:
@@ -627,6 +656,7 @@ def _js8call_named_ini_files(directory: Path) -> Tuple[Path, ...]:
             continue
         if (
             lowered.startswith("js8call - ")
+            or lowered.startswith("js8call-")
             or lowered.startswith("js8call-improved")
             or lowered.startswith("js8call improved")
             or lowered.startswith("js8call subspace")
@@ -645,6 +675,9 @@ def js8call_ini_family_label(path: object) -> str:
         return "JS8Call-improved"
     if lowered.startswith("js8call - "):
         instance = name.rsplit(".", 1)[0].split(" - ", 1)[1].strip()
+        return f"JS8Call {instance}" if instance else "JS8Call"
+    if lowered.startswith("js8call-"):
+        instance = name.rsplit(".", 1)[0].split("-", 1)[1].strip()
         return f"JS8Call {instance}" if instance else "JS8Call"
     return "JS8Call"
 
@@ -673,46 +706,48 @@ def discover_js8call_file_profiles(
         profiles = read_js8call_multisettings(candidate_ini)
         if not profiles:
             continue
+        rig_name = rig_name_from_settings_path(candidate_ini)
+        application_name = js8_application_name(rig_name)
+        root_candidates = qt_data_root_candidates(
+            application_name=application_name,
+            platform=platform,
+            home=home,
+        )
+        evidence_roots = tuple(
+            root
+            for root in root_candidates
+            if any((root / filename).is_file() for filename in ("ALL.TXT", "DIRECTED.TXT", "inbox.db3"))
+        )
         for profile in profiles:
             save_dir_text = str(profile.settings.get("SaveDir", "") or "").strip()
             tcp_server_port = str(profile.settings.get("TCPServerPort", "") or "").strip()
-            if not save_dir_text:
-                discovered.append(
-                    JS8CallFileProfile(
-                        name=profile.name,
-                        ini_path=str(candidate_ini),
-                        save_dir="",
-                        tcp_server_port=tcp_server_port,
-                        directed_path="",
-                        all_path="",
-                        confidence="not_found",
-                        reason="JS8Call profile does not define SaveDir.",
-                    )
-                )
-                continue
-            save_dir = Path(os.path.expandvars(os.path.expanduser(save_dir_text)))
-            directed = save_dir / "DIRECTED.TXT"
-            all_txt = save_dir / "ALL.TXT"
-            has_directed = directed.is_file()
-            has_save_dir = save_dir.is_dir()
-            confidence = "verified" if has_directed else "partial" if has_save_dir else "not_found"
+            save_dir = Path(os.path.expandvars(os.path.expanduser(save_dir_text))) if save_dir_text else None
+            data_root = evidence_roots[0] if len(evidence_roots) == 1 else None
+            directed = data_root / "DIRECTED.TXT" if data_root is not None else None
+            all_txt = data_root / "ALL.TXT" if data_root is not None else None
+            inbox = data_root / "inbox.db3" if data_root is not None else None
+            confidence = "verified" if data_root is not None else "not_found"
             reason = (
-                f"Found DIRECTED.TXT from JS8Call profile '{profile.name}' SaveDir."
-                if has_directed
-                else f"JS8Call profile '{profile.name}' SaveDir exists, but DIRECTED.TXT was not found."
-                if has_save_dir
-                else f"JS8Call profile '{profile.name}' SaveDir does not exist."
+                f"Found JS8Call message storage for application '{application_name}'. SaveDir is separate."
+                if data_root is not None
+                else f"No bounded message-storage evidence found for application '{application_name}'. SaveDir is not a message-log location."
             )
             discovered.append(
                 JS8CallFileProfile(
                     name=profile.name,
                     ini_path=str(candidate_ini),
-                    save_dir=str(save_dir),
+                    save_dir=str(save_dir) if save_dir is not None else "",
                     tcp_server_port=tcp_server_port,
-                    directed_path=str(directed) if has_directed or has_save_dir else "",
-                    all_path=str(all_txt) if all_txt.is_file() else "",
+                    directed_path=str(directed) if directed is not None and directed.is_file() else "",
+                    all_path=str(all_txt) if all_txt is not None and all_txt.is_file() else "",
                     confidence=confidence,
                     reason=reason,
+                    inbox_path=str(inbox) if inbox is not None and inbox.is_file() else "",
+                    application_data_root=str(data_root) if data_root is not None else "",
+                    rig_name=rig_name,
+                    # A matching bounded path proves the file location, but an
+                    # INI filename alone does not prove which variant owns it.
+                    storage_mode="unverified",
                 )
             )
     return tuple(discovered)

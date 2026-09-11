@@ -109,11 +109,18 @@ class SoftwarePathDetector:
             linux_files=(
                 Path("/usr/bin/js8call"),
                 Path("/usr/local/bin/js8call"),
+                Path("/usr/bin/JS8Call"),
+                Path("/usr/local/bin/JS8Call"),
+                self.home / ".local" / "bin" / "JS8Call",
                 Path("/opt/js8call/js8call"),
                 Path("/usr/bin/js8call-improved"),
                 Path("/usr/local/bin/js8call-improved"),
                 Path("/opt/js8call-improved/js8call"),
+                Path("/opt/JS8Call-improved/bin/JS8Call"),
+                Path("/usr/bin/js8call-subspace"),
+                Path("/usr/local/bin/js8call-subspace"),
                 Path("/opt/js8call-subspace/js8call"),
+                Path("/opt/JS8Call Subspace/JS8Call"),
             ),
             prefer_bundle_dir=True,
         )

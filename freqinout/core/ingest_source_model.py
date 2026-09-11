@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from freqinout.core.commstat_config import load_commstat_group_state
+from freqinout.core.js8_storage import canonicalize_storage_path, resolve_js8_storage
 from freqinout.core.protocol_capabilities import capabilities_dict_for, provenance_hint_for, scope_hint_for
 
 
@@ -122,8 +123,40 @@ def app_instance_from_device_profile(profile: Mapping[str, Any], family: str) ->
             return None
         host = str(profile.get("js8_host", "") or "").strip() or "127.0.0.1"
         port = _int_or_zero(profile.get("js8_port")) or 2442
-        directed = normalize_ingest_path(profile.get("js8_directed_path", ""))
-        inbox = _first_normalized_path(profile, ("js8_inbox_path", "inbox_path", "js8call_inbox_path"))
+        storage = resolve_js8_storage(profile)
+        legacy_directed = normalize_ingest_path(profile.get("js8_directed_path", ""))
+        explicit_inbox = _first_normalized_path(profile, ("js8_inbox_path", "inbox_path", "js8call_inbox_path"))
+        modern_explicit_root = bool(
+            str(profile.get("application_data_root", profile.get("js8_message_storage_root", "")) or "").strip()
+        )
+        # Existing device profiles explicitly selected these paths before FIO
+        # learned modern Qt storage namespaces.  They remain authoritative
+        # until the operator saves a modern application-data root; ambient
+        # files elsewhere on the machine must not silently redirect them.
+        legacy_explicit = bool(legacy_directed or explicit_inbox) and not modern_explicit_root
+        directed = legacy_directed if legacy_explicit and legacy_directed else normalize_ingest_path(storage.directed_path)
+        all_path = (
+            str(Path(legacy_directed).with_name("ALL.TXT")) if legacy_directed else ""
+        ) if legacy_explicit else normalize_ingest_path(storage.all_path)
+        if legacy_explicit and explicit_inbox:
+            inbox = explicit_inbox
+        elif legacy_explicit:
+            legacy_inbox = Path(legacy_directed).with_name("inbox.db3") if legacy_directed else None
+            inbox = str(legacy_inbox) if legacy_inbox is not None and legacy_inbox.is_file() else ""
+        elif storage.verified:
+            inbox = normalize_ingest_path(storage.inbox_path)
+        elif explicit_inbox:
+            inbox = explicit_inbox
+        elif legacy_directed:
+            # A legacy profile explicitly owns its text-log path but says
+            # nothing about the modern Qt data root.  Do not invent an inbox
+            # source beside a platform candidate until that root is verified.
+            inbox = ""
+        else:
+            inbox = normalize_ingest_path(storage.inbox_path)
+        effective_storage_mode = "rig_scoped" if legacy_explicit else storage.storage_mode
+        effective_storage_verified = True if legacy_explicit else storage.verified
+        effective_storage_evidence = "legacy_explicit_path" if legacy_explicit else storage.evidence
         instance_token = str(profile.get("js8_instance_id", "") or radio_id or radio_name)
         return AppInstanceDescriptor(
             source_id=stable_source_id("js8call", instance_token, radio_id, host, port, directed, prefix="app"),
@@ -135,10 +168,25 @@ def app_instance_from_device_profile(profile: Mapping[str, Any], family: str) ->
             api_port=port,
             paths={
                 "directed": directed,
-                "all": str(Path(directed).with_name("ALL.TXT")) if directed else "",
+                "all": all_path,
                 "inbox": inbox,
+                "data_root": storage.data_root,
+                "save": storage.save_dir,
             },
-            metadata={"profile": radio_name, "js8_instance_id": instance_token},
+            metadata={
+                "profile": radio_name,
+                "js8_instance_id": instance_token,
+                "variant_family": storage.variant_family,
+                "variant_version": storage.variant_version,
+                "rig_name": storage.rig_name,
+                "rig_name_source": storage.rig_name_source,
+                "storage_mode": effective_storage_mode,
+                "expected_storage_mode": storage.expected_mode,
+                "storage_verified": effective_storage_verified,
+                "storage_evidence": effective_storage_evidence,
+                "storage_display_state": "Isolated · legacy path" if legacy_explicit else storage.display_state,
+                "application_data_root": storage.data_root,
+            },
         )
     if family_key == "varac":
         if not _truthy(profile.get("use_varac", False), False):
@@ -189,6 +237,12 @@ def js8_ingest_sources(instance: AppInstanceDescriptor) -> tuple[IngestSourceDes
     if instance.family != "js8call":
         return ()
     sources: list[IngestSourceDescriptor] = []
+    instance_metadata = dict(instance.metadata or {})
+    storage_mode = str(instance_metadata.get("storage_mode", "unverified") or "unverified")
+    storage_verified = bool(instance_metadata.get("storage_verified", False))
+    attributable = storage_mode == "rig_scoped" and storage_verified
+    file_radio_id = instance.radio_id if attributable else ""
+    file_instance_id = instance.source_id if attributable else ""
     for role in ("directed", "all"):
         path = normalize_ingest_path(instance.paths.get(role, ""))
         if not path:
@@ -200,12 +254,20 @@ def js8_ingest_sources(instance: AppInstanceDescriptor) -> tuple[IngestSourceDes
                 family="js8call",
                 source_type="file",
                 label=f"{instance.label} {role.upper()}",
-                app_instance_id=instance.source_id,
-                radio_id=instance.radio_id,
+                app_instance_id=file_instance_id,
+                radio_id=file_radio_id,
                 path=path,
                 checkpoint_key=f"{source_id}_offset",
                 enabled=instance.enabled,
-                metadata={"role": role},
+                metadata={
+                    "role": role,
+                    "storage_mode": storage_mode,
+                    "storage_verified": storage_verified,
+                    "application_data_root": str(instance.paths.get("data_root", "") or ""),
+                    "candidate_app_instance_ids": (instance.source_id,),
+                    "candidate_radio_ids": (instance.radio_id,) if instance.radio_id else (),
+                    "js8_instance_id": str(instance_metadata.get("js8_instance_id", "") or ""),
+                },
             )
         )
     inbox_path = normalize_ingest_path(instance.paths.get("inbox", ""))
@@ -217,12 +279,20 @@ def js8_ingest_sources(instance: AppInstanceDescriptor) -> tuple[IngestSourceDes
                 family="js8call",
                 source_type="sqlite",
                 label=f"{instance.label} Inbox",
-                app_instance_id=instance.source_id,
-                radio_id=instance.radio_id,
+                app_instance_id=file_instance_id,
+                radio_id=file_radio_id,
                 path=inbox_path,
                 checkpoint_key=f"{source_id}_last_id",
                 enabled=instance.enabled,
-                metadata={"role": "inbox"},
+                metadata={
+                    "role": "inbox",
+                    "storage_mode": storage_mode,
+                    "storage_verified": storage_verified,
+                    "application_data_root": str(instance.paths.get("data_root", "") or ""),
+                    "candidate_app_instance_ids": (instance.source_id,),
+                    "candidate_radio_ids": (instance.radio_id,) if instance.radio_id else (),
+                    "js8_instance_id": str(instance_metadata.get("js8_instance_id", "") or ""),
+                },
             )
         )
     if instance.api_host and instance.api_port:
@@ -352,10 +422,90 @@ def build_ingest_source_inventory(profiles: Iterable[Mapping[str, Any]]) -> Inge
             app_instances.append(commstat_instance)
             ingest_sources.extend(commstat_ingest_sources(commstat_instance))
         ingest_sources.extend(file_message_sources_from_device_profile(profile))
+    ingest_sources = list(_coalesce_js8_storage_sources(ingest_sources))
     return IngestSourceInventory(
         app_instances=tuple(app_instances),
         ingest_sources=dedupe_ingest_sources(ingest_sources),
     )
+
+
+def _coalesce_js8_storage_sources(
+    sources: Iterable[IngestSourceDescriptor],
+) -> tuple[IngestSourceDescriptor, ...]:
+    """Represent each JS8 file once and never invent shared-root attribution."""
+
+    passthrough: list[IngestSourceDescriptor] = []
+    grouped: dict[tuple[str, str], list[IngestSourceDescriptor]] = {}
+    for source in sources:
+        if source.family != "js8call" or source.source_type not in {"file", "sqlite"} or not source.path:
+            passthrough.append(source)
+            continue
+        role = str((source.metadata or {}).get("role", "") or source.source_type)
+        canonical = canonicalize_storage_path(source.path)
+        grouped.setdefault((role, canonical.casefold()), []).append(source)
+
+    for (role, _canonical_key), rows in grouped.items():
+        first = rows[0]
+        metadata_rows = [dict(row.metadata or {}) for row in rows]
+        shared = len(rows) > 1 or any(str(meta.get("storage_mode", "")) == "shared" for meta in metadata_rows)
+        verified_isolated = (
+            len(rows) == 1
+            and str(metadata_rows[0].get("storage_mode", "")) == "rig_scoped"
+            and bool(metadata_rows[0].get("storage_verified", False))
+        )
+        if verified_isolated:
+            passthrough.append(first)
+            continue
+        app_ids = tuple(
+            dict.fromkeys(
+                value
+                for row, meta in zip(rows, metadata_rows)
+                for value in (
+                    *(str(item) for item in meta.get("candidate_app_instance_ids", ()) if str(item or "")),
+                    str(row.app_instance_id or ""),
+                )
+                if value
+            )
+        )
+        radio_ids = tuple(
+            dict.fromkeys(
+                value
+                for row, meta in zip(rows, metadata_rows)
+                for value in (
+                    *(str(item) for item in meta.get("candidate_radio_ids", ()) if str(item or "")),
+                    str(row.radio_id or ""),
+                )
+                if value
+            )
+        )
+        mode = "shared" if shared else "unverified"
+        source_id = stable_source_id("js8call", mode, role, first.path, prefix="ingest")
+        metadata = dict(metadata_rows[0])
+        metadata.update(
+            {
+                "role": role,
+                "storage_mode": mode,
+                "storage_verified": False,
+                "candidate_app_instance_ids": app_ids,
+                "candidate_radio_ids": radio_ids,
+                "attribution": "shared" if shared else "unverified",
+                "js8_instance_id": "",
+            }
+        )
+        passthrough.append(
+            replace(
+                first,
+                source_id=source_id,
+                label=f"{'Shared JS8 storage' if shared else 'JS8 source unverified'} {role.upper()}",
+                app_instance_id="",
+                radio_id="",
+                checkpoint_key=f"{source_id}_{'last_id' if first.source_type == 'sqlite' else 'offset'}",
+                metadata=metadata,
+                provenance="shared JS8 storage" if shared else "JS8 source unverified",
+                scope_hint="shared" if shared else "unverified",
+            )
+        )
+    return tuple(passthrough)
 
 
 def js8_api_endpoint_collisions(inventory: IngestSourceInventory) -> dict[str, tuple[str, ...]]:

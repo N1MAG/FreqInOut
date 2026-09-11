@@ -12,6 +12,26 @@ from freqinout.radio_interface.js8_api_client import (
 )
 
 
+_JS8_SPEED_NAMES = {
+    0: "Normal",
+    1: "Fast",
+    2: "Turbo",
+    4: "Slow",
+    8: "Ultra",
+    16: "Subspace",
+}
+
+
+def js8_speed_name(value: object) -> str:
+    """Return a stable display name for JS8/JS8Call-Improved speeds."""
+
+    try:
+        speed = int(value)
+    except Exception:
+        return str(value or "")
+    return _JS8_SPEED_NAMES.get(speed, str(value))
+
+
 @dataclass(frozen=True)
 class JS8SendIssue:
     code: str
@@ -219,7 +239,12 @@ def set_js8_selected_target(client: JS8ApiClient, target: object = "", *, settle
     """
     value = normalize_js8_target(target)
     params = {"CALL": value, "SELECTED_CALL": value, "TARGET": value}
-    for command in ("RX.SET_SELECTED_CALL", "TX.SET_SELECTED_CALL", "STATION.SET_SELECTED_CALL"):
+    for command in (
+        "RX.SET_CALL_SELECTED",
+        "RX.SET_SELECTED_CALL",
+        "TX.SET_SELECTED_CALL",
+        "STATION.SET_SELECTED_CALL",
+    ):
         try:
             client.send(command, value=value, params=params)
         except Exception:

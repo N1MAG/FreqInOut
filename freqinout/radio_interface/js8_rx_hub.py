@@ -34,6 +34,8 @@ except Exception:  # pragma: no cover
 
 _JS8_HUB_TEXT_LIMIT = 8192
 _JS8_HUB_FIELD_LIMIT = 256
+_JS8_HUB_QUEUE_LIMIT = 2048
+_JS8_HUB_DISPOSABLE_TYPES = frozenset({"TX.FRAME"})
 _JS8NET_START_LOCK = threading.Lock()
 _JS8NET_STARTED_ENDPOINT: Optional[Tuple[str, int]] = None
 
@@ -144,7 +146,9 @@ class JS8RxHub(QObject):
         self._using_native_api = False
         self._api_client = None
         self._api_listener_registered = False
-        self._api_queue: "queue.Queue[dict]" = queue.Queue()
+        self._api_queue: "queue.Queue[dict]" = queue.Queue(maxsize=_JS8_HUB_QUEUE_LIMIT)
+        self._api_queue_dropped = 0
+        self._api_disposable_dropped = 0
         self._host = str(host or "127.0.0.1").strip() or "127.0.0.1"
         self._port = int(port or 2442)
         self._last_rx_activity_ts: float = 0.0
@@ -304,10 +308,28 @@ class JS8RxHub(QObject):
         safe = _safe_js8_hub_message(message.to_dict() if hasattr(message, "to_dict") else message)
         if safe is None:
             return
+        # Improved 3.x emits a TX.FRAME event for every transmitted frame,
+        # including full tone arrays. No hub consumer uses those waveform
+        # diagnostics, so do not let them delay directed traffic or grow
+        # memory while a long transmission is in progress.
+        if str(safe.get("type") or "").upper() in _JS8_HUB_DISPOSABLE_TYPES:
+            self._api_disposable_dropped += 1
+            return
         try:
             self._api_queue.put_nowait(safe)
         except queue.Full:
-            pass
+            # Preserve a bounded, recent view. TX.FRAME traffic was already
+            # discarded above, so the oldest normal event is the least useful
+            # item when the UI has fallen more than one queue window behind.
+            try:
+                self._api_queue.get_nowait()
+                self._api_queue_dropped += 1
+            except queue.Empty:
+                pass
+            try:
+                self._api_queue.put_nowait(safe)
+            except queue.Full:
+                self._api_queue_dropped += 1
 
     def _poll_queue(self) -> None:
         messages: List[dict] = []
@@ -373,3 +395,12 @@ class JS8RxHub(QObject):
 
     def ptt_active(self) -> bool:
         return self._ptt_active
+
+    def queue_stats(self) -> Dict[str, int]:
+        """Return lightweight receive backpressure diagnostics."""
+        return {
+            "queued": int(self._api_queue.qsize()),
+            "capacity": int(_JS8_HUB_QUEUE_LIMIT),
+            "overflow_dropped": int(self._api_queue_dropped),
+            "disposable_dropped": int(self._api_disposable_dropped),
+        }

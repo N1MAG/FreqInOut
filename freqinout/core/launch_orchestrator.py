@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -17,6 +18,7 @@ from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.dependency_status_service import get_dependency_status_service
 from freqinout.core.launch_bundle_store import LaunchBundleStore
+from freqinout.core.js8_storage import resolve_js8_storage, variant_family_from_version
 from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.station_launch_planner import LaunchPlan, StationLaunchPlanner
 
@@ -76,8 +78,21 @@ LAUNCH_APP_META: Dict[str, Dict[str, Any]] = {
     "JS8Call": {
         "path_key": "path_js8call",
         "legacy_autostart_key": "autostart_js8call",
-        "fallback_cmds": ["js8call", "JS8Call"],
-        "folder_candidates": ["JS8Call.exe", "js8call.exe", "JS8Call", "js8call"],
+        "fallback_cmds": ["js8call", "JS8Call", "JS8Call-improved", "js8call-improved", "js8call-subspace", "subspace"],
+        "folder_candidates": [
+            "JS8Call.exe",
+            "js8call.exe",
+            "JS8Call-improved.exe",
+            "js8call-improved.exe",
+            "js8call-subspace.exe",
+            "subspace.exe",
+            "JS8Call",
+            "js8call",
+            "JS8Call-improved",
+            "js8call-improved",
+            "js8call-subspace",
+            "subspace",
+        ],
     },
     "JS8Spotter": {
         "path_key": "path_js8spotter",
@@ -274,12 +289,27 @@ class LaunchOrchestrator(QObject):
         }
         if scope_radio_id is not None and bundle_override is not None:
             bundles[int(scope_radio_id)] = dict(bundle_override)
-        return self.planner.plan_startup(
+        plan = self.planner.plan_startup(
             profiles,
             bundles,
             scope_radio_id=scope_radio_id,
             trigger=trigger,
         )
+        return self._with_effective_launch_preview(plan)
+
+    def _with_effective_launch_preview(self, plan: LaunchPlan) -> LaunchPlan:
+        """Resolve executable selection separately from planner-owned launch arguments.
+
+        The resulting queue is safe to render in Launch Control and remains the
+        same command shape used at execution time, including ``open --args``
+        for macOS application bundles.
+        """
+        instances = []
+        for instance in plan.instances:
+            queue_item = instance.as_queue_item()
+            command, _description = self._resolve_launch_command(queue_item)
+            instances.append(replace(instance, effective_command=tuple(command or ())))
+        return LaunchPlan(trigger=plan.trigger, scope_radio_id=plan.scope_radio_id, instances=tuple(instances))
 
     def set_launch_items(self, items: List[Dict[str, Any]], launch_all_with_startup: bool) -> None:
         """Compatibility entry point; writes the runtime-primary radio bundle, never legacy KV."""
@@ -392,7 +422,17 @@ class LaunchOrchestrator(QObject):
             "detail": detail,
         }
         if isinstance(item, Mapping):
-            for key in ("instance_key", "instance_identity", "radio_ids", "radio_names"):
+            for key in (
+                "instance_key",
+                "instance_identity",
+                "radio_ids",
+                "radio_names",
+                "rig_name",
+                "rig_name_source",
+                "application_data_root",
+                "storage_mode",
+                "effective_command",
+            ):
                 if key in item:
                     result[key] = item[key]
         return result
@@ -543,6 +583,11 @@ class LaunchOrchestrator(QObject):
             endpoint_scoped = name in {"JS8Call", "FLRig", "FLDigi"}
             ready = self._program_ready_for_sequence(queue_item)
             if ready and (not has_distinct_instances or endpoint_scoped):
+                if name == "JS8Call":
+                    try:
+                        self._persist_ready_js8_identity(queue_item, self._cached_status_for_item(queue_item))
+                    except Exception as storage_exc:
+                        log.warning("LaunchOrchestrator: JS8 ready-state persistence failed: %s", storage_exc)
                 result = self._result_for(queue_item, status="already_running", detail="already running")
                 self._results.append(result)
                 self.sequence_progress.emit(result)
@@ -580,6 +625,14 @@ class LaunchOrchestrator(QObject):
                 creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
             cwd = self._infer_launch_cwd(name, cmd, cmd_desc)
             subprocess.Popen(cmd, shell=False, creationflags=creationflags, cwd=cwd)
+            if name == "JS8Call":
+                try:
+                    self._persist_planned_js8_storage(queue_item)
+                except Exception as storage_exc:
+                    # Storage metadata is diagnostic/reconciliation state.  A
+                    # successful process start must not be reported as failed
+                    # because this auxiliary persistence step had a problem.
+                    log.warning("LaunchOrchestrator: JS8 storage-plan persistence failed: %s", storage_exc)
             try:
                 self.dependency_status.refresh_now(reason=f"launch:{name}", force=True)
             except Exception:
@@ -600,6 +653,66 @@ class LaunchOrchestrator(QObject):
             self._results.append(result)
             self.sequence_progress.emit(result)
             self._schedule_advance_queue(0)
+
+    def _persist_planned_js8_storage(self, item: Any) -> None:
+        """Persist launch identity without claiming runtime verification.
+
+        The later background reconciliation owns bounded message-file evidence
+        checks.  A previously verified, different root is never replaced here.
+        """
+
+        if not isinstance(item, Mapping):
+            return
+        root = str(item.get("application_data_root", "") or "").strip()
+        rig_name = str(item.get("rig_name", "") or "").strip()
+        if not root or not rig_name:
+            return
+        for raw_radio_id in item.get("radio_ids", ()):
+            try:
+                profile = self.multi_radio_store.get_device_profile(int(raw_radio_id)) or {}
+                instance_id = int(profile.get("js8_instance_id", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if instance_id <= 0:
+                continue
+            existing = self.multi_radio_store.get_js8_instance(instance_id) or {}
+            existing_root = str(existing.get("application_data_root", "") or "").strip()
+            existing_evidence = str(existing.get("storage_evidence", "") or "").strip()
+            if (
+                existing_root
+                and existing_root != root
+                and existing_evidence.startswith(("operator_confirmed", "runtime_verified"))
+            ):
+                log.warning(
+                    "LaunchOrchestrator: retained verified JS8 storage root for %s; planned root differs",
+                    profile.get("name", raw_radio_id),
+                )
+                self.multi_radio_store.save_js8_instance(
+                    {
+                        **dict(existing),
+                        "id": instance_id,
+                        "storage_mode": "unverified",
+                        "storage_evidence": "mismatch:launch_planned",
+                    }
+                )
+                continue
+            expected_mode = str(item.get("expected_storage_mode", "unverified") or "unverified")
+            updated = dict(existing)
+            updated.update(
+                {
+                    "id": instance_id,
+                    "rig_name": rig_name,
+                    "rig_name_source": str(item.get("rig_name_source", "") or "managed"),
+                    "application_data_root": root,
+                    "all_path": str(Path(root) / "ALL.TXT"),
+                    "directed_path": str(Path(root) / "DIRECTED.TXT"),
+                    "inbox_path": str(Path(root) / "inbox.db3"),
+                    "storage_mode": "shared" if expected_mode == "shared" else "unverified",
+                    "storage_verified_utc": "",
+                    "storage_evidence": "launch_planned",
+                }
+            )
+            self.multi_radio_store.save_js8_instance(updated)
 
     def _blocked_dependency_for(self, item: Any) -> str:
         if not isinstance(item, Mapping):
@@ -655,6 +768,12 @@ class LaunchOrchestrator(QObject):
             self._poll_timer.setInterval(desired_interval)
         if self._program_ready_for_sequence(self._current_item or name):
             self._poll_timer.stop()
+            if name == "JS8Call":
+                try:
+                    ready_info = self._cached_status_for_item(self._current_item or name)
+                    self._persist_ready_js8_identity(self._current_item, ready_info)
+                except Exception as storage_exc:
+                    log.warning("LaunchOrchestrator: JS8 ready-state persistence failed: %s", storage_exc)
             delay_sec = self._post_ready_settle_delay_seconds(name)
             detail = f"ready in {elapsed:.1f}s"
             if delay_sec > 0:
@@ -681,6 +800,81 @@ class LaunchOrchestrator(QObject):
             self._current_cmd = None
             self._schedule_advance_queue(0)
 
+    def _persist_ready_js8_identity(self, item: Any, status: Mapping[str, Any]) -> None:
+        """Record an API-observed variant; file verification remains background-owned."""
+
+        if not isinstance(item, dict):
+            return
+        version = str(status.get("version", "") or "").strip()
+        variant_family = variant_family_from_version(version)
+        if variant_family == "unknown":
+            return
+        rig_name = str(item.get("rig_name", "") or "").strip()
+        resolution = resolve_js8_storage(
+            {
+                "variant_family": variant_family,
+                "variant_version": version,
+                "rig_name": rig_name,
+                "rig_name_source": str(item.get("rig_name_source", "") or "managed"),
+            },
+            probe_existing=False,
+        )
+        root = str(resolution.data_root or "").strip()
+        if not root:
+            return
+        item["application_data_root"] = root
+        item["storage_mode"] = resolution.storage_mode
+        item["expected_storage_mode"] = resolution.expected_mode
+        for raw_radio_id in item.get("radio_ids", ()):
+            try:
+                profile = self.multi_radio_store.get_device_profile(int(raw_radio_id)) or {}
+                instance_id = int(profile.get("js8_instance_id", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if instance_id <= 0:
+                continue
+            existing = self.multi_radio_store.get_js8_instance(instance_id) or {}
+            existing_root = str(existing.get("application_data_root", "") or "").strip()
+            existing_evidence = str(existing.get("storage_evidence", "") or "").strip()
+            if (
+                existing_root
+                and existing_root != root
+                and existing_evidence.startswith(("operator_confirmed", "runtime_verified"))
+            ):
+                log.warning(
+                    "LaunchOrchestrator: API-observed JS8 identity differs from the verified storage root for %s",
+                    profile.get("name", raw_radio_id),
+                )
+                self.multi_radio_store.save_js8_instance(
+                    {
+                        **dict(existing),
+                        "id": instance_id,
+                        "variant_family": variant_family,
+                        "variant_version": version,
+                        "storage_mode": "unverified",
+                        "storage_evidence": f"mismatch:api_observed:{version}",
+                    }
+                )
+                continue
+            updated = dict(existing)
+            updated.update(
+                {
+                    "id": instance_id,
+                    "variant_family": variant_family,
+                    "variant_version": version,
+                    "rig_name": rig_name,
+                    "rig_name_source": str(item.get("rig_name_source", "") or "managed"),
+                    "application_data_root": root,
+                    "all_path": str(Path(root) / "ALL.TXT"),
+                    "directed_path": str(Path(root) / "DIRECTED.TXT"),
+                    "inbox_path": str(Path(root) / "inbox.db3"),
+                    "storage_mode": "shared" if resolution.expected_mode == "shared" else "unverified",
+                    "storage_verified_utc": "",
+                    "storage_evidence": f"api_observed:{version}",
+                }
+            )
+            self.multi_radio_store.save_js8_instance(updated)
+
     def _program_running(self, item: Any) -> bool:
         name = self._queue_item_name(item)
         if isinstance(item, Mapping) and item.get("instance_identity"):
@@ -699,24 +893,25 @@ class LaunchOrchestrator(QObject):
     def _resolve_launch_command(self, item_or_name: Any) -> Tuple[Optional[List[str]], str]:
         name = self._queue_item_name(item_or_name)
         item = item_or_name if isinstance(item_or_name, Mapping) else {}
+        launch_arguments = self._launch_arguments_for(item)
         override_cmd = str(item.get("launch_command_override", "") or "").strip()
         if override_cmd:
             cmd = self._command_from_freeform(override_cmd)
             if cmd:
-                return self._finalize_launch_command(name, cmd), "radio launch command"
+                return self._finalize_launch_command(name, cmd, launch_arguments), "radio launch command"
         override_path = str(item.get("launch_path_override", "") or "").strip()
         if override_path:
             cmd = self._command_from_config_path(name, override_path)
             if cmd:
-                return self._finalize_launch_command(name, cmd), "radio configured path"
+                return self._finalize_launch_command(name, cmd, launch_arguments), "radio configured path"
             cmd = self._command_from_freeform(override_path)
             if cmd:
-                return self._finalize_launch_command(name, cmd), "radio configured command"
+                return self._finalize_launch_command(name, cmd, launch_arguments), "radio configured command"
         custom_cmd = self._custom_tool_command(name)
         if custom_cmd:
             cmd = self._command_from_freeform(custom_cmd)
             if cmd:
-                return self._finalize_launch_command(name, cmd), "configured custom tool"
+                return self._finalize_launch_command(name, cmd, launch_arguments), "configured custom tool"
         meta = LAUNCH_APP_META.get(name, {})
         launch_cmd_key = str(meta.get("launch_cmd_key", "") or "")
         if launch_cmd_key:
@@ -724,25 +919,40 @@ class LaunchOrchestrator(QObject):
             if raw_launch_cmd:
                 cmd = self._command_from_freeform(raw_launch_cmd)
                 if cmd:
-                    return self._finalize_launch_command(name, cmd), "configured launch command"
+                    return self._finalize_launch_command(name, cmd, launch_arguments), "configured launch command"
         path_key = str(meta.get("path_key", "") or "")
         raw = str(self.settings.get(path_key, "") or "").strip() if path_key else ""
         if raw:
             cmd = self._command_from_config_path(name, raw)
             if cmd:
-                return self._finalize_launch_command(name, cmd), "configured path"
+                return self._finalize_launch_command(name, cmd, launch_arguments), "configured path"
             cmd = self._command_from_freeform(raw)
             if cmd:
-                return self._finalize_launch_command(name, cmd), "configured command"
+                return self._finalize_launch_command(name, cmd, launch_arguments), "configured command"
         fallback = self._fallback_cmd(name)
         if fallback:
-            return self._finalize_launch_command(name, fallback), "fallback command"
+            return self._finalize_launch_command(name, fallback, launch_arguments), "fallback command"
         return None, "none"
 
-    def _finalize_launch_command(self, name: str, cmd: List[str]) -> List[str]:
+    @staticmethod
+    def _launch_arguments_for(item: Mapping[str, Any]) -> List[str]:
+        raw = item.get("launch_arguments", ())
+        if not isinstance(raw, (list, tuple)):
+            return []
+        return [str(argument) for argument in raw if str(argument or "")]
+
+    def _finalize_launch_command(self, name: str, cmd: List[str], launch_arguments: List[str] | None = None) -> List[str]:
         if str(name or "").strip() == "VarAC":
             return self._wrap_varac_wine_if_needed(cmd)
-        return cmd
+        arguments = list(launch_arguments or ())
+        if not arguments:
+            return cmd
+        # ``open`` forwards application arguments only after ``--args``.  The
+        # planner deliberately keeps these arguments separate from bundle/path
+        # selection so a direct executable and a macOS bundle stay equivalent.
+        if cmd and os.path.basename(str(cmd[0])).casefold() == "open" and "--args" not in cmd:
+            return [*cmd, "--args", *arguments]
+        return [*cmd, *arguments]
 
     def _command_from_config_path(self, name: str, raw: str) -> Optional[List[str]]:
         p = Path(raw)
@@ -888,11 +1098,19 @@ class LaunchOrchestrator(QObject):
         return False
 
     def _fallback_cmd(self, name: str) -> Optional[List[str]]:
-        for cand in LAUNCH_APP_META.get(name, {}).get("fallback_cmds", []):
+        fallback_candidates = LAUNCH_APP_META.get(name, {}).get("fallback_cmds", [])
+        first_candidate = None
+        for cand in fallback_candidates:
             cand_s = str(cand).strip()
             if not cand_s:
                 continue
-            return [cand_s]
+            if first_candidate is None:
+                first_candidate = cand_s
+            resolved = shutil.which(cand_s)
+            if resolved:
+                return [resolved]
+        if first_candidate:
+            return [first_candidate]
         return None
 
     def _infer_launch_cwd(self, name: str, cmd: List[str], cmd_desc: str) -> Optional[str]:

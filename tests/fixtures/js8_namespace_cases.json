@@ -1,0 +1,46 @@
+{
+  "platform": "Linux",
+  "home": "/fixture-home",
+  "cases": [
+    {
+      "id": "default",
+      "variant": "js8call",
+      "version": "2.2.0",
+      "rig_name": "",
+      "expected_root": "/fixture-home/.local/share/JS8Call",
+      "save_dir": "/fixture-home/received/default"
+    },
+    {
+      "id": "field-a",
+      "variant": "js8call",
+      "version": "2.2.0",
+      "rig_name": "field-a",
+      "expected_root": "/fixture-home/.local/share/JS8Call - field-a",
+      "save_dir": "/fixture-home/received/shared-name"
+    },
+    {
+      "id": "field-b",
+      "variant": "improved",
+      "version": "3.0.3",
+      "rig_name": "field-b",
+      "expected_root": "/fixture-home/.local/share/JS8Call - field-b",
+      "save_dir": "/fixture-home/received/shared-name"
+    }
+  ],
+  "message_files": ["ALL.TXT", "DIRECTED.TXT", "inbox.db3"],
+  "identity_invariants": [
+    "save_dir_is_not_message_storage_root",
+    "settings_name_does_not_change_message_storage_root",
+    "api_port_does_not_change_message_storage_root"
+  ],
+  "collision": {
+    "root": "field-a",
+    "equivalent_root": "field-a-symlink",
+    "expected": "collision"
+  },
+  "legacy": {
+    "directed_path": "/fixture-home/legacy/DIRECTED.TXT",
+    "source_content": "preserve-byte-for-byte",
+    "expected": "explicit_override_needs_verification"
+  }
+}
