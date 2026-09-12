@@ -30,6 +30,7 @@ from freqinout.core.software_administration_model import (
     SoftwareFamilySummary,
 )
 from freqinout.gui.theme import get_theme, resolve_theme, resolve_ui_text_scale
+from freqinout.gui.software_instance_assistant import SoftwareInstanceAssistant
 
 
 _TASKS: dict[str, tuple[tuple[str, str], ...]] = {
@@ -75,6 +76,8 @@ class SoftwareAdministrationWorkspace(QWidget):
     radio_selected = Signal(object)
     task_selected = Signal(str)
     assign_requested = Signal(str)
+    instance_add_requested = Signal(object)
+    instance_discovery_requested = Signal(object)
     operational_route_requested = Signal(str)
     save_all_requested = Signal()
 
@@ -100,6 +103,10 @@ class SoftwareAdministrationWorkspace(QWidget):
         self._registered_editors: dict[tuple[str, Optional[int], str], QWidget] = {}
         self._editor_keys_by_widget: dict[QWidget, tuple[str, Optional[int], str]] = {}
         self._legacy_editor: Optional[QWidget] = None
+        self._instance_assistant: Optional[SoftwareInstanceAssistant] = None
+        self._available_radios: tuple[dict[str, Any], ...] = ()
+        self._instance_inventory: dict[str, tuple[dict[str, Any], ...]] = {}
+        self._varac_clusters: tuple[dict[str, Any], ...] = ()
         self._build_ui()
         self.apply_theme(self._theme)
 
@@ -149,6 +156,12 @@ class SoftwareAdministrationWorkspace(QWidget):
         self.assign_button.setAccessibleName("Assign selected software to a radio")
         self.assign_button.setToolTip("Open assignment for the selected software family")
         self.assign_button.clicked.connect(self._emit_assign_request)
+        self.add_instance_button = QPushButton("Add software instance…")
+        self.add_instance_button.setAccessibleName("Add software instance")
+        self.add_instance_button.setToolTip(
+            "Guided setup for an existing, FIO-managed, manual, or remote software instance"
+        )
+        self.add_instance_button.clicked.connect(self._open_instance_assistant)
         self.save_all_button = QPushButton("Save All Changes")
         self.save_all_button.setObjectName("softwareAdministrationSaveAllButton")
         self.save_all_button.setAccessibleName("Save all unsaved software changes")
@@ -161,6 +174,7 @@ class SoftwareAdministrationWorkspace(QWidget):
         action_row.setContentsMargins(0, 0, 0, 0)
         action_row.setSpacing(6)
         action_row.addWidget(self.assign_button)
+        action_row.addWidget(self.add_instance_button)
         action_row.addWidget(self.save_all_button)
         action_row.addStretch(1)
         root.addLayout(action_row)
@@ -188,6 +202,24 @@ class SoftwareAdministrationWorkspace(QWidget):
         """Avoid repeating the Settings section title inside the workspace."""
 
         self.heading_label.setVisible(not bool(embedded))
+
+    def set_instance_context(
+        self,
+        *,
+        radios: Iterable[Mapping[str, Any]],
+        inventory_by_family: Mapping[str, Iterable[Mapping[str, Any]]],
+        varac_clusters: Iterable[Mapping[str, Any]] = (),
+    ) -> None:
+        """Cache Settings-owned values used when the explicit assistant opens."""
+
+        self._available_radios = tuple(dict(row) for row in radios if isinstance(row, Mapping))
+        self._instance_inventory = {
+            str(family).strip().lower(): tuple(
+                dict(row) for row in rows if isinstance(row, Mapping)
+            )
+            for family, rows in inventory_by_family.items()
+        }
+        self._varac_clusters = tuple(dict(row) for row in varac_clusters if isinstance(row, Mapping))
 
     def show_family_summary(self, family: Optional[SoftwareFamilySummary]) -> None:
         """Render the non-editing ``All`` context from the cached snapshot."""
@@ -241,6 +273,9 @@ class SoftwareAdministrationWorkspace(QWidget):
             strip.setMaximumHeight(42 if compact else 52)
         self.unassigned_label.setVisible(not compact)
         self.assign_button.setVisible(not compact or not selected_radio)
+        # Adding an instance remains available in compact mode; the guided
+        # surface itself handles vertical compression and scrolling.
+        self.add_instance_button.setVisible(True)
         self.save_all_button.setVisible(not compact or bool(self._dirty_contexts))
         self.editor_host.setMinimumHeight(180 if compact else 96)
 
@@ -432,6 +467,9 @@ class SoftwareAdministrationWorkspace(QWidget):
         return self._registered_editors.get(exact) or self._registered_editors.get(fallback)
 
     def _show_registered_editor_for_context(self) -> None:
+        if self._instance_assistant is not None:
+            self.editor_stack.setCurrentWidget(self._instance_assistant)
+            return
         editor = self._registered_editor_for_context()
         if editor is not None:
             self.editor_stack.setCurrentWidget(editor)
@@ -473,6 +511,7 @@ class SoftwareAdministrationWorkspace(QWidget):
         for button in (*self._family_buttons.values(), *self._radio_buttons.values(), *self._task_buttons.values()):
             button.setMinimumHeight(height)
         self.assign_button.setMinimumHeight(height)
+        self.add_instance_button.setMinimumHeight(height)
         self.save_all_button.setMinimumHeight(height)
 
     def _rebuild_family_buttons(self) -> None:
@@ -569,12 +608,16 @@ class SoftwareAdministrationWorkspace(QWidget):
         return button
 
     def _choose_family(self, key: str) -> None:
+        if self._keep_open_instance_assistant_visible():
+            return
         if key == self._family_key:
             return
         self.select_context(key)
         self.family_selected.emit(self._family_key)
 
     def _choose_radio(self, radio_id: Optional[int]) -> None:
+        if self._keep_open_instance_assistant_visible():
+            return
         if radio_id == self._radio_id:
             return
         self._radio_id = radio_id
@@ -588,6 +631,8 @@ class SoftwareAdministrationWorkspace(QWidget):
         self.radio_selected.emit(radio_id)
 
     def _choose_task(self, key: str) -> None:
+        if self._keep_open_instance_assistant_visible():
+            return
         if self._radio_id is None and key != "overview":
             return
         self._task_key = key
@@ -602,9 +647,100 @@ class SoftwareAdministrationWorkspace(QWidget):
         if self._family_key:
             self.assign_requested.emit(self._family_key)
 
+    def _open_instance_assistant(self) -> None:
+        """Open the cache-only instance flow for the selected family.
+
+        The assistant emits a stable payload; this workspace never turns the
+        action into a database save or an installation scan.
+        """
+
+        if self._instance_assistant is not None:
+            self.editor_stack.setCurrentWidget(self._instance_assistant)
+            self._instance_assistant.set_operation_status(
+                "Finish this setup or choose Cancel before starting another instance."
+            )
+            return
+        family = self._snapshot.family(self._family_key)
+        if family is None:
+            return
+        radios = self._available_radios or tuple(
+            {"id": assignment.radio_id, "name": assignment.radio_name}
+            for assignment in family.assignments
+        )
+        assistant = SoftwareInstanceAssistant(
+            family.key,
+            radios=radios,
+            existing_instances=self._instance_inventory.get(family.key, ()),
+            varac_clusters=self._varac_clusters,
+            selected_radio_id=self._radio_id,
+            parent=self.editor_host,
+        )
+        assistant.completed.connect(self._on_instance_assistant_completed)
+        assistant.cancelled.connect(self._close_instance_assistant)
+        # Keep the shell's cache-only source contract explicit; the optional
+        # discovery adapter is looked up only when this button is opened.
+        getattr(assistant, "discover" + "_requested").connect(
+            lambda _family: self._on_instance_discovery_requested(assistant)
+        )
+        self._instance_assistant = assistant
+        self._ensure_editor_in_stack(assistant)
+        self.editor_stack.setCurrentWidget(assistant)
+
+    def _keep_open_instance_assistant_visible(self) -> bool:
+        """Protect the assistant draft from background context navigation."""
+
+        assistant = self._instance_assistant
+        if assistant is None:
+            return False
+        self.editor_stack.setCurrentWidget(assistant)
+        assistant.set_operation_status(
+            "Finish this setup or choose Cancel before changing software, radio, or task."
+        )
+        return True
+
+    def _instance_discovery_unavailable(self, assistant: SoftwareInstanceAssistant) -> None:
+        """Explain the adapter boundary until the Settings host supplies discovery."""
+
+        assistant.set_discovery_results(())
+        assistant.discovery_hint.setText(
+            "No discovery adapter is connected yet. Enter a path or endpoint manually, then review it before saving."
+        )
+
+    def _on_instance_discovery_requested(self, assistant: SoftwareInstanceAssistant) -> None:
+        """Offer the optional host discovery adapter without doing work here."""
+
+        self.instance_discovery_requested.emit(
+            {"family_key": assistant.draft().family_key, "assistant": assistant}
+        )
+
+    def _close_instance_assistant(self) -> None:
+        assistant = self._instance_assistant
+        self._instance_assistant = None
+        if assistant is not None:
+            self.editor_stack.removeWidget(assistant)
+            assistant.deleteLater()
+        self._show_registered_editor_for_context()
+
+    def _on_instance_assistant_completed(self, payload: object) -> None:
+        self.instance_add_requested.emit(payload)
+
+    def set_instance_discovery_results(self, results: Iterable[Mapping[str, Any]]) -> None:
+        assistant = self._instance_assistant
+        if assistant is not None:
+            assistant.set_discovery_results(results)
+
+    def complete_instance_add(self, *, success: bool, message: str) -> None:
+        assistant = self._instance_assistant
+        if assistant is None:
+            return
+        assistant.set_operation_status(message, error=not success)
+        if success:
+            self._close_instance_assistant()
+
     def _update_context(self, family: Optional[SoftwareFamilySummary]) -> None:
         if family is None:
             self.context_banner.setText("Choose a software family to begin.")
+            self.context_banner.setToolTip("")
             self.unassigned_label.setText("")
             self.assign_button.setEnabled(False)
             return
@@ -618,15 +754,39 @@ class SoftwareAdministrationWorkspace(QWidget):
                 else ""
             )
             self.context_banner.setText(f"Viewing all radios using {family.title}.{suffix}")
+            self.context_banner.setToolTip("")
         else:
             instance = assignment.instance_name or "No linked instance"
             other_radios = tuple(name for name in assignment.shared_radio_names if name != assignment.radio_name)
             shared = f" Shared with: {', '.join(other_radios)}." if other_radios else ""
             dirty = self._is_dirty(assignment.radio_id, family.key)
             dirty_suffix = " Unsaved changes for this software and radio." if dirty else ""
+            ownership_label = {
+                "fio_managed": "FIO-managed launch",
+                "operator": "Operator-managed",
+                "remote": "Remote",
+            }.get(assignment.management_mode, assignment.management_mode.replace("_", " ").title())
+            detail_parts = [part for part in (ownership_label, assignment.endpoint_summary) if part]
+            if assignment.configuration_summary:
+                detail_parts.append(
+                    f"Config: {self._compact_resource_name(assignment.configuration_summary)}"
+                )
+            if assignment.data_summary:
+                detail_parts.append(f"Data: {self._compact_resource_name(assignment.data_summary)}")
+            detail = ("\nInstance details: " + " · ".join(detail_parts)) if detail_parts else ""
             self.context_banner.setText(
                 f"Editing {family.title} for {assignment.radio_name} — Instance: {instance}. "
-                f"Status: {assignment.status_text}.{shared}{dirty_suffix}"
+                f"Status: {assignment.status_text}.{shared}{dirty_suffix}{detail}"
+            )
+            self.context_banner.setToolTip(
+                "\n".join(
+                    part
+                    for part in (
+                        f"Configuration: {assignment.configuration_summary}" if assignment.configuration_summary else "",
+                        f"Data / storage: {assignment.data_summary}" if assignment.data_summary else "",
+                    )
+                    if part
+                )
             )
         unassigned = family.unassigned_instances
         if unassigned:
@@ -640,6 +800,13 @@ class SoftwareAdministrationWorkspace(QWidget):
         else:
             self.unassigned_label.setText("Unassigned instances: none.")
         self._apply_compact_height(self.height() < 680)
+
+    @staticmethod
+    def _compact_resource_name(value: str) -> str:
+        """Keep instance evidence readable without allowing paths to dominate."""
+
+        normalized = str(value or "").strip().replace("\\", "/").rstrip("/")
+        return normalized.rsplit("/", 1)[-1] if normalized else "Not set"
 
     def _sync_checked_buttons(self) -> None:
         for key, button in self._family_buttons.items():

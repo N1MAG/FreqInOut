@@ -1,0 +1,307 @@
+# Multi-Instance Software Administration Specification
+
+Status: implementation complete; automated exit gate passed. Live Linux
+multi-process and radio/PTT qualification remains an operator-assisted release
+check.
+
+Governing delivery contract: `project_delivery_rules.md`
+
+Governing product/UI contract: `multirig_product_ui_contract.md`
+
+Related specifications:
+
+- `settings_configuration_assistant_spec.md`
+- `js8call_modern_variant_compatibility_spec.md`
+- `multi_endpoint_scheduler_concurrency_spec.md`
+- `production_reliability_and_workflow_remediation_spec.md`
+
+## Product Outcome
+
+Software Administration must let an operator start with the software they want
+to configure, see every radio that uses it, and safely add, import, review,
+launch, and persist a distinct instance without reconstructing application
+internals by hand.
+
+The normal workflow is:
+
+`Software -> application -> radio -> Add software instance -> review -> save -> verify`
+
+The operator must be able to understand, before applying anything:
+
+- which radio owns the instance;
+- whether FIO discovered, imported, or manages its launch recipe;
+- which executable, profile/configuration, endpoint, data paths, and launch
+  identity distinguish it;
+- whether ports and storage are unique or intentionally shared;
+- what FIO will write and what remains operator-owned;
+- whether the saved instance has been merely configured, detected, reached, or
+  semantically verified.
+
+This work is additive and non-destructive. Discovery never writes. Importing an
+existing instance never rewrites its external configuration. `FIO-managed`
+means FIO owns the durable instance identity and launch recipe; it does not mean
+FIO owns a third-party application's native settings. This assistant invokes no
+external configuration writer. Any future writer requires an explicit review,
+backup, apply, and readback-verification contract.
+
+## Supported Instance Families
+
+### JS8Call
+
+FIO supports stock JS8Call 2.2.0, JS8Call Improved 3.0.3, and Subspace as
+rig-scoped multi-instance applications. Each local instance requires:
+
+- a stable FIO system key and operator-facing instance name;
+- a stable, unique `--rig-name` launch identity;
+- a unique local TCP API endpoint and UDP port where UDP is enabled;
+- a reviewed settings/profile source;
+- a rig-scoped application-data root and attributable message files;
+- a distinct launch-bundle identity and radio assignment.
+
+Per maintainer direction, Subspace is assumed to instantiate and isolate second
+instances in the same fashion as JS8Call 2.2.0 and Improved 3.0.3. The former
+single-local-instance/shared-store restriction is removed. Runtime evidence that
+contradicts the assumed rig-scoped root must produce `Needs attention`; FIO must
+not silently attribute one shared file source to multiple radios.
+
+### Fast Light
+
+A Fast Light instance is a radio-scoped workflow containing FLRig and FLDigi,
+with FLMsg and FLAmp shared by default unless the operator chooses advanced
+radio-specific paths. A distinct instance requires:
+
+- unique FLRig and FLDigi control endpoints;
+- distinct native profile/config roots where supported;
+- separate FLDigi log/check-in paths when attribution matters;
+- an explicit FLDigi-to-FLRig relationship;
+- persisted executable paths and effective launch commands;
+- application/version-qualified launch arguments and readiness checks.
+
+FIO must not claim to have created an application-native managed profile when a
+supported writer or installed-version capability has not been verified. The
+current assistant may manage the FIO launch recipe while the native profile
+remains operator-configured and explicitly reviewed.
+
+### Cluster VarAC
+
+Each VarAC radio uses a distinct node record with its own installation/launcher,
+INI, database/runtime paths, inbox/outbox paths, and launch identity. Cluster
+membership is a separate, persisted relationship that supplies cluster ID,
+instance number, shared database where applicable, counter refresh, gateway
+handler, and PTT-lock policy.
+
+FIO guides the operator through node creation first and cluster membership
+second. It does not imply that ordinary single-instance VarAC requires cluster
+mode. It must detect duplicate node paths, launch identities, and cluster
+instance numbers before saving.
+
+## Durable Instance Manifest
+
+Existing application-specific tables remain authoritative for operational
+settings and radio links. An additive software-instance manifest records the
+cross-application lifecycle evidence that those tables do not share:
+
+- `instance_key`: stable FIO identity, never derived from row position;
+- `family_key` and linked application `system_key`;
+- ownership: `operator`, `fio_managed`, or `remote`;
+- provenance: manual, detected file/profile, running endpoint, clone, or managed;
+- executable, configuration path/root, data root, effective launch command;
+- host plus named TCP/UDP endpoint claims;
+- serial, rig-control, PTT, log, database, and storage resource claims;
+- desired and last-observed configuration fingerprints;
+- verification state, summary, evidence, and timestamps;
+- bounded family-specific metadata.
+
+The manifest does not duplicate the radio assignment. The radio profile's
+existing application link remains the source of truth, so an unassigned imported
+instance can exist without fabricating a radio relationship.
+
+All manifest JSON is bounded, versioned, normalized, and free of credentials.
+Additive schema assurance creates missing columns/tables without transforming or
+deleting existing production values.
+
+## Discovery And Adoption
+
+`Find existing configurations` is explicit and asynchronous. It scans only known,
+bounded application locations and already-loaded FIO configuration. It must not
+walk an unbounded home directory, contact radios, or block the UI thread.
+
+Each candidate shows:
+
+- application/variant and instance/profile name;
+- executable and configuration source;
+- host and named ports;
+- data/message/log paths;
+- matching FIO record or radio, if any;
+- confidence and evidence;
+- conflicts and the proposed operator action.
+
+The source choices are `Set up a new local instance (FIO-guided)`, `Find or
+import an existing installation`, and `Connect to a manual or remote instance`.
+A discovery result must be selected explicitly before it can be imported.
+Ambiguous candidates are review-only and are never assigned automatically.
+
+Import captures current configuration and a fingerprint. It does not take
+ownership or modify the source. A subsequent difference is drift, not permission
+to overwrite.
+
+## Managed Creation And Port Policy
+
+FIO proposes ports from family-specific ranges after checking:
+
+1. persisted application records;
+2. saved launch bundles and manifests;
+3. all ports proposed in the current transaction;
+4. family-internal overlap, such as FLRig and FLDigi claiming one TCP endpoint.
+
+Live reachability is checked explicitly from Health after save. It is not
+performed while navigating the assistant and is not treated as proof that the
+responding process is the expected service. This avoids blocking the UI and a
+time-of-check/time-of-use claim that a currently free port has been reserved.
+
+Remote endpoints are checked for persisted collisions but are not treated as
+locally reservable. A listening port proves reachability only; semantic
+verification must still identify the expected service.
+
+FIO never silently renumbers an imported instance. A conflicting imported port
+is shown with `Use another port`, `Link to existing owner`, or `Keep external and
+repair manually` choices.
+
+Port checks include JS8Call TCP/UDP, FLRig XML-RPC, FLDigi XML-RPC, and any
+configured rigctld or application-specific endpoint. Serial devices, PTT groups,
+message roots, log roots, VarAC INI/database paths, and cluster instance numbers
+are first-class resource claims even though they are not TCP ports.
+
+## Save And Apply Contract
+
+Before Save, the review page lists every durable value and external action.
+
+Validation occurs before mutation. FIO then saves the application record,
+manifest, radio link, optional Cluster VarAC membership, and launch-bundle
+identity as one atomic database operation. A failure rolls the complete change
+back. The current assistant does not modify external files. Any future supported
+external writer must use this staged plan:
+
+1. validate and preview;
+2. back up the explicit target;
+3. apply through an application-specific writer;
+4. verify readback;
+5. commit FIO ownership/evidence;
+6. retain a clear recovery path if launch verification later fails.
+
+Unsupported external writers never receive a generic best-effort rewrite.
+
+## Launch And Verification
+
+Startup and manual launch use the same persisted station launch planner. The
+effective launch preview shows radio, instance, executable, arguments, endpoint,
+config/profile, storage/data root, ownership, dependencies, and conflicts.
+
+Endpoint-scoped applications are not deduplicated merely because their process
+names match. Shared tools are deduplicated only when their persisted instance
+identity is intentionally shared.
+
+Readiness states have precise meanings:
+
+- `Configured`: durable settings exist.
+- `Detected`: external evidence exists but is not yet adopted.
+- `Reachable`: something answered at the endpoint.
+- `Verified`: the expected service/instance and resources match.
+- `Managed by FIO`: FIO owns supported generated configuration.
+- `Operator managed`: FIO observes but does not rewrite it.
+- `Needs attention`: collision, drift, ambiguous storage, or identity mismatch.
+
+A slow or failed instance remains isolated in its endpoint worker/readiness lane
+and cannot delay other radios or receiver endpoints.
+
+## Software Administration UX
+
+The software-family workspace retains the existing three-level chip model:
+
+1. software family;
+2. radio context;
+3. configuration task.
+
+The primary action is `Add software instance`. `Assign software to a radio`
+remains available for linking a saved unassigned instance. The assistant is a
+responsive in-workspace step surface rather than a dense all-fields dialog.
+
+Steps are `Purpose`, `Find or create`, `Identity`, `Connections`, `Files`,
+`Launch`, and `Review`. Completed steps use concise text/icon state. At compact
+sizes, only the active step expands; the review remains vertically scrollable
+without page-level horizontal scrolling.
+
+Normal fields use operator names. Internal IDs, source keys, hashes, and raw JSON
+remain in Advanced details. No placeholder or example contains a real or
+plausible callsign.
+
+The normal instance detail surface shows assignment, management ownership,
+endpoint, configuration, data/storage, launch policy, and last verification.
+Advanced reveals fingerprints and bounded evidence.
+
+## Slices And Exit Gates
+
+### MIS-0 — Specification And Existing-Work Checkpoint
+
+- Commit the completed Software Administration workspace as a recovery point.
+- Establish this lifecycle, persistence, safety, and UX contract.
+- Record the Subspace rig-scoped product assumption.
+
+Exit gate: checkpoint commit exists; specification is internally consistent and
+requires no destructive migration.
+
+### MIS-1 — Core Model And Additive Persistence
+
+- Add manifest dataclasses, normalization, bounded JSON, and collision rules.
+- Add additive manifest persistence and round-trip tests.
+- Project manifests into application/radio records without changing legacy
+  compatibility behavior.
+
+Exit gate: fresh and upgraded database tests pass; invalid family/ownership,
+duplicate identity, malformed JSON, and unsafe collision cases fail clearly;
+existing records are unchanged.
+
+### MIS-2 — Discovery, Adoption, And Port Planning
+
+- Produce bounded candidates for JS8Call and configured FIO Fast Light/VarAC
+  instances.
+- Add stable import/adoption and managed proposal services.
+- Check configured endpoint/resource collisions and require explicit Health
+  verification for live reachability.
+- Apply the Subspace rig-scoped launch/storage contract.
+
+Exit gate: discovery performs no writes; ambiguous results are not auto-linked;
+second-instance proposals are deterministic; collision and Subspace tests pass.
+
+### MIS-3 — Guided Software UX And Persistence Integration
+
+- Add the in-workspace assistant and instance detail review.
+- Support JS8Call, Fast Light, and VarAC node/cluster paths.
+- Save through explicit Settings-host persistence and refresh cached snapshots.
+- Keep scans/checks off the UI thread and protect against stale completion.
+
+Exit gate: all families render at 1920x1080, 1000x700, and 900x560 in Normal and
+Large Text/light and dark themes; cancel makes no changes; saved values survive
+restart; focus/navigation remain responsive.
+
+### MIS-4 — Launch Integration And Final Qualification
+
+- Persist/preview distinct launch identities and readiness evidence.
+- Verify endpoint-scoped multi-launch behavior and drift reporting.
+- Update operator help, related specs, and work log.
+
+Exit gate: automated focused and adjacent Settings/launch/database tests pass;
+`py_compile` and `git diff --check` pass. Linux operator qualification remains a
+separate external gate for two simultaneous instances of each installed family,
+including real radio/PTT resource behavior.
+
+## Model Assignment
+
+- High-reasoning primary: architecture, additive schema, migration safety,
+  concurrency/lifecycle integration, delegated-diff review, final tests/gate.
+- `gpt-5.6-terra` high: bounded core discovery, launch validation, and focused
+  tests.
+- `gpt-5.6-luna` high: bounded guided UI/responsive implementation and focused
+  UI tests.
+- A cost-appropriate Terra/Luna package performs independent focused test and
+  regression review after integration.

@@ -74,7 +74,7 @@ state are now part of the runtime contract.
 | TX completion | no positive completion event | `TX.COMPLETE` extension | Additive evidence only; core behavior cannot require it |
 | Configuration probes | includes `STATION.GET_CONFIG` and `RX.GET_FREE_OFFSETS` | those two are absent | Missing optional probes remain nonblocking capability warnings |
 | High-volume events | emits `TX.FRAME` with tone arrays | may emit transmit events and richer extensions | Drop unused `TX.FRAME` at the shared hub and bound all polling backlogs |
-| Multi-instance storage | `--rig-name` changes application/settings/data identity | `--rig-name` is supported and separates settings/lock identity, but does not isolate `ALL.TXT`, `DIRECTED.TXT`, or `inbox.db3` | Improved may be isolated when launched with correct upstream arguments; FIO blocks more than one planned local Subspace instance |
+| Multi-instance storage | `--rig-name` changes application/settings/data identity | Per the approved forward-compatibility assumption, `--rig-name` changes application/settings/data identity in the corrected Subspace build | Plan each variant with a stable unique rig name, API ports, and application-data root; show `Needs verification` until runtime evidence confirms the root |
 
 ## Verified Storage Namespace Behavior
 
@@ -86,7 +86,7 @@ not the configurable `SaveDir` used for saved/received transfer files.
 |---|---|---|---|
 | JS8Call 2.2.0 | The application starts as `JS8Call`; `--rig-name <name>` changes it to `JS8Call - <name>` before settings and lock creation | `QStandardPaths::DataLocation` is resolved after the application-name change; every distinct rig name therefore receives a distinct writable data root | Generate and pass a stable unique rig name for every concurrent local instance; resolve messages from that instance's application-data root |
 | JS8Call-Improved 3.0.3 | Same application-name and rig-name sequence as 2.2.0 | Uses the newer `QStandardPaths::AppLocalDataLocation`, resolved after the application-name change; message data remains per rig name | Same as 2.2.0 |
-| Subspace 4.1.0.478 reviewed build | `--rig-name` suffixes its settings file and lock | `StoragePaths::dataLocation()` temporarily pins the Qt application name to canonical `JS8Call`; all local rig names therefore share one message root | Permit one local instance only; re-audit before recognizing a future fixed build as rig-scoped |
+| Subspace corrected-build contract | `--rig-name` suffixes its settings file and lock | Per maintainer direction, assume the corrected build resolves application data after applying the rig name, matching 2.2.0 and Improved 3.0.3 | Permit distinct planned instances, retain `Needs verification` until each live root is observed, and fall back to one ingest owner if roots collide |
 
 For 2.2.0 and Improved 3.0.3, distinct TCP ports, MultiSettings configuration
 names, or `SaveDir` values do not substitute for distinct `--rig-name` values.
@@ -158,21 +158,21 @@ override remains supported and its single existing rig-name option is preserved
 and validated. The UI does not describe MultiSettings names, API ports, or
 FIO's managed `SaveDir` folders as proof of message-store isolation.
 
-Subspace supports `-r` / `--rig-name` and uses the name to suffix its settings
-file and instance lock, so the flag does permit multiple processes with separate
-settings. It nevertheless pins application data to the canonical JS8Call data
-location. A launch plan containing more than one local Subspace instance is
-therefore rejected before any process starts because their message evidence
-would still be shared. A single radio-scoped Subspace launch remains valid.
-Remote instances on different hosts are not covered by this local-storage guard.
+Subspace supports `-r` / `--rig-name`. Per the approved product compatibility
+assumption, FIO treats its settings, process lock, and application-data namespace
+as rig-scoped in the same manner as JS8Call 2.2.0 and Improved 3.0.3. FIO may
+therefore plan multiple local Subspace instances only when their rig names, API
+ports, and resolved application-data roots are distinct. Until runtime evidence
+confirms each resolved root, the UI must show `Needs verification`; the product
+assumption is not presented as observed evidence.
 
 Live native API events retain the identity of the radio-scoped host/port that
 delivered them, so FIO can attribute that live evidence to its configured JS8
-instance. Subspace's shared `ALL.TXT`, `DIRECTED.TXT`, and `inbox.db3` records do
-not carry dependable instance identity. FIO must not infer a receiving instance
-for those file-derived records when multiple local Subspace processes exist.
-The one-local-instance launch guard prevents that false attribution in a
-FIO-managed configuration.
+instance. File-derived records are attributed only after the resolved
+application-data root is unique and verified. If actual Subspace runtime evidence
+contradicts the rig-scoped assumption, FIO marks the affected instances
+`Needs attention`, coalesces the shared root to one ingest owner, and does not
+assign those file records to an arbitrary radio.
 
 ## Storage Resolution And Attribution Contract
 
@@ -232,10 +232,12 @@ roots and build a collision map.
   the same root are a blocking configuration error.
 - Two profiles using the same normalized rig name are a blocking launch error,
   even when their TCP ports differ.
-- A reviewed shared-store Subspace build is restricted to one local instance.
-- A future Subspace build may be marked `rig_scoped` only after source review or
-  runtime qualification proves that `--rig-name` changes its application-data
-  root as well as settings and lock identity.
+- Subspace is planned as `rig_scoped` under the approved compatibility
+  assumption, with the same unique rig-name, endpoint, and root checks as 2.2.0
+  and Improved 3.0.3.
+- Runtime evidence remains authoritative. If two Subspace instances resolve to
+  one canonical root, launch/ingest status becomes `Needs attention`; that root
+  is watched once and its records remain shared/unattributed.
 - A deliberately shared root is watched and ingested once, never once per
   radio. Its file-derived records are marked shared/unattributed rather than
   assigned to an arbitrary radio.
@@ -368,8 +370,9 @@ from a busy endpoint.
 - Do not expose source-code variant implementation detail during normal use.
 - A missing optional API probe is a capability limitation, not a false
   disconnected state.
-- Subspace's shared-file limitation must be stated in Settings and at blocked
-  launch planning; FIO must not imply its traffic is per-radio isolated.
+- Subspace's rig-scoped behavior is an explicit compatibility assumption, not a
+  verified claim. Settings must distinguish `Needs verification` from observed
+  isolation and identify both radios if a root collision is detected.
 - Show an operator-readable **Message storage** state for each JS8 radio:
   `Isolated · <rig name>`, `Shared`, or `Needs verification`. Keep full paths in
   details/help rather than crowding the primary radio card.
@@ -402,8 +405,9 @@ package passed its exit gate after automated proof showed that:
 8. optional polling and receive-hub queues remain bounded during a flood;
    listener delivery remains nonblocking; unused `TX.FRAME` is discarded.
 9. Subspace refusal is observable without adding a positive-response wait.
-10. planning two local Subspace instances fails before launch, while a single
-    scoped instance succeeds.
+10. planning two local Subspace instances succeeds only with distinct rig names,
+    endpoints, and proposed application-data roots; unresolved roots remain
+    `Needs verification` rather than being presented as observed isolation.
 11. JS8Call 2.2.0 and Improved 3.0.3 managed launches receive stable, distinct
     `--rig-name` values and exact launch preview commands.
 12. an explicit command's existing rig name is preserved; duplicate or
@@ -429,11 +433,13 @@ package passed its exit gate after automated proof showed that:
 Linux production qualification must exercise a default and at least two
 simultaneous uniquely rig-named JS8Call 2.2.0/Improved instances: confirm unique
 settings, locks, data roots, APIs, and message attribution before and after
-restart. It should additionally exercise one Subspace installation: select the
-executable, confirm API readiness, receive a directed event with correct age,
-observe the correct speed, and perform a guarded operator-authorized send.
-Subspace qualification must use only one local instance until its upstream
-storage isolation changes and is re-audited.
+restart. It must also exercise at least two corrected Subspace instances:
+select each executable/rig profile, confirm distinct API endpoints and resolved
+application-data roots, receive directed events with correct per-instance
+attribution, observe the correct speed, and perform a guarded
+operator-authorized send. If the observed roots collide, qualification fails;
+FIO must retain one ingest owner and present the affected instances as needing
+attention rather than guessing radio attribution.
 
 ## Storage Implementation Packages
 
@@ -476,16 +482,16 @@ unchanged-source tests.
 Exit gate: all 20 requirements pass; the work log records automated evidence
 and the external Linux qualification boundary.
 
-Automated evidence is recorded in `ui_regression_work_log.md`. The external
-Linux exercise remains pending and does not weaken the implemented one-local-
-Subspace guard or the requirement to leave unknown storage unattributed.
+Automated evidence is recorded in `ui_regression_work_log.md`. External Linux
+qualification remains pending and does not weaken the requirement to leave an
+unverified or unexpectedly shared storage root unattributed.
 
 ## Deferred Opportunities
 
 - explicit variant/capability reporting in Station Health;
 - Improved filter, group, heartbeat, and auto-reply control APIs;
 - Subspace directed-send and transmit-completion enrichment;
-- remote Subspace multi-instance qualification where storage is not shared.
+- live Subspace multi-instance storage qualification on each supported desktop.
 
 These additions require their own UX and safety review. They are not blockers
 for the baseline support defined here.

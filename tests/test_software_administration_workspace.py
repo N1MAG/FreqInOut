@@ -90,6 +90,34 @@ def test_family_cards_and_radio_context_are_separate_navigation_controls():
         widget.deleteLater()
 
 
+def test_selected_radio_shows_reviewable_manifest_identity_without_long_path_chrome():
+    snapshot = build_software_administration_snapshot(
+        [{"id": 1, "name": "FIO-A", "enabled": 1, "use_js8call": 1, "js8_instance_id": 11}],
+        js8_instances=[{"id": 11, "system_key": "js8-a", "name": "FIO-A JS8"}],
+        instance_manifests=[
+            {
+                "instance_key": "js8:js8-a",
+                "family_key": "js8call",
+                "application_system_key": "js8-a",
+                "management_mode": "fio_managed",
+                "verification_state": "configured",
+                "configuration_path": "/profiles/field/JS8Call - FIO-A.ini",
+                "data_root": "/messages/field/JS8Call - FIO-A",
+                "ports": [{"name": "JS8Call API", "host": "127.0.0.1", "port": 2442}],
+            }
+        ],
+    )
+    widget = _workspace(snapshot)
+    try:
+        widget.select_context("js8call", 1)
+        assert "FIO-managed launch" in widget.context_banner.text()
+        assert "Config: JS8Call - FIO-A.ini" in widget.context_banner.text()
+        assert "Data: JS8Call - FIO-A" in widget.context_banner.text()
+        assert "/profiles/field/JS8Call - FIO-A.ini" in widget.context_banner.toolTip()
+    finally:
+        widget.deleteLater()
+
+
 def test_radio_chip_selection_and_task_selection_route_without_io():
     widget = _workspace(_snapshot())
     try:
@@ -165,6 +193,31 @@ def test_navigation_controls_have_accessible_names():
         assert len(named) >= 4
         names = " ".join(b.accessibleName() for b in named)
         assert "JS8Call" in names and "FIO-A" in names
+    finally:
+        widget.deleteLater()
+
+
+def test_open_instance_assistant_preserves_its_draft_until_finish_or_cancel():
+    widget = _workspace(_snapshot())
+    try:
+        widget.set_instance_context(
+            radios=({"id": 1, "name": "FIO-A"}, {"id": 2, "name": "FIO-B"}),
+            inventory_by_family={"js8call": (), "fast_light": (), "varac": ()},
+        )
+        widget.select_context("js8call", 1)
+        widget._open_instance_assistant()
+        assistant = widget._instance_assistant
+        assert assistant is not None
+        assistant._field_widgets["instance_name"].setText("My second JS8")
+
+        next(button for button in _buttons(widget) if button.text().startswith("FIO-B")).click()
+
+        assert widget.selected_radio_id() == 1
+        assert widget.editor_stack.currentWidget() is assistant
+        assert assistant._field_widgets["instance_name"].text() == "My second JS8"
+        assert "Finish this setup" in assistant.operation_status_label.text()
+        assistant.cancelled.emit()
+        assert widget._instance_assistant is None
     finally:
         widget.deleteLater()
 

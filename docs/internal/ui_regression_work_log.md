@@ -4396,3 +4396,71 @@ verification evidence exists and directing the operator to Health. Luna added
 the complete no-field/action matrix and terminology regression; the primary
 strengthened it with geometry-order and zero-stretch assertions after reviewing
 Terra's structural audit.
+
+## 2026-09-12 — Guided multi-instance software administration
+
+Status: implementation complete; automated exit gate passed. Live Linux
+qualification with two simultaneous instances of each installed family remains
+an operator-assisted release check.
+
+Recovery checkpoint `55065a0` preserves the completed software-centered
+workspace before this lifecycle work. The new in-workspace assistant follows
+Purpose, Find or create, Identity, Connections, Files, Launch, and Review. It
+starts with a FIO-guided local setup, requires an owning radio, proposes the
+next unused family ports and a stable JS8 rig name, imports only a specifically
+selected discovery result, shows family-specific names instead of generic
+fields, and keeps every external write visible as `None from this review`.
+Discovery is bounded, explicit, asynchronous, and stale-result protected.
+
+An additive `software_instance_manifests` table now records management mode,
+provenance, executable/configuration/data roots, launch command, endpoint and
+exclusive-resource claims, verification state, and bounded evidence. Saving a
+reviewed instance, linking it to a radio, creating its launch items, and adding
+optional VarAC cluster membership is one `BEGIN IMMEDIATE` transaction; any
+collision or error rolls the whole operation back. Legacy application-table
+collisions are checked even when no manifest exists. Canonical exclusive paths,
+JS8 TCP/UDP, FLRig/FLDigi endpoints, duplicate application ownership, VarAC
+node paths, and cluster instance numbers cannot be silently reused.
+
+Launch planning now carries FIO-managed `--rig-name` for stock JS8Call 2.2.0,
+Improved 3.0.3, and the approved rig-scoped Subspace assumption. It preserves
+Fast Light's instance-specific FLRig/FLDigi profile and XML-RPC arguments,
+orders FLRig before FLDigi, and blocks duplicate launch endpoints/resources.
+Cluster VarAC requires a configured cluster/instance pair and an explicit
+instance launch command. FIO manages the durable launch recipe but does not
+claim to rewrite third-party native settings; live reachability and identity
+remain explicit Health verification.
+
+Work packages and models:
+
+- high-reasoning primary GPT-5 model (exact host runtime submodel identifier not
+  exposed): specification, architecture, transaction and schema review,
+  integration, canonical collision hardening, delegated-diff review, adjacent
+  regression gate, and final exit decision;
+- `gpt-5.6-terra`, high reasoning: bounded discovery/adoption-plan and launch
+  preflight core plus focused tests;
+- `gpt-5.6-luna`, high reasoning: seven-step responsive assistant and workspace
+  integration plus focused UI tests;
+- `gpt-5.6-luna`, medium reasoning: independent manifest/transaction rollback,
+  replacement, startup, cluster, and no-sharing tests;
+- inherited primary-class delegated source/test audit (no model override;
+  exact host identifier not exposed): JS8Call Improved/Subspace launch and
+  Settings-adapter regression fixtures.
+
+Primary review corrected a nonexistent VarAC profile-column write exposed by
+the rollback package, made cluster membership part of the same transaction,
+propagated Fast Light native launch arguments through the station planner,
+removed a JS8 discovery fallback that confused `SaveDir` with message storage,
+made imported candidates operator-managed, and replaced ambiguous managed-copy
+claims with the implemented launch-ownership boundary.
+
+Acceptance evidence: the final combined Software Administration, Settings,
+instance/adapter/manifest, storage, discovery, database, and launch partition
+passes 340 tests. Python compilation,
+HTML parsing, and `git diff --check` pass. A full repository attempt reached 59%
+but the test process segfaulted after unrelated scheduler tests accumulated many
+live worker threads; an earlier unrelated ingest-source fixture also fails in
+isolation because its JS8 messages are filtered. Neither failure occurs in or
+is caused by this change's focused/adjacent partitions. No production database,
+external application configuration, endpoint, radio, or filesystem content was
+mutated by the implementation or tests.

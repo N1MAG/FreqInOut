@@ -9,8 +9,15 @@ from typing import Mapping, Sequence
 
 
 MESSAGE_FILENAMES = ("ALL.TXT", "DIRECTED.TXT", "inbox.db3")
-RIG_SCOPED_VARIANTS = frozenset({"js8call_2_2", "js8call_improved_3_0_3"})
-SHARED_VARIANTS = frozenset({"js8call_subspace_4_1"})
+RIG_SCOPED_VARIANTS = frozenset({
+    "js8call_2_2",
+    "js8call_improved_3_0_3",
+    # Subspace 4.1 is intentionally handled like the reviewed 2.2.0 and
+    # Improved 3.0.3 families: an independently launched rig uses its own
+    # --rig-name namespace and therefore its own application-data root.
+    "js8call_subspace_4_1",
+})
+SHARED_VARIANTS = frozenset()
 STORAGE_MODES = frozenset({"rig_scoped", "shared", "unverified"})
 
 
@@ -114,8 +121,8 @@ def rig_name_from_settings_path(value: object) -> str:
     lowered = stem.casefold()
     if lowered.startswith("js8call - "):
         return normalize_rig_name(stem[len("JS8Call - ") :])
-    # Subspace uses this settings-name convention, although the reviewed 4.1
-    # build still pins message data to the unsuffixed JS8Call directory.
+    # Subspace uses this settings-name convention.  It participates in the
+    # same rig-name namespace as the other reviewed multi-instance families.
     if lowered.startswith("js8call-") and not lowered.startswith("js8call-improved"):
         return normalize_rig_name(stem[len("JS8Call-") :])
     return ""
@@ -167,9 +174,6 @@ def resolve_js8_storage(
     rig_source = str(values.get("rig_name_source", values.get("js8_rig_name_source", "")) or "").strip()
     application_name = js8_application_name(rig_name)
     expected_mode = expected_storage_mode(variant_family, variant_version)
-    if expected_mode == "shared":
-        application_name = "JS8Call"
-
     explicit_root = str(
         values.get("application_data_root", values.get("js8_message_storage_root", "")) or ""
     ).strip()

@@ -14,6 +14,7 @@ import tempfile
 import zipfile
 import re
 import threading
+import uuid
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, Optional, List, Tuple, Mapping, Sequence
@@ -760,13 +761,65 @@ class _SoftwareAutofillWorker(QObject):
                 self.cancelled.emit(self.generation)
                 return
             detector = SoftwarePathDetector(self.settings_values)
+            candidates: List[Dict[str, Any]] = []
             if self.section == "fast_light":
                 results = detector.detect_fast_light()
+                flrig = results.get("path_flrig")
+                fldigi = results.get("path_fldigi")
+                if (flrig and flrig.path) or (fldigi and fldigi.path):
+                    candidates.append(
+                        {
+                            "family_key": "fast_light",
+                            "name": "Detected Fast Light installation",
+                            "application_path": flrig.path if flrig else "",
+                            "secondary_application_path": fldigi.path if fldigi else "",
+                            "host": "127.0.0.1",
+                            "port": 12345,
+                            "secondary_port": 7362,
+                            "storage_path": getattr(results.get("fldigi_log_path"), "path", ""),
+                            "provenance": "detected",
+                        }
+                    )
             elif self.section == "varac":
                 results = detector.detect_varac()
+                install = results.get("varac_path")
+                if install and install.path:
+                    candidates.append(
+                        {
+                            "family_key": "varac",
+                            "name": "Detected VarAC installation",
+                            "application_path": install.path,
+                            "configuration_path": getattr(results.get("varac_ini_path"), "path", ""),
+                            "storage_path": getattr(results.get("varac_db_path"), "path", ""),
+                            "secondary_storage_path": getattr(results.get("message_paths.varac"), "path", ""),
+                            "outbox_path": getattr(results.get("varac_outbox_dir"), "path", ""),
+                            "provenance": "detected",
+                        }
+                    )
             elif self.section == "js8":
                 results = detector.detect_js8()
                 profiles = discover_js8call_file_profiles()
+                install_path = getattr(results.get("path_js8call"), "path", "")
+                for profile in profiles:
+                    try:
+                        tcp_port = int(profile.tcp_server_port or 2442)
+                    except (TypeError, ValueError):
+                        tcp_port = 2442
+                    candidates.append(
+                        {
+                            "family_key": "js8call",
+                            "name": profile.operator_label,
+                            "host": "127.0.0.1",
+                            "port": tcp_port,
+                            "udp_port": 2242,
+                            "rig_name": profile.rig_name,
+                            "application_path": install_path,
+                            "configuration_path": profile.ini_path,
+                            "storage_path": profile.application_data_root,
+                            "provenance": "detected",
+                            "storage_mode": profile.storage_mode,
+                        }
+                    )
                 selected = select_js8call_file_profile(
                     profiles,
                     tcp_port=self.js8_port,
@@ -797,6 +850,7 @@ class _SoftwareAutofillWorker(QObject):
                     )
             else:
                 results = {}
+            results["__instance_candidates__"] = candidates
             if self._cancel_event.is_set():
                 self.cancelled.emit(self.generation)
                 return
@@ -6144,6 +6198,12 @@ class SettingsTab(QWidget):
         self.software_administration_workspace.save_all_requested.connect(
             self._save_all_software_family_drafts
         )
+        self.software_administration_workspace.instance_add_requested.connect(
+            self._on_software_instance_add_requested
+        )
+        self.software_administration_workspace.instance_discovery_requested.connect(
+            self._on_software_instance_discovery_requested
+        )
         software_administration_group = self._make_collapsible_group(
             "Software Administration",
             self.software_administration_workspace,
@@ -9621,6 +9681,293 @@ class SettingsTab(QWidget):
         self._select_settings_section_group(getattr(self, "radio_profile_section_group", None))
         self._select_radio_profile_guided_task("apps")
 
+    def _software_instance_inventory(self, family_key: str) -> tuple[Dict[str, Any], ...]:
+        family = str(family_key or "").strip().lower()
+        if family == "js8call":
+            rows = self.multi_radio_store.list_js8_instances()
+        elif family == "fast_light":
+            rows = self.multi_radio_store.list_fast_light_configs()
+        elif family == "varac":
+            rows = self.multi_radio_store.list_varac_nodes()
+        else:
+            rows = []
+        try:
+            manifests = self.multi_radio_store.list_software_instance_manifests()
+        except Exception:
+            log.exception("Failed loading software instance manifests for review.")
+            manifests = []
+        return self._enrich_software_instance_rows(family, rows, manifests)
+
+    @staticmethod
+    def _enrich_software_instance_rows(
+        family: str,
+        rows: Sequence[Mapping[str, Any]],
+        manifests: Sequence[Mapping[str, Any]],
+    ) -> tuple[Dict[str, Any], ...]:
+        """Join already-loaded lifecycle evidence without another I/O pass."""
+
+        by_application = {
+            (
+                str(row.get("family_key") or "").strip().lower(),
+                str(row.get("application_system_key") or "").strip(),
+            ): dict(row)
+            for row in manifests
+            if isinstance(row, Mapping)
+        }
+        enriched: List[Dict[str, Any]] = []
+        for raw in rows:
+            if not isinstance(raw, Mapping):
+                continue
+            row = dict(raw)
+            manifest = by_application.get((family, str(row.get("system_key") or "").strip()))
+            if manifest:
+                ownership = {
+                    "fio_managed": "fio-managed",
+                    "operator": "operator-managed",
+                    "remote": "remote",
+                }.get(str(manifest.get("management_mode") or "").strip().lower(), "operator-managed")
+                row.update(
+                    {
+                        "ownership": ownership,
+                        "mode": "discover" if manifest.get("provenance") == "detected" else "managed",
+                        "application_path": manifest.get("executable_path") or row.get("install_path") or row.get("flrig_path"),
+                        "configuration_path": manifest.get("configuration_path") or row.get("profile_path") or row.get("ini_path"),
+                        "storage_path": manifest.get("data_root") or row.get("application_data_root") or row.get("db_path") or row.get("fldigi_log_path"),
+                        "launch_command": manifest.get("launch_command") or row.get("launch_cmd"),
+                    }
+                )
+                for claim in manifest.get("ports", ()) or ():
+                    if not isinstance(claim, Mapping):
+                        continue
+                    name = str(claim.get("name") or "").strip().lower()
+                    protocol = str(claim.get("protocol") or "tcp").strip().lower()
+                    port = claim.get("port")
+                    if family == "js8call" and protocol == "udp":
+                        row["udp_port"] = port
+                    elif family == "fast_light" and "fldigi" in name:
+                        row["secondary_port"] = port
+                for claim in manifest.get("resource_claims", ()) or ():
+                    if not isinstance(claim, Mapping):
+                        continue
+                    kind = str(claim.get("kind") or "").strip().lower()
+                    value = str(claim.get("value") or "").strip()
+                    target = {
+                        "flrig_configuration": "configuration_path",
+                        "fldigi_configuration": "secondary_configuration_path",
+                        "fldigi_logs": "storage_path",
+                        "fldigi_checkins": "secondary_storage_path",
+                        "varac_incoming": "secondary_storage_path",
+                        "varac_outbox": "outbox_path",
+                        "rig_name": "rig_name",
+                    }.get(kind)
+                    if target and value:
+                        row[target] = value
+            enriched.append(row)
+        return tuple(enriched)
+
+    def _on_software_instance_discovery_requested(self, request: object) -> None:
+        """Show saved instances immediately, then request bounded file discovery."""
+
+        if not isinstance(request, Mapping):
+            return
+        family = str(request.get("family_key") or "").strip().lower()
+        assistant = request.get("assistant")
+        workspace = getattr(self, "software_administration_workspace", None)
+        if not isinstance(workspace, SoftwareAdministrationWorkspace):
+            return
+        workspace.set_instance_discovery_results(self._software_instance_inventory(family))
+        section = {"js8call": "js8", "fast_light": "fast_light", "varac": "varac"}.get(family, "")
+        if section:
+            self._request_software_autofill(
+                section,
+                (),
+                target="instance_assistant",
+                family_key=family,
+                assistant_token=id(assistant) if assistant is not None else None,
+            )
+
+    @staticmethod
+    def _software_instance_system_key(family_key: str, instance_name: str) -> str:
+        family = str(family_key or "software").strip().lower()
+        slug = re.sub(r"[^a-z0-9]+", "-", str(instance_name or "instance").strip().lower()).strip("-")
+        return f"{family}-{slug or 'instance'}-{uuid.uuid4().hex[:10]}"
+
+    def _on_software_instance_add_requested(self, raw_payload: object) -> None:
+        """Persist one reviewed instance, radio link, manifest, and launch recipe."""
+
+        workspace = getattr(self, "software_administration_workspace", None)
+        if not isinstance(workspace, SoftwareAdministrationWorkspace) or not isinstance(raw_payload, Mapping):
+            return
+        payload = dict(raw_payload)
+        family = str(payload.get("family_key") or "").strip().lower()
+        try:
+            radio_id = int(payload.get("radio_id") or 0)
+        except (TypeError, ValueError):
+            radio_id = 0
+        profile = self._device_profile_by_id(radio_id)
+        if family not in {"js8call", "fast_light", "varac"} or not isinstance(profile, Mapping):
+            workspace.complete_instance_add(
+                success=False,
+                message="Choose a radio and one supported software family before saving.",
+            )
+            return
+
+        link_column = {
+            "js8call": "js8_instance_id",
+            "fast_light": "fast_light_config_id",
+            "varac": "varac_node_id",
+        }[family]
+        imported_id = int(payload.get("imported_id") or 0) or None
+        current_id = int(profile.get(link_column, 0) or 0) or None
+        replace_existing = False
+        if current_id is not None and current_id != imported_id:
+            response = QMessageBox.question(
+                self,
+                "Replace software assignment?",
+                (
+                    f"{self._profile_display_name(dict(profile))} already has this software assigned. "
+                    "Replace that radio-to-instance mapping with the reviewed instance? Existing application "
+                    "records are retained."
+                ),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if response != QMessageBox.Yes:
+                workspace.complete_instance_add(success=False, message="No changes were saved.")
+                return
+            replace_existing = True
+
+        instance_name = str(payload.get("instance_name") or "").strip()
+        system_key = str(payload.get("imported_system_key") or "").strip()
+        if not system_key:
+            system_key = self._software_instance_system_key(family, instance_name)
+        host = str(payload.get("host") or "127.0.0.1").strip() or "127.0.0.1"
+        try:
+            primary_port = int(payload.get("port") or 0)
+            secondary_port = int(payload.get("secondary_port") or 0)
+        except (TypeError, ValueError):
+            workspace.complete_instance_add(success=False, message="Ports must be whole numbers.")
+            return
+        application_path = str(payload.get("application_path") or "").strip()
+        configuration_path = str(payload.get("configuration_path") or "").strip()
+        storage_path = str(payload.get("storage_path") or "").strip()
+        launch_command = str(payload.get("launch_command") or "").strip()
+        base: Dict[str, Any] = {
+            "id": imported_id,
+            "system_key": system_key,
+            "name": instance_name,
+            "enabled": 1,
+        }
+        if family == "js8call":
+            data_root = Path(storage_path) if storage_path else None
+            app_values = {
+                **base,
+                "host": host,
+                "port": primary_port or 2442,
+                "profile_path": configuration_path,
+                "install_path": application_path,
+                "rig_name": str(payload.get("rig_name") or "").strip(),
+                "rig_name_source": "managed" if payload.get("mode") == "managed" else "imported",
+                "application_data_root": storage_path,
+                "directed_path": str(data_root / "DIRECTED.TXT") if data_root else "",
+                "all_path": str(data_root / "ALL.TXT") if data_root else "",
+                "inbox_path": str(data_root / "inbox.db3") if data_root else "",
+                "storage_mode": "rig_scoped" if storage_path else "unverified",
+            }
+        elif family == "fast_light":
+            app_values = {
+                **base,
+                "flrig_path": application_path,
+                "flrig_host": host,
+                "flrig_port": primary_port or 12345,
+                "fldigi_path": str(payload.get("secondary_application_path") or "").strip(),
+                "fldigi_host": host,
+                "fldigi_port": secondary_port or 7362,
+                "fldigi_log_path": storage_path,
+                "fldigi_checkin_dir": str(payload.get("secondary_storage_path") or "").strip(),
+            }
+        else:
+            app_values = {
+                **base,
+                "install_path": application_path,
+                "ini_path": configuration_path,
+                "db_path": storage_path,
+                "incoming_path": str(payload.get("secondary_storage_path") or "").strip(),
+                "outbox_path": str(payload.get("outbox_path") or "").strip(),
+                "launch_cmd": launch_command,
+            }
+
+        manifest_values = dict(payload)
+        manifest_values.update(
+            {
+                "instance_key": f"{family}:{system_key}",
+                "application_system_key": system_key,
+                "verification_state": "detected" if payload.get("mode") == "discover" else "configured",
+                "verification_summary": (
+                    "Imported into FIO; run Health to verify the live endpoint and files."
+                    if payload.get("mode") == "discover"
+                    else "Saved in FIO; run Health before operational use."
+                ),
+                "evidence": {
+                    "source": str(payload.get("mode") or "manual"),
+                    "external_configuration_changed": False,
+                    "reviewed_radio_id": radio_id,
+                },
+            }
+        )
+        cluster_db_id: int | None = None
+        cluster_instance_number: int | None = None
+        cluster_value = str(payload.get("cluster_id") or "").strip()
+        if family == "varac" and cluster_value:
+            cluster = next(
+                (
+                    row for row in self.multi_radio_store.list_varac_clusters()
+                    if str(row.get("cluster_id") or "").strip().casefold() == cluster_value.casefold()
+                    or str(row.get("name") or "").strip().casefold() == cluster_value.casefold()
+                    or str(row.get("id") or "") == cluster_value
+                ),
+                None,
+            )
+            if cluster is None:
+                workspace.complete_instance_add(
+                    success=False,
+                    message="Choose an existing VarAC cluster ID or leave Cluster blank.",
+                )
+                return
+            cluster_db_id = int(cluster.get("id") or 0) or None
+            cluster_instance_number = int(payload.get("cluster_instance_number") or 0) or None
+
+        try:
+            result = self.multi_radio_store.adopt_software_instance(
+                family_key=family,
+                radio_profile_id=radio_id,
+                application_values=app_values,
+                manifest_values=manifest_values,
+                replace_existing=replace_existing,
+                launch_at_startup=bool(payload.get("launch_at_startup", False)),
+                varac_cluster_db_id=cluster_db_id,
+                varac_cluster_instance_number=cluster_instance_number,
+            )
+        except (ValueError, KeyError) as exc:
+            workspace.complete_instance_add(success=False, message=str(exc))
+            return
+        except Exception:
+            log.exception("Failed saving reviewed %s instance.", family)
+            workspace.complete_instance_add(
+                success=False,
+                message="The instance was not saved. Existing settings were left unchanged.",
+            )
+            return
+        saved_radio = result.get("radio") if isinstance(result, Mapping) else None
+        if isinstance(saved_radio, Mapping):
+            self._replace_cached_device_profile(saved_radio)
+        self._refresh_device_profiles_table()
+        success_message = f"Saved {instance_name} for {self._profile_display_name(dict(profile))}."
+        workspace.complete_instance_add(success=True, message=success_message)
+        feedback = getattr(self, "settings_action_feedback_label", None)
+        if isinstance(feedback, QLabel):
+            feedback.setText(success_message + " Open Health to verify the live application.")
+
     def _on_software_administration_operational_route_requested(self, route: str) -> None:
         if str(route or "").strip().lower() != "fio spotter":
             return
@@ -13002,6 +13349,7 @@ class SettingsTab(QWidget):
         family_key: str = "",
         task_key: str = "",
         radio_id: int | None = None,
+        assistant_token: int | None = None,
     ) -> None:
         """Queue one explicit, off-UI-thread discovery request.
 
@@ -13032,6 +13380,7 @@ class SettingsTab(QWidget):
             "family_key": str(family_key or "").strip().lower(),
             "task_key": str(task_key or "").strip().lower(),
             "radio_id": int(radio_id) if radio_id else None,
+            "assistant_token": int(assistant_token) if assistant_token else None,
             "settings_values": settings_values,
             "js8_port": port_txt,
             "profile_name": profile_name,
@@ -13050,6 +13399,12 @@ class SettingsTab(QWidget):
         self._start_software_autofill_request(request)
 
     def _set_software_autofill_feedback(self, request: Mapping[str, Any], text: str) -> None:
+        if str(request.get("target") or "") == "instance_assistant":
+            workspace = getattr(self, "software_administration_workspace", None)
+            assistant = getattr(workspace, "_instance_assistant", None)
+            if assistant is not None and hasattr(assistant, "set_operation_status"):
+                assistant.set_operation_status(text)
+            return
         if str(request.get("target") or "") == "software":
             key = (
                 str(request.get("family_key") or ""),
@@ -13104,7 +13459,16 @@ class SettingsTab(QWidget):
     def _software_autofill_request_is_current(self, request: Mapping[str, Any]) -> bool:
         if int(request.get("generation") or 0) != int(self._software_autofill_generation):
             return False
-        if str(request.get("target") or "") != "software":
+        target = str(request.get("target") or "")
+        if target == "instance_assistant":
+            workspace = getattr(self, "software_administration_workspace", None)
+            return bool(
+                isinstance(workspace, SoftwareAdministrationWorkspace)
+                and getattr(workspace, "_instance_assistant", None) is not None
+                and id(getattr(workspace, "_instance_assistant")) == request.get("assistant_token")
+                and workspace.selected_family_key() == str(request.get("family_key") or "")
+            )
+        if target != "software":
             return True
         workspace = getattr(self, "software_administration_workspace", None)
         return bool(
@@ -13126,6 +13490,35 @@ class SettingsTab(QWidget):
         if not self._software_autofill_request_is_current(request):
             return
         result_map = dict(results) if isinstance(results, Mapping) else {}
+        if str(request.get("target") or "") == "instance_assistant":
+            family = str(request.get("family_key") or "")
+            combined = list(self._software_instance_inventory(family))
+            discovered = result_map.get("__instance_candidates__")
+            if isinstance(discovered, (list, tuple)):
+                combined.extend(dict(row) for row in discovered if isinstance(row, Mapping))
+            deduped: List[Dict[str, Any]] = []
+            identities: set[tuple[str, str, str]] = set()
+            for row in combined:
+                identity = (
+                    str(row.get("system_key") or "").strip().casefold(),
+                    str(row.get("configuration_path") or row.get("profile_path") or row.get("ini_path") or "")
+                    .strip()
+                    .casefold(),
+                    str(row.get("name") or "").strip().casefold(),
+                )
+                if identity in identities:
+                    continue
+                identities.add(identity)
+                deduped.append(row)
+            workspace = getattr(self, "software_administration_workspace", None)
+            if isinstance(workspace, SoftwareAdministrationWorkspace):
+                workspace.set_instance_discovery_results(deduped)
+                assistant = getattr(workspace, "_instance_assistant", None)
+                if assistant is not None and hasattr(assistant, "set_operation_status"):
+                    assistant.set_operation_status(
+                        f"Found {len(deduped)} saved or detected configuration{'s' if len(deduped) != 1 else ''}."
+                    )
+            return
         wanted = set(request.get("keys") or ())
         scoped = {
             str(key): result
@@ -15812,18 +16205,36 @@ class SettingsTab(QWidget):
         """Refresh the bounded snapshot from the same explicit Settings load."""
 
         try:
+            js8_instances = tuple(self.multi_radio_store.list_js8_instances())
+            fast_light_configs = tuple(self.multi_radio_store.list_fast_light_configs())
+            varac_nodes = tuple(self.multi_radio_store.list_varac_nodes())
+            manifests = tuple(self.multi_radio_store.list_software_instance_manifests())
             snapshot = build_software_administration_snapshot(
                 tuple(self.device_profiles),
-                js8_instances=tuple(self.multi_radio_store.list_js8_instances()),
-                fast_light_configs=tuple(self.multi_radio_store.list_fast_light_configs()),
-                varac_nodes=tuple(self.multi_radio_store.list_varac_nodes()),
+                js8_instances=js8_instances,
+                fast_light_configs=fast_light_configs,
+                varac_nodes=varac_nodes,
+                instance_manifests=manifests,
             )
         except Exception:
             log.exception("Failed building the software administration snapshot.")
             snapshot = SoftwareAdministrationSnapshot(families=())
+            js8_instances = ()
+            fast_light_configs = ()
+            varac_nodes = ()
+            manifests = ()
         self._software_administration_snapshot = snapshot
         workspace = getattr(self, "software_administration_workspace", None)
         if isinstance(workspace, SoftwareAdministrationWorkspace):
+            workspace.set_instance_context(
+                radios=tuple(self.device_profiles),
+                inventory_by_family={
+                    "js8call": self._enrich_software_instance_rows("js8call", js8_instances, manifests),
+                    "fast_light": self._enrich_software_instance_rows("fast_light", fast_light_configs, manifests),
+                    "varac": self._enrich_software_instance_rows("varac", varac_nodes, manifests),
+                },
+                varac_clusters=tuple(getattr(self, "varac_clusters", ()) or ()),
+            )
             workspace.set_snapshot(snapshot)
             self._sync_software_dirty_ui()
             self._show_software_task_editor()
@@ -18323,7 +18734,7 @@ class SettingsTab(QWidget):
         state = cls._js8_storage_display_state(profile)
         mode = "shared" if state == "Shared" else "rig_scoped" if state.startswith("Isolated") else "unverified"
         if mode == "shared":
-            consequence = "Only one local Subspace instance is supported because its message files are shared."
+            consequence = "This storage root is explicitly shared; use one file-ingest owner and verify attribution before relying on it."
         elif mode == "rig_scoped":
             consequence = (
                 "Concurrent local launch requires a stable unique --rig-name; API port, MultiSettings name, "

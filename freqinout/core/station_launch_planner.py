@@ -15,6 +15,10 @@ from freqinout.core.js8_storage import (
     rig_name_collision_key,
     stable_managed_rig_name,
 )
+from freqinout.core.multi_instance_review import (
+    blocking_issue_message,
+    validate_multi_instance_launch_records,
+)
 
 
 DEFAULT_DEPENDENCIES = {
@@ -50,6 +54,7 @@ class PlannedInstance:
     effective_command: Tuple[str, ...] = ()
     dependencies: Tuple[str, ...] = ()
     readiness_policy: Tuple[Tuple[str, Any], ...] = ()
+    configuration_paths: Tuple[Tuple[str, str], ...] = ()
 
     def as_queue_item(self) -> Dict[str, Any]:
         return {
@@ -69,6 +74,7 @@ class PlannedInstance:
             "effective_command": list(self.effective_command),
             "dependencies": list(self.dependencies),
             "readiness_policy": dict(self.readiness_policy),
+            "configuration_paths": dict(self.configuration_paths),
         }
 
 
@@ -128,6 +134,9 @@ class StationLaunchPlanner:
                     readiness.setdefault("port", int(profile.get("fldigi_port", 7362) or 7362))
                     readiness.setdefault("require_service", True)
                 js8_values = self._js8_launch_values(profile, item) if name == "JS8Call" else {}
+                configured_arguments = readiness.pop("launch_arguments", ())
+                if not isinstance(configured_arguments, (list, tuple)):
+                    configured_arguments = ()
                 instance = PlannedInstance(
                     name=name,
                     instance_key=str(item["instance_key"]),
@@ -136,7 +145,11 @@ class StationLaunchPlanner:
                     radio_names=(str(profile.get("name", radio_id) or radio_id),),
                     launch_path_override=str(item["launch_path_override"]),
                     launch_command_override=str(item["launch_command_override"]),
-                    launch_arguments=tuple(js8_values.get("launch_arguments", ())),
+                    launch_arguments=tuple(
+                        js8_values.get("launch_arguments", ())
+                        if name == "JS8Call"
+                        else (str(value) for value in configured_arguments)
+                    ),
                     rig_name=str(js8_values.get("rig_name", "")),
                     rig_name_source=str(js8_values.get("rig_name_source", "")),
                     application_data_root=str(js8_values.get("application_data_root", "")),
@@ -144,6 +157,7 @@ class StationLaunchPlanner:
                     expected_storage_mode=str(js8_values.get("expected_storage_mode", "unverified")),
                     dependencies=dependencies,
                     readiness_policy=tuple(sorted(readiness.items())),
+                    configuration_paths=self._configuration_paths(name, profile),
                 )
                 candidates.append((int(profile.get("display_order", 0) or 0), order, instance))
         deduped: Dict[str, Tuple[int, int, PlannedInstance]] = {}
@@ -170,29 +184,34 @@ class StationLaunchPlanner:
                 effective_command=existing.effective_command,
                 dependencies=existing.dependencies,
                 readiness_policy=existing.readiness_policy,
+                configuration_paths=existing.configuration_paths,
             )
             deduped[instance.instance_identity] = (prior[0], prior[1], merged)
         ordered = self._dependency_order(list(deduped.values()))
-        subspace_instances = [
-            value[2]
-            for value in ordered
-            if value[2].name == "JS8Call"
-            and self._is_local_js8_instance(value[2])
-            and self._is_subspace_launch_target(value[2])
-        ]
-        if len(subspace_instances) > 1:
-            radios = ", ".join(
-                name
-                for instance in subspace_instances
-                for name in instance.radio_names
-            )
-            raise ValueError(
-                "Subspace Edition currently uses one shared local JS8Call message store. "
-                f"Start only one local Subspace instance in FIO ({radios}); separate API ports "
-                "do not isolate ALL.TXT, DIRECTED.TXT, or inbox.db3."
-            )
-        self._validate_js8_launch_collisions([value[2] for value in ordered])
-        return LaunchPlan(trigger=trigger, scope_radio_id=scope_radio_id, instances=tuple(value[2] for value in ordered))
+        instances = tuple(value[2] for value in ordered)
+        self._validate_js8_launch_collisions(instances)
+        issues = validate_multi_instance_launch_records([instance.as_queue_item() for instance in instances])
+        if blocking_issue_message(issues):
+            raise ValueError(blocking_issue_message(issues))
+        return LaunchPlan(trigger=trigger, scope_radio_id=scope_radio_id, instances=instances)
+
+    @staticmethod
+    def _configuration_paths(name: str, profile: Mapping[str, Any]) -> Tuple[Tuple[str, str], ...]:
+        """Expose only launch-relevant native resources to pure preflight checks."""
+
+        if name != "VarAC":
+            return ()
+        values = {
+            "ini_path": profile.get("varac_ini_path", ""),
+            "db_path": profile.get("varac_db_path", ""),
+            "incoming_path": profile.get("varac_incoming_path", ""),
+            "outbox_dir": profile.get("varac_outbox_dir", ""),
+        }
+        return tuple(
+            (key, str(value or "").strip())
+            for key, value in values.items()
+            if str(value or "").strip()
+        )
 
     @staticmethod
     def _js8_launch_values(profile: Mapping[str, Any], item: Mapping[str, Any]) -> Dict[str, Any]:
@@ -238,8 +257,9 @@ class StationLaunchPlanner:
             == "unverified"
             and StationLaunchPlanner._launch_target_looks_subspace(item)
         ):
-            # A Subspace-specific launch target is conservative evidence: it
-            # may enforce shared storage, but can never grant isolation.
+            # A Subspace-specific launch target identifies the reviewed family.
+            # Like 2.2.0 and Improved 3.0.3 it receives a distinct --rig-name
+            # namespace and rig-scoped storage candidate.
             storage_values["variant_family"] = "js8call_subspace_4_1"
             storage_values["variant_version"] = ""
         storage = resolve_js8_storage(storage_values, probe_existing=False)
@@ -315,17 +335,6 @@ class StationLaunchPlanner:
                     f"'{root}': {', '.join((*prior_root.radio_names, *instance.radio_names))}."
                 )
             roots[root_key] = instance
-
-    @staticmethod
-    def _is_subspace_launch_target(instance: PlannedInstance) -> bool:
-        if instance.expected_storage_mode == "shared":
-            return True
-        return StationLaunchPlanner._launch_target_looks_subspace(
-            {
-                "launch_path_override": instance.launch_path_override,
-                "launch_command_override": instance.launch_command_override,
-            }
-        )
 
     @staticmethod
     def _launch_target_looks_subspace(item: Mapping[str, Any]) -> bool:

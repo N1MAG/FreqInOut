@@ -29,6 +29,13 @@ class RadioSoftwareAssignment:
     readiness: str
     status_text: str
     shared_radio_names: tuple[str, ...] = ()
+    manifest_instance_key: str = ""
+    management_mode: str = ""
+    provenance: str = ""
+    verification_state: str = ""
+    endpoint_summary: str = ""
+    configuration_summary: str = ""
+    data_summary: str = ""
 
     @property
     def is_shared(self) -> bool:
@@ -184,6 +191,7 @@ def build_software_administration_snapshot(
     js8_instances: Sequence[Any] = (),
     fast_light_configs: Sequence[Any] = (),
     varac_nodes: Sequence[Any] = (),
+    instance_manifests: Sequence[Any] = (),
     readiness_by_radio: Optional[Mapping[Any, Any]] = None,
 ) -> SoftwareAdministrationSnapshot:
     """Build a deterministic reverse index from already-loaded configuration rows."""
@@ -207,6 +215,15 @@ def build_software_administration_snapshot(
     indexes["commstat"] = indexes["js8call"]
     indexes["external_spotter"] = indexes["js8call"]
     indexes["fio_spotter"] = indexes["js8call"]
+    manifest_index: dict[tuple[str, str], Mapping[str, Any]] = {}
+    for raw in instance_manifests:
+        row = _mapping(raw)
+        key = (
+            _text(row.get("family_key")).casefold(),
+            _text(row.get("application_system_key")),
+        )
+        if key[0] and key[1]:
+            manifest_index[key] = row
 
     family_assignments: dict[str, list[RadioSoftwareAssignment]] = {
         key: [] for key, _title, _description in _FAMILY_DEFINITIONS
@@ -223,6 +240,14 @@ def build_software_administration_snapshot(
         for family_key in family_assignments:
             software_enabled, instance_id = _family_link(profile, family_key)
             instance_row = indexes[family_key].get(instance_id or -1)
+            manifest_family = (
+                "js8call"
+                if family_key in {"commstat", "external_spotter", "fio_spotter"}
+                else family_key
+            )
+            manifest = manifest_index.get(
+                (manifest_family, _text((instance_row or {}).get("system_key")))
+            )
 
             if family_key == "external_spotter":
                 software_enabled = bool(instance_row and _text(instance_row.get("spotter_launch_path")))
@@ -239,6 +264,26 @@ def build_software_administration_snapshot(
             if not instance_name and instance_id is not None:
                 instance_name = f"Missing instance {instance_id}"
             readiness = _readiness_text(readiness_by_radio, radio_id, family_key)
+            manifest_state = _text((manifest or {}).get("verification_state")).casefold()
+            if not readiness and manifest_state:
+                readiness = {
+                    "verified": "Verified",
+                    "reachable": "Reachable",
+                    "configured": "Configured",
+                    "detected": "Detected",
+                    "needs_attention": "Needs attention",
+                }.get(manifest_state, "")
+            ports = (manifest or {}).get("ports")
+            endpoint_parts: list[str] = []
+            if isinstance(ports, Sequence) and not isinstance(ports, (str, bytes)):
+                for item in ports:
+                    if not isinstance(item, Mapping):
+                        continue
+                    name = _text(item.get("name")) or "Service"
+                    host = _text(item.get("host")) or _text((manifest or {}).get("host"))
+                    port = _integer(item.get("port"))
+                    if host and port:
+                        endpoint_parts.append(f"{name}: {host}:{port}")
             family_assignments[family_key].append(
                 RadioSoftwareAssignment(
                     radio_id=radio_id,
@@ -256,6 +301,16 @@ def build_software_administration_snapshot(
                         instance_found=instance_row is not None,
                         readiness=readiness,
                     ),
+                    manifest_instance_key=_text((manifest or {}).get("instance_key")),
+                    management_mode=_text((manifest or {}).get("management_mode")),
+                    provenance=_text((manifest or {}).get("provenance")),
+                    verification_state=manifest_state,
+                    endpoint_summary=" · ".join(endpoint_parts),
+                    configuration_summary=(
+                        _text((manifest or {}).get("configuration_path"))
+                        or _text((manifest or {}).get("configuration_root"))
+                    ),
+                    data_summary=_text((manifest or {}).get("data_root")),
                 )
             )
 

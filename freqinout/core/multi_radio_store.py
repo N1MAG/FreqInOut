@@ -19,6 +19,11 @@ from freqinout.core.js8_storage import (
 )
 from freqinout.core.logger import log
 from freqinout.core.receiver_control import receiver_control_verification_matches
+from freqinout.core.software_instance_manifest import (
+    find_manifest_conflicts,
+    manifest_from_mapping,
+    manifest_to_record,
+)
 from freqinout.core.sqlite_utils import connect_sqlite_readonly
 from freqinout.core.multi_rig_guardrails import (
     collect_multi_rig_guardrail_warnings,
@@ -687,6 +692,62 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
         },
         "indexes": (
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_varac_nodes_system_key ON varac_nodes(system_key)",
+        ),
+    },
+    "software_instance_manifests": {
+        "ddl": """
+        CREATE TABLE IF NOT EXISTS software_instance_manifests (
+            instance_key TEXT PRIMARY KEY,
+            family_key TEXT NOT NULL,
+            application_system_key TEXT,
+            management_mode TEXT NOT NULL DEFAULT 'operator',
+            provenance TEXT NOT NULL DEFAULT 'manual',
+            executable_path TEXT,
+            configuration_path TEXT,
+            configuration_root TEXT,
+            data_root TEXT,
+            launch_command TEXT,
+            host TEXT NOT NULL DEFAULT '127.0.0.1',
+            ports_json TEXT NOT NULL DEFAULT '[]',
+            resource_claims_json TEXT NOT NULL DEFAULT '[]',
+            desired_fingerprint TEXT,
+            observed_fingerprint TEXT,
+            verification_state TEXT NOT NULL DEFAULT 'configured',
+            verification_summary TEXT,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            last_discovered_utc TEXT,
+            last_verified_utc TEXT,
+            created_utc TEXT NOT NULL,
+            updated_utc TEXT NOT NULL
+        )
+        """,
+        "columns": {
+            "family_key": "TEXT NOT NULL",
+            "application_system_key": "TEXT",
+            "management_mode": "TEXT NOT NULL DEFAULT 'operator'",
+            "provenance": "TEXT NOT NULL DEFAULT 'manual'",
+            "executable_path": "TEXT",
+            "configuration_path": "TEXT",
+            "configuration_root": "TEXT",
+            "data_root": "TEXT",
+            "launch_command": "TEXT",
+            "host": "TEXT NOT NULL DEFAULT '127.0.0.1'",
+            "ports_json": "TEXT NOT NULL DEFAULT '[]'",
+            "resource_claims_json": "TEXT NOT NULL DEFAULT '[]'",
+            "desired_fingerprint": "TEXT",
+            "observed_fingerprint": "TEXT",
+            "verification_state": "TEXT NOT NULL DEFAULT 'configured'",
+            "verification_summary": "TEXT",
+            "evidence_json": "TEXT NOT NULL DEFAULT '{}'",
+            "last_discovered_utc": "TEXT",
+            "last_verified_utc": "TEXT",
+            "created_utc": "TEXT NOT NULL DEFAULT ''",
+            "updated_utc": "TEXT NOT NULL DEFAULT ''",
+        },
+        "indexes": (
+            "CREATE INDEX IF NOT EXISTS idx_software_manifests_family ON software_instance_manifests(family_key)",
+            "CREATE INDEX IF NOT EXISTS idx_software_manifests_application ON software_instance_manifests(family_key, application_system_key)",
+            "CREATE INDEX IF NOT EXISTS idx_software_manifests_verification ON software_instance_manifests(verification_state)",
         ),
     },
     "operating_profiles": {
@@ -2985,7 +3046,6 @@ def _save_simple_record(
         assignments = ", ".join(f"{name}=?" for name in columns)
         params = [record[name] for name in columns] + [int(record_id)]
         conn.execute(f"UPDATE {table} SET {assignments} WHERE id=?", params)
-        conn.commit()
         return _record_by_id(conn, table, int(record_id)) or {}
 
     placeholders = ", ".join(["?"] * len(columns))
@@ -2993,7 +3053,6 @@ def _save_simple_record(
         f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})",
         [record[name] for name in columns],
     )
-    conn.commit()
     return _record_by_system_key(conn, table, system_key) or {}
 
 
@@ -3085,6 +3144,150 @@ def _save_varac_node_conn(conn: sqlite3.Connection, values: Mapping[str, Any]) -
         default_name=DEFAULT_VARAC_NODE_NAME,
         fields=("install_path", "db_path", "ini_path", "launch_cmd", "incoming_path"),
     )
+
+
+def _validate_software_application_claims_conn(
+    conn: sqlite3.Connection,
+    family_key: str,
+    values: Mapping[str, Any],
+) -> None:
+    """Reject collisions in legacy application rows that predate manifests."""
+
+    payload = dict(values or {})
+    record_id = _coerce_optional_int(payload.get("id"))
+    family = str(family_key or "").strip().lower()
+    if family == "js8call":
+        host = _coerce_text(payload.get("host", "127.0.0.1"), "127.0.0.1").casefold()
+        port = _coerce_int(payload.get("port", 2442), 2442)
+        row = conn.execute(
+            """
+            SELECT name FROM js8_instances
+             WHERE LOWER(COALESCE(host, '127.0.0.1'))=? AND port=?
+               AND (? IS NULL OR id<>?) LIMIT 1
+            """,
+            (host, port, record_id, record_id),
+        ).fetchone()
+        if row is not None:
+            raise ValueError(f"JS8Call TCP endpoint {host}:{port} is already used by {row[0]}.")
+        return
+    if family == "fast_light":
+        claims = (
+            (
+                "FLRig",
+                _coerce_text(payload.get("flrig_host", "127.0.0.1"), "127.0.0.1").casefold(),
+                _coerce_int(payload.get("flrig_port", 12345), 12345),
+                "flrig_host",
+                "flrig_port",
+            ),
+            (
+                "FLDigi",
+                _coerce_text(
+                    payload.get("fldigi_host", payload.get("flrig_host", "127.0.0.1")),
+                    "127.0.0.1",
+                ).casefold(),
+                _coerce_int(payload.get("fldigi_port", 7362), 7362),
+                "fldigi_host",
+                "fldigi_port",
+            ),
+        )
+        if claims[0][1:3] == claims[1][1:3]:
+            raise ValueError("FLRig and FLDigi must use different local TCP endpoints.")
+        for label, host, port, host_column, port_column in claims:
+            row = conn.execute(
+                f"""
+                SELECT name FROM fast_light_configs
+                 WHERE LOWER(COALESCE({host_column}, '127.0.0.1'))=? AND {port_column}=?
+                   AND (? IS NULL OR id<>?) LIMIT 1
+                """,
+                (host, port, record_id, record_id),
+            ).fetchone()
+            if row is not None:
+                raise ValueError(f"{label} endpoint {host}:{port} is already used by {row[0]}.")
+        return
+    if family == "varac":
+        for label, column, value in (
+            ("VarAC configuration", "ini_path", payload.get("ini_path")),
+            ("VarAC database", "db_path", payload.get("db_path")),
+            ("VarAC incoming folder", "incoming_path", payload.get("incoming_path")),
+        ):
+            path = _coerce_text(value, "")
+            if not path:
+                continue
+            row = conn.execute(
+                f"SELECT name FROM varac_nodes WHERE {column}=? AND (? IS NULL OR id<>?) LIMIT 1",
+                (path, record_id, record_id),
+            ).fetchone()
+            if row is not None:
+                raise ValueError(f"{label} is already assigned to {row[0]}.")
+
+
+def _software_instance_manifest_row(row: Mapping[str, Any]) -> Dict[str, Any]:
+    data = dict(row)
+    for source_key, target_key, fallback in (
+        ("ports_json", "ports", []),
+        ("resource_claims_json", "resource_claims", []),
+        ("evidence_json", "evidence", {}),
+    ):
+        try:
+            parsed = json.loads(str(data.get(source_key, "") or ""))
+        except (TypeError, ValueError):
+            parsed = fallback
+        data[target_key] = parsed
+    return data
+
+
+def _list_software_instance_manifests_conn(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT * FROM software_instance_manifests ORDER BY family_key, instance_key"
+    ).fetchall()
+    return [_software_instance_manifest_row(dict(row)) for row in rows]
+
+
+def _save_software_instance_manifest_conn(
+    conn: sqlite3.Connection,
+    values: Mapping[str, Any],
+) -> Dict[str, Any]:
+    manifest = manifest_from_mapping(values)
+    if not manifest.application_system_key:
+        raise ValueError("A software instance manifest must link to a saved application instance.")
+    expected_table = {
+        "js8call": "js8_instances",
+        "fast_light": "fast_light_configs",
+        "varac": "varac_nodes",
+    }[manifest.family_key]
+    linked = _record_by_system_key(conn, expected_table, manifest.application_system_key)
+    if linked is None:
+        raise ValueError("The linked application instance does not exist.")
+
+    existing = [manifest_from_mapping(row) for row in _list_software_instance_manifests_conn(conn)]
+    conflicts = find_manifest_conflicts(manifest, existing)
+    if conflicts:
+        raise ValueError(conflicts[0].message)
+
+    record = manifest_to_record(manifest)
+    now_iso = _utc_now_iso()
+    prior = conn.execute(
+        "SELECT created_utc FROM software_instance_manifests WHERE instance_key=?",
+        (manifest.instance_key,),
+    ).fetchone()
+    record["created_utc"] = str(prior[0]) if prior is not None else now_iso
+    record["updated_utc"] = now_iso
+    columns = tuple(record.keys())
+    placeholders = ", ".join("?" for _ in columns)
+    updates = ", ".join(f"{column}=excluded.{column}" for column in columns if column != "instance_key")
+    conn.execute(
+        f"""
+        INSERT INTO software_instance_manifests ({', '.join(columns)})
+        VALUES ({placeholders})
+        ON CONFLICT(instance_key) DO UPDATE SET {updates}
+        """,
+        tuple(record[column] for column in columns),
+    )
+    saved = conn.execute(
+        "SELECT * FROM software_instance_manifests WHERE instance_key=?",
+        (manifest.instance_key,),
+    ).fetchone()
+    return _software_instance_manifest_row(dict(saved)) if saved is not None else {}
 
 
 def _save_operating_profile_conn(conn: sqlite3.Connection, values: Mapping[str, Any]) -> Dict[str, Any]:
@@ -6251,6 +6454,341 @@ class MultiRadioStore:
             rows = conn.execute("SELECT * FROM js8_instances ORDER BY id ASC").fetchall()
             return [dict(row) for row in rows]
 
+    def list_software_instance_manifests(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            return _list_software_instance_manifests_conn(conn)
+
+    def get_software_instance_manifest(self, instance_key: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM software_instance_manifests WHERE instance_key=?",
+                (str(instance_key or "").strip(),),
+            ).fetchone()
+            return _software_instance_manifest_row(dict(row)) if row is not None else None
+
+    def save_software_instance_manifest(self, values: Mapping[str, Any]) -> Dict[str, Any]:
+        with self._connect() as conn:
+            try:
+                saved = _save_software_instance_manifest_conn(conn, values)
+                conn.commit()
+                return saved
+            except Exception:
+                conn.rollback()
+                raise
+
+    def delete_software_instance_manifest(self, instance_key: str) -> None:
+        """Delete lifecycle metadata only; application/radio records remain intact."""
+
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM software_instance_manifests WHERE instance_key=?",
+                (str(instance_key or "").strip(),),
+            )
+            conn.commit()
+
+    def adopt_software_instance(
+        self,
+        *,
+        family_key: str,
+        radio_profile_id: int,
+        application_values: Mapping[str, Any],
+        manifest_values: Mapping[str, Any],
+        replace_existing: bool = False,
+        launch_at_startup: bool = False,
+        varac_cluster_db_id: Optional[int] = None,
+        varac_cluster_instance_number: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Persist one reviewed application instance and radio link atomically.
+
+        This method only changes FIO's settings database. ``fio_managed`` means
+        FIO owns the durable launch recipe and radio assignment; it does not
+        imply that FIO rewrote a third-party application's native settings.
+        """
+
+        family = str(family_key or "").strip().lower()
+        if family not in {"js8call", "fast_light", "varac"}:
+            raise ValueError(f"Unsupported software instance family: {family or 'blank'}")
+        radio_id = int(radio_profile_id or 0)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                profile = _record_by_id(conn, "device_profiles", radio_id)
+                if profile is None:
+                    raise KeyError(f"Unknown radio profile id: {radio_id}")
+                app_values = dict(application_values or {})
+                _validate_software_application_claims_conn(conn, family, app_values)
+                if family == "js8call":
+                    saved_app = _save_js8_instance_conn(conn, app_values)
+                    link_column = "js8_instance_id"
+                    updates = {
+                        "js8_instance_id": int(saved_app["id"]),
+                        "use_js8call": 1,
+                        "js8_host": str(saved_app.get("host", "127.0.0.1") or "127.0.0.1"),
+                        "js8_port": int(saved_app.get("port", 2442) or 2442),
+                        "js8_profile_path": str(saved_app.get("profile_path", "") or ""),
+                        "js8_directed_path": str(saved_app.get("directed_path", "") or ""),
+                        "js8_forms_path": str(saved_app.get("forms_path", "") or ""),
+                    }
+                elif family == "fast_light":
+                    saved_app = _save_fast_light_config_conn(conn, app_values)
+                    link_column = "fast_light_config_id"
+                    updates = {
+                        "fast_light_config_id": int(saved_app["id"]),
+                        "use_flrig": 1,
+                        "use_fldigi": 1,
+                        "flrig_host": str(saved_app.get("flrig_host", "127.0.0.1") or "127.0.0.1"),
+                        "flrig_port": int(saved_app.get("flrig_port", 12345) or 12345),
+                        "fldigi_host": str(saved_app.get("fldigi_host", "127.0.0.1") or "127.0.0.1"),
+                        "fldigi_port": int(saved_app.get("fldigi_port", 7362) or 7362),
+                        "fldigi_log_path": str(saved_app.get("fldigi_log_path", "") or ""),
+                        "fldigi_checkin_dir": str(saved_app.get("fldigi_checkin_dir", "") or ""),
+                    }
+                else:
+                    saved_app = _save_varac_node_conn(conn, app_values)
+                    link_column = "varac_node_id"
+                    updates = {
+                        "varac_node_id": int(saved_app["id"]),
+                        "use_varac": 1,
+                        "varac_install_path": str(saved_app.get("install_path", "") or ""),
+                        "varac_db_path": str(saved_app.get("db_path", "") or ""),
+                        "varac_ini_path": str(saved_app.get("ini_path", "") or ""),
+                        "varac_outbox_dir": str(app_values.get("outbox_path", "") or ""),
+                    }
+                current_link = _coerce_optional_int(profile.get(link_column))
+                if current_link is not None and current_link != int(saved_app["id"]) and not replace_existing:
+                    raise ValueError(
+                        f"{profile.get('name') or 'This radio'} already has a {family.replace('_', ' ')} "
+                        "instance. Confirm replacement before changing the assignment."
+                    )
+                used_by = conn.execute(
+                    f"SELECT name FROM device_profiles WHERE {link_column}=? AND id<>? LIMIT 1",
+                    (int(saved_app["id"]), radio_id),
+                ).fetchone()
+                if used_by is not None:
+                    raise ValueError(
+                        f"This application instance is already assigned to {used_by[0]}; "
+                        "each independently controlled radio needs its own instance identity."
+                    )
+
+                updates["updated_utc"] = _utc_now_iso()
+                conn.execute(
+                    f"UPDATE device_profiles SET {', '.join(f'{key}=?' for key in updates)} WHERE id=?",
+                    tuple(updates.values()) + (radio_id,),
+                )
+
+                manifest_payload = dict(manifest_values or {})
+                manifest_payload["family_key"] = family
+                manifest_payload["application_system_key"] = str(saved_app.get("system_key", "") or "")
+                manifest_payload.setdefault(
+                    "instance_key",
+                    f"{family}:{str(saved_app.get('system_key', '') or '')}",
+                )
+                saved_manifest = _save_software_instance_manifest_conn(conn, manifest_payload)
+                self._upsert_instance_launch_items_conn(
+                    conn,
+                    radio_profile_id=radio_id,
+                    family_key=family,
+                    saved_app=saved_app,
+                    manifest=saved_manifest,
+                    launch_at_startup=bool(launch_at_startup),
+                )
+                if family == "varac" and varac_cluster_db_id is not None:
+                    cluster = _varac_cluster_by_id(conn, int(varac_cluster_db_id))
+                    if cluster is None:
+                        raise KeyError(f"Unknown VarAC cluster id: {varac_cluster_db_id}")
+                    if _is_observer_device_class(profile):
+                        raise ValueError("Observer / SDR device profiles cannot participate in VarAC clusters.")
+                    instance_number = _coerce_int(varac_cluster_instance_number, 0)
+                    if instance_number <= 0:
+                        raise ValueError("VarAC cluster instance number must be a positive integer.")
+                    other = _varac_enabled_membership_for_device(
+                        conn,
+                        radio_id,
+                        exclude_cluster_id=int(varac_cluster_db_id),
+                    )
+                    if other is not None:
+                        raise ValueError("This radio is already an enabled member of another VarAC cluster.")
+                    occupied = conn.execute(
+                        """
+                        SELECT device_profile_id FROM varac_cluster_members
+                         WHERE cluster_id=? AND instance_number=? AND device_profile_id<>? AND enabled=1
+                         LIMIT 1
+                        """,
+                        (int(varac_cluster_db_id), instance_number, radio_id),
+                    ).fetchone()
+                    if occupied is not None:
+                        raise ValueError(f"VarAC cluster instance {instance_number} is already assigned.")
+                    now_iso = _utc_now_iso()
+                    conn.execute(
+                        """
+                        INSERT INTO varac_cluster_members
+                            (cluster_id, device_profile_id, instance_number, enabled, created_utc, updated_utc)
+                        VALUES (?, ?, ?, 1, ?, ?)
+                        ON CONFLICT(cluster_id, device_profile_id) DO UPDATE SET
+                            instance_number=excluded.instance_number,
+                            enabled=1,
+                            updated_utc=excluded.updated_utc
+                        """,
+                        (int(varac_cluster_db_id), radio_id, instance_number, now_iso, now_iso),
+                    )
+                    _sync_varac_cluster_member_enabled_flags_conn(conn)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            resolved = _resolve_device_profile_links_conn(
+                conn,
+                _record_by_id(conn, "device_profiles", radio_id) or profile,
+            )
+            return {
+                "application": dict(saved_app),
+                "manifest": dict(saved_manifest),
+                "radio": dict(resolved),
+            }
+
+    @staticmethod
+    def _upsert_instance_launch_items_conn(
+        conn: sqlite3.Connection,
+        *,
+        radio_profile_id: int,
+        family_key: str,
+        saved_app: Mapping[str, Any],
+        manifest: Mapping[str, Any],
+        launch_at_startup: bool = False,
+    ) -> None:
+        """Create launch identities; enabling is explicit and never disables peers."""
+
+        now_iso = _utc_now_iso()
+        conn.execute(
+            """
+            INSERT INTO radio_launch_bundles
+                (radio_profile_id, schema_version, launch_enabled, migrated_from_legacy, updated_utc)
+            VALUES (?, 1, ?, 0, ?)
+            ON CONFLICT(radio_profile_id) DO UPDATE SET
+                launch_enabled=CASE
+                    WHEN excluded.launch_enabled=1 THEN 1
+                    ELSE radio_launch_bundles.launch_enabled
+                END,
+                updated_utc=excluded.updated_utc
+            """,
+            (int(radio_profile_id), 1 if launch_at_startup else 0, now_iso),
+        )
+        manifest_key = str(manifest.get("instance_key", "") or "")
+        command = str(manifest.get("launch_command", "") or "")
+        resources = {
+            str(item.get("kind", "") or ""): str(item.get("value", "") or "")
+            for item in manifest.get("resource_claims", ()) or ()
+            if isinstance(item, Mapping)
+        }
+        if family_key == "js8call":
+            rows = (
+                (
+                    f"{manifest_key}:js8call",
+                    "JS8Call",
+                    50,
+                    command,
+                    str(saved_app.get("install_path", "") or ""),
+                    [],
+                    {
+                        "host": str(saved_app.get("host", "127.0.0.1") or "127.0.0.1"),
+                        "port": int(saved_app.get("port", 2442) or 2442),
+                        "require_api": True,
+                    },
+                ),
+            )
+        elif family_key == "fast_light":
+            host = str(saved_app.get("flrig_host", "127.0.0.1") or "127.0.0.1")
+            flrig_arguments = (
+                ["--config-dir", resources["flrig_configuration"]]
+                if resources.get("flrig_configuration")
+                else []
+            )
+            fldigi_arguments: List[str] = []
+            if not command:
+                if resources.get("fldigi_configuration"):
+                    fldigi_arguments.extend(["--config-dir", resources["fldigi_configuration"]])
+                fldigi_arguments.extend(
+                    [
+                        "--xmlrpc-server-address",
+                        str(saved_app.get("fldigi_host", host) or host),
+                        "--xmlrpc-server-port",
+                        str(int(saved_app.get("fldigi_port", 7362) or 7362)),
+                    ]
+                )
+            rows = (
+                (
+                    f"{manifest_key}:flrig",
+                    "FLRig",
+                    10,
+                    "",
+                    str(saved_app.get("flrig_path", "") or ""),
+                    [],
+                    {
+                        "host": host,
+                        "port": int(saved_app.get("flrig_port", 12345) or 12345),
+                        "require_service": True,
+                        "launch_arguments": flrig_arguments,
+                    },
+                ),
+                (
+                    f"{manifest_key}:fldigi",
+                    "FLDigi",
+                    20,
+                    command,
+                    str(saved_app.get("fldigi_path", "") or ""),
+                    ["FLRig"],
+                    {
+                        "host": str(saved_app.get("fldigi_host", host) or host),
+                        "port": int(saved_app.get("fldigi_port", 7362) or 7362),
+                        "require_service": True,
+                        "launch_arguments": fldigi_arguments,
+                    },
+                ),
+            )
+        else:
+            rows = (
+                (
+                    f"{manifest_key}:varac",
+                    "VarAC",
+                    40,
+                    command or str(saved_app.get("launch_cmd", "") or ""),
+                    str(saved_app.get("install_path", "") or ""),
+                    [],
+                    {},
+                ),
+            )
+        for instance_key, app_name, order, command_override, path_override, dependencies, readiness in rows:
+            conn.execute(
+                """
+                INSERT INTO radio_launch_bundle_items (
+                    radio_profile_id, instance_key, app_name, display_order, enabled,
+                    launch_at_startup, monitor_health, command_override, path_override,
+                    dependencies_json, readiness_json, updated_utc
+                ) VALUES (?, ?, ?, ?, 1, ?, 1, ?, ?, ?, ?, ?)
+                ON CONFLICT(radio_profile_id, instance_key) DO UPDATE SET
+                    app_name=excluded.app_name,
+                    display_order=excluded.display_order,
+                    launch_at_startup=excluded.launch_at_startup,
+                    command_override=excluded.command_override,
+                    path_override=excluded.path_override,
+                    dependencies_json=excluded.dependencies_json,
+                    readiness_json=excluded.readiness_json,
+                    updated_utc=excluded.updated_utc
+                """,
+                (
+                    int(radio_profile_id),
+                    instance_key,
+                    app_name,
+                    int(order),
+                    1 if launch_at_startup else 0,
+                    command_override,
+                    path_override,
+                    json.dumps(dependencies, sort_keys=True),
+                    json.dumps(readiness, sort_keys=True),
+                    now_iso,
+                ),
+            )
+
     def get_js8_instance(self, js8_instance_id: int) -> Optional[Dict[str, Any]]:
         with self._connect() as conn:
             return _record_by_id(conn, "js8_instances", int(js8_instance_id))
@@ -6270,6 +6808,10 @@ class MultiRadioStore:
             ).fetchone()[0]
             if int(count or 0) > 0:
                 raise ValueError("Cannot delete a JS8 instance that is still assigned.")
+            conn.execute(
+                "DELETE FROM software_instance_manifests WHERE family_key='js8call' AND application_system_key=?",
+                (str(row.get("system_key", "") or ""),),
+            )
             conn.execute("DELETE FROM js8_instances WHERE id=?", (int(js8_instance_id),))
             conn.commit()
 
@@ -6297,6 +6839,10 @@ class MultiRadioStore:
             ).fetchone()[0]
             if int(count or 0) > 0:
                 raise ValueError("Cannot delete a Fast Light config that is still assigned.")
+            conn.execute(
+                "DELETE FROM software_instance_manifests WHERE family_key='fast_light' AND application_system_key=?",
+                (str(row.get("system_key", "") or ""),),
+            )
             conn.execute("DELETE FROM fast_light_configs WHERE id=?", (int(fast_light_config_id),))
             conn.commit()
 
@@ -6324,6 +6870,10 @@ class MultiRadioStore:
             ).fetchone()[0]
             if int(count or 0) > 0:
                 raise ValueError("Cannot delete a VarAC node that is still assigned.")
+            conn.execute(
+                "DELETE FROM software_instance_manifests WHERE family_key='varac' AND application_system_key=?",
+                (str(row.get("system_key", "") or ""),),
+            )
             conn.execute("DELETE FROM varac_nodes WHERE id=?", (int(varac_node_id),))
             conn.commit()
 

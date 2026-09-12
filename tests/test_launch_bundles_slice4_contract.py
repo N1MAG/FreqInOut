@@ -355,7 +355,7 @@ def test_startup_planner_keeps_distinct_js8_ports_as_separate_instances() -> Non
     assert all(len(instance.radio_ids) == 1 for instance in plan.instances)
 
 
-def test_startup_planner_blocks_multiple_local_subspace_instances_with_shared_data() -> None:
+def test_startup_planner_allows_multiple_local_subspace_instances_with_distinct_rig_names() -> None:
     profiles = [
         {"id": 1, "name": "Alpha", "runtime_active": 1, "js8_port": 2442, "js8_instance_system_key": "js8-alpha", "js8_instance_name": "JS8 Alpha"},
         {"id": 2, "name": "Bravo", "runtime_active": 1, "js8_port": 2443, "js8_instance_system_key": "js8-bravo", "js8_instance_name": "JS8 Bravo"},
@@ -365,8 +365,12 @@ def test_startup_planner_blocks_multiple_local_subspace_instances_with_shared_da
         2: {"launch_enabled": True, "items": [_item("JS8Call", path="/usr/bin/js8call-subspace")]},
     }
 
-    with pytest.raises(ValueError, match="one shared local JS8Call message store"):
-        StationLaunchPlanner().plan_startup(profiles, bundles)
+    plan = StationLaunchPlanner().plan_startup(profiles, bundles)
+
+    assert len(plan.instances) == 2
+    assert {item.expected_storage_mode for item in plan.instances} == {"rig_scoped"}
+    assert len({item.rig_name for item in plan.instances}) == 2
+    assert len({item.application_data_root for item in plan.instances}) == 2
 
 
 def test_startup_planner_allows_one_scoped_subspace_instance() -> None:
@@ -532,6 +536,49 @@ def test_js8_planner_manages_stable_rig_names_and_storage_preview_without_numeri
     assert {row["application_data_root"] for row in queue} == {str(tmp_path / "alpha"), str(tmp_path / "bravo")}
 
 
+def test_fast_light_planner_preserves_instance_specific_native_arguments() -> None:
+    profiles = [
+        {
+            "id": 7,
+            "name": "Field Radio",
+            "runtime_active": 1,
+            "flrig_host": "127.0.0.1",
+            "flrig_port": 12445,
+            "fldigi_host": "127.0.0.1",
+            "fldigi_port": 7462,
+        }
+    ]
+    flrig = _item("FLRig", path="/apps/flrig", instance_key="fast:field:flrig")
+    flrig["readiness_policy"] = {
+        "host": "127.0.0.1",
+        "port": 12445,
+        "launch_arguments": ["--config-dir", "/profiles/flrig-field"],
+    }
+    fldigi = _item("FLDigi", path="/apps/fldigi", instance_key="fast:field:fldigi")
+    fldigi["dependencies"] = ["FLRig"]
+    fldigi["readiness_policy"] = {
+        "host": "127.0.0.1",
+        "port": 7462,
+        "launch_arguments": [
+            "--config-dir",
+            "/profiles/fldigi-field",
+            "--xmlrpc-server-address",
+            "127.0.0.1",
+            "--xmlrpc-server-port",
+            "7462",
+        ],
+    }
+
+    queue = StationLaunchPlanner().plan_startup(
+        profiles,
+        {7: {"launch_enabled": True, "items": [flrig, fldigi]}},
+    ).queue()
+
+    assert queue[0]["launch_arguments"] == ["--config-dir", "/profiles/flrig-field"]
+    assert queue[1]["launch_arguments"][-2:] == ["--xmlrpc-server-port", "7462"]
+    assert "launch_arguments" not in queue[0]["readiness_policy"]
+
+
 def test_js8_command_override_preserves_one_rig_name_and_rejects_duplicates() -> None:
     profile = {"id": 1, "name": "Alpha", "runtime_active": 1, "js8_instance_system_key": "field-alpha", "js8_instance_name": "Alpha Instance"}
     bundle = {1: {"launch_enabled": True, "items": [_item("JS8Call", command="/apps/JS8Call --rig-name 'Manual Alpha'")]}}
@@ -575,7 +622,7 @@ def test_js8_changed_rig_name_does_not_reuse_prior_verified_storage_root(tmp_pat
     assert str(row["application_data_root"]).endswith("JS8Call - replacement")
 
 
-def test_subspace_specific_launch_target_conservatively_uses_shared_root() -> None:
+def test_subspace_specific_launch_target_uses_rig_scoped_root() -> None:
     profile = {
         "id": 1,
         "name": "Alpha",
@@ -594,9 +641,9 @@ def test_subspace_specific_launch_target_conservatively_uses_shared_root() -> No
 
     row = StationLaunchPlanner().plan_startup([profile], bundle).queue()[0]
 
-    assert row["expected_storage_mode"] == "shared"
-    assert row["storage_mode"] == "shared"
-    assert str(row["application_data_root"]).endswith("JS8Call")
+    assert row["expected_storage_mode"] == "rig_scoped"
+    assert row["storage_mode"] == "unverified"
+    assert "JS8Call - fio-field-alpha" in str(row["application_data_root"])
 
 
 def test_js8_launch_planning_does_not_probe_filesystem_message_evidence(monkeypatch) -> None:

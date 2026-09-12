@@ -117,7 +117,6 @@ def test_verified_distinct_roots_keep_identical_inbox_content_as_distinct_radio_
 @pytest.mark.parametrize(
     ("variant", "version", "evidence", "expected_attribution"),
     (
-        ("subspace", "4.1.0.478", "runtime_verified:test", "shared"),
         ("unknown", "", "platform_candidate", "unverified"),
     ),
 )
@@ -136,9 +135,8 @@ def test_shared_or_unverified_root_is_coalesced_and_never_gets_radio_attribution
     root = tmp_path / "canonical-root"
     _create_inbox(root / "inbox.db3", "SHARED TRAFFIC")
     profiles = [_profile(radio_id="A", root=root, variant=variant, version=version, evidence=evidence)]
-    # Shared storage must coalesce multiple planned radios.  An unknown build
-    # is already unattributed with one canonical source, before a second radio
-    # can be allowed to claim it.
+    # An unknown build is already unattributed with one canonical source,
+    # before a second radio can be allowed to claim it.
     if expected_attribution == "shared":
         profiles.append(_profile(radio_id="B", root=root, variant=variant, version=version, evidence=evidence))
     inventory = build_ingest_source_inventory(profiles)

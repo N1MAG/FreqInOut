@@ -122,13 +122,15 @@ def test_js8_storage_ui_exposes_state_and_separates_save_folder(tmp_path: Path) 
     assert "Save folder is separate" in detail
     assert "does not relocate ALL.TXT, DIRECTED.TXT, or inbox.db3" in detail
 
-    shared = {
+    subspace = {
         "js8_variant_family": "js8call_subspace",
         "js8_variant_version": "4.1.0.478",
-        "js8_message_storage_root": str(tmp_path / "shared"),
+        "js8_rig_name": "field-subspace",
+        "js8_message_storage_root": str(tmp_path / "JS8Call - field-subspace"),
+        "js8_storage_evidence": "operator_confirmed:fixture",
     }
-    assert SettingsTab._js8_storage_display_state(shared) == "Shared"
-    assert "Only one local Subspace instance" in SettingsTab._js8_storage_detail_text(shared)
+    assert SettingsTab._js8_storage_display_state(subspace) == "Isolated · field-subspace"
+    assert "Concurrent local launch requires a stable unique --rig-name" in SettingsTab._js8_storage_detail_text(subspace)
 
     unknown = {"js8_variant_family": "unknown"}
     assert SettingsTab._js8_storage_display_state(unknown) == "Needs verification"
@@ -173,7 +175,7 @@ def test_js8_status_tokens_include_case_variant_for_configured_processes() -> No
     assert "js8call" in service._configured_tokens("JS8Call")
 
 
-def test_api_ready_version_persists_conservative_subspace_storage_identity() -> None:
+def test_api_ready_version_persists_rig_scoped_subspace_storage_identity() -> None:
     class Store:
         def __init__(self) -> None:
             self.saved: list[dict[str, object]] = []
@@ -202,9 +204,11 @@ def test_api_ready_version_persists_conservative_subspace_storage_identity() -> 
 
     orchestrator._persist_ready_js8_identity(item, {"version": "Subspace 4.1.0.478"})
 
-    assert item["expected_storage_mode"] == "shared"
-    assert str(item["application_data_root"]).endswith("JS8Call")
+    assert item["expected_storage_mode"] == "rig_scoped"
+    assert str(item["application_data_root"]).endswith("JS8Call - field-alpha")
     assert len(store.saved) == 1
     assert store.saved[0]["variant_family"] == "js8call_subspace_4_1"
-    assert store.saved[0]["storage_mode"] == "shared"
+    # API version observation identifies the rig-scoped namespace, but a
+    # message-file check remains necessary before the root is verified.
+    assert store.saved[0]["storage_mode"] == "unverified"
     assert store.saved[0]["storage_evidence"] == "api_observed:Subspace 4.1.0.478"
