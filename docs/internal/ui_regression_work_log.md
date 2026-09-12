@@ -4607,6 +4607,58 @@ discovery, manifest, and status partition passes 338 tests with 4 intentional
 environment skips. Independent manual offscreen verification passed All-radio
 Create and selected-radio Replace through cached refresh, dark/light themes,
 Normal/Large Text, and 1000x700, 900x560, and 760x460 resizes, with no additional
-top-level window or outer scrollbar. Python compilation and `git diff --check`
+top-level window or page-level horizontal scrollbar. Python compilation and `git diff --check`
 pass. No migration, database write, endpoint I/O, external application change,
 or destructive action was introduced.
+
+## 2026-09-12 — Systemic Settings swipe/vanish root correction
+
+Status: corrected; automated exit gate passed. Linux production confirmation
+remains operator-assisted.
+
+The recurring disappearance was reproduced from the real MainWindow deferred
+startup path at the 900x600 application minimum. The earlier correction changed
+which transient height was sampled but retained the underlying feedback
+mechanism: Settings copied that height into equal minimum and maximum bounds on
+both the active page and its shared stack. During the 75 ms deferred load, the
+viewport and child then sized one another. At compact height the Software editor
+extended beyond its clipped parent while the old test incorrectly required no
+vertical scrollbar, producing the apparent swipe-and-vanish behavior.
+
+The permanent correction introduces a constant-time current-page stack used by
+Settings, Software Administration, and the instance assistant. Hidden pages no
+longer influence size hints, the outer Settings scroll area owns the viewport,
+and all hard height mirroring was removed. Compact layouts may use bounded
+vertical scrolling so the primary action remains reachable; no recurring timer
+or child scan is added. MainWindow now binds deferred screen-local callbacks to
+a navigation epoch, discards stale callbacks after navigation, preserves each
+tab's established activation semantics, and uses the actual main stack for
+compact-navigation selection.
+
+Work packages and models:
+
+- high-reasoning primary GPT-5 model (exact host runtime submodel identifier not
+  exposed): real-path diagnosis, geometry/lifecycle architecture, navigation
+  epoch integration, delegated-diff review, documentation, and final gate;
+- `gpt-5.6-terra`, high reasoning: read-only deferred refresh, nested stack,
+  visibility, and sizing audit that isolated the hard-bound feedback loop;
+- `gpt-5.6-luna`, high reasoning: reusable current-page stack implementation,
+  bounded integration, and focused geometry tests;
+- `gpt-5.6-luna`, high reasoning: independent real MainWindow first-launch
+  reproduction across desktop and compact sizes;
+- `gpt-5.6-luna`, medium reasoning: independent regression-gap audit of startup,
+  lifecycle, and top-level-window coverage.
+
+Acceptance evidence: the focused geometry, navigation-epoch, Software
+Administration, and startup partition passes 113 tests. The broader Software
+Administration, persistence, discovery, status, Settings, and selected shell
+navigation partition passes 360 tests with 4 intentional environment skips.
+Independent real offscreen MainWindow verification passed immediate Settings >
+Software entry before deferred loading at requested 900x560 (the application
+minimum clamps to 900x600) and at 1000x700. Settings settled without subsequent
+geometry oscillation; JS8Call radio/task and Create/Replace assistant ownership
+remained stable; compact vertical scrolling was bounded, horizontal scrolling
+was zero, Cancel restored the editor, MainWindow stayed visible, and no other
+visible top-level window appeared. Python compilation and `git diff --check`
+pass. No migration, database write, endpoint I/O, external application change,
+or destructive action is part of this correction.

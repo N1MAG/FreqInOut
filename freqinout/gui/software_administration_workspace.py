@@ -20,7 +20,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QStackedWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -31,6 +30,7 @@ from freqinout.core.software_administration_model import (
     SoftwareFamilySummary,
 )
 from freqinout.gui.theme import get_theme, resolve_theme, resolve_ui_text_scale
+from freqinout.gui.current_page_stack import CurrentPageStack
 from freqinout.gui.software_instance_assistant import SoftwareInstanceAssistant
 
 
@@ -213,7 +213,8 @@ class SoftwareAdministrationWorkspace(QWidget):
         self.editor_placeholder.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.editor_placeholder.setMargin(8)
         self.editor_placeholder.setAccessibleName("No software configuration editor selected")
-        self.editor_stack = QStackedWidget()
+        self.editor_stack = CurrentPageStack()
+        self.editor_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self.editor_stack.setAccessibleName("Software configuration editor surface")
         self.editor_stack.addWidget(self.editor_placeholder)
         self.editor_host_layout.addWidget(self.editor_stack)

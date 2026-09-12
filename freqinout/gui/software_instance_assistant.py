@@ -28,10 +28,12 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
-    QStackedWidget,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
+
+from freqinout.gui.current_page_stack import CurrentPageStack
 
 
 SUPPORTED_INSTANCE_FAMILIES: tuple[tuple[str, str], ...] = (
@@ -535,7 +537,8 @@ class SoftwareInstanceAssistant(QWidget):
         self.step_label.setAccessibleName("Software instance setup step")
         root.addWidget(self.step_label)
 
-        self.pages = QStackedWidget()
+        self.pages = CurrentPageStack()
+        self.pages.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self.pages.setAccessibleName("Software instance setup pages")
         root.addWidget(self.pages, 1)
         self._build_choose_page()

@@ -337,6 +337,22 @@ For each UI slice:
    the primary task remains reachable without unnecessary page-level horizontal
    scrolling.
 
+Nested workspaces have an additional permanent geometry and lifecycle contract:
+
+- A stacked workspace derives its size hint from its current visible page only.
+  Hidden legacy, summary, or assistant pages must not inflate or collapse the
+  active page.
+- The parent scroll area owns the available viewport. Code must never copy a
+  transient viewport, child, or size-hint height into matching minimum and
+  maximum heights on a shared stack. Compact windows may scroll vertically;
+  clipping an active editor to suppress that scrollbar is a failure.
+- Queued or deferred screen-local work is bound to the navigation generation
+  that scheduled it. Once the operator navigates elsewhere, stale callbacks
+  must not select, rebuild, resize, or refresh the hidden screen.
+- Deferred first-load checks at the 900x600 application minimum must verify a
+  stable current page, reachable primary action, no page-level horizontal
+  scrolling, and no unintended top-level window after the event queue settles.
+
 Plain-language operator feedback and annotated screenshots are valid product
 inputs. Convert them into observable objectives and acceptance criteria without
 requiring the operator to prescribe the technical solution.

@@ -436,14 +436,14 @@ def test_settings_nav_buttons_are_left_aligned_and_consistent() -> None:
     source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
     nav_build_block = source[
         source.index("nav_panel = QWidget()")
-        : source.index("self.sections_stack = QStackedWidget()")
+        : source.index("self.sections_stack = CurrentPageStack()")
     ]
     configured_radios_block = source[
         source.index('configured_radios_group = QGroupBox("Configured Radios")')
         : source.index("sections_row = QHBoxLayout()")
     ]
     sections_scroll_block = source[
-        source.index("self.sections_stack = QStackedWidget()")
+        source.index("self.sections_stack = CurrentPageStack()")
         : source.index("main_layout.addLayout(sections_row, 1)")
     ]
     add_section_block = source[
@@ -499,7 +499,7 @@ def test_settings_nav_buttons_are_left_aligned_and_consistent() -> None:
     assert "self.settings_section_nav_scroll.setVisible(True)" in nav_build_block
     assert "sections_row.addWidget(self.settings_section_nav_scroll, 0)" not in nav_build_block
     assert "self.sections_stack.setMinimumWidth(0)" in sections_scroll_block
-    assert "self.sections_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)" in sections_scroll_block
+    assert "self.sections_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)" in sections_scroll_block
     assert "self.sections_scroll.setAlignment(Qt.AlignLeft | Qt.AlignTop)" in sections_scroll_block
     assert "self.sections_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)" in sections_scroll_block
     assert 'self.add_device_profile_btn = QPushButton("Add Radio")' in configured_radios_block
@@ -539,7 +539,9 @@ def test_settings_nav_buttons_are_left_aligned_and_consistent() -> None:
     assert '" padding-right: 10px;"' in style_block
     assert 'stacked_mode = hasattr(self, "sections_stack") and self.sections_stack.indexOf(group) >= 0' in visibility_block
     assert "if not stacked_mode:\n            group.setVisible(bool(visible))" in visibility_block
-    assert "self.sections_stack.setMaximumHeight(target_h)" in sync_scroll_block
+    assert "self.sections_stack.updateGeometry()" in sync_scroll_block
+    assert "setMaximumHeight" not in sync_scroll_block
+    assert "setMinimumHeight" not in sync_scroll_block
 
 
 def test_settings_section_navigation_scrolls_without_horizontal_content_scroll(monkeypatch, tmp_path) -> None:

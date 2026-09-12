@@ -1022,6 +1022,9 @@ class MainWindow(QMainWindow):
         self._sop_next_action_label = ""
         self._sop_next_action_count = 0
         self._active_tab_index = None
+        # Every queued screen-local callback is bound to this generation.
+        # A later navigation invalidates it before it can mutate a hidden page.
+        self._navigation_epoch = 0
         self._lazy_prewarm_labels = ["Messages", "FreqPlanner"]
         self._lazy_prewarm_index = 0
         self._startup_deferred_prewarm_enabled = self._should_prewarm_deferred_screens_at_startup()
@@ -3799,10 +3802,30 @@ class MainWindow(QMainWindow):
 
     def _current_screen_label(self) -> str:
         try:
-            index = int(self.stacked_widget.currentIndex())
+            index = int(self.stack.currentIndex())
             return str(self._screens[index][0])
         except Exception:
             return ""
+
+    def _run_if_screen_current(
+        self,
+        expected_index: int,
+        expected_epoch: int,
+        callback: Callable[[], None],
+    ) -> bool:
+        """Run queued UI work only for the navigation that scheduled it."""
+
+        if bool(getattr(self, "_shutting_down", False)):
+            return False
+        if int(getattr(self, "_navigation_epoch", -1)) != int(expected_epoch):
+            return False
+        try:
+            if int(self.stack.currentIndex()) != int(expected_index):
+                return False
+        except Exception:
+            return False
+        callback()
+        return True
 
     def _show_compact_navigation_menu(self, anchor: QToolButton, group_key: str) -> None:
         menu = QMenu(anchor)
@@ -4348,21 +4371,27 @@ class MainWindow(QMainWindow):
         else:
             self._settings_nav_context = "main" if context == "main" else "radios"
         self._set_screen(idx)
+        navigation_epoch = int(getattr(self, "_navigation_epoch", 0))
         if hasattr(self.settings_tab, "show_settings_context"):
             QTimer.singleShot(
                 0,
-                lambda key=str(health_key or "freqinout"), ident=radio_id, ctx=self._settings_nav_context: self.settings_tab.show_settings_context(
-                    ctx,
-                    health_key=key,
-                    radio_id=ident,
+                lambda key=str(health_key or "freqinout"), ident=radio_id, ctx=self._settings_nav_context, expected=idx, epoch=navigation_epoch: self._run_if_screen_current(
+                    expected,
+                    epoch,
+                    lambda: self.settings_tab.show_settings_context(
+                        ctx,
+                        health_key=key,
+                        radio_id=ident,
+                    ),
                 ),
             )
         elif hasattr(self.settings_tab, "focus_section_by_health_key"):
             QTimer.singleShot(
                 0,
-                lambda key=str(health_key or "freqinout"), ident=radio_id: self.settings_tab.focus_section_by_health_key(
-                    key,
-                    ident,
+                lambda key=str(health_key or "freqinout"), ident=radio_id, expected=idx, epoch=navigation_epoch: self._run_if_screen_current(
+                    expected,
+                    epoch,
+                    lambda: self.settings_tab.focus_section_by_health_key(key, ident),
                 ),
             )
 
@@ -12648,6 +12677,8 @@ class MainWindow(QMainWindow):
                         pass
 
                 self._ensure_lazy_tab_loaded(label, index)
+                self._navigation_epoch = int(getattr(self, "_navigation_epoch", 0)) + 1
+                navigation_epoch = self._navigation_epoch
                 self.stack.setCurrentIndex(index)
                 self._active_tab_index = index
                 self._sync_compact_navigation_selection(label)
@@ -12682,7 +12713,14 @@ class MainWindow(QMainWindow):
                     if hasattr(widget, "show_loading_toast"):
                         widget.show_loading_toast()
                     if hasattr(widget, "on_tab_activated"):
-                        QTimer.singleShot(0, widget.on_tab_activated)
+                        QTimer.singleShot(
+                            0,
+                            lambda target=widget, expected=index, epoch=navigation_epoch: self._run_if_screen_current(
+                                expected,
+                                epoch,
+                                target.on_tab_activated,
+                            ),
+                        )
                 except Exception:
                     pass
 

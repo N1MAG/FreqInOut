@@ -370,6 +370,17 @@ its draft or passive status. It is never promoted to a dialog or other top-level
 window. Cancel restores the refreshed All-family summary or exact radio task;
 successful completion closes only after persistence reports success.
 
+Systemic geometry and deferred-navigation gate: Settings, the Software
+Administration editor host, and the instance assistant use a current-page-only
+stack sizing contract. The outer Settings scroll area owns the viewport; no
+refresh or resize path may hard-pin a shared page/stack minimum and maximum to a
+transient height. At compact sizes, vertical scrolling is permitted and the
+active editor's primary action must remain reachable without horizontal page
+scrolling. Deferred Settings routing and activation work must be discarded when
+its navigation generation is no longer current. Exercise this gate from a real
+MainWindow first-load sequence at the 900x600 application minimum as well as the
+standalone Settings layout matrix.
+
 ## Model Assignment
 
 - High-reasoning primary: architecture, additive schema, migration safety,

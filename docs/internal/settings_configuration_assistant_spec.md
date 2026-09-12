@@ -563,3 +563,25 @@ Target behavior:
   removal: the user should be able to keep radio-message archives clean without
   confusing that with deleting or unpublishing BBS copies.
 - Treat BBS repair and diagnostics as candidates for the future Tools UI.
+
+## Permanent Nested-Workspace Stability Gate
+
+Settings is a deferred-load surface embedded in MainWindow. Every Settings
+section stack, Software Administration editor stack, and guided-assistant step
+stack must report geometry from its current page only. Hidden pages cannot
+contribute their large legacy size hints. The outer Settings scroll area owns
+the available viewport, and no code may mirror a transient viewport or child
+height into equal minimum/maximum heights on a shared stack.
+
+Queued Settings routing and activation callbacks carry the MainWindow
+navigation generation that created them. If another screen becomes current,
+the callback expires without mutating the hidden Settings page. Existing tab
+lifecycle hooks retain their refresh semantics; their queued work is simply
+prevented from running against a screen that is no longer current.
+
+The acceptance matrix includes first entry immediately after launch, deferred
+Settings population, repeated family/task selection, Create/Replace assistant
+entry, and resize at the 900x600 application minimum. The visible workflow and
+its primary action must remain reachable, compact vertical scrolling is valid,
+page-level horizontal scrolling and unintended top-level windows are not, and
+settling the event queue must not change the selected page.

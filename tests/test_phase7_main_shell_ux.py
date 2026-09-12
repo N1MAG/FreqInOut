@@ -5121,7 +5121,8 @@ def test_phase7_settings_sections_use_bounded_fit_content_layouts() -> None:
     assert "fit_content_in_stack=True" in source
     assert "self.sections_stack.currentChanged.connect(lambda _idx: self._sync_current_section_scroll_size())" in source
     assert "self.sections_scroll.setAlignment(Qt.AlignLeft | Qt.AlignTop)" in source
-    assert "self.sections_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)" in source
+    assert "self.sections_stack = CurrentPageStack()" in source
+    assert "self.sections_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)" in source
     assert 'self.settings_section_nav_title = QLabel("Settings")' in source
     assert 'self.global_settings_toggle_btn.setText("Main Settings")' in source
     assert 'self.radio_settings_toggle_btn.setText("Radio Settings")' in source

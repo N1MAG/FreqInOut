@@ -55,7 +55,6 @@ from PySide6.QtWidgets import (
     QToolTip,
     QListWidget,
     QListWidgetItem,
-    QStackedWidget,
     QStyledItemDelegate,
     QStyle,
     QSpinBox,
@@ -129,6 +128,7 @@ from freqinout.core.launch_orchestrator import (
     LAUNCH_APP_ORDER,
     LaunchOrchestrator,
 )
+from freqinout.gui.current_page_stack import CurrentPageStack
 from freqinout.core.dependency_status_service import get_dependency_status_service
 from freqinout.core.software_path_detector import SoftwarePathDetector, PathDetectionResult
 from freqinout.core.software_status_service import SoftwareStatusService
@@ -1087,8 +1087,6 @@ class SettingsTab(QWidget):
         self._last_running_status_sig: Optional[Tuple[object, ...]] = None
         self._last_varac_bbs_lookup_reload_ts = 0.0
         self._varac_bbs_lookup_reload_interval_sec = 20.0
-        self._last_section_stack_index = -1
-        self._last_section_target_height = 0
 
         self._build_ui()
         if not self._defer_initial_load:
@@ -4004,9 +4002,11 @@ class SettingsTab(QWidget):
         self.settings_section_nav_scroll.setWidget(nav_panel)
         self.settings_section_nav_scroll.setVisible(True)
 
-        self.sections_stack = QStackedWidget()
+        self.sections_stack = CurrentPageStack()
         self.sections_stack.setMinimumWidth(0)
-        self.sections_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        # Fill the available Settings workspace when the active page is
+        # compact; a genuinely large active legacy page can still scroll.
+        self.sections_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self.sections_scroll = QScrollArea()
         self.sections_scroll.setWidgetResizable(True)
         self.sections_scroll.setFrameShape(QFrame.NoFrame)
@@ -10889,41 +10889,13 @@ class SettingsTab(QWidget):
         if page is None:
             return
         try:
-            meta = self._section_meta.get(page, {})
-            if str(meta.get("scope", "")).strip().lower() == "software":
-                # Software task editors are created after the section is
-                # selected. Bound the stack to the height already allocated
-                # to the outer scroll container, not its child-driven
-                # viewport. During deferred loading and a family click the
-                # viewport can briefly report zero or a stale height; copying
-                # that transient value made the workspace collapse. The hard
-                # bound is still required so a large hidden legacy Settings
-                # page cannot expand this embedded workspace to thousands of
-                # pixels.
-                scroll = getattr(self, "sections_scroll", None)
-                container_h = int(scroll.height()) if scroll is not None else 0
-                minimum_h = max(240, container_h)
-                page.setMinimumHeight(minimum_h)
-                page.setMaximumHeight(minimum_h)
-                self.sections_stack.setMinimumHeight(minimum_h)
-                self.sections_stack.setMaximumHeight(minimum_h)
-                # Keep this policy non-expanding so a hidden, large settings
-                # page cannot override the allocated scroll-container size.
-                self.sections_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-                self._last_section_stack_index = int(self.sections_stack.currentIndex())
-                self._last_section_target_height = minimum_h
-                page.updateGeometry()
-                self.sections_stack.updateGeometry()
-                return
-            target_h = max(0, int(page.sizeHint().height()))
-            row = int(self.sections_stack.currentIndex())
-            if row != int(self._last_section_stack_index) or target_h != int(self._last_section_target_height):
-                page.setMinimumHeight(target_h)
-                self.sections_stack.setMinimumHeight(target_h)
-                self.sections_stack.setMaximumHeight(target_h)
-                self.sections_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-                self._last_section_stack_index = row
-                self._last_section_target_height = target_h
+            # CurrentPageStack derives hints from this page only.  In
+            # particular, do not mirror a size hint or transient viewport
+            # height into min/max values: doing so creates a deferred-resize
+            # feedback loop and leaves stale bounds behind when navigating
+            # from a large legacy page to Software or the instance assistant.
+            page.updateGeometry()
+            self.sections_stack.updateGeometry()
         except Exception:
             pass
 

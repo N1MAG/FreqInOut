@@ -536,7 +536,25 @@ def test_settings_software_workspace_survives_repeated_reflow_and_resize(monkeyp
             assert workspace.editor_stack.currentWidget().isVisible()
             assert tab.sections_stack.height() >= 240
             assert tab.sections_stack.height() < 1000
-            assert tab.sections_scroll.verticalScrollBar().maximum() == 0
+            assert tab.sections_scroll.horizontalScrollBar().maximum() == 0
+
+            # A compact viewport may need a bounded vertical scrollbar.  The
+            # old zero-scroll assertion encouraged the host to clamp the page
+            # to a transient viewport height, which clipped the editor and
+            # produced the visible swipe/vanish failure.  The operator-facing
+            # invariant is that the active editor remains reachable and that
+            # returning to a larger size settles without stale bounds.
+            scroll = tab.sections_scroll.verticalScrollBar()
+            assert 0 <= scroll.maximum() < 1000
+            editor = workspace.editor_stack.currentWidget()
+            save_button = editor.save_button
+            scroll.setValue(scroll.maximum())
+            app.processEvents()
+            save_bottom = save_button.mapTo(
+                tab.sections_scroll.viewport(),
+                save_button.rect().bottomRight(),
+            )
+            assert save_bottom.y() <= tab.sections_scroll.viewport().rect().bottom()
     finally:
         tab.deleteLater()
         app.processEvents()
