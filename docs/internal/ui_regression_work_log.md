@@ -4662,3 +4662,99 @@ was zero, Cancel restored the editor, MainWindow stayed visible, and no other
 visible top-level window appeared. Python compilation and `git diff --check`
 pass. No migration, database write, endpoint I/O, external application change,
 or destructive action is part of this correction.
+
+## 2026-09-12 — P1 FLRig verification and QSY continuation
+
+Status: implementation complete and automated exit gate passed. Linux
+production confirmation remains operator-assisted.
+
+Production `freqinout (28).log`, the running local configuration, and scheduler
+events show that this is not a basic FLRig connection outage. FIO-A and FIO-B
+resolve to independent `127.0.0.1:12345` and `127.0.0.1:12346` endpoints. Direct
+read-only XML-RPC checks returned FLRig 2.0.10 PTT off, valid VFO A, and current
+frequencies immediately. The database also contains successful post-command
+verification for both endpoints.
+
+The regression is the scheduler's asynchronous status handoff. A cold or expired
+target status request returns its stale placeholder immediately, so the safe PTT
+gate holds QSY. The completed fresh result clears health state but does not
+resume the exact held intent. A later schedule tick commonly arrives after the
+short safety freshness window, starts another poll, and holds again. Separately,
+the cache-only control bar correctly avoids endpoint I/O but degrades to
+`Applied · verification unavailable` after its cached evidence ages because no
+independent active-endpoint status cadence owns liveness.
+
+The implementation package will add generation-fenced, endpoint-scoped status
+continuations; a paced active-endpoint liveness refresh; target-qualified manual
+QSY preflight; and truthful pending/queued/blocked feedback. Unknown PTT remains
+fail-closed and every continuation re-runs shared-resource, RF-guard, busy,
+ownership, and deduplication checks. There is no destructive migration.
+
+Work packages and models:
+
+- high-reasoning primary GPT-5 model (exact host runtime submodel identifier not
+  exposed): live/production evidence correlation, scheduler concurrency and
+  safety architecture, specification, implementation integration, delegated
+  diff review, and final gate;
+- `gpt-5.6-terra`, high reasoning: read-only root-cause and endpoint-routing
+  audit;
+- `gpt-5.6-luna`, high reasoning: focused QSY/status regression design and test
+  implementation;
+- `gpt-5.6-luna`, medium reasoning: independent specification and acceptance-gate
+  audit.
+
+Implementation and review evidence: the high-reasoning primary implemented the
+endpoint/configuration-epoch-fenced continuation, paced runtime status cadence,
+stable recent-readback presentation, result-bearing manual QSY contract,
+target-qualified shared-PTT preflight, and checked FLRig/rigctld PTT reads. The
+primary reviewed every delegated test diff, retained deterministic event-based
+coordination, and expanded the gate where the first delegated cadence test did
+not exercise the timer path directly. Luna then added direct `_on_timer`
+two-endpoint cadence coverage plus pending/blocked/legacy QSY feedback tests.
+
+Acceptance evidence: 14 new P1 regressions pass. The final scheduler, endpoint
+status/lane/isolation/fault/lifecycle, manual-control, shared-PTT, runtime-routing,
+station presentation, and QSY regression partition passes 283 tests with 5
+intentional platform/environment skips. Python compilation and `git diff
+--check` pass. Read-only live checks returned FLRig 2.0.10, PTT off, VFO A, and
+valid frequencies on both configured local endpoints. The running FIO process
+was not restarted, so the new binary behavior and production Linux QSY remain
+explicit external checks. No migration, device write, app restart, or destructive
+action was performed during diagnosis or validation.
+
+### P1 follow-up — complete endpoint evidence across liveness and coalescing
+
+After the operator restarted FIO, runtime evidence confirmed that the new
+endpoint continuation worked: held QSY operations resumed and applied to the
+correct `127.0.0.1:12345` and `127.0.0.1:12346` FLRig endpoints. The remaining
+`Applied · verification unavailable` label had two status-lifecycle causes.
+FLRig liveness polling replaced a complete post-apply snapshot with one that
+omitted the expected JS8 offset, and rapid lane coalescing could suppress the
+last successful readback merely because a newer intent was queued or running.
+Global process-inventory state could also suppress a valid configured endpoint
+probe.
+
+The follow-up makes liveness collect every field in the endpoint's expected
+state, including the mapped JS8 offset for an FLRig-controlled schedule. It
+probes instantiated endpoint clients according to their persisted backend
+without using global process detection as an eligibility gate. The latest
+successful readback remains cached while a newer generation is only queued or
+running and is replaced only by later successful evidence. When RF readback
+matches but JS8 offset evidence is genuinely unavailable, operator wording is
+now `RF verified · verify JS8Call` instead of implying that FLRig verification
+failed.
+
+Work packages and models: the high-reasoning primary GPT-5 model owned runtime
+correlation, concurrency semantics, production changes, specification, and
+integration review. `gpt-5.6-terra` (high) independently audited the fallback
+path and identified the coalesced-generation and process-inventory hazards.
+`gpt-5.6-luna` (high) reproduced the expected-state omission and implemented
+focused deterministic regressions. No schema migration, device write,
+application restart, or destructive action was performed.
+
+Acceptance evidence: the final scheduler, endpoint status/lane/isolation/fault/
+lifecycle, manual-control, shared-PTT, runtime-routing, station presentation,
+and QSY partition passes **289 tests with 5 intentional skips**. The focused P1
+file passes 20 tests, Python compilation succeeds, and `git diff --check` is
+clean. The current FIO process started before this follow-up source change, so
+one additional restart and operator confirmation remain the external gate.

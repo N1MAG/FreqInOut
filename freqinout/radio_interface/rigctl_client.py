@@ -272,11 +272,16 @@ class FLRigClient:
         Returns True if FLRig reports PTT active (transmitting).
         """
         try:
-            state = self._with_proxy(lambda p: p.rig.get_ptt(), label="get_ptt")
-            return bool(state)
+            return self.get_ptt_checked()
         except Exception as e:
             log.warning("Failed to get PTT from FLRig: %s", e)
             return False
+
+    def get_ptt_checked(self) -> bool:
+        """Return PTT or raise so safety callers can distinguish read failure."""
+
+        state = self._with_proxy(lambda p: p.rig.get_ptt(), label="get_ptt")
+        return bool(state)
 
     def get_vfo_frequency(self) -> Optional[int]:
         """
@@ -583,11 +588,17 @@ class RigctldClient:
     def get_ptt(self) -> bool:
         with self._lock:
             try:
-                raw = self._scalar_response_locked("t", label="get_ptt")
-                return bool(int(str(raw or "0").strip() or "0"))
+                return self.get_ptt_checked()
             except Exception as e:
                 log.debug("Failed to get PTT from rigctld: %s", e)
                 return False
+
+    def get_ptt_checked(self) -> bool:
+        """Return PTT or raise so safety callers can distinguish read failure."""
+
+        with self._lock:
+            raw = self._scalar_response_locked("t", label="get_ptt")
+            return bool(int(str(raw or "0").strip() or "0"))
 
     def get_vfo_frequency(self) -> Optional[int]:
         with self._lock:

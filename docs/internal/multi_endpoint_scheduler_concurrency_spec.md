@@ -823,6 +823,105 @@ radio application, the full scheduler regression package, CPU-report redaction
 and cooldown coverage, and scheduler-signal UI coalescing. Production Linux must
 confirm settled idle CPU and the absence of repeated schedule-application logs.
 
+## September 12 P1 Endpoint Verification And QSY Continuation
+
+Production and local evidence showed healthy FLRig endpoints accepting commands
+while FIO repeatedly reported `Applied · verification unavailable` and held QSY
+with `Rig PTT state is unavailable`. Direct read-only XML-RPC checks returned PTT,
+frequency, and VFO immediately. Scheduler events also contained successful
+post-apply verification. The defect is therefore in FIO's asynchronous status
+handoff, not basic FLRig connectivity.
+
+The following rules are binding corrections to MES-3 and MES-5:
+
+1. A target command that needs fresh PTT evidence may enter a bounded
+   `checking target radio` state. Unknown or stale PTT must never authorize a
+   frequency change, but completion of the exact endpoint's status request must
+   resume the held intent promptly without waiting for a later timer tick.
+2. The continuation is endpoint-, configuration-epoch-, and intent-scoped. A
+   completion from an edited, disabled, removed, superseded, or different
+   endpoint cannot apply a command. At most one continuation may be pending per
+   endpoint, and repeated status callbacks cannot create an apply loop.
+3. Resumption uses the fresh cached snapshot and the normal control lane. It
+   must re-run shared PTT, RF Safety Guard, busy, ownership, and deduplication
+   checks. It cannot bypass any existing safety control.
+4. Automatic schedule intents and manual QSY intents retain their original
+   source and safety options. A manual QSY request is accepted only as
+   `pending verification`, `queued`, or `blocked`; UI code must not describe a
+   request as sent merely because the scheduler method was called.
+5. Shared-PTT and conflict preflight for a manual QSY must be qualified by
+   `target_device_profile_id`. Another independent radio cannot block the
+   selected target, while a genuinely shared resource continues to fail closed.
+6. Active automatic endpoint status is maintained by a centrally paced,
+   cache-only-for-consumers cadence. Polls remain endpoint-local, single-flight,
+   bounded, backoff-aware, and free of UI-thread I/O. A hung endpoint cannot
+   delay a healthy peer or cause thread growth.
+7. A previously verified endpoint may be presented as `Verification aging`
+   while a refresh is in flight. `Applied · verification unavailable` is reserved
+   for a target with no usable intent/readback pair, an explicit read failure,
+   or evidence beyond the operational stale limit. The UI must never imply that
+   an unverified command is verified.
+8. Apply, verify, hold, and failure events must carry the exact target radio and
+   endpoint route so primary-radio fallback cannot misattribute evidence.
+9. A liveness refresh must collect every field required by that endpoint's
+   current expected-state contract. In particular, an FLRig-controlled radio
+   with an expected JS8 offset must refresh both FLRig readback and that radio's
+   JS8 offset. A partial refresh cannot erase a still-required field and turn a
+   healthy combined endpoint into the generic verification fallback.
+10. An active endpoint's liveness eligibility comes from its persisted control
+    mode and instantiated endpoint client, not a global process-inventory
+    snapshot. A newer queued or running generation does not erase the most
+    recent successful readback; that evidence remains usable until a later
+    generation succeeds, fails its verification, or naturally becomes stale.
+
+The P1 automated exit gate requires:
+
+- a cold-cache FLRig QSY remains safe, completes one target status poll, and
+  queues exactly one command after fresh PTT-off evidence arrives;
+- PTT-on, failed, timed-out, stale, and superseded status completions never
+  authorize a command;
+- a held automatic schedule intent resumes without another database projection
+  or forced all-radio evaluation;
+- one hung status endpoint does not delay the peer continuation or operational
+  summary;
+- the active-endpoint cadence maintains truthful cached readback without direct
+  UI, database, process-inventory, or network work;
+- an FLRig intent with a JS8 offset remains verified across repeated liveness
+  refreshes, and a genuine JS8 read failure is identified as JS8 evidence rather
+  than an FLRig disconnection;
+- liveness polling still runs when global process detection is stale but the
+  configured endpoint client exists, and rapid generation coalescing retains
+  the newest successful readback until a later success replaces it;
+- manual QSY feedback distinguishes pending, queued, and blocked outcomes;
+- target-specific shared-PTT and event-attribution tests pass; and
+- focused endpoint status, endpoint lane, lifecycle, runtime routing, manual
+  control, QSY helper, and architecture guard suites pass.
+
+Linux production confirmation remains an external hardware gate: with FLRig
+reachable and PTT off, QSY must progress from checking to verified apply; an
+unreachable or transmitting target must remain safely blocked; peer radios must
+stay responsive throughout.
+
+Implementation evidence (2026-09-12): the scheduler now retains at most one
+newest PTT-waiting intent per normalized endpoint. Status completion is marshaled
+back to the scheduler thread and resumes only a fresh, error-free, PTT-known
+snapshot whose endpoint mapping and configuration epoch are still current. The
+normal apply path is re-entered, so shared PTT, RF Safety Guard, busy checks,
+ownership, and command-lane deduplication remain authoritative. Manual QSY now
+returns a result-bearing disposition and its UI reports target checking, queued,
+manual, or blocked rather than treating a method call as a sent command. Active
+runtime endpoints receive paced background status requests through their
+existing isolated single-flight lanes; UI consumers remain cache-only. Recent
+matching readback remains stably `On schedule · verified` during the brief
+in-flight refresh window. Liveness now derives eligibility from each configured
+runtime client, refreshes every expected field including a mapped JS8 offset,
+and preserves a successful readback while a newer generation is merely queued
+or running. A later successful generation fences out an older completion.
+FLRig and rigctld expose checked PTT reads so a transport error cannot be
+silently converted into safe PTT-off evidence. No schema or configuration
+migration was introduced. The final automated partition passes 289 tests with
+5 intentional skips; Linux production confirmation remains external.
+
 Thread-concurrency tests must use deterministic barriers/events rather than
 timing-only sleeps wherever possible. Hardware tests supplement; they do not
 replace fault-injection tests.

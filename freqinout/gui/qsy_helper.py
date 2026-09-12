@@ -144,7 +144,30 @@ def current_scheduler_freq(window) -> Optional[float]:
         return None
 
 
-def _shared_ptt_block_reason(scheduler) -> str:
+def _shared_ptt_block_reason(
+    scheduler,
+    target_device_profile_id: Optional[int] = None,
+) -> str:
+    if (
+        scheduler is not None
+        and target_device_profile_id is not None
+        and hasattr(scheduler, "get_shared_ptt_status_for_target")
+    ):
+        try:
+            target_status = scheduler.get_shared_ptt_status_for_target(
+                int(target_device_profile_id)
+            )
+        except Exception:
+            target_status = {}
+        if isinstance(target_status, dict):
+            # Incomplete cache evidence is handled as a pending verification by
+            # SchedulerEngine. Only a known active shared-PTT owner is an
+            # immediate GUI preflight block.
+            if not bool(target_status.get("evidence_known", True)):
+                return ""
+            if not bool(target_status.get("blocked")):
+                return ""
+            return str(target_status.get("reason") or "Shared PTT interlock is active.").strip()
     if scheduler is None or not hasattr(scheduler, "get_status_summary"):
         return ""
     try:
@@ -326,6 +349,72 @@ def _rf_guard_warning_detail(detail: str, *, mode_label: str) -> str:
     if clean_detail:
         return f"{prefix} {clean_detail}"
     return prefix
+
+
+def _submit_manual_qsy(
+    window,
+    scheduler,
+    entry: Dict,
+    *,
+    ignore_coordination_prompt: bool = False,
+) -> bool:
+    """Submit QSY without describing a pending safety check as a sent command."""
+
+    try:
+        result = scheduler.apply_manual_qsy(
+            entry,
+            ignore_coordination_prompt=ignore_coordination_prompt,
+        )
+    except TypeError:
+        result = scheduler.apply_manual_qsy(entry)
+    if result is None:
+        # Compatibility for existing integrations whose scheduler predates the
+        # result-bearing QSY contract. They own their established feedback.
+        return True
+    disposition = str(result).strip().lower()
+    if disposition == "pending_verification":
+        _publish_schedule_control_feedback(
+            window,
+            action_type="qsy",
+            status="partial",
+            summary="Checking target radio before QSY…",
+            detail=(
+                "FIO is verifying that the selected radio is not transmitting. "
+                "The QSY will continue automatically when safe."
+            ),
+            source_surface="qsy_helper_preflight",
+        )
+        return True
+    if disposition in {"queued", "pending", "already_applied"}:
+        _publish_schedule_control_feedback(
+            window,
+            action_type="qsy",
+            status="partial" if disposition == "pending" else "succeeded",
+            summary=(
+                "The selected radio is already on this frequency."
+                if disposition == "already_applied"
+                else "QSY is queued for the selected radio."
+            ),
+            detail="FIO will report the endpoint readback separately.",
+            source_surface="qsy_helper_submit",
+        )
+        return True
+    if disposition == "manual":
+        _publish_schedule_control_feedback(
+            window,
+            action_type="qsy",
+            status="partial",
+            summary="QSY selected · tune this radio manually.",
+            detail="FIO updated the manual hold but did not send a radio-control command.",
+            source_surface="qsy_helper_manual",
+        )
+        return True
+    _publish_qsy_blocked_feedback(
+        window,
+        "QSY blocked for the selected radio.",
+        "Review the radio status or RF Safety Guard details, then try again.",
+    )
+    return False
 
 
 def _resume_coordination_conflict(scheduler) -> Dict[str, object]:
@@ -528,7 +617,10 @@ def perform_qsy(window, meta: Dict) -> bool:
         target_device_profile_id = 0
     if target_device_profile_id > 0:
         entry["target_device_profile_id"] = target_device_profile_id
-    block_reason = _shared_ptt_block_reason(scheduler)
+    block_reason = _shared_ptt_block_reason(
+        scheduler,
+        target_device_profile_id if target_device_profile_id > 0 else None,
+    )
     if block_reason:
         if not _publish_qsy_blocked_feedback(
             window,
@@ -550,11 +642,12 @@ def perform_qsy(window, meta: Dict) -> bool:
             summary = str(conflict.get("summary") or "RF Safety Guard warning.").strip()
             detail = str(conflict.get("detail") or summary).strip()
             _publish_qsy_warning_feedback(window, summary, _rf_guard_warning_detail(detail, mode_label="Warn only"))
-            try:
-                scheduler.apply_manual_qsy(entry, ignore_coordination_prompt=True)
-            except TypeError:
-                scheduler.apply_manual_qsy(entry)
-            return True
+            return _submit_manual_qsy(
+                window,
+                scheduler,
+                entry,
+                ignore_coordination_prompt=True,
+            )
         msg = QMessageBox(window)
         msg.setWindowTitle("RF Conflict Warning")
         msg.setText(str(conflict.get("summary") or "RF conflict detected.").strip() or "RF conflict detected.")
@@ -584,13 +677,13 @@ def perform_qsy(window, meta: Dict) -> bool:
                 mode_label="Require confirmation",
             ),
         )
-        try:
-            scheduler.apply_manual_qsy(entry, ignore_coordination_prompt=True)
-        except TypeError:
-            scheduler.apply_manual_qsy(entry)
-        return True
-    scheduler.apply_manual_qsy(entry)
-    return True
+        return _submit_manual_qsy(
+            window,
+            scheduler,
+            entry,
+            ignore_coordination_prompt=True,
+        )
+    return _submit_manual_qsy(window, scheduler, entry)
 
 
 def normalize_hold_minutes(value) -> int:
