@@ -74,6 +74,20 @@ class JS8SendResult:
     transmitted_text: str = ""
 
 
+@dataclass(frozen=True)
+class JS8SelectedTargetState:
+    """One bounded observation of the target selected in a JS8Call UI."""
+
+    endpoint: JS8ApiEndpoint
+    target: str = ""
+    available: bool = False
+    detail: str = ""
+
+    @property
+    def has_target(self) -> bool:
+        return bool(self.target)
+
+
 _EXPECT_TX_LOCKS: dict[tuple[str, int], threading.RLock] = {}
 _EXPECT_TX_LOCKS_GUARD = threading.Lock()
 
@@ -228,6 +242,49 @@ def preflight_js8_send(
 
 def normalize_js8_target(value: object) -> str:
     return str(value or "").strip().upper()
+
+
+def query_js8_selected_target(
+    client: JS8ApiClient,
+    *,
+    timeout_s: float = 0.6,
+) -> JS8SelectedTargetState:
+    """Read the current JS8Call callsign/group selection without changing it.
+
+    Unsupported, unreachable, and timed-out endpoints are represented as an
+    unavailable observation so Compose can remain quiet and usable.  The caller
+    owns threading; this bounded socket request must not run on the GUI thread.
+    """
+
+    endpoint = client.endpoint.normalized()
+    try:
+        if not client.is_running:
+            client.start()
+        if not client.is_connected:
+            return JS8SelectedTargetState(
+                endpoint=endpoint,
+                available=False,
+                detail="JS8Call selected-target state is unavailable.",
+            )
+        response = client.request(
+            "RX.GET_CALL_SELECTED",
+            expect_types=("RX.CALL_SELECTED",),
+            timeout_s=timeout_s,
+        )
+        target = normalize_js8_target(
+            response.value
+            or response.params.get("CALLSIGN")
+            or response.params.get("CALL")
+            or response.params.get("TARGET")
+            or ""
+        )
+        return JS8SelectedTargetState(endpoint=endpoint, target=target, available=True)
+    except Exception as exc:
+        return JS8SelectedTargetState(
+            endpoint=endpoint,
+            available=False,
+            detail=f"JS8Call selected-target state is unavailable: {exc}",
+        )
 
 
 def set_js8_selected_target(client: JS8ApiClient, target: object = "", *, settle_s: float = 0.12) -> None:

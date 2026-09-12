@@ -314,6 +314,7 @@ from freqinout.core.js8_spotter_decode import (
 )
 from freqinout.core.js8_send_service import (
     js8_endpoint_from_radio_profile,
+    query_js8_selected_target,
     send_js8_message_guarded,
 )
 from freqinout.core.condition_alerts import CONDITION_ALERT_RULES_SETTING_KEY
@@ -902,6 +903,33 @@ class _ComposeJs8SendWorker(QObject):
                 "result": None,
                 "error": str(exc),
             }
+        self.finished.emit(payload)
+
+
+class _ComposeJs8SelectedTargetWorker(QObject):
+    """Read one JS8Call UI target selection outside the GUI thread."""
+
+    finished = Signal(object)
+
+    def __init__(self, *, endpoint: JS8ApiEndpoint, context: Mapping[str, object]):
+        super().__init__()
+        self._endpoint = endpoint.normalized()
+        self._context = dict(context)
+
+    def run(self) -> None:
+        payload = dict(self._context)
+        try:
+            client = JS8ApiClientRegistry.get(self._endpoint, timeout_s=0.8, auto_reconnect=True)
+            state = query_js8_selected_target(client, timeout_s=0.6)
+            payload.update(
+                {
+                    "supported": bool(state.available),
+                    "target": state.target,
+                    "error": state.detail,
+                }
+            )
+        except Exception as exc:
+            payload.update({"supported": False, "target": "", "error": str(exc)})
         self.finished.emit(payload)
 
 
@@ -3440,6 +3468,10 @@ class MessageHeaderWithCheckbox(QHeaderView):
 
 class MessageViewerTab(QWidget):
     busyStateChanged = Signal(bool)
+    # The endpoint worker is primary-owned.  The Compose UI only emits a
+    # snapshot request and accepts a matching completed result; it never makes
+    # a JS8 API call from a paint, preview, or editing path.
+    composeJs8SelectedTargetRefreshRequested = Signal(object)
 
     """
     Message Viewer for VarAC / FLMSG / FLAMP inbox-like folders.
@@ -3570,6 +3602,18 @@ class MessageViewerTab(QWidget):
         self._compose_guidance_thread: QThread | None = None
         self._compose_guidance_worker: _ComposeTargetGuidanceWorker | None = None
         self._compose_guidance_pending: bool = False
+        self._compose_js8_selected_target_generation: int = 0
+        self._compose_js8_selected_target_state: str = "unknown"
+        self._compose_js8_selected_target_value: str = ""
+        self._compose_js8_selected_target_radio_id: int = 0
+        self._compose_js8_selected_target_endpoint_identity: str = ""
+        self._compose_js8_selected_target_error: str = ""
+        self._compose_js8_selected_target_thread: QThread | None = None
+        self._compose_js8_selected_target_worker: _ComposeJs8SelectedTargetWorker | None = None
+        self._compose_js8_selected_target_pending_context: Dict[str, object] = {}
+        self.composeJs8SelectedTargetRefreshRequested.connect(
+            self._queue_compose_js8_selected_target_refresh
+        )
         self._compose_bbs_targets_cache: List[Dict[str, str]] = []
         self._compose_destination_plans_cache: List[ComposeDestinationPlan] = []
         self._compose_action_generation: int = 0
@@ -6424,7 +6468,9 @@ class MessageViewerTab(QWidget):
         self.compose_js8_target_edit = QLineEdit()
         self.compose_js8_target_edit.setMinimumWidth(220)
         self.compose_js8_target_edit.setPlaceholderText("GROUP or CALLSIGN")
-        self.compose_js8_target_edit.setToolTip("Destination typed into the JS8 command, for example MAGNET or a callsign. FIO strips @ before transmit.")
+        self.compose_js8_target_edit.setToolTip(
+            "Destination typed into the JS8 command. Enter a group or callsign; FIO strips @ before transmit."
+        )
         self.compose_js8_target_edit.textChanged.connect(self._on_compose_rf_target_changed)
         js8_target_row.addWidget(self.compose_js8_target_edit, 1)
         self.compose_js8_sign_chk = QCheckBox("Sign MsgAuth")
@@ -6447,6 +6493,39 @@ class MessageViewerTab(QWidget):
         js8_target_row.addWidget(self.compose_js8_target_spacer, 1)
         self.compose_js8_target_row_widget.setVisible(False)
         setup_layout.addWidget(self.compose_js8_target_row_widget)
+
+        # This is deliberately a separate, compact row rather than a value in
+        # the target field.  A target selected in JS8Call is live external
+        # state, not part of an FIO draft until the operator explicitly adopts
+        # it with Use Target.
+        self.compose_js8_selected_target_row_widget = QWidget()
+        self.compose_js8_selected_target_row_widget.setObjectName("composeJs8SelectedTargetRow")
+        self.compose_js8_selected_target_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        selected_target_row = QHBoxLayout(self.compose_js8_selected_target_row_widget)
+        selected_target_row.setContentsMargins(8, 4, 8, 4)
+        selected_target_row.setSpacing(8)
+        self.compose_js8_selected_target_label = QLabel()
+        self.compose_js8_selected_target_label.setWordWrap(True)
+        self.compose_js8_selected_target_label.setMinimumWidth(0)
+        self.compose_js8_selected_target_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Minimum)
+        self.compose_js8_selected_target_label.setToolTip(
+            "This is live state observed in JS8Call. It is not copied into this draft or sent until you choose Use Target."
+        )
+        selected_target_row.addWidget(self.compose_js8_selected_target_label, 1)
+        self.compose_js8_selected_target_use_btn = QPushButton("Use Target")
+        self.compose_js8_selected_target_use_btn.setToolTip(
+            "Copy the target already selected in JS8Call into this compose draft. This does not send a message."
+        )
+        self.compose_js8_selected_target_use_btn.clicked.connect(self._use_compose_js8_selected_target)
+        selected_target_row.addWidget(self.compose_js8_selected_target_use_btn)
+        self.compose_js8_selected_target_refresh_btn = QPushButton("Refresh Target")
+        self.compose_js8_selected_target_refresh_btn.setToolTip(
+            "Check the currently selected callsign or group in JS8Call for this radio."
+        )
+        self.compose_js8_selected_target_refresh_btn.clicked.connect(self.request_compose_js8_selected_target_refresh)
+        selected_target_row.addWidget(self.compose_js8_selected_target_refresh_btn)
+        self.compose_js8_selected_target_row_widget.setVisible(False)
+        setup_layout.addWidget(self.compose_js8_selected_target_row_widget)
 
         self.compose_js8_auth_row_widget = QWidget()
         self.compose_js8_auth_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -6525,7 +6604,9 @@ class MessageViewerTab(QWidget):
         self.compose_commstat_target_edit = QLineEdit()
         self.compose_commstat_target_edit.setMinimumWidth(220)
         self.compose_commstat_target_edit.setPlaceholderText("GROUP or CALLSIGN")
-        self.compose_commstat_target_edit.setToolTip("CommStat RF destination, for example MAGNET or a callsign. FIO strips @ before transmit.")
+        self.compose_commstat_target_edit.setToolTip(
+            "CommStat RF destination. Enter a group or callsign; FIO strips @ before transmit."
+        )
         self.compose_commstat_target_edit.textChanged.connect(self._on_compose_rf_target_changed)
         self.compose_commstat_grid_edit = QLineEdit()
         self.compose_commstat_grid_edit.setPlaceholderText("Grid")
@@ -7141,6 +7222,7 @@ class MessageViewerTab(QWidget):
             "compose_form_row_widget",
             "compose_header_row_widget",
             "compose_js8_target_row_widget",
+            "compose_js8_selected_target_row_widget",
             "compose_js8_plain_row_widget",
             "compose_js8_plain_scroll",
             "compose_commstat_row_widget",
@@ -7831,6 +7913,8 @@ class MessageViewerTab(QWidget):
         finally:
             self._compose_restoring_mode_draft = False
         self._update_compose_preview()
+        self._refresh_compose_js8_selected_target_cue()
+        self.request_compose_js8_selected_target_refresh()
 
     @staticmethod
     def _compose_combo_text(combo: object) -> str:
@@ -8069,9 +8153,244 @@ class MessageViewerTab(QWidget):
             self._refresh_compose_signing_keys(force=force)
         self._start_compose_target_guidance_worker()
 
+    @staticmethod
+    def _compose_js8_selected_target_modes() -> tuple[str, ...]:
+        return ("js8", "spotter", "commstat_rf")
+
+    def _compose_js8_selected_target_is_active(self) -> bool:
+        return str(getattr(self, "_compose_mode", "nbems") or "nbems") in self._compose_js8_selected_target_modes()
+
+    def _compose_js8_selected_target_endpoint_key(self, radio_target: Optional[ComposeRadioTarget]) -> str:
+        """Return the UI's stable endpoint hint without opening or probing an endpoint."""
+        if radio_target is None:
+            return ""
+        endpoint = js8_endpoint_from_radio_profile(
+            radio_target.profile,
+            fallback_settings=getattr(self, "settings", None),
+        )
+        return f"radio:{radio_target.radio_id}|endpoint:{endpoint.host}:{endpoint.port}"
+
+    def compose_js8_selected_target_request_context(self) -> Optional[Dict[str, object]]:
+        """Snapshot a selected-target lookup request for the endpoint worker.
+
+        The caller must return this exact generation, radio ID, and endpoint
+        identity to :meth:`apply_compose_js8_selected_target_result`; stale
+        results are ignored by the UI.
+        """
+        if not self._compose_js8_selected_target_is_active():
+            return None
+        radio_target = self._selected_compose_radio_target()
+        if radio_target is None or "JS8Call" not in tuple(radio_target.capabilities):
+            return None
+        self._compose_js8_selected_target_generation += 1
+        self._compose_js8_selected_target_radio_id = int(radio_target.radio_id)
+        self._compose_js8_selected_target_endpoint_identity = self._compose_js8_selected_target_endpoint_key(radio_target)
+        self._compose_js8_selected_target_state = "refreshing"
+        self._compose_js8_selected_target_value = ""
+        self._compose_js8_selected_target_error = ""
+        self._refresh_compose_js8_selected_target_cue()
+        return {
+            "generation": self._compose_js8_selected_target_generation,
+            "radio_id": self._compose_js8_selected_target_radio_id,
+            "endpoint_identity": self._compose_js8_selected_target_endpoint_identity,
+            "radio_label": self._compose_radio_target_short_label(radio_target),
+        }
+
+    def request_compose_js8_selected_target_refresh(self) -> Optional[Dict[str, object]]:
+        """Request one explicit selected-target refresh without performing UI-thread I/O."""
+        if self._is_shutting_down:
+            return None
+        context = self.compose_js8_selected_target_request_context()
+        if context is not None:
+            try:
+                self.composeJs8SelectedTargetRefreshRequested.emit(dict(context))
+            except RuntimeError:
+                # Lightweight non-Qt construction is useful to focused callers;
+                # a normal widget always has the signal available.
+                pass
+        return context
+
+    def _queue_compose_js8_selected_target_refresh(self, context: object) -> None:
+        """Serialize target observations so one slow endpoint cannot fan out work."""
+        if self._is_shutting_down or not isinstance(context, Mapping):
+            return
+        request = dict(context)
+        if self._compose_js8_selected_target_thread is not None and self._qt_thread_running(
+            self._compose_js8_selected_target_thread
+        ):
+            self._compose_js8_selected_target_pending_context = request
+            return
+        try:
+            radio_id = int(request.get("radio_id", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        radio_target = next(
+            (item for item in self._compose_radio_targets if int(item.radio_id) == radio_id),
+            None,
+        )
+        if radio_target is None or "JS8Call" not in tuple(radio_target.capabilities):
+            return
+        endpoint = js8_endpoint_from_radio_profile(radio_target.profile, fallback_settings=self.settings)
+        expected_identity = self._compose_js8_selected_target_endpoint_key(radio_target)
+        if str(request.get("endpoint_identity", "") or "") != expected_identity:
+            return
+        self._compose_js8_selected_target_thread = QThread(self)
+        self._compose_js8_selected_target_worker = _ComposeJs8SelectedTargetWorker(
+            endpoint=endpoint,
+            context=request,
+        )
+        self._compose_js8_selected_target_worker.moveToThread(self._compose_js8_selected_target_thread)
+        self._compose_js8_selected_target_thread.started.connect(
+            self._compose_js8_selected_target_worker.run
+        )
+        self._compose_js8_selected_target_worker.finished.connect(
+            self.apply_compose_js8_selected_target_result
+        )
+        self._compose_js8_selected_target_worker.finished.connect(
+            self._compose_js8_selected_target_thread.quit
+        )
+        self._compose_js8_selected_target_worker.finished.connect(
+            self._compose_js8_selected_target_worker.deleteLater
+        )
+        self._compose_js8_selected_target_thread.finished.connect(
+            self._on_compose_js8_selected_target_thread_finished
+        )
+        self._compose_js8_selected_target_thread.finished.connect(
+            self._compose_js8_selected_target_thread.deleteLater
+        )
+        self._compose_js8_selected_target_thread.start()
+
+    def _on_compose_js8_selected_target_thread_finished(self) -> None:
+        self._retain_finished_worker_refs(
+            self._compose_js8_selected_target_thread,
+            self._compose_js8_selected_target_worker,
+        )
+        self._compose_js8_selected_target_thread = None
+        self._compose_js8_selected_target_worker = None
+        pending = dict(self._compose_js8_selected_target_pending_context)
+        self._compose_js8_selected_target_pending_context = {}
+        if self._is_shutting_down or not pending:
+            return
+        if int(pending.get("generation", 0) or 0) != self._compose_js8_selected_target_generation:
+            return
+        QTimer.singleShot(0, lambda request=pending: self._queue_compose_js8_selected_target_refresh(request))
+
+    def apply_compose_js8_selected_target_result(self, result: Mapping[str, object]) -> bool:
+        """Apply a worker result only if it still belongs to the active radio endpoint."""
+        if self._is_shutting_down or not self._compose_js8_selected_target_is_active():
+            return False
+        try:
+            generation = int(result.get("generation", 0) or 0)
+            radio_id = int(result.get("radio_id", 0) or 0)
+        except (AttributeError, TypeError, ValueError):
+            return False
+        endpoint_identity = str(result.get("endpoint_identity", "") or "")
+        if (
+            generation != self._compose_js8_selected_target_generation
+            or radio_id != self._compose_js8_selected_target_radio_id
+            or endpoint_identity != self._compose_js8_selected_target_endpoint_identity
+        ):
+            return False
+        selected = self._selected_compose_radio_target()
+        if selected is None or int(selected.radio_id) != radio_id:
+            return False
+        if self._compose_js8_selected_target_endpoint_key(selected) != endpoint_identity:
+            return False
+
+        supported = bool(result.get("supported", True))
+        target = str(result.get("target", "") or "").strip().upper()
+        error = str(result.get("error", "") or "").strip()
+        self._compose_js8_selected_target_error = error
+        if not supported:
+            self._compose_js8_selected_target_state = "unsupported"
+            self._compose_js8_selected_target_value = ""
+        elif target:
+            self._compose_js8_selected_target_state = "selected"
+            self._compose_js8_selected_target_value = target
+        else:
+            self._compose_js8_selected_target_state = "empty"
+            self._compose_js8_selected_target_value = ""
+        self._refresh_compose_js8_selected_target_cue()
+        return True
+
+    def _refresh_compose_js8_selected_target_cue(self) -> None:
+        row = getattr(self, "compose_js8_selected_target_row_widget", None)
+        label = getattr(self, "compose_js8_selected_target_label", None)
+        use_btn = getattr(self, "compose_js8_selected_target_use_btn", None)
+        refresh_btn = getattr(self, "compose_js8_selected_target_refresh_btn", None)
+        if any(widget is None for widget in (row, label, use_btn, refresh_btn)):
+            return
+        active = self._compose_js8_selected_target_is_active()
+        radio = self._selected_compose_radio_target()
+        radio_label = self._compose_radio_target_short_label(radio) or "the selected radio"
+        state = str(getattr(self, "_compose_js8_selected_target_state", "unknown") or "unknown")
+        target = str(getattr(self, "_compose_js8_selected_target_value", "") or "")
+        draft_uses_target = bool(
+            target
+            and self._compose_rf_target_text(target) == self._compose_intent_target()
+        )
+        if state == "selected" and target:
+            if draft_uses_target:
+                text = f"Already selected in JS8Call on {radio_label}: {target} · This draft uses it."
+            else:
+                text = f"Already selected in JS8Call on {radio_label}: {target} · Use Target to adopt it."
+        elif state == "refreshing":
+            text = f"Checking the target currently selected in JS8Call on {radio_label}…"
+        elif state == "empty":
+            text = f"No callsign or group is currently selected in JS8Call on {radio_label}."
+        elif state == "unsupported":
+            text = f"JS8Call selected-target lookup is unavailable on {radio_label}."
+        else:
+            text = f"JS8Call selected target has not been checked on {radio_label}."
+        label.setText(text)
+        label.setTextFormat(Qt.PlainText)
+        row.setVisible(active)
+        use_btn.setVisible(active)
+        use_btn.setText("Target in Use" if draft_uses_target else "Use Target")
+        use_btn.setEnabled(active and state == "selected" and bool(target) and not draft_uses_target)
+        refresh_btn.setVisible(active)
+        refresh_btn.setEnabled(active and radio is not None and state != "refreshing")
+        try:
+            theme = resolve_theme(self.settings)
+            emphasized = state == "selected" and bool(target)
+            border = theme.get("accent", "#2E6F9E") if emphasized else theme.get("border", "#D3D7DD")
+            surface = theme.get("surface_alt", "#DDE1E6") if emphasized else "transparent"
+            label_color = theme.get("text", "#1C1F21") if emphasized else theme.get("text_muted", "#5B6570")
+            row.setStyleSheet(
+                "QWidget#composeJs8SelectedTargetRow {"
+                f"background: {surface}; border: 1px solid {border}; border-radius: 5px;"
+                "}"
+            )
+            label.setStyleSheet(f"color: {label_color}; font-weight: {'700' if emphasized else '500'};")
+            use_btn.setStyleSheet(button_style("secondary" if use_btn.isEnabled() else "muted", theme))
+            refresh_btn.setStyleSheet(button_style("muted", theme))
+        except Exception:
+            pass
+
+    def _use_compose_js8_selected_target(self) -> None:
+        """Explicitly copy the observed JS8Call selection into the active mode draft."""
+        target = str(getattr(self, "_compose_js8_selected_target_value", "") or "").strip()
+        if not target or str(getattr(self, "_compose_js8_selected_target_state", "")) != "selected":
+            return
+        mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
+        target_edit = (
+            getattr(self, "compose_commstat_target_edit", None)
+            if mode == "commstat_rf"
+            else getattr(self, "compose_js8_target_edit", None)
+        )
+        if not isinstance(target_edit, QLineEdit):
+            return
+        target_edit.setText(target)
+        self._refresh_compose_js8_selected_target_cue()
+        self._set_compose_status(
+            "Copied the target selected in JS8Call into this draft. Review the exact preview before sending.",
+            role="info",
+        )
+
     def _on_compose_rf_target_changed(self, *_args) -> None:
         """Keep payload preview immediate and coalesce target-scoped lookup work."""
         self._update_compose_preview()
+        self._refresh_compose_js8_selected_target_cue()
         if getattr(self, "_compose_target_discovery_pending", False):
             return
         self._compose_target_discovery_pending = True
@@ -9322,6 +9641,7 @@ class MessageViewerTab(QWidget):
             self._refresh_compose_forms()
         self._start_compose_target_guidance_worker()
         self._update_compose_preview()
+        self.request_compose_js8_selected_target_refresh()
 
     @staticmethod
     def _compose_parse_hhmm_minutes(value: object) -> Optional[int]:
@@ -14373,11 +14693,18 @@ class MessageViewerTab(QWidget):
                 self.compose_status_label.text() or "Compose is ready.",
                 role=getattr(self, "_compose_status_role", "info"),
             )
+        self._refresh_compose_js8_selected_target_cue()
         if hasattr(self, "reader_delete_btn"):
             self.reader_delete_btn.setStyleSheet(button_style("danger", theme))
 
     def shutdown(self) -> None:
         self._is_shutting_down = True
+        # Invalidate any endpoint result that races application shutdown.  The
+        # selected-target endpoint worker is attached by the primary runtime.
+        self._compose_js8_selected_target_generation += 1
+        self._compose_js8_selected_target_state = "unknown"
+        self._compose_js8_selected_target_value = ""
+        self._compose_js8_selected_target_pending_context = {}
         try:
             if self._persist_timer and self._persist_timer.isActive():
                 self._persist_timer.stop()
@@ -14434,13 +14761,15 @@ class MessageViewerTab(QWidget):
         self._request_worker_thread_stop(self._projected_query_thread)
         self._request_worker_thread_stop(self._signature_verify_thread)
         self._request_worker_thread_stop(self._bbs_auto_archive_thread)
-        # Compose catalog and key discovery touch the filesystem and external
-        # GPG process state.  Give these short-lived workers a bounded clean
-        # exit so Qt never destroys a live thread during application shutdown.
+        # Compose discovery workers touch the filesystem, external GPG state,
+        # local databases, or one bounded JS8 socket request. Give these
+        # short-lived workers a bounded clean exit so Qt never destroys a live
+        # thread during application shutdown.
         for background_thread in (
             getattr(self, "_compose_discovery_thread", None),
             getattr(self, "_compose_signing_key_thread", None),
             getattr(self, "_compose_guidance_thread", None),
+            getattr(self, "_compose_js8_selected_target_thread", None),
         ):
             if background_thread is None:
                 continue

@@ -4108,3 +4108,44 @@ Acceptance evidence: 12 focused application-identity, icon-loading, splash,
 and font-surface tests pass. Python compilation, installer shell syntax, and
 `git diff --check` pass. No startup polling, filesystem scan, or blocking work
 was added.
+
+## 2026-09-11 — Compose adoption of the target selected in JS8Call (CMW-5)
+
+Status: automated implementation gate passed; Linux production qualification
+remains operator-assisted.
+
+JS8Call, FIOSpotter, and CommStat RF Compose now issue one bounded background
+`RX.GET_CALL_SELECTED` request for the selected radio when entering the mode,
+changing radios, or explicitly refreshing. A callsign or group returned by
+JS8Call appears in a highlighted inline cue using the radio's short name:
+`Already selected in JS8Call ...`. The live value remains separate from every
+draft until the operator chooses `Use Target`; matching drafts show
+`Target in Use`. Adoption does not send, weaken preflight, or silently replace
+another target.
+
+The request lane is single-in-flight with latest-request coalescing. Each result
+must match its generation, radio ID, and resolved host/port endpoint identity,
+so a late result from another radio cannot appear in the current workbench.
+Empty, unsupported, timed-out, and unreachable results remain non-blocking.
+The worker is included in bounded shutdown. There is no poll timer, and payload
+typing, preview, resize, paint, and theme paths do not perform socket work.
+
+Model ownership: the GPT-5 Codex high-reasoning primary owned the API contract,
+endpoint/concurrency/lifecycle design, specification, delegated-diff review,
+integration, and final gate. `gpt-5.6-terra` at medium reasoning implemented the
+bounded responsive cue and explicit adoption hooks. `gpt-5.6-luna` at medium
+reasoning implemented the focused CMW-5 tests. During review, the primary
+replaced a radio/instance-only stale key with the actual mapped endpoint
+identity, connected the one-shot worker, added latest-request serialization,
+routed adoption through normal target-change behavior, added highlighted
+matching-state presentation, and removed cue restyling from ordinary body
+keystrokes.
+
+Acceptance evidence: 17 focused CMW-5 tests pass. The wider Compose, JS8 API,
+guarded send, Expect, NBEMS, and Managed BBS partition passes 190 tests. Python
+compilation and `git diff --check` pass. An offscreen 1000x700 Compose render was
+reviewed with the highlighted selected-group cue and reachable `Use Target` and
+`Refresh Target` actions. A 120-edit real QTextEdit signal-path probe measured
+0.750 ms median, 0.899 ms p95, and 1.295 ms maximum against the 16 ms p95 and
+50 ms maximum Compose budgets. No schema migration, production-data mutation,
+periodic polling, or destructive operation was introduced.

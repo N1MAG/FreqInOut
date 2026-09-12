@@ -1,8 +1,8 @@
 # Compose Messages Workbench Spec
 
-Status: CMW-0 through CMW-4 automated implementation complete 2026-09-11.
+Status: CMW-0 through CMW-5 automated implementation complete 2026-09-11.
 Linux production qualification remains an explicit operator gate for real GPG,
-NBEMS, Managed BBS, and JS8Call installations.
+NBEMS, Managed BBS, JS8Call send, and selected-target observation.
 
 Delivery governance: all review, implementation, testing, and integration under
 this specification must follow `docs/internal/project_delivery_rules.md`.
@@ -156,6 +156,18 @@ Required workflow:
 - Select sending radio if more than one JS8Call-capable radio exists.
 - Show peer schedule / last-heard / path guidance for the target when known.
 - Provide a visible `Send To` field with autocomplete.
+- When the selected radio's JS8Call instance reports an existing callsign or
+  group selection, show a prominent inline cue immediately beside or below
+  `Send To`: `Already selected in JS8Call: <target>`. Offer an explicit
+  `Use Target` action. The live target is advisory and must never silently
+  replace an operator's Compose draft.
+- `Use Target` copies the reported live selection into the active Compose
+  target using the normal target normalization and validation path. If the
+  draft already uses that target, replace the action with a concise
+  `Using selected JS8Call target` confirmation.
+- A different FIO draft target remains valid. Explain in the cue's tooltip that
+  FIO sends its previewed explicit target and clears the conflicting JS8Call UI
+  selection through the supported safety path before queueing.
 - Provide a visible payload text entry field.
 - `Directed Message` requires a target.
 - `Traffic` may allow no target.
@@ -183,6 +195,15 @@ Acceptance criteria:
 - Self-send is blocked.
 - Target autocomplete contains known groups once, without duplicate `@GROUP`
   and `GROUP` suggestions.
+- A callsign or configured group selected in JS8Call is discovered without
+  blocking Compose, displayed as live JS8Call state, and adopted only after the
+  operator activates `Use Target`.
+- Selecting another Compose radio invalidates the prior live-target result;
+  a late response from the old endpoint cannot appear under the new radio.
+- Empty, unreachable, timed-out, or unsupported selected-target responses are
+  quiet during composition. They must not clear a draft, disable editing, or
+  imply that no destination exists. The guarded send preflight remains the
+  authoritative safety check.
 
 ### FIOSpotter
 
@@ -367,8 +388,12 @@ Forms:
 - First usable cached paint targets 150 ms; cold paint targets 300 ms before
   background enrichment. A preview edit targets 16 ms at p95 and must remain
   below 50 ms on the bounded acceptance fixture.
-- No periodic timer, source scan, or background worker is added solely for
-  Compose. Discovery is event-driven and cached.
+- No periodic timer or source scan is added solely for Compose. Background
+  discovery is event-driven, bounded, and cached.
+- Live JS8Call target discovery is a bounded, one-shot background request on
+  entry to a JS8-backed Compose mode, selected-radio change, or explicit
+  refresh. It is never issued by keystrokes, preview rendering, resize, paint,
+  theme changes, or a polling timer.
 
 ## Draft And Action State
 
@@ -474,6 +499,41 @@ compile and diff checks pass. A full-repository run reached 709 passing tests
 before stopping on an unrelated JS8 ingest-policy expectation; this does not
 alter the Compose gate and is recorded in the work log.
 
+### CMW-5 — Adopt the target already selected in JS8Call
+
+Primary high-reasoning ownership: define endpoint scoping, stale-result
+rejection, unsupported-API behavior, and interaction with the existing guarded
+send path. Bounded UI and focused tests may be delegated.
+
+Implementation requirements:
+
+- Query `RX.GET_CALL_SELECTED` asynchronously from the JS8Call endpoint mapped
+  to the currently selected Compose radio. Accept `RX.CALL_SELECTED` values for
+  both callsigns and `@GROUP` targets.
+- Snapshot a monotonically increasing generation plus endpoint identity. Apply
+  a result only when its generation and selected radio/endpoint still match.
+- Keep the detected live target separate from every per-mode draft. `Use Target`
+  is the only action that copies it into the active JS8Call, FIOSpotter, or
+  CommStat RF target field.
+- Present the live value as observed JS8Call state, not as an FIO recommendation
+  or authorization. Use operator-configured radio short names only.
+- Preserve the current send contract: the exact FIO preview remains
+  authoritative, and FIO clears a conflicting JS8Call selection before
+  queueing when the variant supports that action. Adopting the value does not
+  bypass preflight or cause an immediate transmission.
+- Do not add polling. Refresh only on JS8-backed mode entry, selected-radio
+  change, and an explicit lightweight refresh action.
+
+Exit gate: focused tests prove callsign/group/empty/unsupported results,
+explicit-only adoption, mode-specific field routing, endpoint/generation stale
+rejection, no keystroke/socket coupling, single in-flight behavior, and clean
+worker shutdown. Existing Compose and guarded-send acceptance suites remain
+green. Linux qualification confirms the cue against a real selected callsign
+and group without UI delay. **Automated gate passed 2026-09-11:** 17 focused
+CMW-5 tests and 190 Compose/JS8/BBS adjacent integration tests pass; compile,
+diff, and offscreen visual checks pass. The 120-edit JS8 payload probe measured
+0.750 ms median, 0.899 ms p95, and 1.295 ms maximum.
+
 ## Implemented Outcome
 
 - Embedded Compose and the non-modal full workbench share one stable draft but
@@ -494,6 +554,11 @@ alter the Compose gate and is recorded in the work log.
 - JS8Call, FIOSpotter, and CommStat RF use a guarded background send. The UI
   reports API acceptance as `Queued`, never as confirmed transmission, and
   prevents overlapping send attempts.
+- JS8-backed Compose modes make the selected radio's live JS8Call target
+  visible in a highlighted cue. `Use Target` explicitly adopts the callsign or
+  group into only the active mode draft; matching drafts show `Target in Use`.
+  The one-shot lookup is endpoint- and generation-scoped, serialized, and
+  never runs from preview, typing, layout, paint, or a timer.
 - Keystroke preview performs in-memory formatting only. Destination probing,
   peer/path queries, MsgAuth lookup, form parsing, GPG discovery/signing, BBS
   writes, and JS8 socket calls are removed from that path.
@@ -518,6 +583,11 @@ Use configured production paths and disposable test content. Confirm:
 6. Resize embedded Compose and the full workbench at normal and Large text,
    switch among all four modes, and confirm fields, actions, preview, and
    per-mode drafts remain visible and stable.
+7. In JS8Call, select a callsign and then a configured group. For each, open a
+   JS8-backed Compose mode and confirm the highlighted `Already selected in
+   JS8Call` cue names the correct radio and target. Confirm the draft remains
+   unchanged until `Use Target`, then shows `Target in Use`. Repeat after
+   switching radios and confirm a late prior-endpoint result never appears.
 
 ## Non-Goals
 
@@ -745,5 +815,7 @@ observations of the current implementation, not new product behavior.
 - Switching modes preserves draft state where reasonable and never leaves stale
   widgets visible from another mode.
 - Changing compose radio invalidates only radio-scoped form/path caches.
+- Selected JS8Call callsign/group state appears without blocking; `Use Target`
+  updates only the active draft, and stale endpoint results are ignored.
 - Existing tests for NBEMS staging, JS8 guarded send, FIOSpotter native
   integration, CommStat RF compose, and map-to-compose prefill pass.
