@@ -1931,6 +1931,11 @@ not update the same state concurrently.
 
 ## Cost-Efficient Model Assignment
 
+This section is historical slice guidance. Current and future work is governed
+by the authoritative project-wide contract in
+`docs/internal/project_delivery_rules.md`; stricter slice-specific safety and
+exit gates below remain binding.
+
 A less expensive model can perform substantial implementation after this spec
 is converted into file-bounded task cards with exact tests.
 

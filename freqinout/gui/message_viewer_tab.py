@@ -13,7 +13,6 @@ import datetime
 import platform
 import shutil
 import subprocess
-import tempfile
 import threading
 import xml.dom.minidom
 import time
@@ -88,6 +87,22 @@ MESSAGE_PROJECTION_QUEUE_POLL_SECONDS = 30
 MESSAGE_PROJECTION_VISIBLE_COALESCE_MS = 500
 MESSAGE_PROJECTION_HIDDEN_COALESCE_MS = 2000
 PENDING_RETRIEVAL_PAGE_SIZE = 100
+
+
+class _ResponsiveComposeWorkbenchDialog(QDialog):
+    """Non-modal compose workbench that coalesces resize layout updates."""
+
+    def __init__(self, parent: QWidget, on_resize: Callable[[], None]):
+        super().__init__(parent)
+        self._on_compose_resize = on_resize
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        # The splitter hierarchy needs the dialog's final viewport size.  Queue
+        # one update so interactive resize remains responsive instead of
+        # recalculating geometry for every native resize event.
+        QTimer.singleShot(0, self._on_compose_resize)
+
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.multi_radio_store import MultiRadioStore
@@ -303,7 +318,11 @@ from freqinout.core.js8_send_service import (
 )
 from freqinout.core.condition_alerts import CONDITION_ALERT_RULES_SETTING_KEY
 from freqinout.radio_interface.js8_api_client import JS8ApiClientRegistry, JS8ApiEndpoint
-from freqinout.core.js8_expect_store import list_expect_runtime_audit, save_expect_entry
+from freqinout.core.js8_expect_store import (
+    ExpectEntryExistsError,
+    list_expect_runtime_audit,
+    save_expect_entry,
+)
 from freqinout.core.js8_msg_auth import MsgAuthKey, encode_short_datecode, sign_js8_text, verify_js8_text
 from freqinout.core.js8_msg_auth_store import (
     MSG_AUTH_SCOPE_SIGNING,
@@ -376,9 +395,7 @@ from freqinout.core.varac_bbs_library_store import (
 )
 from freqinout.core.gpg_tools import (
     DEFAULT_INLINE_SIGNED_SUFFIXES,
-    clearsign_file,
     find_detached_signature,
-    gpg_detail_indicates_passphrase_needed,
     gpg_key_display_label,
     is_detached_signature_file,
     list_secret_keys,
@@ -393,7 +410,11 @@ from freqinout.core.hash_tools import (
     verify_file_hash_against_registry,
     verify_file_hash_with_discovery,
 )
-from freqinout.core.secret_store import load_gpg_signing_passphrase
+from freqinout.core.compose_stage_service import (
+    ComposeStageRequest,
+    ComposeStageResult,
+    stage_compose_request,
+)
 from freqinout.core.launch_orchestrator import LaunchOrchestrator
 from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.nbems_compose import (
@@ -813,6 +834,394 @@ class _PendingRetrievalActionBridge(QObject):
     """Deliver one serialized retrieval action result back to the GUI thread."""
 
     finished = Signal(object)
+
+
+class _ComposeStageWorker(QObject):
+    """Run one immutable compose stage/sign/publish request off the GUI thread."""
+
+    finished = Signal(object)
+
+    def __init__(self, request: ComposeStageRequest):
+        super().__init__()
+        self._request = request
+
+    def run(self) -> None:
+        try:
+            result = stage_compose_request(self._request)
+        except Exception as exc:
+            result = ComposeStageResult(
+                generation=self._request.generation,
+                problems=(f"Compose staging failed: {exc}",),
+            )
+        self.finished.emit(result)
+
+
+class _ComposeJs8SendWorker(QObject):
+    """Perform guarded JS8 API preflight/send without blocking the GUI thread."""
+
+    finished = Signal(object)
+
+    def __init__(
+        self,
+        *,
+        endpoint: JS8ApiEndpoint,
+        command: str,
+        generation: int,
+        allow_uncertain_target_state: bool,
+    ):
+        super().__init__()
+        self._endpoint = endpoint
+        self._command = command
+        self._generation = int(generation)
+        self._allow_uncertain = bool(allow_uncertain_target_state)
+
+    def run(self) -> None:
+        try:
+            client = JS8ApiClientRegistry.get(self._endpoint, timeout_s=1.0, auto_reconnect=True)
+            result = send_js8_message_guarded(
+                client,
+                self._command,
+                timeout_s=0.6,
+                allow_uncertain_target_state=self._allow_uncertain,
+                clear_selected_target=True,
+            )
+            payload = {
+                "generation": self._generation,
+                "endpoint": self._endpoint,
+                "command": self._command,
+                "allow_uncertain": self._allow_uncertain,
+                "result": result,
+                "error": "",
+            }
+        except Exception as exc:
+            payload = {
+                "generation": self._generation,
+                "endpoint": self._endpoint,
+                "command": self._command,
+                "allow_uncertain": self._allow_uncertain,
+                "result": None,
+                "error": str(exc),
+            }
+        self.finished.emit(payload)
+
+
+class _ComposeCatalogDiscoveryWorker(QObject):
+    """Discover and parse bounded compose catalogs without using Qt widgets."""
+
+    finished = Signal(object)
+
+    def __init__(
+        self,
+        *,
+        generation: int,
+        mode: str,
+        settings_snapshot: Mapping[str, object],
+        spotter_candidates: Sequence[str],
+    ):
+        super().__init__()
+        self._generation = int(generation)
+        self._mode = str(mode or "nbems")
+        self._settings = dict(settings_snapshot)
+        self._spotter_candidates = tuple(str(value or "").strip() for value in spotter_candidates if str(value or "").strip())
+
+    def run(self) -> None:
+        entries: List[dict] = []
+        parsed: Dict[str, Dict[str, object]] = {}
+        problems: List[str] = []
+        try:
+            if self._mode != "spotter":
+                entries.append({"kind": "standard", "key": "STANDARD", "label": "Standard Blank"})
+                for family in discover_form_families(self._settings):
+                    templates = discover_forms_for_family(family)
+                    entries.append(
+                        {
+                            "kind": "family",
+                            "key": family.key,
+                            "label": family.label,
+                            "family": family,
+                            "templates": templates,
+                        }
+                    )
+                    for template in templates:
+                        key = str(template.path)
+                        try:
+                            text_value = template.path.read_text(encoding="utf-8", errors="replace")
+                            parsed[key] = {
+                                "title": extract_compose_template_title(text_value),
+                                "menu_item": extract_compose_menu_item(text_value),
+                                "rows": parse_compose_template_fields(text_value),
+                            }
+                        except Exception as exc:
+                            problems.append(f"{template.path.name}: {exc}")
+            else:
+                forms = []
+                for candidate in self._spotter_candidates:
+                    forms = discover_spotter_forms(candidate)
+                    if forms:
+                        break
+                entries.append(
+                    {
+                        "kind": "spotter",
+                        "key": "JS8SPOTTER",
+                        "label": "FIOSpotter Forms",
+                        "forms": forms,
+                    }
+                )
+                for form in forms:
+                    key = str(getattr(form, "path", "") or "")
+                    if not key:
+                        continue
+                    try:
+                        text_value = Path(key).read_text(encoding="utf-8", errors="replace")
+                        parsed[key] = {"spotter_rows": parse_spotter_form_fields(text_value)}
+                    except Exception as exc:
+                        problems.append(f"{Path(key).name}: {exc}")
+        except Exception as exc:
+            problems.append(str(exc))
+        self.finished.emit(
+            {
+                "generation": self._generation,
+                "mode": self._mode,
+                "entries": entries,
+                "parsed": parsed,
+                "problems": problems,
+            }
+        )
+
+
+class _ComposeSigningKeyWorker(QObject):
+    finished = Signal(object)
+
+    def __init__(self, *, generation: int, configured_path: str):
+        super().__init__()
+        self._generation = int(generation)
+        self._configured_path = str(configured_path or "")
+
+    def run(self) -> None:
+        try:
+            keys, error = list_secret_keys(configured_path=self._configured_path)
+        except Exception as exc:
+            keys, error = [], str(exc)
+        self.finished.emit({"generation": self._generation, "keys": keys, "error": error})
+
+
+class _ComposeTargetGuidanceWorker(QObject):
+    """Resolve target-scoped RF guidance and MsgAuth keys off the GUI thread."""
+
+    finished = Signal(object)
+
+    def __init__(
+        self,
+        *,
+        generation: int,
+        db_path: str,
+        target: str,
+        target_is_group: bool,
+        operator_callsign: str,
+        cutoff_ts: float,
+        now_utc: datetime.datetime,
+        radio_options: Sequence[ComposeRadioOption],
+        selected_radio_id: int,
+        last_heard: ComposeLastHeard | None,
+        load_auth_keys: bool,
+    ):
+        super().__init__()
+        self._generation = int(generation)
+        self._db_path = str(db_path or "")
+        self._target = str(target or "").strip().upper()
+        self._target_is_group = bool(target_is_group)
+        self._operator_callsign = str(operator_callsign or "").strip().upper()
+        self._cutoff_ts = float(cutoff_ts)
+        self._now_utc = now_utc
+        self._radio_options = tuple(radio_options)
+        self._selected_radio_id = int(selected_radio_id or 0)
+        self._last_heard = last_heard
+        self._load_auth_keys = bool(load_auth_keys)
+
+    @staticmethod
+    def _minutes(value: object) -> int | None:
+        match = re.match(r"^(\d{1,2}):(\d{2})", str(value or "").strip())
+        if not match:
+            return None
+        hour, minute = int(match.group(1)), int(match.group(2))
+        return hour * 60 + minute if hour <= 23 and minute <= 59 else None
+
+    def _minutes_to_end(self, day_utc: object, start_min: int, end_min: int) -> int | None:
+        day = str(day_utc or "ALL").strip().upper()
+        aliases = {
+            "MONDAY": "MON", "TUESDAY": "TUE", "WEDNESDAY": "WED",
+            "THURSDAY": "THU", "FRIDAY": "FRI", "SATURDAY": "SAT", "SUNDAY": "SUN",
+        }
+        day = aliases.get(day, day[:3] if len(day) > 3 else day)
+        weekday = self._now_utc.strftime("%a").upper()[:3]
+        if day not in {"", "ALL", "ANY", "*", weekday}:
+            return None
+        now_min = self._now_utc.hour * 60 + self._now_utc.minute
+        if end_min <= start_min:
+            if now_min >= start_min or now_min < end_min:
+                return (end_min - now_min) % (24 * 60) or 24 * 60
+            return None
+        return end_min - now_min if start_min <= now_min < end_min else None
+
+    def _peer_schedule(self, conn: sqlite3.Connection) -> ComposePeerSchedule | None:
+        if not self._target or self._target_is_group:
+            return None
+        has_view = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='view' AND name='peer_hf_schedule_effective'"
+        ).fetchone()
+        table_name = "peer_hf_schedule_effective" if has_view else "peer_hf_schedule"
+        try:
+            rows = conn.execute(
+                f"SELECT owner_callsign, day_utc, start_utc, end_utc, band, mode, frequency "
+                f"FROM {table_name} WHERE UPPER(owner_callsign)=?",
+                (self._target,),
+            ).fetchall()
+        except sqlite3.Error:
+            return None
+        best: ComposePeerSchedule | None = None
+        for cs, day_utc, start_utc, end_utc, band, mode, freq in rows:
+            start_min, end_min = self._minutes(start_utc), self._minutes(end_utc)
+            if start_min is None or end_min is None:
+                continue
+            minutes_to_end = self._minutes_to_end(day_utc, start_min, end_min)
+            if minutes_to_end is None:
+                continue
+            try:
+                frequency = float(str(freq or "").strip())
+            except Exception:
+                frequency = None
+            if frequency is not None and frequency > 1000:
+                frequency /= 1_000_000.0
+            candidate = ComposePeerSchedule(
+                callsign=str(cs or self._target).strip().upper(),
+                band=str(band or "").strip().upper(),
+                frequency_mhz=frequency,
+                mode=str(mode or "").strip().upper(),
+                minutes_to_end=int(minutes_to_end),
+            )
+            if best is None or candidate.minutes_to_end < best.minutes_to_end:
+                best = candidate
+        return best
+
+    @staticmethod
+    def _base_call(value: object) -> str:
+        raw = str(value or "").strip().upper().lstrip("@")
+        return re.sub(r"/(P|M|MM|QRP|SOTA|ROVER|[A-Z0-9]{1,4})$", "", raw) if raw else ""
+
+    @staticmethod
+    def _age_label(ts_value: object) -> str:
+        try:
+            age = max(0.0, time.time() - float(ts_value or 0.0))
+        except Exception:
+            return ""
+        if age < 90:
+            return "just now"
+        if age < 3600:
+            return f"{int(age // 60)}m ago"
+        if age < 86400:
+            return f"{age / 3600.0:.1f}h ago"
+        return f"{age / 86400.0:.1f}d ago"
+
+    def _path_evidence(self, conn: sqlite3.Connection) -> ComposePathEvidence | None:
+        target_call = self._base_call(self._target)
+        my_call = self._base_call(self._operator_callsign)
+        if not target_call or not my_call or target_call == my_call or self._target_is_group:
+            return None
+        try:
+            direct = conn.execute(
+                """
+                SELECT ts, snr, band, source_radio_id FROM js8_links
+                 WHERE ts >= ? AND ((UPPER(origin)=? AND UPPER(destination)=?)
+                    OR (UPPER(origin)=? AND UPPER(destination)=?))
+                 ORDER BY ts DESC LIMIT 1
+                """,
+                (self._cutoff_ts, my_call, target_call, target_call, my_call),
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        if direct:
+            ts, snr, band, radio_id = direct
+            try:
+                radio_id_int = int(radio_id or 0)
+            except Exception:
+                radio_id_int = 0
+            return ComposePathEvidence(
+                kind="direct", radio_id=radio_id_int,
+                band=str(band or "").strip().upper(), source="JS8Call",
+                age_label=self._age_label(ts), snr=float(snr) if snr is not None else None,
+            )
+        try:
+            relay = conn.execute(
+                """
+                WITH recent AS (
+                    SELECT ts, origin, destination, snr, band FROM js8_links
+                     WHERE ts >= ? AND origin IS NOT NULL AND destination IS NOT NULL
+                ), mine AS (
+                    SELECT CASE WHEN UPPER(origin)=? THEN UPPER(destination) ELSE UPPER(origin) END relay,
+                           MAX(ts) ts, band FROM recent
+                     WHERE UPPER(origin)=? OR UPPER(destination)=? GROUP BY relay
+                ), theirs AS (
+                    SELECT CASE WHEN UPPER(origin)=? THEN UPPER(destination) ELSE UPPER(origin) END relay,
+                           MAX(ts) ts, band FROM recent
+                     WHERE UPPER(origin)=? OR UPPER(destination)=? GROUP BY relay
+                )
+                SELECT mine.relay, MAX(mine.ts, theirs.ts), COALESCE(theirs.band, mine.band, '')
+                  FROM mine JOIN theirs ON theirs.relay=mine.relay
+                 WHERE mine.relay NOT IN (?, ?) ORDER BY 2 DESC LIMIT 1
+                """,
+                (self._cutoff_ts, my_call, my_call, my_call, target_call, target_call, target_call, my_call, target_call),
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        if not relay:
+            return None
+        relay_call, ts, band = relay
+        return ComposePathEvidence(
+            kind="relay", band=str(band or "").strip().upper(), source="JS8Call",
+            relay=str(relay_call or "").strip().upper(), age_label=self._age_label(ts),
+        )
+
+    def run(self) -> None:
+        peer_schedule: ComposePeerSchedule | None = None
+        path_evidence: ComposePathEvidence | None = None
+        if self._db_path and Path(self._db_path).exists() and self._target and not self._target_is_group:
+            try:
+                conn = connect_sqlite_readonly(Path(self._db_path), timeout=1.0)
+                try:
+                    peer_schedule = self._peer_schedule(conn)
+                    if peer_schedule is None:
+                        path_evidence = self._path_evidence(conn)
+                finally:
+                    conn.close()
+            except Exception as exc:
+                log.debug("MessageViewer: compose guidance worker lookup failed: %s", exc)
+        recommendation = recommend_compose_send_path(
+            self._radio_options,
+            peer_schedule=peer_schedule,
+            path_evidence=path_evidence,
+            last_heard=self._last_heard,
+            selected_radio_id=self._selected_radio_id,
+        )
+        auth_rows = []
+        auth_error = ""
+        if self._load_auth_keys and self._target and self._operator_callsign:
+            try:
+                auth_rows = load_msg_auth_keys(
+                    group_name=normalize_group_name(self._target),
+                    callsign=self._operator_callsign,
+                    key_scope=MSG_AUTH_SCOPE_SIGNING,
+                )
+            except Exception as exc:
+                auth_error = str(exc)
+        self.finished.emit(
+            {
+                "generation": self._generation,
+                "target": self._target,
+                "recommendation": recommendation,
+                "auth_rows": auth_rows,
+                "auth_error": auth_error,
+            }
+        )
 
 
 class _BbsAutoArchiveWorker(QObject):
@@ -3126,7 +3535,18 @@ class MessageViewerTab(QWidget):
         self._compose_template_menu_item: str = ""
         self._compose_active_form_key: str = ""
         self._compose_form_draft_values: Dict[str, Dict[str, str]] = {}
+        self._compose_form_draft_mode_keys: Dict[str, Set[str]] = {}
+        self._compose_mode_drafts: Dict[str, Dict[str, object]] = {}
+        self._compose_restoring_mode_draft: bool = False
         self._compose_mode: str = "nbems"
+        self._compose_family_entries_cache: List[dict] = [
+            {"kind": "standard", "key": "STANDARD", "label": "Standard Blank"}
+        ]
+        self._compose_parsed_form_cache: Dict[str, Dict[str, object]] = {}
+        self._compose_discovery_generation: int = 0
+        self._compose_discovery_thread: QThread | None = None
+        self._compose_discovery_worker: _ComposeCatalogDiscoveryWorker | None = None
+        self._compose_discovery_pending: bool = False
         self._compose_last_stage_paths: List[Path] = []
         self._compose_last_source_dir: Optional[Path] = None
         self._compose_launch_orchestrator = LaunchOrchestrator(self.settings, self)
@@ -3142,6 +3562,25 @@ class MessageViewerTab(QWidget):
         self._compose_signing_keys_loading: bool = False
         self._compose_signing_key_count: int = 0
         self._compose_signing_key_error: str = ""
+        self._compose_signing_key_generation: int = 0
+        self._compose_signing_key_thread: QThread | None = None
+        self._compose_signing_key_worker: _ComposeSigningKeyWorker | None = None
+        self._compose_signing_key_pending: bool = False
+        self._compose_guidance_generation: int = 0
+        self._compose_guidance_thread: QThread | None = None
+        self._compose_guidance_worker: _ComposeTargetGuidanceWorker | None = None
+        self._compose_guidance_pending: bool = False
+        self._compose_bbs_targets_cache: List[Dict[str, str]] = []
+        self._compose_destination_plans_cache: List[ComposeDestinationPlan] = []
+        self._compose_action_generation: int = 0
+        self._compose_stage_thread: QThread | None = None
+        self._compose_stage_worker: _ComposeStageWorker | None = None
+        self._compose_stage_inflight: bool = False
+        self._compose_send_thread: QThread | None = None
+        self._compose_send_worker: _ComposeJs8SendWorker | None = None
+        self._compose_send_inflight: bool = False
+        self._compose_send_context: Dict[str, object] = {}
+        self._compose_send_retry_pending: Dict[str, object] = {}
         self._compose_commstat_brevity_options_cache_key: tuple[str, ...] = ()
         self._compose_commstat_brevity_options_cache: List[str] = []
         self._compose_commstat_brevity_catalogs_cache_key: tuple[str, ...] = ()
@@ -3362,6 +3801,7 @@ class MessageViewerTab(QWidget):
             or self._qt_thread_running(getattr(self, "_file_scan_thread", None))
             or self._qt_thread_running(getattr(self, "_rows_build_thread", None))
             or self._qt_thread_running(getattr(self, "_signature_verify_thread", None))
+            or self._qt_thread_running(getattr(self, "_compose_stage_thread", None))
         )
 
     def _emit_message_refresh_busy(self) -> None:
@@ -5985,7 +6425,7 @@ class MessageViewerTab(QWidget):
         self.compose_js8_target_edit.setMinimumWidth(220)
         self.compose_js8_target_edit.setPlaceholderText("GROUP or CALLSIGN")
         self.compose_js8_target_edit.setToolTip("Destination typed into the JS8 command, for example MAGNET or a callsign. FIO strips @ before transmit.")
-        self.compose_js8_target_edit.textChanged.connect(self._update_compose_preview)
+        self.compose_js8_target_edit.textChanged.connect(self._on_compose_rf_target_changed)
         js8_target_row.addWidget(self.compose_js8_target_edit, 1)
         self.compose_js8_sign_chk = QCheckBox("Sign MsgAuth")
         self.compose_js8_sign_chk.setToolTip("Append a MsgAuth checksum using a key scoped to this JS8 target and your callsign.")
@@ -6001,7 +6441,7 @@ class MessageViewerTab(QWidget):
         self.compose_js8_auth_datecode_chk.stateChanged.connect(self._update_compose_preview)
         self.compose_js8_auth_refresh_btn = QPushButton("Keys")
         self.compose_js8_auth_refresh_btn.setToolTip("Refresh JS8 MsgAuth keys.")
-        self.compose_js8_auth_refresh_btn.clicked.connect(lambda: self._refresh_compose_js8_auth_keys(force=True))
+        self.compose_js8_auth_refresh_btn.clicked.connect(self._start_compose_target_guidance_worker)
         self.compose_js8_target_spacer = QWidget()
         self.compose_js8_target_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         js8_target_row.addWidget(self.compose_js8_target_spacer, 1)
@@ -6086,7 +6526,7 @@ class MessageViewerTab(QWidget):
         self.compose_commstat_target_edit.setMinimumWidth(220)
         self.compose_commstat_target_edit.setPlaceholderText("GROUP or CALLSIGN")
         self.compose_commstat_target_edit.setToolTip("CommStat RF destination, for example MAGNET or a callsign. FIO strips @ before transmit.")
-        self.compose_commstat_target_edit.textChanged.connect(self._update_compose_preview)
+        self.compose_commstat_target_edit.textChanged.connect(self._on_compose_rf_target_changed)
         self.compose_commstat_grid_edit = QLineEdit()
         self.compose_commstat_grid_edit.setPlaceholderText("Grid")
         self._set_compose_fixed_width(self.compose_commstat_grid_edit, floor=110, ceiling=160)
@@ -6322,14 +6762,14 @@ class MessageViewerTab(QWidget):
         row4 = QGridLayout()
         row4.setHorizontalSpacing(8)
         row4.setVerticalSpacing(8)
-        row4.addWidget(QLabel("Send Target"), 0, 0)
+        row4.addWidget(QLabel("Create File"), 0, 0)
         self.compose_send_target_combo = QComboBox()
         self.compose_send_target_combo.addItems(["FLMsg", "FLAmp", "Both"])
         self._configure_compose_combo_width(self.compose_send_target_combo, floor=118)
         self.compose_send_target_combo.setMinimumWidth(220)
         self.compose_send_target_combo.setMinimumHeight(control_height_for_font(self.compose_send_target_combo))
         self.compose_send_target_combo.setMaximumWidth(16777215)
-        self.compose_send_target_combo.currentIndexChanged.connect(self._update_compose_preview)
+        self.compose_send_target_combo.currentIndexChanged.connect(self._on_compose_flamp_options_changed)
         self.compose_send_target_chip_container = QWidget()
         self.compose_send_target_chip_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.compose_send_target_chip_layout = QHBoxLayout(self.compose_send_target_chip_container)
@@ -6340,14 +6780,14 @@ class MessageViewerTab(QWidget):
         row4.addWidget(self.compose_send_target_chip_container, 0, 1)
         row4.addWidget(self.compose_send_target_combo, 0, 2)
         self.compose_send_target_combo.setVisible(False)
-        row4.addWidget(QLabel("VarAC Copy"), 1, 0)
+        row4.addWidget(QLabel("Copy to VarAC"), 1, 0)
         self.compose_varac_target_combo = QComboBox()
-        self.compose_varac_target_combo.addItems(["None", "Outbox", "BBS", "Both"])
+        self.compose_varac_target_combo.addItems(["None", "Outbox"])
         self._configure_compose_combo_width(self.compose_varac_target_combo, floor=118)
         self.compose_varac_target_combo.setMinimumWidth(220)
         self.compose_varac_target_combo.setMinimumHeight(control_height_for_font(self.compose_varac_target_combo))
         self.compose_varac_target_combo.setMaximumWidth(16777215)
-        self.compose_varac_target_combo.currentIndexChanged.connect(self._update_compose_preview)
+        self.compose_varac_target_combo.currentIndexChanged.connect(self._on_compose_varac_target_changed)
         self.compose_varac_target_chip_container = QWidget()
         self.compose_varac_target_chip_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.compose_varac_target_chip_layout = QHBoxLayout(self.compose_varac_target_chip_container)
@@ -6360,8 +6800,14 @@ class MessageViewerTab(QWidget):
         self.compose_varac_target_combo.setVisible(False)
         self.compose_sign_flamp_chk = QCheckBox("Sign FLAmp Copy")
         self.compose_sign_flamp_chk.setToolTip("Create a signed FLAmp copy. When FLMsg is selected, this also selects Both.")
-        self.compose_sign_flamp_chk.stateChanged.connect(self._update_compose_preview)
+        self.compose_sign_flamp_chk.stateChanged.connect(self._on_compose_flamp_options_changed)
         row4.addWidget(self.compose_sign_flamp_chk, 2, 1)
+        self.compose_publish_bbs_chk = QCheckBox("Add to BBS")
+        self.compose_publish_bbs_chk.setToolTip(
+            "Publish the staged message through the one station Managed BBS catalog."
+        )
+        self.compose_publish_bbs_chk.stateChanged.connect(self._on_compose_bbs_publication_changed)
+        row4.addWidget(self.compose_publish_bbs_chk, 3, 1)
         row4.setColumnStretch(1, 1)
         self.compose_nbems_dest_row_widget = QWidget()
         self.compose_nbems_dest_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -6414,10 +6860,13 @@ class MessageViewerTab(QWidget):
         self.compose_bbs_location_row_widget.setMaximumHeight(16777215)
         bbs_location_row = QHBoxLayout(self.compose_bbs_location_row_widget)
         bbs_location_row.setContentsMargins(0, 0, 0, 0)
-        bbs_location_row.addWidget(QLabel("BBS Destination"))
-        self.compose_bbs_location_combo = QComboBox()
-        self.compose_bbs_location_combo.currentIndexChanged.connect(self._on_compose_bbs_location_changed)
-        bbs_location_row.addWidget(self.compose_bbs_location_combo, 1)
+        bbs_location_row.addWidget(QLabel("Managed BBS Locations"))
+        self.compose_bbs_location_selector = DropdownChecklist("Locations")
+        self.compose_bbs_location_selector.setToolTip(
+            "Choose the logical BBS locations that will publish the staged artifact."
+        )
+        self.compose_bbs_location_selector.selectionChanged.connect(self._on_compose_bbs_location_changed)
+        bbs_location_row.addWidget(self.compose_bbs_location_selector, 1)
         self.compose_bbs_location_row_widget.setVisible(False)
         setup_layout.addWidget(self.compose_bbs_location_row_widget)
 
@@ -6507,6 +6956,8 @@ class MessageViewerTab(QWidget):
         output_layout.addLayout(action_row)
         root.addWidget(self.compose_output_box)
 
+        self._refresh_compose_setup_discovery(force=True)
+        self._apply_compose_family_entries(list(self._compose_family_entries_cache))
         self._refresh_compose_forms()
         return page
 
@@ -6577,13 +7028,45 @@ class MessageViewerTab(QWidget):
                 except Exception:
                     pass
 
+    def _compose_layout_viewport(self) -> QWidget:
+        """Return the widget that currently owns Compose's available geometry."""
+        dialog = getattr(self, "_compose_workbench_dialog", None)
+        if bool(getattr(self, "_compose_in_workbench", False)) and isinstance(dialog, QDialog):
+            return dialog
+        return self
+
+    def _compose_workbench_available_geometry(self) -> QRect:
+        """Use the owning screen's usable area so a workbench never opens off-screen."""
+        screen = None
+        try:
+            screen = self.screen()
+        except Exception:
+            screen = None
+        if screen is None:
+            app = QApplication.instance()
+            screen = app.primaryScreen() if app is not None else None
+        if screen is not None:
+            try:
+                return screen.availableGeometry()
+            except Exception:
+                pass
+        return QRect(0, 0, 1280, 800)
+
     def _refresh_compose_layout_geometry(self) -> None:
         splitter = getattr(self, "compose_splitter", None)
         body_splitter = getattr(self, "compose_body_splitter", None)
         mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
         in_workbench = bool(getattr(self, "_compose_in_workbench", False))
+        viewport = self._compose_layout_viewport()
+        viewport_width = max(1, int(viewport.width() or 0))
+        viewport_height = max(1, int(viewport.height() or 0))
         self._refresh_compose_splitter_handles()
-        compact = False if in_workbench else self._messages_responsive_mode_for_width(int(self.width() or 0)) == "compact"
+        # A full workbench retains the wide sidebar until the available dialog
+        # width truly cannot support it.  Embedded Compose follows the normal
+        # Messages compact threshold so it promotes the workbench earlier.
+        compact = (
+            viewport_width < (920 if in_workbench else int(self._responsive_compact_width))
+        )
         compose_sidebar = mode in {"nbems", "spotter", "commstat_rf"} and not compact
         if isinstance(body_splitter, QSplitter):
             desired_body = Qt.Horizontal if compose_sidebar else Qt.Vertical
@@ -6636,34 +7119,22 @@ class MessageViewerTab(QWidget):
                 row_gaps = spacing * max(0, len(visible_heights) - 1)
                 group_label_h = max(24, int(setup_box.fontMetrics().height() + 10))
                 target_h = margin_h + row_gaps + sum(visible_heights) + group_label_h
-                if in_workbench:
-                    cap_h = 360 if mode == "nbems" else 300 if mode == "spotter" else 220
-                elif mode == "nbems":
-                    cap_h = 240
-                elif mode == "spotter":
-                    cap_h = 260
-                elif mode == "commstat_rf":
-                    cap_h = 170
-                else:
-                    cap_h = 150
                 target_h = max(86, target_h)
-                if target_h > cap_h:
-                    # Visibility wins over compactness. Earlier versions capped
-                    # this group below its visible rows, which clipped required
-                    # compose controls on laptop screens.
-                    cap_h = target_h
                 if compose_sidebar:
                     setup_box.setMinimumHeight(target_h)
                     setup_box.setMaximumHeight(16777215)
                     if setup_scroll is not None:
-                        setup_scroll.setMinimumHeight(86)
+                        setup_scroll.setMinimumHeight(min(target_h, max(120, viewport_height // 3)))
                         setup_scroll.setMaximumHeight(16777215)
                 else:
                     setup_box.setMinimumHeight(target_h)
                     setup_box.setMaximumHeight(16777215)
                     if setup_scroll is not None:
-                        setup_scroll.setMinimumHeight(min(target_h, cap_h))
-                        setup_scroll.setMaximumHeight(cap_h)
+                        # The child keeps its natural height while the scroll
+                        # viewport yields space to preview and primary actions.
+                        # This avoids mode-specific fixed-height clipping.
+                        setup_scroll.setMinimumHeight(min(target_h, max(120, viewport_height // 3)))
+                        setup_scroll.setMaximumHeight(16777215)
             except Exception:
                 pass
         for widget_name in (
@@ -6690,18 +7161,21 @@ class MessageViewerTab(QWidget):
                     pass
         if isinstance(splitter, QSplitter) and splitter.orientation() == Qt.Horizontal:
             try:
-                splitter.setSizes([max(640, int(self.width() * 0.68)), max(300, int(self.width() * 0.22))])
+                splitter.setSizes([
+                    max(300, int(viewport_width * 0.66)),
+                    max(220, int(viewport_width * 0.30)),
+                ])
             except Exception:
                 pass
         elif isinstance(splitter, QSplitter):
             try:
                 mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
                 if mode == "spotter":
-                    splitter.setSizes([max(560, int(self.height() * 0.66)), max(220, int(self.height() * 0.24))])
+                    splitter.setSizes([max(180, int(viewport_height * 0.58)), max(120, int(viewport_height * 0.28))])
                 elif mode == "commstat_rf":
-                    splitter.setSizes([max(500, int(self.height() * 0.58)), max(220, int(self.height() * 0.26))])
+                    splitter.setSizes([max(180, int(viewport_height * 0.54)), max(120, int(viewport_height * 0.30))])
                 elif mode == "js8":
-                    splitter.setSizes([max(360, int(self.height() * 0.44)), max(150, int(self.height() * 0.18))])
+                    splitter.setSizes([max(160, int(viewport_height * 0.48)), max(110, int(viewport_height * 0.24))])
             except Exception:
                 pass
         if isinstance(body_splitter, QSplitter):
@@ -6713,10 +7187,10 @@ class MessageViewerTab(QWidget):
                         sidebar_w = 280 if in_workbench else 260
                     else:
                         sidebar_w = 440 if in_workbench else 400
-                    body_splitter.setSizes([sidebar_w, max(700, int(self.width() or 900) - sidebar_w)])
+                    body_splitter.setSizes([sidebar_w, max(320, viewport_width - sidebar_w)])
                 else:
                     setup_h = int(setup_scroll.height() if setup_scroll is not None else setup_box.height() if setup_box is not None else 160)
-                    body_splitter.setSizes([max(120, setup_h), max(480, int(self.height() * 0.65))])
+                    body_splitter.setSizes([max(120, min(setup_h, viewport_height // 3)), max(220, int(viewport_height * 0.62))])
             except Exception:
                 pass
 
@@ -6747,18 +7221,22 @@ class MessageViewerTab(QWidget):
 
     def _refresh_compose_layout_geometry_if_needed(self, *, force: bool = False) -> None:
         mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
-        compact = False if bool(getattr(self, "_compose_in_workbench", False)) else self._messages_responsive_mode_for_width(int(self.width() or 0)) == "compact"
+        in_workbench = bool(getattr(self, "_compose_in_workbench", False))
+        viewport = self._compose_layout_viewport()
+        viewport_width = max(1, int(viewport.width() or 0))
+        viewport_height = max(1, int(viewport.height() or 0))
+        compact = viewport_width < (920 if in_workbench else int(self._responsive_compact_width))
         signature = (
             mode,
-            bool(getattr(self, "_compose_in_workbench", False)),
+            in_workbench,
             compact,
-            int(self.width() or 0) // 120,
-            int(self.height() or 0) // 120,
+            viewport_width // 120,
+            viewport_height // 120,
             bool(getattr(getattr(self, "compose_commstat_brevity_chk", None), "isChecked", lambda: False)()),
             bool(getattr(getattr(self, "compose_sign_flamp_chk", None), "isChecked", lambda: False)()),
             bool(
-                hasattr(self, "compose_varac_target_combo")
-                and self.compose_varac_target_combo.currentText() in {"BBS", "Both"}
+                hasattr(self, "compose_publish_bbs_chk")
+                and self.compose_publish_bbs_chk.isChecked()
             ),
         )
         self._refresh_compose_workbench_button_style()
@@ -6788,17 +7266,28 @@ class MessageViewerTab(QWidget):
                 pass
             return
 
-        dialog = QDialog(self)
+        def refresh_for_workbench_resize() -> None:
+            if (
+                getattr(self, "_compose_workbench_dialog", None) is dialog
+                and bool(getattr(self, "_compose_in_workbench", False))
+            ):
+                self._refresh_compose_layout_geometry_if_needed(force=True)
+
+        dialog = _ResponsiveComposeWorkbenchDialog(self, refresh_for_workbench_resize)
         self._compose_workbench_dialog = dialog
         self._compose_in_workbench = True
         self._refresh_compose_splitter_handles()
         dialog.setWindowTitle("Compose Workbench")
         dialog.setModal(False)
-        dialog.setMinimumSize(1180, 780)
-        try:
-            dialog.resize(max(1280, int(self.width() * 0.9)), max(820, int(self.height() * 0.9)))
-        except Exception:
-            dialog.resize(1280, 820)
+        available = self._compose_workbench_available_geometry()
+        usable_width = max(1, int(available.width()) - 24)
+        usable_height = max(1, int(available.height()) - 24)
+        # Keep the workbench inside the usable desktop even on a 900x560
+        # reduced window.  Its internal setup/form scroll areas own overflow;
+        # the dialog itself must never extend beyond screen controls.
+        dialog.setMinimumSize(min(760, usable_width), min(500, usable_height))
+        dialog.setMaximumSize(usable_width, usable_height)
+        dialog.resize(min(1280, usable_width), min(820, usable_height))
 
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -6824,10 +7313,10 @@ class MessageViewerTab(QWidget):
             self._refresh_compose_splitter_handles()
             root = getattr(self, "compose_root_layout", None)
             if root is not None:
-                for widget_name in ("compose_type_box", "compose_body_splitter", "compose_output_box"):
+                for index, widget_name in enumerate(("compose_type_box", "compose_body_splitter", "compose_output_box"), start=1):
                     widget = getattr(self, widget_name, None)
                     if widget is not None:
-                        root.addWidget(widget, 1 if widget_name == "compose_body_splitter" else 0)
+                        root.insertWidget(index, widget, 1 if widget_name == "compose_body_splitter" else 0)
                 try:
                     root.invalidate()
                 except Exception:
@@ -7247,23 +7736,7 @@ class MessageViewerTab(QWidget):
         self._form_title_cache.clear()
 
     def _compose_family_entries(self) -> List[dict]:
-        mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
-        entries: List[dict] = []
-        if mode != "spotter":
-            entries.append({"kind": "standard", "key": "STANDARD", "label": "Standard Blank"})
-            for family in discover_form_families(self.settings):
-                entries.append({"kind": "family", "key": family.key, "label": family.label, "family": family})
-        spotter_forms = discover_spotter_forms(self._compose_spotter_forms_path())
-        if mode == "spotter":
-            entries.append(
-                {
-                    "kind": "spotter",
-                    "key": "JS8SPOTTER",
-                    "label": "FIOSpotter Forms",
-                    "forms": spotter_forms,
-                }
-            )
-        return entries
+        return list(getattr(self, "_compose_family_entries_cache", []) or [])
 
     def _refresh_spotter_category_options(self, forms: Sequence[object]) -> None:
         if not hasattr(self, "compose_spotter_category_combo"):
@@ -7340,15 +7813,369 @@ class MessageViewerTab(QWidget):
         self._on_compose_form_changed()
 
     def _on_compose_mode_tab_changed(self, index: int) -> None:
+        previous_mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
         self._store_compose_form_draft()
+        self._store_compose_mode_draft(previous_mode)
         idx = int(index or 0)
         self._compose_mode = "js8" if idx == 1 else "spotter" if idx == 2 else "commstat_rf" if idx == 3 else "nbems"
         self._compose_active_form_key = ""
         self._compose_last_stage_paths = []
         self._compose_radio_targets_loaded = False
-        if self._compose_mode == "commstat_rf":
-            self._refresh_compose_commstat_defaults()
-        self._refresh_compose_forms()
+        self._compose_restoring_mode_draft = True
+        try:
+            if self._compose_mode == "commstat_rf":
+                self._refresh_compose_commstat_defaults()
+            self._refresh_compose_setup_discovery(force=True)
+            self._refresh_compose_forms()
+            self._restore_compose_mode_draft(self._compose_mode)
+        finally:
+            self._compose_restoring_mode_draft = False
+        self._update_compose_preview()
+
+    @staticmethod
+    def _compose_combo_text(combo: object) -> str:
+        return combo.currentText() if isinstance(combo, QComboBox) else ""
+
+    @staticmethod
+    def _compose_combo_data(combo: object) -> object:
+        return combo.currentData() if isinstance(combo, QComboBox) else None
+
+    @staticmethod
+    def _compose_set_combo_text(combo: object, value: object) -> None:
+        if not isinstance(combo, QComboBox):
+            return
+        index = combo.findText(str(value or ""))
+        if index < 0:
+            return
+        blocked = combo.blockSignals(True)
+        try:
+            combo.setCurrentIndex(index)
+        finally:
+            combo.blockSignals(blocked)
+
+    @staticmethod
+    def _compose_set_combo_data(combo: object, value: object) -> None:
+        if not isinstance(combo, QComboBox):
+            return
+        index = combo.findData(value)
+        if index < 0:
+            return
+        blocked = combo.blockSignals(True)
+        try:
+            combo.setCurrentIndex(index)
+        finally:
+            combo.blockSignals(blocked)
+
+    @staticmethod
+    def _compose_set_line_text(widget: object, value: object) -> None:
+        if not isinstance(widget, QLineEdit):
+            return
+        blocked = widget.blockSignals(True)
+        try:
+            widget.setText(str(value or ""))
+        finally:
+            widget.blockSignals(blocked)
+
+    @staticmethod
+    def _compose_set_checked(widget: object, checked: object) -> None:
+        if not isinstance(widget, QCheckBox):
+            return
+        blocked = widget.blockSignals(True)
+        try:
+            widget.setChecked(bool(checked))
+        finally:
+            widget.blockSignals(blocked)
+
+    def _compose_current_form_identity(self) -> str:
+        combo = getattr(self, "compose_form_combo", None)
+        return self._compose_form_identity(combo.currentData()) if isinstance(combo, QComboBox) else ""
+
+    def _compose_store_mode_form_identity(self, draft: Dict[str, object]) -> None:
+        draft["form_identity"] = self._compose_current_form_identity()
+
+    def _store_compose_mode_draft(self, mode: str) -> None:
+        """Retain widgets shared by Compose modes without persisting user drafts."""
+        mode = str(mode or "nbems")
+        draft: Dict[str, object] = {}
+        if mode == "nbems":
+            family_data = self._compose_combo_data(getattr(self, "compose_family_combo", None))
+            bbs_selector = getattr(self, "compose_bbs_location_selector", None)
+            draft = {
+                "group": self._compose_combo_data(getattr(self, "compose_operating_group_combo", None)),
+                "family_key": str(family_data.get("key", "") if isinstance(family_data, dict) else ""),
+                "priority": self._compose_combo_text(getattr(self, "compose_priority_combo", None)),
+                "report_title": getattr(getattr(self, "compose_report_title_edit", None), "text", lambda: "")(),
+                "send_target": self._compose_combo_text(getattr(self, "compose_send_target_combo", None)),
+                "varac_target": self._compose_combo_text(getattr(self, "compose_varac_target_combo", None)),
+                "publish_bbs": bool(getattr(getattr(self, "compose_publish_bbs_chk", None), "isChecked", lambda: False)()),
+                "bbs_targets": sorted(bbs_selector.selected_values())
+                if isinstance(bbs_selector, DropdownChecklist)
+                else [],
+                "sign_flamp": bool(getattr(getattr(self, "compose_sign_flamp_chk", None), "isChecked", lambda: False)()),
+                "signing_key": self._compose_combo_data(getattr(self, "compose_signing_key_combo", None)),
+            }
+            self._compose_store_mode_form_identity(draft)
+        elif mode == "js8":
+            draft = {
+                "target": getattr(getattr(self, "compose_js8_target_edit", None), "text", lambda: "")(),
+                "kind": self._compose_combo_text(getattr(self, "compose_js8_plain_kind_combo", None)),
+                "text": getattr(getattr(self, "compose_js8_plain_text_edit", None), "toPlainText", lambda: "")(),
+            }
+        elif mode == "spotter":
+            draft = {
+                "target": getattr(getattr(self, "compose_js8_target_edit", None), "text", lambda: "")(),
+                "category": self._compose_combo_data(getattr(self, "compose_spotter_category_combo", None)),
+                "sign": bool(getattr(getattr(self, "compose_js8_sign_chk", None), "isChecked", lambda: False)()),
+                "date_code": bool(getattr(getattr(self, "compose_js8_auth_datecode_chk", None), "isChecked", lambda: False)()),
+                "auth_key": self._compose_combo_data(getattr(self, "compose_js8_auth_key_combo", None)),
+            }
+            self._compose_store_mode_form_identity(draft)
+        elif mode == "commstat_rf":
+            draft = {
+                "target": getattr(getattr(self, "compose_commstat_target_edit", None), "text", lambda: "")(),
+                "grid": getattr(getattr(self, "compose_commstat_grid_edit", None), "text", lambda: "")(),
+                "scope": self._compose_combo_data(getattr(self, "compose_commstat_scope_combo", None)),
+                "report_id": getattr(getattr(self, "compose_commstat_report_id_edit", None), "text", lambda: "")(),
+                "comment": getattr(getattr(self, "compose_commstat_comment_edit", None), "text", lambda: "")(),
+                "brevity": bool(getattr(getattr(self, "compose_commstat_brevity_chk", None), "isChecked", lambda: False)()),
+                "brevity_code": self._compose_combo_text(getattr(self, "compose_commstat_brevity_edit", None)),
+                "status": {
+                    key: self._compose_combo_text(combo)
+                    for key, combo in (getattr(self, "compose_commstat_status_widgets", {}) or {}).items()
+                },
+                "brevity_builder": {
+                    name: self._compose_combo_data(getattr(self, name, None))
+                    for name in (
+                        "compose_commstat_brevity_list_combo",
+                        "compose_commstat_brevity_event_combo",
+                        "compose_commstat_brevity_status_combo",
+                        "compose_commstat_brevity_impact_combo",
+                        "compose_commstat_brevity_public_combo",
+                        "compose_commstat_brevity_station_combo",
+                    )
+                },
+            }
+        self._compose_mode_drafts[mode] = draft
+
+    def _restore_compose_form_identity(self, identity: object) -> None:
+        if not identity or not hasattr(self, "compose_form_combo"):
+            return
+        for index in range(self.compose_form_combo.count()):
+            if self._compose_form_identity(self.compose_form_combo.itemData(index)) == identity:
+                blocked = self.compose_form_combo.blockSignals(True)
+                try:
+                    self.compose_form_combo.setCurrentIndex(index)
+                finally:
+                    self.compose_form_combo.blockSignals(blocked)
+                self._on_compose_form_changed()
+                return
+
+    def _restore_compose_mode_draft(self, mode: str) -> None:
+        draft = dict(self._compose_mode_drafts.get(str(mode or "nbems"), {}) or {})
+        if not draft:
+            return
+        if mode == "nbems":
+            self._compose_set_combo_data(getattr(self, "compose_operating_group_combo", None), draft.get("group"))
+            self._refresh_compose_forms()
+            family_key = str(draft.get("family_key", "") or "")
+            if family_key and hasattr(self, "compose_family_combo"):
+                for index in range(self.compose_family_combo.count()):
+                    data = self.compose_family_combo.itemData(index)
+                    if isinstance(data, dict) and str(data.get("key", "") or "") == family_key:
+                        blocked = self.compose_family_combo.blockSignals(True)
+                        try:
+                            self.compose_family_combo.setCurrentIndex(index)
+                        finally:
+                            self.compose_family_combo.blockSignals(blocked)
+                        self._on_compose_family_changed()
+                        break
+            self._restore_compose_form_identity(draft.get("form_identity"))
+            self._compose_set_combo_text(getattr(self, "compose_priority_combo", None), draft.get("priority"))
+            self._compose_set_line_text(getattr(self, "compose_report_title_edit", None), draft.get("report_title"))
+            self._compose_set_combo_text(getattr(self, "compose_send_target_combo", None), draft.get("send_target"))
+            self._compose_set_combo_text(getattr(self, "compose_varac_target_combo", None), draft.get("varac_target"))
+            self._compose_set_checked(getattr(self, "compose_publish_bbs_chk", None), draft.get("publish_bbs"))
+            if bool(draft.get("publish_bbs")):
+                self._refresh_compose_bbs_location_targets()
+            bbs_selector = getattr(self, "compose_bbs_location_selector", None)
+            if isinstance(bbs_selector, DropdownChecklist):
+                valid_ids = {str(target.get("location_id", "") or "") for target in self._compose_bbs_targets_cache}
+                selected_ids = [
+                    str(value or "") for value in list(draft.get("bbs_targets", []) or [])
+                    if str(value or "") in valid_ids
+                ]
+                blocked = bbs_selector.blockSignals(True)
+                try:
+                    bbs_selector.set_selected_values(selected_ids)
+                finally:
+                    bbs_selector.blockSignals(blocked)
+            self._compose_set_checked(getattr(self, "compose_sign_flamp_chk", None), draft.get("sign_flamp"))
+            self._compose_set_combo_data(getattr(self, "compose_signing_key_combo", None), draft.get("signing_key"))
+        elif mode == "js8":
+            self._compose_set_line_text(getattr(self, "compose_js8_target_edit", None), draft.get("target"))
+            self._compose_set_combo_text(getattr(self, "compose_js8_plain_kind_combo", None), draft.get("kind"))
+            widget = getattr(self, "compose_js8_plain_text_edit", None)
+            if isinstance(widget, QTextEdit):
+                blocked = widget.blockSignals(True)
+                try:
+                    widget.setPlainText(str(draft.get("text", "") or ""))
+                finally:
+                    widget.blockSignals(blocked)
+        elif mode == "spotter":
+            self._compose_set_line_text(getattr(self, "compose_js8_target_edit", None), draft.get("target"))
+            self._compose_set_combo_data(getattr(self, "compose_spotter_category_combo", None), draft.get("category"))
+            self._on_compose_spotter_category_changed()
+            self._restore_compose_form_identity(draft.get("form_identity"))
+            self._compose_set_checked(getattr(self, "compose_js8_sign_chk", None), draft.get("sign"))
+            self._compose_set_checked(getattr(self, "compose_js8_auth_datecode_chk", None), draft.get("date_code"))
+            self._compose_set_combo_data(getattr(self, "compose_js8_auth_key_combo", None), draft.get("auth_key"))
+        elif mode == "commstat_rf":
+            for widget_name, key in (
+                ("compose_commstat_target_edit", "target"),
+                ("compose_commstat_grid_edit", "grid"),
+                ("compose_commstat_report_id_edit", "report_id"),
+                ("compose_commstat_comment_edit", "comment"),
+            ):
+                self._compose_set_line_text(getattr(self, widget_name, None), draft.get(key))
+            self._compose_set_combo_data(getattr(self, "compose_commstat_scope_combo", None), draft.get("scope"))
+            self._compose_set_checked(getattr(self, "compose_commstat_brevity_chk", None), draft.get("brevity"))
+            self._compose_set_combo_text(getattr(self, "compose_commstat_brevity_edit", None), draft.get("brevity_code"))
+            for key, value in dict(draft.get("status", {}) or {}).items():
+                self._compose_set_combo_text((getattr(self, "compose_commstat_status_widgets", {}) or {}).get(key), value)
+            for name, value in dict(draft.get("brevity_builder", {}) or {}).items():
+                self._compose_set_combo_data(getattr(self, name, None), value)
+
+    def _refresh_compose_setup_discovery(self, *, force: bool = False) -> None:
+        """Refresh setup-only sources outside local payload preview updates.
+
+        This is intentionally synchronous for the current slice.  It is called
+        only for explicit mode/radio/group/target setup changes; the primary
+        responsiveness layer can replace these calls with cached worker results
+        without changing payload rendering or action behavior.
+        """
+        self._refresh_compose_radio_targets(force=force)
+        self._refresh_compose_message_folder_options(force=force)
+        self._refresh_compose_destination_plans()
+        self._install_compose_target_completers()
+        mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
+        bbs_selected = bool(
+            mode == "nbems"
+            and hasattr(self, "compose_publish_bbs_chk")
+            and self.compose_publish_bbs_chk.isChecked()
+        )
+        if bbs_selected:
+            self._refresh_compose_bbs_location_targets()
+        if self._compose_sign_flamp_selected():
+            self._refresh_compose_signing_keys(force=force)
+        self._start_compose_target_guidance_worker()
+
+    def _on_compose_rf_target_changed(self, *_args) -> None:
+        """Keep payload preview immediate and coalesce target-scoped lookup work."""
+        self._update_compose_preview()
+        if getattr(self, "_compose_target_discovery_pending", False):
+            return
+        self._compose_target_discovery_pending = True
+        QTimer.singleShot(180, self._run_pending_compose_target_discovery)
+
+    def _run_pending_compose_target_discovery(self) -> None:
+        self._compose_target_discovery_pending = False
+        self._start_compose_target_guidance_worker()
+
+    def _start_compose_target_guidance_worker(self) -> None:
+        mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
+        if mode not in {"js8", "spotter", "commstat_rf"}:
+            self._compose_send_recommendation = ComposeSendRecommendation()
+            if hasattr(self, "compose_guidance_row_widget"):
+                self.compose_guidance_row_widget.setVisible(False)
+            return
+        self._compose_guidance_generation += 1
+        if self._compose_guidance_thread is not None and self._qt_thread_running(self._compose_guidance_thread):
+            self._compose_guidance_pending = True
+            return
+        radio_target = self._selected_compose_radio_target()
+        selected_radio_id = radio_target.radio_id if radio_target is not None else 0
+        target_text = self._compose_intent_target()
+        configured_groups = self._configured_message_group_names()
+        db_path = self._db_path()
+        options = tuple(
+            ComposeRadioOption(radio_id=item.radio_id, label=self._compose_radio_short_label(item.profile))
+            for item in self._compose_radio_targets
+            if "JS8Call" in tuple(item.capabilities)
+        )
+        self._compose_guidance_thread = QThread(self)
+        self._compose_guidance_worker = _ComposeTargetGuidanceWorker(
+            generation=self._compose_guidance_generation,
+            db_path=str(db_path or ""),
+            target=target_text,
+            target_is_group=self._is_message_group_candidate(target_text, configured_groups=configured_groups),
+            operator_callsign=self._compose_operator_callsign(),
+            cutoff_ts=time.time() - self._compose_map_age_seconds(),
+            now_utc=datetime.datetime.now(datetime.timezone.utc),
+            radio_options=options,
+            selected_radio_id=selected_radio_id,
+            last_heard=self._compose_last_heard_from_intent(),
+            load_auth_keys=mode == "spotter",
+        )
+        self._compose_guidance_worker.moveToThread(self._compose_guidance_thread)
+        self._compose_guidance_thread.started.connect(self._compose_guidance_worker.run)
+        self._compose_guidance_worker.finished.connect(self._on_compose_target_guidance_finished)
+        self._compose_guidance_worker.finished.connect(self._compose_guidance_thread.quit)
+        self._compose_guidance_worker.finished.connect(self._compose_guidance_worker.deleteLater)
+        self._compose_guidance_thread.finished.connect(self._on_compose_target_guidance_thread_finished)
+        self._compose_guidance_thread.finished.connect(self._compose_guidance_thread.deleteLater)
+        self._compose_guidance_thread.start()
+
+    def _on_compose_target_guidance_thread_finished(self) -> None:
+        self._retain_finished_worker_refs(self._compose_guidance_thread, self._compose_guidance_worker)
+        self._compose_guidance_thread = None
+        self._compose_guidance_worker = None
+        if self._compose_guidance_pending and not self._is_shutting_down:
+            self._compose_guidance_pending = False
+            QTimer.singleShot(0, self._start_compose_target_guidance_worker)
+
+    def _on_compose_target_guidance_finished(self, payload: object) -> None:
+        if self._is_shutting_down or not isinstance(payload, dict):
+            return
+        if int(payload.get("generation", 0) or 0) != self._compose_guidance_generation:
+            return
+        recommendation = payload.get("recommendation")
+        if not isinstance(recommendation, ComposeSendRecommendation):
+            recommendation = ComposeSendRecommendation()
+        self._compose_send_recommendation = recommendation
+        selected = self._selected_compose_radio_target()
+        selected_radio_id = selected.radio_id if selected is not None else 0
+        if recommendation.radio_id and recommendation.radio_id != selected_radio_id:
+            self._select_compose_radio_id(recommendation.radio_id)
+        target_text = str(payload.get("target", "") or "")
+        text_value = self._compose_send_guidance_summary(recommendation, target=target_text)
+        tooltip = self._compose_send_guidance_tooltip(recommendation, target=target_text)
+        if hasattr(self, "compose_guidance_label"):
+            self.compose_guidance_label.setText(text_value)
+            self.compose_guidance_label.setToolTip(tooltip)
+        if hasattr(self, "compose_guidance_row_widget"):
+            self.compose_guidance_row_widget.setToolTip(tooltip)
+            self.compose_guidance_row_widget.setVisible(True)
+        if hasattr(self, "compose_tune_recommended_btn"):
+            available = bool(recommendation.tune_available and recommendation.frequency_mhz)
+            self.compose_tune_recommended_btn.setVisible(available)
+            self.compose_tune_recommended_btn.setEnabled(bool(recommendation.radio_id and recommendation.frequency_mhz))
+            self.compose_tune_recommended_btn.setStyleSheet(button_style("warning", resolve_theme(self.settings)))
+        if str(getattr(self, "_compose_mode", "") or "") == "spotter":
+            self._apply_compose_js8_auth_rows(
+                list(payload.get("auth_rows", []) or []),
+                target=target_text,
+                error=str(payload.get("auth_error", "") or ""),
+            )
+        self._update_compose_preview()
+
+    def _on_compose_varac_target_changed(self, *_args) -> None:
+        self._refresh_compose_destination_plans()
+        self._update_compose_preview()
+
+    def _on_compose_flamp_options_changed(self, *_args) -> None:
+        if self._compose_sign_flamp_selected():
+            self._refresh_compose_signing_keys()
+        self._refresh_compose_destination_plans()
         self._update_compose_preview()
 
     def _refresh_compose_commstat_defaults(self) -> None:
@@ -7429,12 +8256,84 @@ class MessageViewerTab(QWidget):
         if not hasattr(self, "compose_family_combo"):
             return
         self._refresh_compose_operating_group_options()
+        self._compose_discovery_generation += 1
+        generation = self._compose_discovery_generation
+        if self._compose_discovery_thread is not None and self._qt_thread_running(self._compose_discovery_thread):
+            self._compose_discovery_pending = True
+            return
+        self.compose_family_combo.blockSignals(True)
+        self.compose_family_combo.clear()
+        self.compose_family_combo.addItem("Loading forms…", None)
+        self.compose_family_combo.blockSignals(False)
+        self.compose_form_combo.blockSignals(True)
+        self.compose_form_combo.clear()
+        self.compose_form_combo.addItem("Loading forms…", None)
+        self.compose_form_combo.blockSignals(False)
+
+        radio = self._selected_compose_radio_target()
+        profile = radio.profile if radio is not None else {}
+        spotter_candidates = [
+            self._compose_profile_text(profile, "js8_forms_path"),
+            self._compose_profile_text(profile, "forms_path"),
+            str(self.settings.get("js8_forms_path", self.forms_path) or "").strip(),
+        ]
+        settings_snapshot = {
+            "nbems_custom_forms_path": self.settings.get("nbems_custom_forms_path", ""),
+            "message_paths": self.settings.get("message_paths", {}) or {},
+        }
+        self._compose_discovery_thread = QThread(self)
+        self._compose_discovery_worker = _ComposeCatalogDiscoveryWorker(
+            generation=generation,
+            mode=str(getattr(self, "_compose_mode", "nbems") or "nbems"),
+            settings_snapshot=settings_snapshot,
+            spotter_candidates=spotter_candidates,
+        )
+        self._compose_discovery_worker.moveToThread(self._compose_discovery_thread)
+        self._compose_discovery_thread.started.connect(self._compose_discovery_worker.run)
+        self._compose_discovery_worker.finished.connect(self._on_compose_discovery_finished)
+        self._compose_discovery_worker.finished.connect(self._compose_discovery_thread.quit)
+        self._compose_discovery_worker.finished.connect(self._compose_discovery_worker.deleteLater)
+        self._compose_discovery_thread.finished.connect(self._on_compose_discovery_thread_finished)
+        self._compose_discovery_thread.finished.connect(self._compose_discovery_thread.deleteLater)
+        self._compose_discovery_thread.start()
+
+    def _on_compose_discovery_thread_finished(self) -> None:
+        self._retain_finished_worker_refs(self._compose_discovery_thread, self._compose_discovery_worker)
+        self._compose_discovery_thread = None
+        self._compose_discovery_worker = None
+        if self._compose_discovery_pending and not self._is_shutting_down:
+            self._compose_discovery_pending = False
+            QTimer.singleShot(0, self._refresh_compose_forms)
+
+    def _on_compose_discovery_finished(self, payload: object) -> None:
+        if self._is_shutting_down or not isinstance(payload, dict):
+            return
+        generation = int(payload.get("generation", 0) or 0)
+        mode = str(payload.get("mode", "") or "")
+        if generation != self._compose_discovery_generation or mode != self._compose_mode:
+            return
+        entries = [dict(value) for value in payload.get("entries", []) if isinstance(value, dict)]
+        if not entries:
+            entries = [{"kind": "standard", "key": "STANDARD", "label": "Standard Blank"}]
+        self._compose_family_entries_cache = entries
+        parsed = payload.get("parsed", {})
+        self._compose_parsed_form_cache = dict(parsed) if isinstance(parsed, dict) else {}
+        self._apply_compose_family_entries(entries)
+        problems = [str(value or "").strip() for value in payload.get("problems", []) if str(value or "").strip()]
+        if problems:
+            self._set_compose_status(
+                f"Forms loaded with {len(problems)} skipped file{'s' if len(problems) != 1 else ''}.",
+                role="warning",
+            )
+
+    def _apply_compose_family_entries(self, entries: Sequence[dict]) -> None:
+        if not hasattr(self, "compose_family_combo"):
+            return
         previous_key = ""
         if self.compose_family_combo.count():
             previous = self.compose_family_combo.currentData()
             if isinstance(previous, dict):
                 previous_key = str(previous.get("key", "") or "")
-        entries = self._compose_family_entries()
         self.compose_family_combo.blockSignals(True)
         self.compose_family_combo.clear()
         selected_index = 0
@@ -7503,6 +8402,7 @@ class MessageViewerTab(QWidget):
             combo.blockSignals(False)
 
     def _on_compose_operating_group_changed(self, *_args) -> None:
+        self._install_compose_target_completers()
         self._refresh_compose_forms()
 
     def _on_compose_family_changed(self) -> None:
@@ -7524,7 +8424,9 @@ class MessageViewerTab(QWidget):
         elif isinstance(data, dict) and isinstance(data.get("family"), ComposeFormFamily):
             family = data.get("family")
             self._compose_last_source_dir = family.path
-            self._compose_templates = discover_forms_for_family(family)
+            self._compose_templates = [
+                template for template in list(data.get("templates") or []) if isinstance(template, ComposeFormTemplate)
+            ]
             if self._compose_templates:
                 for template in self._compose_templates:
                     self.compose_form_combo.addItem(
@@ -7566,13 +8468,10 @@ class MessageViewerTab(QWidget):
         elif isinstance(data, dict) and data.get("kind") == "custom":
             template_path = Path(str(data.get("path", "") or ""))
             self._compose_last_source_dir = template_path.parent
-            try:
-                template_text = template_path.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                template_text = ""
-            self._compose_template_title = extract_compose_template_title(template_text)
-            self._compose_template_menu_item = extract_compose_menu_item(template_text)
-            rows = parse_compose_template_fields(template_text)
+            cached = dict(self._compose_parsed_form_cache.get(str(template_path), {}) or {})
+            self._compose_template_title = str(cached.get("title", "") or "")
+            self._compose_template_menu_item = str(cached.get("menu_item", "") or "")
+            rows = [row for row in list(cached.get("rows", []) or []) if isinstance(row, ComposeFieldDefinition)]
             smart_defaults = self._compose_smart_defaults(rows)
             defaults = {
                 field.key: current_values.get(field.key, smart_defaults.get(field.key, ""))
@@ -7586,11 +8485,8 @@ class MessageViewerTab(QWidget):
             self._compose_template_title = f"{code} - {title}" if title else code
             if path:
                 self._compose_last_source_dir = path.parent
-            try:
-                form_text = path.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                form_text = ""
-            spotter_rows = parse_spotter_form_fields(form_text)
+            cached = dict(self._compose_parsed_form_cache.get(str(path), {}) or {})
+            spotter_rows = list(cached.get("spotter_rows", []) or [])
             rows = [
                 ComposeFieldDefinition(
                     key=field.key,
@@ -7627,6 +8523,8 @@ class MessageViewerTab(QWidget):
         if not form_key or not getattr(self, "_compose_field_widgets", None):
             return
         self._compose_form_draft_values[form_key] = self._compose_field_values()
+        mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
+        self._compose_form_draft_mode_keys.setdefault(mode, set()).add(form_key)
 
     def _compose_smart_defaults(self, rows: Sequence[ComposeFieldDefinition]) -> Dict[str, str]:
         defaults: Dict[str, str] = {}
@@ -7945,34 +8843,57 @@ class MessageViewerTab(QWidget):
         if not force and getattr(self, "_compose_js8_auth_scope_sig", None) == scope_sig:
             return
         self._compose_js8_auth_scope_sig = scope_sig
-        previous_key = ""
-        current = self.compose_js8_auth_key_combo.currentData()
-        if isinstance(current, dict):
-            previous_key = str(current.get("key", "") or "")
-        self.compose_js8_auth_key_combo.blockSignals(True)
-        self.compose_js8_auth_key_combo.clear()
-        self._compose_js8_auth_key_count = 0
         if not group or not callsign:
-            self.compose_js8_auth_key_combo.addItem("Set JS8 target and operator callsign", None)
+            rows = []
         else:
             try:
                 rows = load_msg_auth_keys(group_name=group, callsign=callsign, key_scope=MSG_AUTH_SCOPE_SIGNING)
             except Exception as exc:
                 rows = []
                 log.debug("MessageViewer: failed to load compose MsgAuth keys: %s", exc)
-            if rows:
-                selected_index = 0
-                for idx, key_row in enumerate(rows):
-                    label = str(key_row.label or "").strip() or f"{group} / {callsign}"
-                    data = {"label": label, "key": str(key_row.key or "")}
-                    self.compose_js8_auth_key_combo.addItem(label, data)
-                    self._compose_js8_auth_key_count += 1
-                    if previous_key and data["key"] == previous_key:
-                        selected_index = idx
+        self._apply_compose_js8_auth_rows(rows, target=group)
+
+    def _apply_compose_js8_auth_rows(
+        self,
+        rows: Sequence[object],
+        *,
+        target: str,
+        error: str = "",
+    ) -> None:
+        if not hasattr(self, "compose_js8_auth_key_combo"):
+            return
+        group = normalize_group_name(target)
+        callsign = self._compose_operator_callsign()
+        previous_key = ""
+        current = self.compose_js8_auth_key_combo.currentData()
+        if isinstance(current, dict):
+            previous_key = str(current.get("key", "") or "")
+        self.compose_js8_auth_key_combo.blockSignals(True)
+        try:
+            self.compose_js8_auth_key_combo.clear()
+            self._compose_js8_auth_key_count = 0
+            selected_index = 0
+            for key_row in rows:
+                key_text = str(getattr(key_row, "key", "") or "")
+                if not key_text:
+                    continue
+                label = str(getattr(key_row, "label", "") or "").strip() or f"{group} / {callsign}"
+                data = {"label": label, "key": key_text}
+                self.compose_js8_auth_key_combo.addItem(label, data)
+                if previous_key and key_text == previous_key:
+                    selected_index = self.compose_js8_auth_key_combo.count() - 1
+                self._compose_js8_auth_key_count += 1
+            if self._compose_js8_auth_key_count:
                 self.compose_js8_auth_key_combo.setCurrentIndex(selected_index)
+            elif error:
+                self.compose_js8_auth_key_combo.addItem("MsgAuth key lookup unavailable", None)
+                self.compose_js8_auth_key_combo.setToolTip(error)
+            elif not group or not callsign:
+                self.compose_js8_auth_key_combo.addItem("Set JS8 target and operator callsign", None)
             else:
                 self.compose_js8_auth_key_combo.addItem(f"No key for {group} / {callsign}", None)
-        self.compose_js8_auth_key_combo.blockSignals(False)
+        finally:
+            self.compose_js8_auth_key_combo.blockSignals(False)
 
     def _clear_compose_chip_layout(self, layout: QHBoxLayout, group: QButtonGroup) -> None:
         for button in list(group.buttons()):
@@ -8342,10 +9263,9 @@ class MessageViewerTab(QWidget):
         self._compose_radio_targets = display_targets
         self._compose_radio_targets_loaded = True
         self._refresh_compose_radio_chips()
-        self._refresh_compose_bbs_location_targets()
 
     def _refresh_compose_radios_clicked(self) -> None:
-        self._refresh_compose_radio_targets(force=True)
+        self._refresh_compose_setup_discovery(force=True)
         self._update_compose_preview()
 
     def _select_compose_radio_id(self, radio_id: object) -> bool:
@@ -8367,8 +9287,11 @@ class MessageViewerTab(QWidget):
         return False
 
     def _selected_compose_radio_target(self) -> Optional[ComposeRadioTarget]:
+        # Selection reads are intentionally cache-only.  Preview rendering is
+        # called on every edit and must never turn into a radio-store query.
+        # Setup refreshes and explicit actions populate this cache first.
         if not self._compose_radio_targets_loaded:
-            self._refresh_compose_radio_targets()
+            return None
         if not hasattr(self, "compose_radio_combo"):
             return None
         try:
@@ -8391,9 +9314,13 @@ class MessageViewerTab(QWidget):
         self._clear_spotter_form_caches()
         self._sync_compose_radio_chips()
         self._refresh_compose_message_folder_options(force=True)
-        self._refresh_compose_bbs_location_targets()
+        self._refresh_compose_destination_plans()
+        if hasattr(self, "compose_publish_bbs_chk") and self.compose_publish_bbs_chk.isChecked():
+            self._refresh_compose_bbs_location_targets()
+        self._install_compose_target_completers()
         if str(getattr(self, "_compose_mode", "nbems") or "nbems") == "spotter":
             self._refresh_compose_forms()
+        self._start_compose_target_guidance_worker()
         self._update_compose_preview()
 
     @staticmethod
@@ -8766,7 +9693,9 @@ class MessageViewerTab(QWidget):
             self._set_compose_status("Tune request was blocked or could not be applied.", role="warning")
 
     def _compose_confirm_peer_schedule_before_send(self) -> bool:
-        recommendation = self._compose_refresh_send_guidance()
+        # Target-scoped schedule/path lookups are resolved by the background
+        # guidance worker.  A Send click must never block the GUI on SQLite.
+        recommendation = getattr(self, "_compose_send_recommendation", ComposeSendRecommendation())
         if not recommendation.tune_available or not recommendation.frequency_mhz:
             return True
         radio_label = recommendation.radio_label or "the selected radio"
@@ -8837,121 +9766,88 @@ class MessageViewerTab(QWidget):
             "varac": self._compose_profile_text(profile, "varac_incoming_path"),
         }
 
-    def _location_dir_for_compose_radio(self, location, profile: Dict[str, Any]) -> str:
-        source_dir = str(getattr(location, "source_dir", "") or "").strip()
-        if source_dir:
-            return str(Path(source_dir).expanduser())
-        managed_root = self._compose_profile_text(profile, "varac_bbs_vault_managed_root")
-        if not managed_root:
-            return ""
-        folder_name = (
-            str(getattr(location, "name", "") or "").strip()
-            or str(getattr(location, "alias", "") or "").strip()
-            or str(getattr(location, "id", "") or "").strip()
-        )
-        if not folder_name:
-            return ""
-        return str(Path(managed_root).expanduser() / "locations" / folder_name)
-
     def _compose_bbs_targets_for_radio(self, target: Optional[ComposeRadioTarget]) -> List[Dict[str, str]]:
-        if target is None:
-            return []
-        profile = target.profile
-        live_dir = self._compose_profile_text(profile, "varac_bbs_dir")
-        vault_enabled = self._compose_profile_bool(profile, "varac_bbs_vault_enabled")
+        """Return station-owned logical locations; the radio does not own BBS membership."""
+
         out: List[Dict[str, str]] = []
-        if vault_enabled:
-            default_id = self._compose_profile_text(profile, "varac_bbs_vault_default_location_id") or DEFAULT_LOCATION_ID
-            for location in load_vault_locations(profile.get("varac_bbs_vault_locations_v1", [])):
-                if not bool(getattr(location, "enabled", True)):
-                    continue
-                directory = self._location_dir_for_compose_radio(location, profile)
-                if not directory:
-                    continue
-                try:
-                    Path(directory).mkdir(parents=True, exist_ok=True)
-                except Exception:
-                    pass
-                alias = str(getattr(location, "alias", "") or "").strip()
-                name = str(getattr(location, "name", "") or "").strip() or alias or str(getattr(location, "id", "") or "")
-                hints: List[str] = []
-                if str(getattr(location, "id", "") or "") == default_id:
-                    hints.append("default")
-                if str(getattr(location, "open_rule", "") or "").strip().lower() == "code":
-                    hints.append("code")
-                alias_part = f" - {alias}" if alias else ""
-                hint_part = f" ({', '.join(hints)})" if hints else ""
-                out.append(
-                    {
-                        "id": f"radio:{target.radio_id}:managed:{str(getattr(location, 'id', '') or '').strip()}",
-                        "label": f"Managed BBS: {name}{alias_part}{hint_part}",
-                        "path": directory,
-                        "kind": "managed",
-                        "radio_id": str(target.radio_id),
-                        "location_id": str(getattr(location, "id", "") or "").strip(),
-                        "location_name": name,
-                    }
-                )
-            if live_dir:
-                out.append(
-                    {
-                        "id": f"radio:{target.radio_id}:live:bypass",
-                        "label": "Live BBS root (bypass managed vault)",
-                        "path": live_dir,
-                        "kind": "live",
-                        "radio_id": str(target.radio_id),
-                    }
-                )
-        elif live_dir:
+        for raw in self._varac_bbs_copy_targets():
+            if str(raw.get("kind", "") or "") != "location" or not bool(raw.get("valid", False)):
+                continue
+            location_id = str(raw.get("location_id", "") or "").strip()
+            name = str(raw.get("location_name", "") or raw.get("label", "") or location_id).strip()
+            if not location_id:
+                continue
+            detail = str(raw.get("detail", "") or "").strip()
             out.append(
                 {
-                    "id": f"radio:{target.radio_id}:live",
-                    "label": "Live VarAC BBS",
-                    "path": live_dir,
-                    "kind": "live",
-                    "radio_id": str(target.radio_id),
+                    "id": location_id,
+                    "label": name,
+                    "kind": "location",
+                    "location_id": location_id,
+                    "location_name": name,
+                    "detail": detail,
+                    "is_default": "1" if bool(raw.get("is_default", False)) else "0",
                 }
             )
         return out
 
     def _refresh_compose_bbs_location_targets(self) -> None:
-        if not hasattr(self, "compose_bbs_location_combo"):
+        selector = getattr(self, "compose_bbs_location_selector", None)
+        if not isinstance(selector, DropdownChecklist):
             return
-        target = self._selected_compose_radio_target()
-        saved = str(self.settings.get("varac_bbs_compose_location_target", "") or "").strip()
-        current = ""
-        data = self.compose_bbs_location_combo.currentData()
-        if isinstance(data, dict):
-            current = str(data.get("id", "") or "")
-        preferred = current or saved
-        targets = self._compose_bbs_targets_for_radio(target)
-        self.compose_bbs_location_combo.blockSignals(True)
+        saved_raw = self.settings.get("managed_bbs_compose_location_ids", []) or []
+        if isinstance(saved_raw, str):
+            saved = [value.strip() for value in saved_raw.split(",") if value.strip()]
+        else:
+            saved = [str(value or "").strip() for value in saved_raw if str(value or "").strip()]
+        current = sorted(selector.selected_values())
+        targets = self._compose_bbs_targets_for_radio(self._selected_compose_radio_target())
+        self._compose_bbs_targets_cache = list(targets)
+        valid_ids = {target["location_id"] for target in targets}
+        selected = [value for value in (current or saved) if value in valid_ids]
+        if not selected:
+            selected = [target["location_id"] for target in targets if target.get("is_default") == "1"][:1]
+        options = []
+        for target in targets:
+            label = target["label"]
+            if target.get("is_default") == "1":
+                label = f"{label} · Default"
+            options.append((target["location_id"], label))
+        selector.blockSignals(True)
         try:
-            self.compose_bbs_location_combo.clear()
-            self.compose_bbs_location_combo.setEditable(len(targets) > 8)
-            if self.compose_bbs_location_combo.isEditable():
-                self.compose_bbs_location_combo.setInsertPolicy(QComboBox.NoInsert)
-            selected_index = 0
-            for bbs_target in targets:
-                self.compose_bbs_location_combo.addItem(bbs_target["label"], bbs_target)
-                if preferred and bbs_target.get("id") == preferred:
-                    selected_index = self.compose_bbs_location_combo.count() - 1
-            if self.compose_bbs_location_combo.count():
-                self.compose_bbs_location_combo.setCurrentIndex(selected_index)
+            selector.set_options(options, selected_values=selected, select_all_when_empty=False)
         finally:
-            self.compose_bbs_location_combo.blockSignals(False)
+            selector.blockSignals(False)
+        selector.setEnabled(bool(options))
+
+    def _selected_compose_bbs_targets(self) -> List[Dict[str, str]]:
+        selector = getattr(self, "compose_bbs_location_selector", None)
+        if not isinstance(selector, DropdownChecklist):
+            return []
+        selected = selector.selected_values()
+        return [
+            target
+            for target in list(getattr(self, "_compose_bbs_targets_cache", []) or [])
+            if target.get("location_id") in selected
+        ]
 
     def _selected_compose_bbs_target(self) -> Optional[Dict[str, str]]:
-        if not hasattr(self, "compose_bbs_location_combo"):
-            return None
-        data = self.compose_bbs_location_combo.currentData()
-        return data if isinstance(data, dict) else None
+        targets = self._selected_compose_bbs_targets()
+        return targets[0] if targets else None
+
+    def _on_compose_bbs_publication_changed(self) -> None:
+        selected = bool(
+            hasattr(self, "compose_publish_bbs_chk") and self.compose_publish_bbs_chk.isChecked()
+        )
+        if selected and not getattr(self, "_compose_bbs_targets_cache", []):
+            self._refresh_compose_bbs_location_targets()
+        self._update_compose_preview()
 
     def _on_compose_bbs_location_changed(self) -> None:
-        target = self._selected_compose_bbs_target()
-        if target:
+        selector = getattr(self, "compose_bbs_location_selector", None)
+        if isinstance(selector, DropdownChecklist):
             try:
-                self.settings.set("varac_bbs_compose_location_target", str(target.get("id", "") or ""))
+                self.settings.set("managed_bbs_compose_location_ids", sorted(selector.selected_values()))
             except Exception:
                 pass
         self._update_compose_preview()
@@ -9041,6 +9937,7 @@ class MessageViewerTab(QWidget):
         subfolder = self._selected_compose_message_subfolder()
         if root and resolve_compose_message_folder(root, subfolder) is not None:
             self._save_compose_message_subfolder(subfolder, target)
+        self._refresh_compose_destination_plans()
         self._update_compose_preview()
 
     def _choose_compose_message_folder(self) -> None:
@@ -9068,23 +9965,45 @@ class MessageViewerTab(QWidget):
         self._save_compose_message_subfolder(rel, target)
         self._compose_message_folder_root_cache = None
         self._refresh_compose_message_folder_options(force=True)
+        self._refresh_compose_destination_plans()
         self._update_compose_preview()
 
-    def _compose_destination_plans(self) -> List[ComposeDestinationPlan]:
+    def _compose_cached_destinations(self) -> List[ComposeDestinationPlan]:
+        """Return the last setup-time destination snapshot without filesystem I/O."""
+
+        cached = list(getattr(self, "_compose_destination_plans_cache", []) or [])
+        if not cached:
+            return []
+        base_name = self._compose_base_filename()
+        signed_name = build_signed_filename(
+            base_name,
+            filename_policy=self._compose_fastlight_filename_policy(),
+            operating_group=self._compose_fastlight_target_group(),
+        )
+        out: List[ComposeDestinationPlan] = []
+        for plan in cached:
+            if not plan.ready or not plan.directory:
+                out.append(plan)
+                continue
+            name = signed_name if plan.key == "flamp" and self._compose_sign_flamp_selected() else base_name
+            out.append(replace(plan, path=str(Path(plan.directory) / name), note=""))
+        return out
+
+    def _refresh_compose_destination_plans(self) -> List[ComposeDestinationPlan]:
+        """Probe destination readiness after an explicit setup/action change."""
+
         radio_target = self._selected_compose_radio_target()
         msg_paths = self._compose_radio_message_paths(radio_target)
-        bbs_target = self._selected_compose_bbs_target()
-        bbs_dir = str((bbs_target or {}).get("path", "") or "").strip()
         target_group = self._compose_fastlight_target_group()
         filename_policy = self._compose_fastlight_filename_policy()
-        return plan_compose_destinations(
+        plans = plan_compose_destinations(
             self._compose_base_filename(),
             send_target=self.compose_send_target_combo.currentText() if hasattr(self, "compose_send_target_combo") else "FLMsg",
             varac_target=self.compose_varac_target_combo.currentText() if hasattr(self, "compose_varac_target_combo") else "None",
             flmsg_dir=self._selected_compose_message_dir(radio_target) or str(msg_paths.get("flmsg", "") or "").strip(),
             flamp_dir=resolve_flamp_transmit_dir(str(msg_paths.get("flamp", "") or "").strip()),
             varac_outbox_dir=self._compose_varac_outbox_dir(radio_target),
-            varac_bbs_dir=bbs_dir,
+            varac_bbs_dir="",
             sign_flamp_copy=bool(
                 hasattr(self, "compose_sign_flamp_chk")
                 and self.compose_sign_flamp_chk.isChecked()
@@ -9092,6 +10011,8 @@ class MessageViewerTab(QWidget):
             filename_policy=filename_policy,
             operating_group=target_group,
         )
+        self._compose_destination_plans_cache = list(plans)
+        return list(plans)
 
     def _compose_varac_outbox_dir(self, target: Optional[ComposeRadioTarget] = None) -> str:
         profile = target.profile if target is not None else {}
@@ -10136,39 +11057,51 @@ class MessageViewerTab(QWidget):
         self._update_compose_preview()
 
     def _reset_compose_draft(self, *, status_text: str = "Compose draft reset.") -> None:
+        mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
         self._compose_timestamp_utc = datetime.datetime.now(datetime.timezone.utc)
-        if hasattr(self, "compose_priority_combo"):
-            self.compose_priority_combo.setCurrentText("RR")
-        if hasattr(self, "compose_sign_flamp_chk"):
-            self.compose_sign_flamp_chk.setChecked(False)
-        if hasattr(self, "compose_send_target_combo"):
-            self.compose_send_target_combo.setCurrentText("FLMsg")
-        if hasattr(self, "compose_varac_target_combo"):
-            self.compose_varac_target_combo.setCurrentText("None")
-        if hasattr(self, "compose_report_title_edit"):
-            self.compose_report_title_edit.clear()
-        if hasattr(self, "compose_js8_target_edit"):
-            self.compose_js8_target_edit.clear()
-        if hasattr(self, "compose_js8_plain_text_edit"):
-            self.compose_js8_plain_text_edit.clear()
-        if hasattr(self, "compose_js8_sign_chk"):
-            self.compose_js8_sign_chk.setChecked(False)
-        if hasattr(self, "compose_js8_auth_datecode_chk"):
-            self.compose_js8_auth_datecode_chk.setChecked(False)
-        if hasattr(self, "compose_commstat_target_edit"):
-            self.compose_commstat_target_edit.clear()
-        if hasattr(self, "compose_commstat_comment_edit"):
-            self.compose_commstat_comment_edit.clear()
-        if hasattr(self, "compose_commstat_brevity_chk"):
-            self.compose_commstat_brevity_chk.setChecked(False)
-        if hasattr(self, "compose_commstat_brevity_edit"):
-            self.compose_commstat_brevity_edit.setCurrentIndex(0)
-        self._compose_last_stage_paths = []
-        self._compose_form_draft_values.clear()
+        self._compose_mode_drafts.pop(mode, None)
+        for form_key in self._compose_form_draft_mode_keys.pop(mode, set()):
+            self._compose_form_draft_values.pop(form_key, None)
         self._compose_active_form_key = ""
-        if str(getattr(self, "_compose_mode", "nbems") or "nbems") == "commstat_rf":
-            self._refresh_compose_commstat_defaults()
-        self._on_compose_form_changed()
+        self._compose_restoring_mode_draft = True
+        try:
+            if mode == "nbems":
+                self._compose_set_combo_text(getattr(self, "compose_priority_combo", None), "RR")
+                self._compose_set_checked(getattr(self, "compose_sign_flamp_chk", None), False)
+                self._compose_set_combo_text(getattr(self, "compose_send_target_combo", None), "FLMsg")
+                self._compose_set_combo_text(getattr(self, "compose_varac_target_combo", None), "None")
+                self._compose_set_checked(getattr(self, "compose_publish_bbs_chk", None), False)
+                self._compose_set_line_text(getattr(self, "compose_report_title_edit", None), "")
+                self._compose_last_stage_paths = []
+                self._on_compose_form_changed()
+            elif mode == "js8":
+                self._compose_set_line_text(getattr(self, "compose_js8_target_edit", None), "")
+                self._compose_set_combo_text(getattr(self, "compose_js8_plain_kind_combo", None), "Directed Message")
+                widget = getattr(self, "compose_js8_plain_text_edit", None)
+                if isinstance(widget, QTextEdit):
+                    blocked = widget.blockSignals(True)
+                    try:
+                        widget.clear()
+                    finally:
+                        widget.blockSignals(blocked)
+            elif mode == "spotter":
+                self._compose_set_line_text(getattr(self, "compose_js8_target_edit", None), "")
+                self._compose_set_checked(getattr(self, "compose_js8_sign_chk", None), False)
+                self._compose_set_checked(getattr(self, "compose_js8_auth_datecode_chk", None), False)
+                self._on_compose_form_changed()
+            elif mode == "commstat_rf":
+                self._compose_set_line_text(getattr(self, "compose_commstat_target_edit", None), "")
+                self._compose_set_line_text(getattr(self, "compose_commstat_grid_edit", None), "")
+                self._compose_set_line_text(getattr(self, "compose_commstat_report_id_edit", None), "")
+                self._compose_set_line_text(getattr(self, "compose_commstat_comment_edit", None), "")
+                self._compose_set_checked(getattr(self, "compose_commstat_brevity_chk", None), False)
+                self._compose_set_combo_text(getattr(self, "compose_commstat_brevity_edit", None), "")
+                for combo in (getattr(self, "compose_commstat_status_widgets", {}) or {}).values():
+                    self._compose_set_combo_text(combo, "Unknown")
+                self._refresh_compose_commstat_defaults()
+        finally:
+            self._compose_restoring_mode_draft = False
+        self._update_compose_preview()
         self._set_compose_status(status_text, role="info")
 
     def _open_compose_source_folder(self) -> None:
@@ -10179,7 +11112,7 @@ class MessageViewerTab(QWidget):
 
     def _open_compose_output_folder(self) -> None:
         if not self._compose_last_stage_paths:
-            plans = [p for p in self._compose_destination_plans() if p.ready]
+            plans = [p for p in self._compose_cached_destinations() if p.ready]
             if not plans:
                 self._set_compose_status("No ready staging folder is available.", role="warning")
                 return
@@ -10188,7 +11121,7 @@ class MessageViewerTab(QWidget):
         self._open_path_in_shell(self._compose_last_stage_paths[0].parent)
 
     def _copy_compose_output_paths(self) -> None:
-        paths = self._compose_last_stage_paths or [Path(p.path) for p in self._compose_destination_plans() if p.ready]
+        paths = self._compose_last_stage_paths or [Path(p.path) for p in self._compose_cached_destinations() if p.ready]
         if not paths:
             self._set_compose_status("No compose paths are available to copy.", role="warning")
             return
@@ -10274,32 +11207,66 @@ class MessageViewerTab(QWidget):
             return
         if self._compose_signing_keys_loaded and not force:
             return
+        self._compose_signing_key_generation += 1
+        if self._compose_signing_key_thread is not None and self._qt_thread_running(self._compose_signing_key_thread):
+            self._compose_signing_key_pending = True
+            return
+        self._compose_signing_keys_loading = True
+        self._compose_signing_key_error = ""
+        self.compose_signing_key_combo.blockSignals(True)
+        self.compose_signing_key_combo.clear()
+        self.compose_signing_key_combo.addItem("Loading signing keys…", "")
+        self.compose_signing_key_combo.blockSignals(False)
+        self._compose_signing_key_thread = QThread(self)
+        self._compose_signing_key_worker = _ComposeSigningKeyWorker(
+            generation=self._compose_signing_key_generation,
+            configured_path=str(self.settings.get("gpg_executable_path", "") or "").strip(),
+        )
+        self._compose_signing_key_worker.moveToThread(self._compose_signing_key_thread)
+        self._compose_signing_key_thread.started.connect(self._compose_signing_key_worker.run)
+        self._compose_signing_key_worker.finished.connect(self._on_compose_signing_keys_finished)
+        self._compose_signing_key_worker.finished.connect(self._compose_signing_key_thread.quit)
+        self._compose_signing_key_worker.finished.connect(self._compose_signing_key_worker.deleteLater)
+        self._compose_signing_key_thread.finished.connect(self._on_compose_signing_key_thread_finished)
+        self._compose_signing_key_thread.finished.connect(self._compose_signing_key_thread.deleteLater)
+        self._compose_signing_key_thread.start()
+
+    def _on_compose_signing_key_thread_finished(self) -> None:
+        self._retain_finished_worker_refs(self._compose_signing_key_thread, self._compose_signing_key_worker)
+        self._compose_signing_key_thread = None
+        self._compose_signing_key_worker = None
+        if self._compose_signing_key_pending and not self._is_shutting_down:
+            self._compose_signing_key_pending = False
+            QTimer.singleShot(0, lambda: self._refresh_compose_signing_keys(force=True))
+
+    def _on_compose_signing_keys_finished(self, payload: object) -> None:
+        if self._is_shutting_down or not isinstance(payload, dict):
+            return
+        if int(payload.get("generation", 0) or 0) != self._compose_signing_key_generation:
+            return
         saved = normalize_fingerprint(str(self.settings.get("gpg_compose_signing_key_fingerprint", "") or ""))
         current = normalize_fingerprint(str(self.compose_signing_key_combo.currentData() or ""))
         preferred = current or saved
-        self._compose_signing_keys_loading = True
-        self._compose_signing_key_error = ""
+        keys = list(payload.get("keys", []) or [])
+        self._compose_signing_key_error = str(payload.get("error", "") or "")
+        self.compose_signing_key_combo.blockSignals(True)
         try:
             self.compose_signing_key_combo.clear()
             self.compose_signing_key_combo.addItem("Select signing key...", "")
-            keys, err = list_secret_keys(
-                configured_path=str(self.settings.get("gpg_executable_path", "") or "").strip()
-            )
-            self._compose_signing_key_error = err
             selected_index = 0
             count = 0
             for key in keys:
-                fpr = normalize_fingerprint(key.fingerprint)
-                if not fpr:
+                fingerprint = normalize_fingerprint(str(getattr(key, "fingerprint", "") or ""))
+                if not fingerprint:
                     continue
                 count += 1
-                self.compose_signing_key_combo.addItem(self._compose_signing_key_short_label(key), fpr)
+                self.compose_signing_key_combo.addItem(self._compose_signing_key_short_label(key), fingerprint)
                 self.compose_signing_key_combo.setItemData(
                     self.compose_signing_key_combo.count() - 1,
                     gpg_key_display_label(key),
                     Qt.ToolTipRole,
                 )
-                if preferred and fpr == preferred:
+                if preferred and fingerprint == preferred:
                     selected_index = self.compose_signing_key_combo.count() - 1
             if count == 1 and selected_index == 0:
                 selected_index = 1
@@ -10307,6 +11274,7 @@ class MessageViewerTab(QWidget):
             self._compose_signing_key_count = count
             self._compose_signing_keys_loaded = True
         finally:
+            self.compose_signing_key_combo.blockSignals(False)
             self._compose_signing_keys_loading = False
         self._update_compose_preview()
 
@@ -10346,6 +11314,8 @@ class MessageViewerTab(QWidget):
         return self._compose_flamp_target_selected()
 
     def _update_compose_preview(self) -> None:
+        if bool(getattr(self, "_compose_restoring_mode_draft", False)):
+            return
         if not hasattr(self, "compose_summary_label"):
             return
         for required_widget in (
@@ -10356,9 +11326,6 @@ class MessageViewerTab(QWidget):
         ):
             if not hasattr(self, required_widget):
                 return
-        self._refresh_compose_radio_targets()
-        self._refresh_compose_message_folder_options()
-        self._install_compose_target_completers()
         flamp_selected = self._ensure_compose_flamp_target_for_signing()
         if hasattr(self, "compose_sign_flamp_chk"):
             self.compose_sign_flamp_chk.setEnabled(True)
@@ -10374,22 +11341,18 @@ class MessageViewerTab(QWidget):
             self.compose_signing_key_combo.setMinimumWidth(180)
             self.compose_signing_key_combo.setMaximumWidth(360)
         self._sync_compose_static_choice_chips()
-        if sign_flamp_selected and not self._compose_signing_keys_loaded and not self._compose_signing_keys_loading:
-            self._refresh_compose_signing_keys()
         current_compose_mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
         early_js8_mode = current_compose_mode == "js8"
         early_spotter_mode = current_compose_mode == "spotter"
         early_commstat_mode = current_compose_mode == "commstat_rf"
         early_nbems_mode = not (early_js8_mode or early_spotter_mode or early_commstat_mode)
-        bbs_selected = (
+        bbs_selected = bool(
             early_nbems_mode
-            and hasattr(self, "compose_varac_target_combo")
-            and self.compose_varac_target_combo.currentText() in {"BBS", "Both"}
+            and hasattr(self, "compose_publish_bbs_chk")
+            and self.compose_publish_bbs_chk.isChecked()
         )
         if hasattr(self, "compose_bbs_location_row_widget"):
             self.compose_bbs_location_row_widget.setVisible(bool(bbs_selected))
-        if bbs_selected:
-            self._refresh_compose_bbs_location_targets()
         self.compose_zulu_value.setText(self._compose_zulu_text())
         self.compose_callsign_value.setText(self._compose_operator_callsign() or "Not set")
         self.compose_state_value.setText(self._compose_operator_state() or "Not set")
@@ -10408,7 +11371,7 @@ class MessageViewerTab(QWidget):
         self.compose_summary_label.setToolTip(
             f"{radio_label}\nFreqInOut stages compose files only. The operator sends them manually from FLMsg, FLAmp, or VarAC."
         )
-        plans = self._compose_destination_plans()
+        plans = self._compose_cached_destinations()
         destination_lines: List[str] = []
         if radio_target is None:
             destination_lines.append("No radio profile has FLMsg, FLAmp, or VarAC message destinations configured.")
@@ -10503,12 +11466,12 @@ class MessageViewerTab(QWidget):
             self.compose_js8_plain_row_widget.setVisible(js8_mode)
         if hasattr(self, "compose_js8_plain_scroll"):
             self.compose_js8_plain_scroll.setVisible(js8_mode)
-            self.compose_js8_plain_scroll.setMinimumHeight(220)
+            self.compose_js8_plain_scroll.setMinimumHeight(0)
         if hasattr(self, "compose_commstat_row_widget"):
             self.compose_commstat_row_widget.setVisible(commstat_mode)
         if hasattr(self, "compose_commstat_scroll"):
             self.compose_commstat_scroll.setVisible(commstat_mode)
-            self.compose_commstat_scroll.setMinimumHeight(420 if brevity_enabled else 300)
+            self.compose_commstat_scroll.setMinimumHeight(0)
         if hasattr(self, "compose_commstat_grid_edit"):
             self.compose_commstat_grid_edit.setVisible(commstat_mode)
         if hasattr(self, "compose_commstat_grid_label"):
@@ -10562,16 +11525,16 @@ class MessageViewerTab(QWidget):
             self.compose_field_box.setVisible(True)
             if js8_mode:
                 self.compose_field_box.setTitle("JS8 Message")
-                self.compose_field_box.setMinimumHeight(260)
+                self.compose_field_box.setMinimumHeight(160)
             elif commstat_mode:
                 self.compose_field_box.setTitle("CommStat StatRep")
-                self.compose_field_box.setMinimumHeight(460 if brevity_enabled else 340)
+                self.compose_field_box.setMinimumHeight(180)
             else:
                 self.compose_field_box.setTitle("FIOSpotter Form Fields" if spotter_mode else "Form Fields")
-                self.compose_field_box.setMinimumHeight(440 if spotter_mode else 300)
+                self.compose_field_box.setMinimumHeight(180)
         if hasattr(self, "compose_field_scroll"):
             self.compose_field_scroll.setVisible(not (js8_mode or commstat_mode))
-            self.compose_field_scroll.setMinimumHeight(420 if spotter_mode else 260)
+            self.compose_field_scroll.setMinimumHeight(0)
         if hasattr(self, "compose_rf_fields_stack"):
             self.compose_rf_fields_stack.setVisible(js8_mode or commstat_mode)
             if js8_mode and hasattr(self, "compose_js8_plain_scroll"):
@@ -10585,8 +11548,6 @@ class MessageViewerTab(QWidget):
         if hasattr(self, "compose_nbems_folder_row_widget"):
             self.compose_nbems_folder_row_widget.setVisible(nbems_mode)
         if hasattr(self, "compose_js8_auth_row_widget"):
-            if spotter_selected:
-                self._refresh_compose_js8_auth_keys()
             auth_available = bool(spotter_mode and self._compose_js8_auth_key_count > 0)
             self.compose_js8_auth_row_widget.setVisible(auth_available)
             if not auth_available and hasattr(self, "compose_js8_sign_chk") and self.compose_js8_sign_chk.isChecked():
@@ -10613,7 +11574,11 @@ class MessageViewerTab(QWidget):
         ):
             if widget is not None:
                 widget.setVisible(bool(spotter_mode and self._compose_js8_auth_key_count > 0))
-        recommendation = self._compose_refresh_send_guidance()
+        recommendation = (
+            getattr(self, "_compose_send_recommendation", ComposeSendRecommendation())
+            if (js8_mode or spotter_mode or commstat_mode)
+            else ComposeSendRecommendation()
+        )
         metadata = []
         if not (js8_mode or spotter_mode or commstat_mode):
             metadata.append(f"<div><b>Compose For:</b> {html.escape(radio_label)}</div>")
@@ -10622,8 +11587,8 @@ class MessageViewerTab(QWidget):
                     f"<div><b>Filename:</b> {html.escape(filename)}</div>",
                     f"<div><b>Fast Light Format:</b> {html.escape(self._compose_fastlight_delimiter_guidance())}</div>",
                     f"<div><b>Message Folder:</b> {html.escape(self.compose_message_folder_combo.currentText() if hasattr(self, 'compose_message_folder_combo') and self.compose_message_folder_combo.count() else 'Messages')}</div>",
-                    f"<div><b>Send Target:</b> {html.escape(self.compose_send_target_combo.currentText())}</div>",
-                    f"<div><b>VarAC Copy:</b> {html.escape(self.compose_varac_target_combo.currentText())}</div>",
+                    f"<div><b>Create File:</b> {html.escape(self.compose_send_target_combo.currentText())}</div>",
+                    f"<div><b>Copy to VarAC:</b> {html.escape(self.compose_varac_target_combo.currentText())}</div>",
                 ]
             )
         if js8_mode:
@@ -10663,9 +11628,12 @@ class MessageViewerTab(QWidget):
         if (js8_mode or spotter_mode or commstat_mode) and recommendation.reason:
             metadata.append(f"<div><b>Send Guidance:</b> {html.escape(recommendation.reason)}</div>")
         if bbs_selected:
-            bbs_target = self._selected_compose_bbs_target()
+            bbs_targets = self._selected_compose_bbs_targets()
+            labels = ", ".join(target.get("label", "") for target in bbs_targets if target.get("label"))
+            publish_kind = "FLAmp" if self._compose_flamp_target_selected() else "FLMsg"
             metadata.append(
-                f"<div><b>BBS Destination:</b> {html.escape(str((bbs_target or {}).get('label', '') or 'No valid BBS target'))}</div>"
+                f"<div><b>Add to BBS:</b> {html.escape(labels or 'Select at least one location')} "
+                f"({publish_kind} artifact)</div>"
             )
         if sign_flamp_selected:
             metadata.append(
@@ -10706,6 +11674,8 @@ class MessageViewerTab(QWidget):
             and self._compose_has_valid_form_selection()
             and signing_ready
             and radio_target is not None
+            and (not bbs_selected or bool(self._selected_compose_bbs_targets()))
+            and not bool(getattr(self, "_compose_stage_inflight", False))
             and not (js8_mode or spotter_mode or commstat_mode)
         )
         self.compose_stage_btn.setEnabled(can_stage)
@@ -10716,6 +11686,7 @@ class MessageViewerTab(QWidget):
             ((js8_mode and js8_plain_command) or (spotter_selected and spotter_command) or (commstat_mode and commstat_command))
             and radio_target is not None
             and "JS8Call" in tuple(radio_target.capabilities)
+            and not bool(getattr(self, "_compose_send_inflight", False))
             and (js8_mode or commstat_mode or ((not self._compose_js8_msg_auth_selected()) or bool(self._selected_compose_js8_msg_auth_key())))
         )
         if hasattr(self, "compose_send_js8_btn"):
@@ -10778,6 +11749,11 @@ class MessageViewerTab(QWidget):
             btn.setVisible(not (js8_mode or spotter_mode or commstat_mode))
 
     def _send_compose_js8_spotter(self) -> None:
+        if self._compose_send_inflight:
+            self._set_compose_status("A JS8 send is already in progress.", role="info")
+            return
+        if not self._compose_radio_targets_loaded:
+            self._refresh_compose_radio_targets()
         mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
         js8_mode = mode == "js8"
         commstat_mode = mode == "commstat_rf"
@@ -10820,33 +11796,118 @@ class MessageViewerTab(QWidget):
         if not self._compose_confirm_peer_schedule_before_send():
             return
         endpoint = js8_endpoint_from_radio_profile(radio_target.profile, fallback_settings=self.settings)
-        client = JS8ApiClientRegistry.get(endpoint, timeout_s=1.0, auto_reconnect=True)
-        result = send_js8_message_guarded(client, command, timeout_s=0.6, clear_selected_target=True)
-        if not result.sent:
-            issue_codes = [issue.code for issue in result.preflight.issues]
-            if issue_codes == ["target_state_unknown"]:
-                detail = result.preflight.issues[0].detail
+        label = "JS8Call" if js8_mode else "CommStat RF" if commstat_mode else "FIOSpotter"
+        radio_short_label = self._compose_radio_target_short_label(radio_target) or radio_target.label
+        self._compose_action_generation += 1
+        self._compose_send_context = {
+            "label": label,
+            "radio_label": radio_short_label,
+            "command": command,
+            "endpoint": endpoint,
+            "generation": self._compose_action_generation,
+        }
+        self._start_compose_js8_send_worker(
+            endpoint=endpoint,
+            command=command,
+            generation=self._compose_action_generation,
+            allow_uncertain_target_state=False,
+        )
+
+    def _start_compose_js8_send_worker(
+        self,
+        *,
+        endpoint: JS8ApiEndpoint,
+        command: str,
+        generation: int,
+        allow_uncertain_target_state: bool,
+    ) -> None:
+        self._compose_send_inflight = True
+        self._set_compose_status("Checking JS8Call and queueing the message…", role="info")
+        self._update_compose_preview()
+        self._compose_send_thread = QThread(self)
+        self._compose_send_worker = _ComposeJs8SendWorker(
+            endpoint=endpoint,
+            command=command,
+            generation=generation,
+            allow_uncertain_target_state=allow_uncertain_target_state,
+        )
+        self._compose_send_worker.moveToThread(self._compose_send_thread)
+        self._compose_send_thread.started.connect(self._compose_send_worker.run)
+        self._compose_send_worker.finished.connect(self._on_compose_js8_send_finished)
+        self._compose_send_worker.finished.connect(self._compose_send_thread.quit)
+        self._compose_send_worker.finished.connect(self._compose_send_worker.deleteLater)
+        self._compose_send_thread.finished.connect(self._on_compose_js8_send_thread_finished)
+        self._compose_send_thread.finished.connect(self._compose_send_thread.deleteLater)
+        self._compose_send_thread.start()
+
+    def _on_compose_js8_send_thread_finished(self) -> None:
+        self._retain_finished_worker_refs(self._compose_send_thread, self._compose_send_worker)
+        self._compose_send_thread = None
+        self._compose_send_worker = None
+        retry = dict(getattr(self, "_compose_send_retry_pending", {}) or {})
+        self._compose_send_retry_pending = {}
+        if retry and not self._is_shutting_down:
+            endpoint = retry.get("endpoint")
+            if isinstance(endpoint, JS8ApiEndpoint):
+                self._start_compose_js8_send_worker(
+                    endpoint=endpoint,
+                    command=str(retry.get("command", "") or ""),
+                    generation=int(retry.get("generation", 0) or 0),
+                    allow_uncertain_target_state=True,
+                )
+                return
+        self._compose_send_inflight = False
+        if not self._is_shutting_down:
+            self._update_compose_preview()
+
+    def _on_compose_js8_send_finished(self, payload: object) -> None:
+        if self._is_shutting_down:
+            return
+        data = payload if isinstance(payload, dict) else {}
+        error = str(data.get("error", "") or "").strip()
+        result = data.get("result")
+        context = dict(getattr(self, "_compose_send_context", {}) or {})
+        generation = int(data.get("generation", 0) or 0)
+        if error or result is None:
+            self._set_compose_status(f"JS8Call send failed: {error or 'No result returned.'}", role="warning")
+            self._update_compose_preview()
+            return
+        if not bool(getattr(result, "sent", False)):
+            issues = list(getattr(getattr(result, "preflight", None), "issues", []) or [])
+            issue_codes = [str(getattr(issue, "code", "") or "") for issue in issues]
+            if issue_codes == ["target_state_unknown"] and not bool(data.get("allow_uncertain", False)):
+                endpoint = data.get("endpoint")
+                detail = str(getattr(issues[0], "detail", "") or "")
+                endpoint_label = (
+                    f"{endpoint.host}:{endpoint.port}" if isinstance(endpoint, JS8ApiEndpoint) else "the selected JS8Call endpoint"
+                )
                 confirm = QMessageBox.question(
                     self,
                     "JS8Call Target State Unverified",
-                    f"{detail}\n\nSend anyway to {endpoint.host}:{endpoint.port}?",
+                    f"{detail}\n\nSend anyway to {endpoint_label}?",
                     QMessageBox.Yes | QMessageBox.No,
                     QMessageBox.No,
                 )
-                if confirm == QMessageBox.Yes:
-                    result = send_js8_message_guarded(
-                        client,
-                        command,
-                        timeout_s=0.6,
-                        allow_uncertain_target_state=True,
-                        clear_selected_target=True,
-                    )
-            if not result.sent:
-                self._set_compose_status(result.detail, role="warning")
-                return
-        label = "JS8Call" if js8_mode else "CommStat RF" if commstat_mode else "FIOSpotter"
-        radio_short_label = self._compose_radio_target_short_label(radio_target) or radio_target.label
-        self._set_compose_status(f"Sent {label} message via {radio_short_label}: {command}", role="success")
+                if confirm == QMessageBox.Yes and isinstance(endpoint, JS8ApiEndpoint):
+                    self._compose_send_retry_pending = {
+                        "endpoint": endpoint,
+                        "command": str(data.get("command", "") or ""),
+                        "generation": generation,
+                    }
+                    self._compose_send_inflight = True
+                    self._set_compose_status("Retrying after operator confirmation…", role="info")
+                    return
+            self._set_compose_status(str(getattr(result, "detail", "") or "JS8Call send was not accepted."), role="warning")
+            self._update_compose_preview()
+            return
+        label = str(context.get("label", "") or "JS8Call")
+        radio_label = str(context.get("radio_label", "") or "selected radio")
+        command = str(data.get("command", "") or context.get("command", "") or "")
+        self._set_compose_status(
+            f"Queued {label} message via {radio_label}: {command}",
+            role="success",
+        )
+        self._update_compose_preview()
     def _save_compose_js8_expect(self) -> None:
         if self._compose_template_kind != "spotter":
             self._set_compose_status("Select a FIOSpotter form before saving to Expect.", role="warning")
@@ -10857,6 +11918,8 @@ class MessageViewerTab(QWidget):
         if not message_text or not expect_key:
             self._set_compose_status("Enter a JS8 target and complete the Spotter form before saving to Expect.", role="warning")
             return
+        if not self._compose_radio_targets_loaded:
+            self._refresh_compose_radio_targets()
         radio_target = self._selected_compose_radio_target()
         if radio_target is None:
             self._set_compose_status("Select a radio before saving to Expect.", role="warning")
@@ -10868,9 +11931,9 @@ class MessageViewerTab(QWidget):
         try:
             result = save_expect_entry(
                 {
-                    "source_radio_id": str(radio_target.radio_id),
-                    "source_scope": "radio",
-                    "js8_instance_id": str(radio_target.profile.get("js8_instance_id", "") or ""),
+                    "source_radio_id": "",
+                    "source_scope": "all",
+                    "js8_instance_id": "",
                     "expect_key": expect_key,
                     "response_text": message_text,
                     "msg_auth_sign_enabled": self._compose_js8_msg_auth_selected(),
@@ -10888,8 +11951,16 @@ class MessageViewerTab(QWidget):
                     "auto_reply_enabled": False,
                     "unattended_auto_reply_enabled": False,
                     "import_source": "fio-compose-js8spotter",
+                    "create_only": True,
                 }
             )
+        except ExpectEntryExistsError as exc:
+            self._set_compose_status(
+                f"Expect rule {exc.expect_key} already exists. Open FIO Spotter > Expect to review it; "
+                "Compose did not replace its access or auto-reply policy.",
+                role="warning",
+            )
+            return
         except Exception as exc:
             self._set_compose_status(f"Could not save Expect entry: {exc}", role="warning")
             return
@@ -10899,102 +11970,120 @@ class MessageViewerTab(QWidget):
             role="success",
         )
 
-    def _stage_compose_files(self) -> None:
+    def _compose_stage_request_snapshot(self) -> ComposeStageRequest | None:
         if not self._compose_has_valid_form_selection():
             self._set_compose_status("Select a compose form before staging files.", role="warning")
-            return
-        plans = self._compose_destination_plans()
-        payload = self._compose_current_payload()
+            return None
+        if not self._compose_radio_targets_loaded:
+            self._refresh_compose_radio_targets()
+        # Re-probe and collision-reserve the current destinations immediately
+        # before the worker snapshot. Preview rendering uses only cached plans.
+        plans = self._refresh_compose_destination_plans()
         ready_plans = [plan for plan in plans if plan.ready]
         if not ready_plans:
             self._set_compose_status("No ready compose destinations are available.", role="warning")
-            return
-        skipped = [plan.note for plan in plans if plan.requested and not plan.ready and plan.note]
-        outputs: List[Path] = []
-        problems: List[str] = []
-        signature_notes: List[str] = []
-        gpg_path = str(self.settings.get("gpg_executable_path", "") or "").strip()
-        trusted_fingerprints = self.settings.get("gpg_trusted_signers", []) or []
+            return None
         sign_flamp = self._compose_sign_flamp_selected()
         signer_fingerprint = self._selected_compose_signing_fingerprint() if sign_flamp else ""
         if sign_flamp and not signer_fingerprint:
             self._set_compose_status("Select a private signing key before staging a signed FLAmp copy.", role="warning")
-            return
+            return None
         radio_target = self._selected_compose_radio_target()
         if radio_target is None:
             self._set_compose_status("Select a radio profile before staging compose files.", role="warning")
+            return None
+        publish_to_bbs = bool(
+            hasattr(self, "compose_publish_bbs_chk") and self.compose_publish_bbs_chk.isChecked()
+        )
+        bbs_targets = self._selected_compose_bbs_targets() if publish_to_bbs else []
+        if publish_to_bbs and not bbs_targets:
+            self._set_compose_status("Select at least one enabled Managed BBS location.", role="warning")
+            return None
+        self._compose_action_generation += 1
+        trusted_raw = self.settings.get("gpg_trusted_signers", []) or []
+        if isinstance(trusted_raw, str):
+            trusted = tuple(value.strip() for value in trusted_raw.split(",") if value.strip())
+        else:
+            trusted = tuple(str(value or "").strip() for value in trusted_raw if str(value or "").strip())
+        return ComposeStageRequest(
+            payload=self._compose_current_payload(),
+            unsigned_name=self._compose_base_filename(),
+            plans=tuple(plans),
+            radio_id=str(radio_target.radio_id),
+            radio_label=self._compose_radio_target_short_label(radio_target) or radio_target.label,
+            sign_flamp=sign_flamp,
+            signer_fingerprint=signer_fingerprint,
+            gpg_path=str(self.settings.get("gpg_executable_path", "") or "").strip(),
+            trusted_fingerprints=trusted,
+            publish_to_bbs=publish_to_bbs,
+            bbs_db_path=str(bbs_library_db_path_from_settings(self.settings)) if publish_to_bbs else "",
+            bbs_location_ids=tuple(str(target.get("location_id", "") or "") for target in bbs_targets),
+            bbs_location_names=tuple(str(target.get("label", "") or "") for target in bbs_targets),
+            source_id=f"compose:{self._compose_base_filename()}",
+            metadata=(
+                ("form", str(self.compose_form_combo.currentText() if hasattr(self, "compose_form_combo") else "")),
+                ("group", self._compose_fastlight_target_group()),
+            ),
+            generation=self._compose_action_generation,
+        )
+
+    def _stage_compose_files(self) -> None:
+        if self._compose_stage_inflight:
+            self._set_compose_status("Compose staging is already in progress.", role="info")
             return
-        unsigned_name = self._compose_base_filename()
-        for plan in ready_plans:
-            dst = Path(plan.path)
-            try:
-                if plan.key == "flamp" and sign_flamp:
-                    with tempfile.TemporaryDirectory(prefix="fio-compose-") as tmpdir:
-                        temp_src = Path(tmpdir) / unsigned_name
-                        temp_src.write_text(payload, encoding="utf-8")
-                        ok, detail = clearsign_file(
-                            temp_src,
-                            output_path=dst,
-                            configured_path=gpg_path,
-                            signer_fingerprint=signer_fingerprint,
-                        )
-                        if not ok and gpg_detail_indicates_passphrase_needed(detail):
-                            passphrase, secret_err = load_gpg_signing_passphrase(signer_fingerprint)
-                            if not passphrase:
-                                detail = secret_err or (
-                                    "Selected signing key requires a passphrase. Save it in Settings > Message Auth."
-                                )
-                            else:
-                                try:
-                                    ok, detail = clearsign_file(
-                                        temp_src,
-                                        output_path=dst,
-                                        configured_path=gpg_path,
-                                        signer_fingerprint=signer_fingerprint,
-                                        passphrase=passphrase,
-                                    )
-                                finally:
-                                    passphrase = ""
-                    if ok:
-                        outputs.append(dst)
-                        verify_result = verify_file_with_discovery(
-                            dst,
-                            configured_path=gpg_path,
-                            trusted_fingerprints=trusted_fingerprints,
-                            allow_inline_clearsigned=True,
-                        )
-                        if verify_result.status != "valid":
-                            problems.append(f"FLAmp signature verification: {verify_result.detail}")
-                        else:
-                            signature_notes.append(f"FLAmp signed file verified: {dst.name}")
-                    else:
-                        problems.append(f"FLAmp signing failed; no unsigned FLAmp fallback was staged. {detail}")
-                    continue
-                dst.write_text(payload, encoding="utf-8")
-                outputs.append(dst)
-            except Exception as e:
-                problems.append(f"{plan.label}: {e}")
+        request = self._compose_stage_request_snapshot()
+        if request is None:
+            return
+        self._compose_stage_inflight = True
+        self._set_compose_status("Staging compose files…", role="info")
+        self._update_compose_preview()
+        self._compose_stage_thread = QThread(self)
+        self._compose_stage_worker = _ComposeStageWorker(request)
+        self._compose_stage_worker.moveToThread(self._compose_stage_thread)
+        self._compose_stage_thread.started.connect(self._compose_stage_worker.run)
+        self._compose_stage_worker.finished.connect(self._on_compose_stage_finished)
+        self._compose_stage_worker.finished.connect(self._compose_stage_thread.quit)
+        self._compose_stage_worker.finished.connect(self._compose_stage_worker.deleteLater)
+        self._compose_stage_thread.finished.connect(self._on_compose_stage_thread_finished)
+        self._compose_stage_thread.finished.connect(self._compose_stage_thread.deleteLater)
+        self._compose_stage_thread.start()
+
+    def _on_compose_stage_thread_finished(self) -> None:
+        self._retain_finished_worker_refs(self._compose_stage_thread, self._compose_stage_worker)
+        self._compose_stage_thread = None
+        self._compose_stage_worker = None
+        self._compose_stage_inflight = False
+        if not self._is_shutting_down:
+            self._update_compose_preview()
+
+    def _on_compose_stage_finished(self, payload: object) -> None:
+        if self._is_shutting_down:
+            return
+        result = payload if isinstance(payload, ComposeStageResult) else ComposeStageResult(
+            generation=self._compose_action_generation,
+            problems=("Compose staging returned an invalid result.",),
+        )
+        outputs = [Path(value) for value in result.outputs]
         self._compose_last_stage_paths = outputs
         lines: List[str] = []
         if outputs:
-            radio_short_label = self._compose_radio_target_short_label(radio_target) or radio_target.label
-            lines.append(f"Staged {len(outputs)} compose file(s) for {radio_short_label}.")
+            lines.append(f"Staged {len(outputs)} compose file(s).")
             for path in outputs:
                 lines.append(str(path))
         else:
             lines.append("No compose files were staged.")
-        lines.extend(skipped)
-        lines.extend(signature_notes)
-        lines.extend(problems)
-        role = "success" if outputs and not problems and not skipped else "warning"
-        status_text = "\n".join(lines)
+        if result.bbs_artifact_id:
+            names = ", ".join(str(value or "") for value in result.bbs_location_names if str(value or ""))
+            lines.append(f"Published to Managed BBS: {names or len(result.bbs_location_ids)}.")
+            self._invalidate_bbs_action_cache()
+        lines.extend(result.skipped)
+        lines.extend(result.signature_notes)
+        lines.extend(result.problems)
         if outputs:
-            status_text = f"{status_text}\nCompose draft reset for the next message."
-            self._reset_compose_draft(status_text=status_text)
-            self._set_compose_status(status_text, role=role)
-        else:
-            self._set_compose_status(status_text, role=role)
-            self._update_compose_preview()
+            lines.append("Draft retained. Reset it when you are ready for the next message.")
+        role = "success" if outputs and not result.problems and not result.skipped else "warning"
+        self._set_compose_status("\n".join(lines), role=role)
+        self._update_compose_preview()
 
     @staticmethod
     def _normalize_excluded_msg_types(values) -> set[str]:
@@ -13345,6 +14434,43 @@ class MessageViewerTab(QWidget):
         self._request_worker_thread_stop(self._projected_query_thread)
         self._request_worker_thread_stop(self._signature_verify_thread)
         self._request_worker_thread_stop(self._bbs_auto_archive_thread)
+        # Compose catalog and key discovery touch the filesystem and external
+        # GPG process state.  Give these short-lived workers a bounded clean
+        # exit so Qt never destroys a live thread during application shutdown.
+        for background_thread in (
+            getattr(self, "_compose_discovery_thread", None),
+            getattr(self, "_compose_signing_key_thread", None),
+            getattr(self, "_compose_guidance_thread", None),
+        ):
+            if background_thread is None:
+                continue
+            try:
+                if background_thread.isRunning():
+                    background_thread.requestInterruption()
+                    background_thread.quit()
+                    background_thread.wait(5000)
+            except Exception:
+                pass
+        compose_thread = getattr(self, "_compose_stage_thread", None)
+        if compose_thread is not None:
+            try:
+                if compose_thread.isRunning():
+                    compose_thread.requestInterruption()
+                    compose_thread.quit()
+                    # A signing process or final local transaction must finish
+                    # before Qt destroys its worker thread during app exit.
+                    compose_thread.wait(10000)
+            except Exception:
+                pass
+        send_thread = getattr(self, "_compose_send_thread", None)
+        if send_thread is not None:
+            try:
+                if send_thread.isRunning():
+                    send_thread.requestInterruption()
+                    send_thread.quit()
+                    send_thread.wait(3000)
+            except Exception:
+                pass
 
     @staticmethod
     def _request_worker_thread_stop(thread: QThread | None, *, wait_ms: int = 150) -> None:

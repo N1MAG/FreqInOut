@@ -1,3 +1,13 @@
+from __future__ import annotations
+
+import os
+from types import SimpleNamespace
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtWidgets import QApplication
+import pytest
+
 from freqinout.core.compose_guidance import (
     ComposeLastHeard,
     ComposePathEvidence,
@@ -5,6 +15,13 @@ from freqinout.core.compose_guidance import (
     ComposeRadioOption,
     recommend_compose_send_path,
 )
+from freqinout.core.js8_expect_store import (
+    ExpectEntryExistsError,
+    list_expect_entries,
+    save_expect_entry,
+)
+from freqinout.gui import message_viewer_tab as viewer_module
+from freqinout.radio_interface.js8_api_client import JS8ApiEndpoint
 
 
 def test_peer_schedule_drives_compose_send_recommendation() -> None:
@@ -106,7 +123,8 @@ def test_compose_send_checks_peer_schedule_guidance_before_transmit() -> None:
     send_end = source.index("    def _save_compose_js8_expect", send_start)
     send_block = source[send_start:send_end]
     assert "_compose_confirm_peer_schedule_before_send" in send_block
-    assert "send_js8_message_guarded" in send_block
+    assert "_start_compose_js8_send_worker" in send_block
+    assert "_compose_send_inflight" in send_block
 
     confirm_start = source.index("    def _compose_confirm_peer_schedule_before_send")
     confirm_end = source.index("    def prefill_compose_intent", confirm_start)
@@ -136,14 +154,19 @@ def test_compose_visible_radio_status_uses_short_name() -> None:
     send_start = source.index("    def _send_compose_js8_spotter")
     send_end = source.index("    def _save_compose_js8_expect", send_start)
     send_block = source[send_start:send_end]
-    assert "Sent {label} message via {radio_short_label}" in send_block
-    assert "via {radio_target.label}" not in send_block
+    assert '"radio_label": radio_short_label' in send_block
+    assert 'f"Queued {label} message via {radio_label}: {command}"' in source
+    assert "via {radio_target.label}" not in source
 
     stage_start = source.index("    def _stage_compose_files")
     stage_end = source.index("    @staticmethod", stage_start)
     stage_block = source[stage_start:stage_end]
-    assert "for {radio_short_label}" in stage_block
-    assert "for {radio_target.label}" not in stage_block
+    assert "_compose_stage_request_snapshot" in stage_block
+    assert "_ComposeStageWorker" in stage_block
+    assert '"Staging compose files…"' in stage_block
+    assert "write_text" not in stage_block
+    assert "clearsign_file" not in stage_block
+    assert '"Draft retained. Reset it when you are ready for the next message."' in source
 
     # Managed BBS choices are station locations in Slice 2, not duplicated
     # radio-prefixed targets. Radio-specific compose/send status above still
@@ -179,8 +202,53 @@ def test_plain_js8_compose_is_first_class_guarded_send_mode() -> None:
     assert "def _compose_plain_js8_command" in source
     assert "Directed Message" in source
     assert "FIO will not send a message to your own callsign" in source
-    assert "send_js8_message_guarded(client, command" in source
-    assert "clear_selected_target=True" in source
+    worker_start = source.index("class _ComposeJs8SendWorker")
+    worker_end = source.index("class _ComposeCatalogDiscoveryWorker", worker_start)
+    worker_block = source[worker_start:worker_end]
+    assert "send_js8_message_guarded(" in worker_block
+    assert "clear_selected_target=True" in worker_block
+    send_start = source.index("    def _send_compose_js8_spotter")
+    send_end = source.index("    def _save_compose_js8_expect", send_start)
+    send_block = source[send_start:send_end]
+    assert "send_js8_message_guarded(" not in send_block
+    assert "_start_compose_js8_send_worker" in send_block
+
+
+def test_compose_js8_worker_emits_guarded_result_without_gui_send_call(monkeypatch) -> None:
+    """The worker owns guarded API work and returns a queued result payload."""
+
+    app = QApplication.instance() or QApplication([])
+    endpoint = JS8ApiEndpoint("127.0.0.1", 2442)
+    calls = []
+    expected = SimpleNamespace(sent=True, detail="queued")
+
+    monkeypatch.setattr(
+        viewer_module.JS8ApiClientRegistry,
+        "get",
+        lambda endpoint, **kwargs: calls.append(("client", endpoint, kwargs)) or object(),
+    )
+    monkeypatch.setattr(
+        viewer_module,
+        "send_js8_message_guarded",
+        lambda client, command, **kwargs: calls.append(("guarded", client, command, kwargs)) or expected,
+    )
+    worker = viewer_module._ComposeJs8SendWorker(
+        endpoint=endpoint,
+        command="GROUP CHECK",
+        generation=4,
+        allow_uncertain_target_state=False,
+    )
+    payloads = []
+    worker.finished.connect(payloads.append)
+    worker.run()
+    app.processEvents()
+
+    assert calls[0][0] == "client"
+    assert calls[1][0] == "guarded"
+    assert calls[1][2] == "GROUP CHECK"
+    assert calls[1][3]["clear_selected_target"] is True
+    assert payloads[0]["generation"] == 4
+    assert payloads[0]["result"] is expected
 
 
 def test_compose_mode_rows_are_wrapped_for_clean_visibility() -> None:
@@ -200,13 +268,13 @@ def test_compose_mode_rows_are_wrapped_for_clean_visibility() -> None:
     assert "self.compose_rf_fields_stack.addWidget(self.compose_js8_plain_scroll)" in source
     assert "self.compose_rf_fields_stack.addWidget(self.compose_commstat_scroll)" in source
     assert "self._set_compose_fixed_width(self.compose_radio_combo, floor=160, ceiling=260)" in source
-    assert "Visibility wins over compactness" in source
-    assert "if target_h > cap_h:" in source
+    assert "target_h = max(86, target_h)" in source
     assert "def _open_compose_workbench_dialog" in source
     assert 'self.compose_workbench_btn = QPushButton("Open Full Compose Workbench")' in source
     assert 'self.compose_inline_reset_btn = QPushButton("Reset")' in source
     assert 'reset_btn = QPushButton("Reset Draft")' in source
-    assert "setup_scroll.setMaximumHeight(cap_h)" in source
+    assert "setup_scroll.setMaximumHeight(16777215)" in source
+    assert "setup_scroll.setMinimumHeight(min(target_h, max(120, viewport_height // 3)))" in source
     assert "self.compose_operating_group_combo = QComboBox()" in source
     assert "def _refresh_compose_operating_group_options" in source
     assert "self.compose_js8_auth_row_widget = QWidget()" in source
@@ -222,7 +290,7 @@ def test_compose_mode_rows_are_wrapped_for_clean_visibility() -> None:
     assert "def _run_pending_compose_layout_geometry_refresh" in source
 
 
-def test_compose_reset_clears_all_compose_modes_but_preserves_radio_choice() -> None:
+def test_compose_reset_clears_only_active_mode_but_preserves_radio_choice() -> None:
     source = open("freqinout/gui/message_viewer_tab.py", encoding="utf-8").read()
     reset_block = source[
         source.index("def _reset_compose_draft")
@@ -230,13 +298,14 @@ def test_compose_reset_clears_all_compose_modes_but_preserves_radio_choice() -> 
     ]
 
     assert "compose_radio_combo" not in reset_block
-    assert "self.compose_js8_target_edit.clear()" in reset_block
-    assert "self.compose_js8_plain_text_edit.clear()" in reset_block
-    assert "self.compose_js8_sign_chk.setChecked(False)" in reset_block
-    assert "self.compose_commstat_target_edit.clear()" in reset_block
-    assert "self.compose_commstat_comment_edit.clear()" in reset_block
-    assert "self.compose_commstat_brevity_chk.setChecked(False)" in reset_block
-    assert "self._compose_form_draft_values.clear()" in reset_block
+    assert "mode = str(getattr(self, \"_compose_mode\", \"nbems\") or \"nbems\")" in reset_block
+    assert "self._compose_mode_drafts.pop(mode, None)" in reset_block
+    assert "self._compose_form_draft_mode_keys.pop(mode, set())" in reset_block
+    assert "if mode == \"nbems\":" in reset_block
+    assert "elif mode == \"js8\":" in reset_block
+    assert "elif mode == \"spotter\":" in reset_block
+    assert "elif mode == \"commstat_rf\":" in reset_block
+    assert "self._compose_form_draft_values.clear()" not in reset_block
 
 
 def test_compose_form_fields_use_dense_short_field_grid() -> None:
@@ -253,7 +322,7 @@ def test_compose_form_fields_use_dense_short_field_grid() -> None:
 def test_compose_rf_modes_use_vertical_panels_and_target_completion() -> None:
     source = open("freqinout/gui/message_viewer_tab.py", encoding="utf-8").read()
 
-    assert "compact = False if in_workbench else self._messages_responsive_mode_for_width" in source
+    assert "viewport_width < (920 if in_workbench else int(self._responsive_compact_width))" in source
     assert "self.compose_body_splitter = body_splitter" in source
     assert 'compose_sidebar = mode in {"nbems", "spotter", "commstat_rf"} and not compact' in source
     assert "desired_body = Qt.Horizontal if compose_sidebar else Qt.Vertical" in source
@@ -266,6 +335,81 @@ def test_compose_rf_modes_use_vertical_panels_and_target_completion() -> None:
     assert 'setPlaceholderText("GROUP or CALLSIGN")' in source
     assert "known_groups: set[str] = set()" in source
     assert "def _compose_rf_target_text" in source
+
+
+def test_compose_workbench_is_screen_bounded_and_resize_safe() -> None:
+    source = open("freqinout/gui/message_viewer_tab.py", encoding="utf-8").read()
+
+    assert "class _ResponsiveComposeWorkbenchDialog(QDialog):" in source
+    assert "QTimer.singleShot(0, self._on_compose_resize)" in source
+    assert "def _compose_layout_viewport" in source
+    assert "def _compose_workbench_available_geometry" in source
+    assert "dialog = _ResponsiveComposeWorkbenchDialog(self, refresh_for_workbench_resize)" in source
+    assert "dialog.setMaximumSize(usable_width, usable_height)" in source
+    assert "dialog.resize(min(1280, usable_width), min(820, usable_height))" in source
+    assert "root.insertWidget(index, widget" in source
+
+
+def test_compose_mode_bodies_use_internal_scroll_before_fixed_height() -> None:
+    source = open("freqinout/gui/message_viewer_tab.py", encoding="utf-8").read()
+
+    assert "self.compose_commstat_scroll.setMinimumHeight(0)" in source
+    assert "self.compose_field_scroll.setMinimumHeight(0)" in source
+    assert "self.compose_field_box.setMinimumHeight(180)" in source
+    assert "self.compose_field_box.setMinimumHeight(460 if brevity_enabled else 340)" not in source
+
+
+def test_compose_payload_preview_keeps_discovery_out_of_keystroke_path() -> None:
+    source = open("freqinout/gui/message_viewer_tab.py", encoding="utf-8").read()
+    preview = source[source.index("    def _update_compose_preview"): source.index("    def _send_compose_js8_spotter")]
+
+    for helper in (
+        "_refresh_compose_radio_targets",
+        "_refresh_compose_message_folder_options",
+        "_install_compose_target_completers",
+        "_refresh_compose_bbs_location_targets",
+        "_refresh_compose_signing_keys",
+        "_refresh_compose_js8_auth_keys",
+        "_compose_refresh_send_guidance",
+    ):
+        assert helper not in preview
+    # Preview is a hot keystroke path: it may format cached state, but it must
+    # not plan destinations (which probes the filesystem) or touch DB/socket
+    # APIs. Those operations belong to explicit workers/actions.
+    assert "_compose_destination_plans" not in preview
+    assert "Path(" not in preview
+    assert "sqlite3.connect" not in preview
+    assert "send_js8_message_guarded" not in preview
+    assert "def _refresh_compose_setup_discovery" in source
+    assert "def _on_compose_rf_target_changed" in source
+    assert "QTimer.singleShot(180, self._run_pending_compose_target_discovery)" in source
+
+
+def test_compose_expect_save_is_create_only_and_preserves_existing_policy(tmp_path) -> None:
+    db_path = tmp_path / "expect.sqlite"
+    entry = {
+        "expect_key": "F!103",
+        "response_text": "@MAGNET F!103 ORIGINAL",
+        "source_radio_id": "",
+        "source_scope": "all",
+        "js8_instance_id": "",
+        "enabled": False,
+        "auto_reply_enabled": False,
+        "unattended_auto_reply_enabled": False,
+        "import_source": "fio-compose-js8spotter",
+        "create_only": True,
+    }
+
+    first = save_expect_entry(entry, db_path=db_path)
+    assert first.created is True
+
+    with pytest.raises(ExpectEntryExistsError):
+        save_expect_entry({**entry, "response_text": "REPLACEMENT", "enabled": True}, db_path=db_path)
+
+    rows = list_expect_entries(db_path=db_path, enabled_only=False, expect_key="F!103")
+    assert len(rows) == 1
+    assert rows[0]["response_text"] == "@MAGNET F!103 ORIGINAL"
+    assert rows[0]["enabled"] == 0
 
 
 def test_nbems_compose_uses_sidebar_and_popout_body_splitter() -> None:
@@ -347,4 +491,6 @@ def test_compose_form_drafts_survive_mode_switch_rebuilds() -> None:
     assert "self._compose_form_draft_values[form_key] = self._compose_field_values()" in source
     assert "self._store_compose_form_draft()" in source
     assert "dict(self._compose_form_draft_values.get(form_identity, {}))" in source
-    assert "self._compose_form_draft_values.clear()" in source
+    assert "self._compose_form_draft_mode_keys.setdefault(mode, set()).add(form_key)" in source
+    assert "def _store_compose_mode_draft" in source
+    assert "def _restore_compose_mode_draft" in source

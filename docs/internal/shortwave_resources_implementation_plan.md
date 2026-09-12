@@ -8,6 +8,9 @@ Date: 2026-09-10
 
 Authority: `shortwave_resources_spec.md`
 
+Delivery governance: `docs/internal/project_delivery_rules.md` is authoritative;
+the package assignments below remain historical implementation evidence.
+
 SDR receiver work is governed and ordered by
 `sdr_receiver_control_implementation_plan.md`. SDR control is the implementation
 priority before Shortwave packages. The Shortwave data model remains independent

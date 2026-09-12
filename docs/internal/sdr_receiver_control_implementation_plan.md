@@ -7,6 +7,9 @@ Date: 2026-09-10
 
 Authority: `sdr_receiver_control_spec.md`
 
+Delivery governance: `docs/internal/project_delivery_rules.md` is authoritative;
+the package assignments below remain historical implementation evidence.
+
 Scheduler concurrency authority:
 `multi_endpoint_scheduler_concurrency_spec.md`. Package SDR-1 depends on the
 corresponding MES-0 through MES-3 gates; automated SDR adapter integration,

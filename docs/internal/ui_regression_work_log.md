@@ -1,5 +1,114 @@
 # UI Regression Work Log
 
+All new entries must follow the authoritative multi-model delivery contract in
+`docs/internal/project_delivery_rules.md` and record the required package/model,
+primary-review, acceptance, and exit-gate evidence.
+
+## 2026-09-11 — Standing multi-model delivery governance
+
+Status: documentation/governance exit gate passed; no runtime behavior changed.
+
+The maintainer's standing authorization for cost-controlled model selection is
+now a mandatory repository rule. `AGENTS.md` requires every project task to read
+`docs/internal/project_delivery_rules.md`; the Compose workbench, production
+remediation, Shortwave, and SDR implementation authorities reference the same
+contract without duplicating it. The contract assigns architecture,
+concurrency/lifecycle, migrations, destructive-operation review, delegated-diff
+review, and final integration to the high-reasoning primary model; assigns
+bounded UI, mechanical, audit, fixture, and focused-test packages to Terra,
+Luna, or an available Mini-class model; requires pre-coding package/model
+reporting; preserves unrelated work; requires specification and work-log
+updates; and prevents successor work from starting before its gate passes.
+
+Work packages and models:
+
+- high-reasoning primary GPT-5 model (exact host runtime submodel identifier not
+  exposed): contract architecture, precedence, integration, delegated-result
+  review, repository edits, and exit-gate judgment;
+- `gpt-5.6-luna`, medium reasoning: read-only audit of existing model-assignment
+  language and the minimum durable cross-reference pattern;
+- `gpt-5.6-terra`, high reasoning: independent ambiguity, enforceability,
+  safety-exception, reporting, and model-identifier review.
+
+Primary review incorporated both audits, retained the user's standing
+authorization verbatim in the canonical contract, clarified unavailable
+Mini-class fallback and exact-model reporting, and preserved stricter
+specification gates. Acceptance checks verified every mandatory reference,
+heading, authorization clause, model boundary, gate clause, work-log clause,
+and clean Markdown whitespace. No application code, database, configuration,
+or runtime data was changed.
+
+## 2026-09-11 — Message Compose Workbench completion
+
+Status: CMW-0 through CMW-4 automated exit gates passed; Linux production
+qualification remains open for the operator's real GPG, NBEMS, Managed BBS,
+VarAC, and JS8Call installations.
+
+The workbench now treats composition as the primary task at embedded and
+pop-out sizes. The non-modal full workbench is bounded to the available screen,
+resize work is coalesced, internal editors yield before clipping, and returning
+to embedded Compose performs a clean reparent/layout pass. NBEMS, JS8Call,
+FIOSpotter, and CommStat retain independent in-memory drafts; Reset clears only
+the active mode and preserves the selected radio.
+
+The keystroke preview path is now memory-only. Destination readiness is cached
+after explicit setup changes and revalidated at Stage time. Form discovery and
+parsing, signing-key discovery, target schedule/path guidance, and Spotter
+MsgAuth lookup use generation-keyed workers. Stage/sign/verify/BBS work and
+guarded JS8 preflight/send also run off the GUI thread. In-flight guards remain
+active until each QThread actually finishes, closing the rapid-double-click
+reference race, and shutdown gives Compose workers a bounded clean exit.
+
+NBEMS presents `FLMsg`, `FLAmp`, and `Both` as file choices, with an independent
+VarAC Outbox copy and station-owned `Add to BBS` workflow. Staging uses
+temporary files plus no-overwrite publication. Signed FLAmp output must verify
+locally before it becomes visible or eligible for BBS publication; failure
+never falls back to unsigned. Managed BBS receives the FLAmp artifact when
+FLAmp/Both is selected and FLMsg otherwise, and logical memberships update in
+one database transaction without direct writes to location/live projection
+folders. Partial results retain the draft and enumerate successes and failures.
+
+FIOSpotter Save-to-Expect now creates a disabled, all-radio review draft and
+refuses to replace an existing rule or policy. JS8Call, FIOSpotter, and CommStat
+RF actions retain selected-target safety preflight and report API acceptance as
+`Queued`, not as confirmed transmission.
+
+Work packages and models:
+
+- high-reasoning primary GPT-5 model (exact host runtime submodel identifier not
+  exposed): completion spec, BBS/signing/Expect ownership, thread/action
+  architecture, cached preview boundary, target-guidance worker, delegated-diff
+  review, integration, and exit-gate decision;
+- `gpt-5.6-terra`, medium reasoning: bounded responsive workbench geometry,
+  stable reparenting, scroll/size behavior, coalesced resize work, and
+  mode-scoped draft/reset implementation;
+- `gpt-5.6-luna`, medium reasoning: staging/signing/BBS failure matrix,
+  responsiveness and action contract tests, and replacement of stale static
+  assertions with the worker/catalog ownership contract.
+
+Primary review corrected logical multi-location BBS ownership, result snapshot
+reporting, send/stage QThread completion races, clean shutdown waits, duplicate
+initial setup, destination filesystem probes during preview, stale target
+guidance, and draft preservation for the checklist-based BBS selector.
+
+Acceptance evidence:
+
+- 71 focused Compose, NBEMS, workbench, guidance, signing, BBS, JS8Call,
+  FIOSpotter, and CommStat tests pass.
+- 145 adjacent Expect, JS8 send, Message responsiveness, reader/BBS, and station
+  BBS integration tests pass.
+- A 120-edit offscreen JS8 preview probe measured 0.809 ms median, 0.838 ms
+  p95, and 1.335 ms maximum on the development Mac, below the 16 ms p95 and
+  50 ms bounded acceptance targets.
+- Python compile and `git diff --check` pass.
+- A full-repository run reached 709 passing and 3 skipped tests before the first
+  unrelated failure in `test_js8_inbox_ingest_keeps_same_native_id_from_two_sources`;
+  its fixture traffic is now excluded by the existing JS8 inbox policy and no
+  Compose-owned file is involved. A later all-tests run was stopped after the
+  suite accumulated unrelated scheduler workers; interrupting that Qt process
+  produced a harness segmentation fault. The bounded Compose and adjacent
+  suites exit cleanly.
+
 This log tracks user-observed UI regressions and contract follow-up items that
 must remain visible across implementation passes. Use it for issues that are
 easy to lose inside broader specs.

@@ -1,5 +1,20 @@
 # Agent Operating Rules
 
+## Mandatory Multi-Model Delivery Governance
+
+- Before reviewing, planning, coding, testing, or integrating project work, read
+  `docs/internal/project_delivery_rules.md`.
+- That document is the standing project-wide authority for model selection,
+  delegation, work-package planning, acceptance testing, exit-gate sequencing,
+  specification/work-log updates, and delivery reporting.
+- The user authorizes the high-reasoning primary model to select appropriate
+  primary, Terra, Luna, or available Mini-class models without requesting
+  package-by-package approval. Work begins automatically after the required
+  work-package announcement unless the governing contract requires user input.
+- A stricter safety, migration, hardware, or acceptance gate in an applicable
+  specification remains binding. General language in an older specification
+  does not weaken the project-wide delivery contract.
+
 ## Multi-Rig Product And UI Authority
 
 - Before planning, reviewing, or implementing multi-rig UI work, read

@@ -1,7 +1,11 @@
 # Compose Messages Workbench Spec
 
-Status: planned for multi-rig 2.0.0 private testing. Early plumbing exists, but
-the current UI is not yet accepted as operator-usable.
+Status: CMW-0 through CMW-4 automated implementation complete 2026-09-11.
+Linux production qualification remains an explicit operator gate for real GPG,
+NBEMS, Managed BBS, and JS8Call installations.
+
+Delivery governance: all review, implementation, testing, and integration under
+this specification must follow `docs/internal/project_delivery_rules.md`.
 
 ## Goal
 
@@ -53,9 +57,10 @@ but this document owns the Compose user experience and acceptance criteria.
 - Heavy data discovery must happen through cached helpers/background work, not
   repeated synchronous UI rebuilds.
 - Small fixed-choice controls should be graphical chips, not dropdowns. This
-  includes radio source, NBEMS send target, NBEMS VarAC copy target, and JS8
-  send kind. Large or user-defined option sets such as forms, folders,
-  categories, and brevity catalogs remain dropdowns.
+  includes radio source, NBEMS file type, optional VarAC Outbox copy, Managed
+  BBS publication, and JS8 send kind. Large or user-defined option sets such as
+  forms, folders, categories, BBS locations, and brevity catalogs remain
+  dropdowns or checkable lists.
 
 ## Compose Modes
 
@@ -72,8 +77,12 @@ Required workflow:
 - Preserve `Auto` group when no group mapping is required.
 - Show form family and form after group selection.
 - Show priority, report title, and timestamp in a compact header.
-- Show send target chips: `FLMsg`, `FLAmp`, or `Both`.
-- Show VarAC copy chips: `None`, `Outbox`, `BBS`, or `Both`.
+- Show file-type chips: `FLMsg`, `FLAmp`, or `Both`.
+- Show VarAC Outbox copy as an optional radio-specific destination. Managed BBS
+  publication is a separate station-service action and must never be presented
+  as a VarAC-folder copy.
+- Show `Add to BBS` plus one or more enabled logical Managed BBS locations.
+  Location labels include concise access/retention context where space allows.
 - Show signing option for FLAmp copies without clipping the row.
 - Show save folder only when the operator needs to change it. The current save
   destination should remain visible in the summary.
@@ -87,8 +96,8 @@ Preferred embedded/wide layout:
   a left compose-selection/sidebar panel and a larger right compose-message
   panel.
 - Left panel: compact short-name radio chips, `Group`, `Form Family`, `Form`,
-  `Priority`, `Report Title`, `Zulu`, `Send Target`, `VarAC Copy`,
-  `Sign FLAmp Copy`, `Message Folder`, and optional signing/BBS controls.
+  `Priority`, `Report Title`, `Zulu`, `File Type`, optional `Copy to VarAC
+  Outbox`, `Sign FLAmp Copy`, `Message Folder`, and Managed BBS controls.
 - Right panel: large form field editor/message body with generated filename,
   delimiter/suffix guidance, stage destinations, and exact output preview below
   or beside the editor as space allows.
@@ -101,9 +110,9 @@ Preferred embedded/wide layout:
 
 Acceptance criteria:
 
-- On a 13-inch laptop window, `Send Target`, `VarAC Copy`, and `Sign FLAmp Copy`
-  are visible and usable.
-- `Send Target` and `VarAC Copy` chips must render as compact inline rows with
+- On a 13-inch laptop window, `File Type`, `Copy to VarAC Outbox`, `Add to BBS`,
+  and `Sign FLAmp Copy` are visible and usable.
+- `File Type` and fixed destination chips must render as compact inline rows with
   full-height clickable chips; labels or chip text must not be hidden behind the
   next setup row.
 - `Compose For` must not span the entire screen in embedded Compose; it should
@@ -119,9 +128,18 @@ Acceptance criteria:
   reparented widgets may remain.
 - A long message body must have a large editor. If embedded Compose cannot make
   that comfortable, the full workbench/modal is the preferred operator path.
-- Selecting `BBS` or `Both` for VarAC Copy must not distort the layout. BBS
+- Selecting Managed BBS publication must not distort the layout. BBS
   destination controls are NBEMS-only unless a separate RF-to-BBS workflow is
   explicitly designed.
+- BBS publication updates the one station Managed BBS catalog atomically using
+  logical location IDs. Compose must not create/copy files directly in a
+  location source folder or a radio's live BBS projection folder.
+- When both FLMsg and FLAmp are staged, Managed BBS publishes the FLAmp artifact;
+  otherwise it publishes the selected generated artifact. If `Sign FLAmp Copy`
+  is enabled, the catalog must reference only the successfully signed and
+  locally verified FLAmp artifact. This exact choice appears in preview.
+- Failure to sign or verify prevents the FLAmp artifact from being published
+  and never falls back silently to an unsigned BBS publication.
 - Standard blank form behavior remains `.b2s` driven by form selection, not by
   group default.
 - Operating-group delimiter and signed/unsigned suffix policies remain visible
@@ -337,6 +355,169 @@ Forms:
 - Preview updates must be local and fast.
 - Catalog/form parsing should be cached by radio/profile path and invalidated
   only when radio, path, or refresh action changes.
+- Keystroke-driven preview is pure in-memory work: it performs no filesystem
+  discovery or mutation, SQLite query/write, socket call, GPG operation, or
+  full widget-tree layout traversal.
+- Compose discovery is generation-keyed and asynchronous. Stale results from a
+  prior radio, mode, group, or path selection are discarded.
+- Expensive stage/sign/verify/BBS-publish and JS8 send/preflight operations run
+  outside the GUI thread. The workbench displays progress within one event-loop
+  turn, permits only one in-flight primary action, and restores controls on
+  success or failure.
+- First usable cached paint targets 150 ms; cold paint targets 300 ms before
+  background enrichment. A preview edit targets 16 ms at p95 and must remain
+  below 50 ms on the bounded acceptance fixture.
+- No periodic timer, source scan, or background worker is added solely for
+  Compose. Discovery is event-driven and cached.
+
+## Draft And Action State
+
+- Each compose mode owns a draft containing all operator-entered content and
+  meaningful selections. Switching modes preserves the inactive draft.
+- Opening or closing the full workbench preserves the same draft and must not
+  initiate discovery merely because widgets are reparented or resized.
+- `Reset Draft` affects only the active mode, clears its staged-action status,
+  and preserves the selected radio unless the operator changes it.
+- A successful stage does not erase the draft automatically. The operator may
+  explicitly reset after confirming the generated files and publication
+  result. This avoids losing content after a partial destination failure.
+- Action completion is generation-checked. A result generated from an older
+  draft is reported but must not overwrite preview or status for a newer draft.
+
+## NBEMS Transaction Contract
+
+- A stage request snapshots the payload, filename, radio short name, file type,
+  signing selection/key, message folder, VarAC Outbox selection, Managed BBS
+  selection, and logical BBS location IDs before background work begins.
+- Destination filenames are collision-safe and every output is written through
+  a temporary sibling followed by a no-overwrite hard-link publication where
+  supported, with exclusive-create copying as the portability fallback.
+- FLAmp signing occurs before its final destination is made visible. Signed
+  output is locally verified before it can be reported as successful or added
+  to Managed BBS.
+- Managed BBS catalog work occurs in one local transaction after the selected
+  publish artifact exists. `upsert_bbs_artifact_path` and
+  `set_bbs_artifact_locations` are the ownership boundary. A DB failure leaves
+  generated source files intact and reports publication as failed; no live BBS
+  directory is modified directly.
+- Partial destination success is explicit. The result lists every staged,
+  signed/verified, published, skipped, and failed operation and retains the
+  draft for correction or retry.
+- Save-to-Expect creates a disabled draft without silently replacing an
+  existing rule or changing its access/auto-reply policy. A collision opens the
+  existing rule for review or requires an explicit replace decision.
+
+## Completion Work Packages (CMW)
+
+### CMW-0 — Contract and architecture review
+
+Primary high-reasoning ownership: reconcile the current implementation with
+the station Managed BBS ownership model, define draft/action state, define the
+GUI-thread boundary, and preserve existing guarded JS8/MsgAuth behavior.
+
+Exit gate: this specification names one BBS ownership path, one async action
+boundary, deterministic artifact selection, non-destructive failure behavior,
+and measurable responsiveness targets. **Passed 2026-09-11.**
+
+### CMW-1 — Cheap preview and asynchronous enrichment
+
+Primary high-reasoning ownership for concurrency; focused tests may be
+delegated. Split cheap payload/validation preview from radio, form, target,
+signing-key, BBS-location, peer/path, and catalog discovery. Cache discovery by
+effective inputs, coalesce layout work, and discard stale generations.
+
+Exit gate: typing executes no filesystem/DB/socket/GPG work; cold loading is
+visible and non-blocking; stale results cannot overwrite current selections;
+preview latency meets the bounded target. **Passed by focused automated tests
+2026-09-11.** Target guidance, MsgAuth lookup, form parsing, signing-key
+discovery, staging/signing/BBS publication, and guarded JS8 send are worker
+owned; preview uses cached destination state only.
+
+### CMW-2 — Responsive embedded and full workbench UX
+
+Bounded UI implementation may be delegated. Establish mode-specific
+presentation, compact/wrapped action strips, dominant editors, reachable exact
+preview/action, active-mode draft preservation, and stable open/close geometry
+at all required viewport/theme/text combinations.
+
+Exit gate: offscreen geometry/render tests and reviewed screenshots pass at
+1280 x 720 embedded and 1180 x 780 workbench baselines, plus narrow/Large-text
+cases, with no clipping, overlap, stale mode content, or reparenting artifacts.
+**Passed by offscreen geometry, workbench round-trip, and mode-draft tests
+2026-09-11.** Production visual confirmation remains part of the Linux gate.
+
+### CMW-3 — NBEMS, signing, Managed BBS, Expect, and send actions
+
+Primary high-reasoning ownership. Move action I/O off the GUI thread; make
+staging atomic and retry-safe; verify signed FLAmp before publication; update
+logical Managed BBS memberships transactionally; protect existing Expect rules;
+and retain guarded JS8 target-state preflight and MsgAuth semantics.
+
+Exit gate: the FLMsg/FLAmp/Both × signed/unsigned × Outbox × BBS matrix passes;
+missing paths/keys, bad passphrase, signing/verification failure, DB failure,
+collision, double-click, close-during-action, and partial success remain calm,
+recoverable, and explicit. **Passed by service and UI acceptance tests
+2026-09-11.** No destructive migration was used.
+
+### CMW-4 — Integration and qualification
+
+Primary high-reasoning ownership for delegated-diff review, full regression,
+spec/work-log reconciliation, and the exit decision.
+
+Exit gate: all automated compose, NBEMS, BBS, Expect, JS8/FIOSpotter/CommStat,
+responsive-layout, lifecycle, compile, and diff checks pass. Linux production
+qualification covers a real signed FLAmp stage, FLMsg stage, Managed BBS
+publication, and JS8 send; any remaining hardware/operator gate is recorded
+separately and does not misstate automated completion. **Automated gate passed
+2026-09-11:** 71 focused Compose tests and 145 adjacent integration tests pass;
+compile and diff checks pass. A full-repository run reached 709 passing tests
+before stopping on an unrelated JS8 ingest-policy expectation; this does not
+alter the Compose gate and is recorded in the work log.
+
+## Implemented Outcome
+
+- Embedded Compose and the non-modal full workbench share one stable draft but
+  use screen-bounded, resize-coalesced geometry. Each mode retains and resets
+  only its own draft; the selected radio remains stable.
+- FLMsg, FLAmp, and Both are explicit file choices. Optional VarAC Outbox copy
+  remains radio-specific. `Add to BBS` selects one or more logical station BBS
+  locations and never writes directly to a live BBS projection folder.
+- File writes are collision-safe and temporary-first. A signed FLAmp output is
+  not exposed or published until local GPG verification succeeds; failure has
+  no unsigned fallback.
+- The selected BBS artifact is deterministic: FLAmp for `FLAmp` or `Both`, and
+  FLMsg otherwise. Catalog membership is committed as one transaction and
+  action results use the request snapshot, not whatever the operator selects
+  while work is running.
+- FIOSpotter Save-to-Expect creates a disabled all-radio draft. It refuses to
+  overwrite an existing rule or its access and auto-reply policy.
+- JS8Call, FIOSpotter, and CommStat RF use a guarded background send. The UI
+  reports API acceptance as `Queued`, never as confirmed transmission, and
+  prevents overlapping send attempts.
+- Keystroke preview performs in-memory formatting only. Destination probing,
+  peer/path queries, MsgAuth lookup, form parsing, GPG discovery/signing, BBS
+  writes, and JS8 socket calls are removed from that path.
+
+## Linux Production Qualification
+
+Use configured production paths and disposable test content. Confirm:
+
+1. Create FLMsg, unsigned FLAmp, and Both; verify the expected sibling files and
+   collision-safe names without changing source templates.
+2. Create a signed FLAmp file with a real private key; verify its signature in
+   FIO/FLAmp. Repeat once with a wrong or unavailable passphrase and confirm no
+   unsigned FLAmp or BBS publication is produced.
+3. Select two Managed BBS locations, stage, and confirm one station-catalog
+   artifact has exactly those memberships and appears through the normal BBS
+   projection lifecycle.
+4. Copy to a configured VarAC Outbox and confirm the radio-specific destination
+   receives the generated file independently of Managed BBS publication.
+5. Queue one JS8Call message, one FIOSpotter form, and one CommStat StatRep;
+   confirm selected-target preflight behavior and observe the actual transmit
+   in JS8Call.
+6. Resize embedded Compose and the full workbench at normal and Large text,
+   switch among all four modes, and confirm fields, actions, preview, and
+   per-mode drafts remain visible and stable.
 
 ## Non-Goals
 

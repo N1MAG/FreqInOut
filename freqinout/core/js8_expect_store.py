@@ -36,6 +36,15 @@ class ExpectEntrySaveResult:
     auto_reply_enabled: bool
 
 
+class ExpectEntryExistsError(ValueError):
+    """Raised when a create-only Expect draft would replace an existing rule."""
+
+    def __init__(self, *, entry_id: int, expect_key: str):
+        self.entry_id = int(entry_id)
+        self.expect_key = str(expect_key or "").strip().upper()
+        super().__init__(f"Expect rule {self.expect_key} already exists (id {self.entry_id}).")
+
+
 @dataclass(frozen=True)
 class ExpectAllowPolicySaveResult:
     id: int
@@ -875,6 +884,8 @@ def save_expect_entry(
             """,
             (expect_key, source_radio_id, js8_instance_id),
         ).fetchone()
+        if row and bool(entry.get("create_only", False)):
+            raise ExpectEntryExistsError(entry_id=int(row[0]), expect_key=expect_key)
         values = {
             "source_radio_id": source_radio_id,
             "source_scope": source_scope,

@@ -388,6 +388,7 @@ def test_suggest_field_value_uses_form_context_and_skips_expiration_defaults() -
 
 def test_messages_source_contains_compose_mode_and_varac_copy_controls() -> None:
     text = _read("freqinout/gui/message_viewer_tab.py")
+    stage_service = _read("freqinout/core/compose_stage_service.py")
     shell = _read("freqinout/gui/main_window.py")
     assert '("Inbox", "Messages")' in shell
     assert '("Compose", "Messages")' in shell
@@ -407,10 +408,15 @@ def test_messages_source_contains_compose_mode_and_varac_copy_controls() -> None
     assert "No radio profile has FLMsg, FLAmp, or VarAC message destinations configured." in text
     assert "def _compose_bbs_targets_for_radio(self, target: Optional[ComposeRadioTarget])" in text
     assert 'radio_row.addWidget(QLabel("Radio"))' not in text
-    assert 'bbs_location_row.addWidget(QLabel("BBS Destination"))' in text
+    assert 'bbs_location_row.addWidget(QLabel("Managed BBS Locations"))' in text
+    assert 'self.compose_publish_bbs_chk = QCheckBox("Add to BBS")' in text
+    assert 'self.compose_bbs_location_selector = DropdownChecklist("Locations")' in text
     assert 'row2.addWidget(QLabel("Report Title"))' in text
-    assert 'self.compose_varac_target_combo.addItems(["None", "Outbox", "BBS", "Both"])' in text
+    assert 'self.compose_varac_target_combo.addItems(["None", "Outbox"])' in text
     assert 'varac_outbox_dir=self._compose_varac_outbox_dir(radio_target)' in text
+    assert 'varac_bbs_dir=""' in text
+    assert 'publish_to_bbs=publish_to_bbs' in text
+    assert 'bbs_location_ids=tuple(str(target.get("location_id", "") or "") for target in bbs_targets)' in text
     assert 'def _compose_varac_outbox_dir(self, target: Optional[ComposeRadioTarget] = None) -> str:' in text
     assert 'self.compose_family_combo.addItem("Standard Blank Form (.b2s)"' not in text
     assert 'self.compose_form_combo.addItem("Standard Blank Form (.b2s)", {"kind": "standard"})' in text
@@ -423,11 +429,40 @@ def test_messages_source_contains_compose_mode_and_varac_copy_controls() -> None
     assert "self._refresh_compose_smart_defaults()" in text
     assert "self._compose_active_form_key = form_identity" in text
     assert "dict(self._compose_form_draft_values.get(form_identity, {}))" in text
-    assert 'parse_compose_template_fields(template_text)' in text
+    assert 'class _ComposeCatalogDiscoveryWorker(QObject):' in text
+    assert 'parse_compose_template_fields(text_value)' in text
+    assert 'self._compose_parsed_form_cache = dict(parsed)' in text
     assert "field_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)" in text
     assert "widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)" in text
-    assert "FLAmp signed file verified:" in text
-    assert "FLAmp signing failed; no unsigned FLAmp fallback was staged." in text
-    assert "FLAmp signing failed; staged unsigned file instead" not in text
+    assert "FLAmp signed file verified:" in stage_service
+    assert "FLAmp signing failed; no unsigned FLAmp fallback was staged." in stage_service
+    assert "FLAmp signing failed; staged unsigned file instead" not in stage_service
     assert "self._compose_software_status.program_is_running(app_name)" in text
     assert "No second instance was opened." in text
+
+
+def test_compose_add_to_bbs_uses_logical_catalog_publication_and_stage_worker() -> None:
+    text = _read("freqinout/gui/message_viewer_tab.py")
+    service = _read("freqinout/core/compose_stage_service.py")
+
+    snapshot_start = text.index("    def _compose_stage_request_snapshot")
+    snapshot_end = text.index("    def _stage_compose_files", snapshot_start)
+    snapshot = text[snapshot_start:snapshot_end]
+    stage_start = text.index("    def _stage_compose_files")
+    stage_end = text.index("    def _on_compose_stage_thread_finished", stage_start)
+    stage = text[stage_start:stage_end]
+
+    # “Add to BBS” carries location IDs into the stage request. It does not
+    # turn the BBS into another filesystem destination/copy operation.
+    assert "publish_to_bbs=publish_to_bbs" in snapshot
+    assert "bbs_db_path=str(bbs_library_db_path_from_settings(self.settings)) if publish_to_bbs else \"\"" in snapshot
+    assert "bbs_location_ids=" in snapshot
+    assert "varac_bbs_dir" not in snapshot
+    assert "_ComposeStageWorker" in stage
+    assert "stage_compose_request" not in stage
+    assert "copyfile" not in stage
+
+    assert "upsert_bbs_artifact_path" in service
+    assert "set_bbs_artifact_locations" in service
+    assert "bbs_publish_path" in service
+    assert "request.bbs_location_ids" in service
