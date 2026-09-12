@@ -11945,19 +11945,27 @@ class MainWindow(QMainWindow):
             pass
 
     def _set_window_icon(self):
-        assets_dir = Path(__file__).resolve().parents[2] / "assets"
+        asset_roots = []
+        bundle_root = str(getattr(sys, "_MEIPASS", "") or "").strip()
+        if bundle_root:
+            asset_roots.append(Path(bundle_root) / "assets")
+        asset_roots.append(Path(__file__).resolve().parents[2] / "assets")
         icon = QIcon()
         candidates = ["FreqInOut.ico", "FreqInOut-desktop.png"] if sys.platform == "win32" else ["FreqInOut-desktop.png", "FreqInOut.ico"]
-        for name in candidates:
-            icon_path = assets_dir / name
-            if not icon_path.exists():
-                continue
-            candidate = QIcon(str(icon_path))
-            if candidate.isNull():
-                continue
-            icon = candidate
-            break
+        for assets_dir in asset_roots:
+            for name in candidates:
+                icon_path = assets_dir / name
+                if not icon_path.exists():
+                    continue
+                candidate = QIcon(str(icon_path))
+                if candidate.isNull():
+                    continue
+                icon = candidate
+                break
+            if not icon.isNull():
+                break
         if icon.isNull():
+            log.warning("FIO application icon could not be loaded from packaged or source assets.")
             return
         self.setWindowIcon(icon)
         app = QApplication.instance()

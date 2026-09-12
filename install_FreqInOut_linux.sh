@@ -1538,6 +1538,7 @@ Name=FreqInOut
 Comment=HF Radio Frequency and Net Control Utility
 Exec=$LAUNCHER_PATH
 Icon=$icon_value
+StartupWMClass=FreqInOut
 Terminal=false
 Categories=Utility;HamRadio;
 StartupNotify=true

@@ -32,10 +32,41 @@ def _set_windows_app_user_model_id() -> None:
         pass
 
 
+def _apply_application_identity(app: QApplication) -> None:
+    """Set shell identity before the splash creates FIO's first window."""
+
+    app.setApplicationName("FreqInOut")
+    app.setApplicationDisplayName("FreqInOut")
+    app.setOrganizationName("N1MAG")
+    if sys.platform.startswith("linux"):
+        # Matches ~/.local/share/applications/freqinout.desktop. Cinnamon,
+        # GNOME, KDE, and Wayland shells use this association instead of
+        # falling back to a generic Python/application gear.
+        app.setDesktopFileName("freqinout")
+
+
+def _app_icon_candidate_paths() -> list[Path]:
+    names = (
+        ("FreqInOut.ico", "FreqInOut-desktop.png")
+        if sys.platform == "win32"
+        else ("FreqInOut-desktop.png", "FreqInOut.ico")
+    )
+    roots: list[Path] = []
+    bundle_root = str(getattr(sys, "_MEIPASS", "") or "").strip()
+    if bundle_root:
+        roots.append(Path(bundle_root) / "assets")
+    roots.append(Path(__file__).resolve().parents[1] / "assets")
+    candidates: list[Path] = []
+    for root in roots:
+        for name in names:
+            candidate = root / name
+            if candidate not in candidates:
+                candidates.append(candidate)
+    return candidates
+
+
 def _load_app_icon() -> QIcon:
-    assets_dir = Path(__file__).resolve().parents[1] / "assets"
-    icon_candidates = [assets_dir / "FreqInOut.ico", assets_dir / "FreqInOut-desktop.png"]
-    for icon_path in icon_candidates:
+    for icon_path in _app_icon_candidate_paths():
         try:
             if not icon_path.exists():
                 continue
@@ -77,6 +108,7 @@ def main():
     _set_windows_app_user_model_id()
     stage_started = time.perf_counter()
     app = QApplication(sys.argv)
+    _apply_application_identity(app)
     _emit_startup_stage("qt_app_created", stage_started, app_start=startup_started)
 
     stage_started = time.perf_counter()

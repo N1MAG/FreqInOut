@@ -3964,3 +3964,38 @@ that database measured 14.549 ms median; the 97.939 ms cold maximum remains on
 the background query lane. Python compilation and `git diff --check` pass. No
 source file or production database was modified, and no destructive migration
 was introduced.
+
+## 2026-09-11 — Startup dedication and community support message
+
+Status: implemented and automated gate passed.
+
+The lightweight startup splash now includes the dedication, “Dedicated to my
+Dad, now SK, who learned digital HF TriMode at age 86.” It also carries a
+restrained invitation: “If FIO serves your station, please consider supporting
+its continued development,” followed by the recognizable Buy Me a Coffee name
+and `buymeacoffee.com/n1mag`. The support message is informational and never
+blocks, delays, or requires interaction during startup. Both messages are also
+included in the splash accessibility description.
+
+Acceptance evidence: the focused startup-splash content/accessibility test
+passes, Python compilation and `git diff --check` pass, and the rendered
+540×270 splash was visually reviewed with a live startup-status line.
+
+## 2026-09-11 — Linux desktop-panel FIO icon restoration
+
+Status: implemented; Linux production confirmation remains operator-assisted.
+
+The application now declares `FreqInOut`, organization `N1MAG`, and desktop
+file id `freqinout` immediately after `QApplication` construction and before
+the splash creates the first window. Linux and macOS prefer the PNG application
+artwork while Windows continues to prefer the multiresolution ICO. Both source
+and PyInstaller `_MEIPASS` asset roots are supported. The generated Linux
+desktop entry now declares matching `StartupWMClass=FreqInOut`, allowing
+Mint/Cinnamon and other desktop shells to associate the running window with
+`freqinout.desktop` instead of displaying a generic gear. Missing runtime
+artwork is logged rather than silently ignored.
+
+Acceptance evidence: 12 focused application-identity, icon-loading, splash,
+and font-surface tests pass. Python compilation, installer shell syntax, and
+`git diff --check` pass. No startup polling, filesystem scan, or blocking work
+was added.
