@@ -172,11 +172,17 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         title="Software Used Help",
         summary="Choose only the station programs you actually use so FIO shows useful readiness guidance.",
     ),
+    "settings.software": HelpContext(
+        key="settings.software",
+        anchor="settings-software-administration",
+        title="Software Administration Help",
+        summary="Choose software, see the radios using it, choose a radio and task, then save only that software scope. Discovery and health checks run only when requested.",
+    ),
     "settings.js8call": HelpContext(
         key="settings.js8call",
         anchor="settings-js8call-details",
         title="JS8Call Settings Help",
-        summary="JS8Call connection, JS8 traffic files, CommStat, JS8Spotter, JS8Spotter form mapping, and Expect preparation.",
+        summary="Radio-scoped JS8Call application, API, message storage, ingest, launch, health, and advanced tasks. CommStat and Spotter are separate software families.",
     ),
     "settings.fast-light": HelpContext(
         key="settings.fast-light",
@@ -200,7 +206,7 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         key="settings.varac",
         anchor="settings-varac-details",
         title="VarAC Settings Help",
-        summary="VarAC paths, incoming/outbox folders, BBS management, Managed BBS Library, relay, and BBS Access Guard.",
+        summary="Radio-scoped VarAC application, runtime, inbox/outbox, inbound guard, cluster, launch, and health tasks. Station BBS administration is a separate top-level service.",
     ),
     "settings.message-auth": HelpContext(
         key="settings.message-auth",

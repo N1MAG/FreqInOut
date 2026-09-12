@@ -1,7 +1,13 @@
 # Settings Configuration Assistant Spec
 
-Status: planned, with first UI cleanup slice in progress for multi-rig 2.0.0
-private testing.
+Status: software-centered administration implementation complete for multi-rig
+2.0.0 private testing. SCA-S0 through SCA-S4 have passed their automated exit
+gates. Linux desktop qualification remains an operator-assisted production
+check and is recorded below rather than treated as automated evidence.
+
+The software-centered administration work below is the current implementation
+authority for Settings software workflows. It refines Phases 2 and 3 without
+moving operational FIO Spotter or BBS administration back under radio Settings.
 
 ## Goal
 
@@ -23,6 +29,250 @@ guide the user toward a stable setup while preserving operator control.
   screens.
 - Keep developer/support details available, but out of the normal operator
   path.
+
+## Software-Centered Administration
+
+### Operator mental model
+
+The normal workflow is:
+
+`Choose software -> see radios using it -> choose a radio -> choose a task -> configure`
+
+Settings navigation exposes `Main`, `Radios`, and `Software`. `Radios` owns
+radio identity, hardware/control backend, activation, plan/schedule assignment,
+RF Guard, and a concise software-assignment summary. `Software` owns detailed
+application administration. A software chip on a radio deep-links to the same
+Software workspace; detailed editors are not duplicated on the Radios page.
+
+The Software workspace must:
+
+- show software-family cards before presenting detailed fields;
+- show an `All` summary plus a chip for every radio using the selected family;
+- show disabled, unassigned, missing, shared, and needs-attention states without
+  relying on color alone;
+- keep a persistent identity banner such as
+  `Editing JS8Call for FIO-A - Instance: FIO-A JS8` above the editor;
+- disclose every affected radio before editing a shared instance;
+- segment configuration by operator task rather than present one long table or
+  form; and
+- label saves with the exact scope, for example
+  `Save JS8Call for FIO-A`.
+
+Selecting a family, radio, or task is navigation only. It must never save,
+discard, scan the filesystem, inspect processes, probe an endpoint, or perform
+radio I/O. Unsaved drafts remain keyed by owning radio and software instance.
+Switching context preserves drafts and marks affected chips. A deliberate
+secondary Save All action may exist, but a generic save must not silently commit
+unrelated radio drafts.
+
+### Software ownership and task taxonomy
+
+- **JS8Call** is a radio-assigned application instance. Tasks are Overview,
+  Application & Profile, API & Radio, Message Storage, Ingest & Forms, Launch,
+  Health, and Advanced.
+- **Fast Light** is a family. FLRig and FLDigi endpoints are radio-assigned.
+  FLMsg and FLAmp are shared station applications by default, while the workspace
+  still shows which radios use their message and transfer workflows. Tasks are
+  Overview, FLRig Control, FLDigi Modem & Logs, FLMsg, FLAmp & Signing, Message
+  Folders, Launch, Health, and Advanced.
+- **VarAC** is a radio-assigned application instance. Tasks are Overview,
+  Application & Radio, Runtime & Paths, Inbox & Outbox, Inbound Guard, Cluster,
+  Launch, Health, and Advanced. Shared BBS administration remains in the
+  top-level BBS service; Settings provides a contextual link only.
+- **CommStat** is a standalone external tool using an explicit JS8/radio
+  transport mapping. Its installation, launch, health, and mapping are not
+  presented as JS8Call settings.
+- **External Spotter** is an optional standalone application. It appears only
+  when configured or discovered and owns its installation, launch, profile, and
+  form-synchronization guidance.
+- **FIO Spotter** is a built-in FIO service. Settings shows dependency and radio
+  mapping status and links to the top-level FIO Spotter workspace for rules,
+  Expect administration, watches, forms, and activity.
+- **Launch Control** is a cross-cutting task and may summarize all configured
+  applications, but it does not replace each application's scoped Launch task.
+
+### Read model and performance contract
+
+The workspace renders from a bounded, immutable software-administration
+snapshot derived from device-profile assignments, linked JS8Call/Fast Light/
+VarAC rows, and cached readiness evidence. The snapshot supplies the reverse
+index from software instances to radios and identifies unassigned instances.
+The initial read model is additive and requires no schema migration.
+
+Opening Settings, choosing a family, changing a radio chip, switching a task,
+resizing, changing theme, and painting are cache-only operations. Discovery and
+validation run only on explicit request or a bounded background refresh. They
+are asynchronous, coalesced, cancellable, generation-checked, and publish an
+immutable result. The prior known state remains usable while refresh runs. One
+slow or unavailable application endpoint must not block another editor or the UI.
+
+### Responsive and accessibility contract
+
+At wide sizes, family cards, radio chips, task navigation, and the editor may use
+multiple columns. At 1000x700, 900x560, and Large Text, controls wrap or stack
+without horizontal page scrolling and the editor remains the primary work
+surface. Chip text includes identity and state, has an accessible name and
+tooltip, and never communicates readiness by color alone. Hints follow the
+project-wide neutral-identity rule.
+
+### Delivery slices and exit gates
+
+1. **SCA-S0 - specification and read model.** Add the immutable reverse-index
+   model and pure tests for assigned, shared, disabled, and unassigned instances.
+   Exit: no migration or runtime writes; focused model tests pass.
+2. **SCA-S1 - workspace shell.** Add `Settings -> Software`, family cards, radio
+   chips, identity banner, task routing, and radio-page deep links. Existing
+   editors may be reused behind the shell. Exit: the complete software-first
+   navigation path works without I/O and responsive/theme tests pass.
+3. **SCA-S2 - task-oriented editors.** Separate JS8Call from FIO Spotter,
+   External Spotter, and CommStat; segment Fast Light and VarAC by operator task.
+   Exit: ownership is unambiguous and existing values round-trip unchanged.
+4. **SCA-S3 - scoped drafts and saves.** Add exact save scope, dirty-state chips,
+   shared-instance warnings, and deliberate Save All behavior while retaining
+   cross-radio rejection and the single-active-radio legacy projection rule.
+   Exit: wrong-radio and shared-instance tests pass.
+5. **SCA-S4 - guided discovery and qualification.** Route existing path/endpoint
+   discovery through bounded background work, finish help and accessibility,
+   and qualify light/dark, Normal/Large Text, Linux, 1920x1080, 1000x700, and
+   900x560. Exit: focused and integration suites pass; any platform-assisted
+   evidence is recorded rather than silently waived.
+
+### Implemented through SCA-S2
+
+The Software workspace now hosts declarative, task-oriented editors over the
+existing per-radio software state. JS8Call no longer presents CommStat,
+External Spotter, or legacy Expect administration as JS8Call settings. CommStat
+owns its launcher and explicit JS8 transport mapping; External Spotter owns its
+optional launcher/import workflow; built-in FIO Spotter exposes dependency and
+radio mapping plus a route to its top-level operational workspace. Fast Light
+and VarAC are segmented by the task taxonomy above. The former monolithic
+editors remain non-navigable compatibility adapters until their state-loader
+dependencies are retired; they are not a competing operator surface.
+
+Task navigation is cache-only. Existing per-radio values populate the editor
+without changing their database keys or schema, and dotted message-folder
+values retain their nested structure. The hidden legacy Spotter and Expect
+tables are no longer synchronously queried and populated during Settings
+startup. Explicit import and operational management remain available from the
+owning product surface.
+
+### Implemented in SCA-S3
+
+Each editable family now has an explicit field partition and an exact-scope
+save label. A selected-family save merges only that family's draft fields into
+the selected radio's persisted base, including individually owned nested
+message-folder entries. Other software values and other dirty family drafts are
+preserved. The existing source-radio identity rejection remains authoritative,
+shared instances name the other affected radios before confirmation, and the
+legacy single-active-radio projection runs only after a successful scoped save.
+
+Dirty state is keyed by `(radio, software family)` and is communicated in family
+and radio chip text, accessible names, the identity banner, and the selected
+editor. `Save All Changes` is deliberate, secondary, disabled when no drafts
+exist, and retains dirty indicators after failure. The global `Save Settings`
+action explicitly excludes Software workspace drafts. Default endpoint values
+alone no longer create unrelated JS8Call or Fast Light instance records while
+saving another family.
+
+### Implemented in SCA-S4
+
+Path discovery is an explicit `Find installed software` action in the selected
+task editor. It captures a copy of already-loaded Settings values on the UI
+thread and performs filesystem discovery in one Settings-owned worker lane.
+Repeated requests are coalesced to the newest request, the active worker
+receives a cancellation request, and generation plus family/radio/task identity
+guards prevent a stale result from filling a different editor. Discovery fills
+blank fields only and reports how many values were filled, preserved, or not
+found. Existing operator values are never silently replaced.
+
+Worker completion, cancellation, and failure all stop the worker thread. Normal
+navigation never starts discovery. Shutdown requests cancellation and waits no
+more than 1.2 seconds; an unusually slow filesystem operation is retained until
+its thread exits instead of blocking shutdown or allowing a running `QThread`
+to be destroyed. Endpoint health checks remain explicit and use the existing
+asynchronous status service.
+
+At constrained height, explanatory prompts collapse while the software,
+radio, and task chip strips remain available and the editor becomes the primary
+surface. Light and dark themes, Normal and Large Text, 1920x1080, 1000x700, and
+900x560 are covered by offscreen layout/repaint tests. Software controls and
+status surfaces have accessible names and communicate state in text rather than
+color alone. The operator guide now documents the software-first workflow,
+ownership boundaries, exact-scope save behavior, explicit discovery, and the
+top-level FIO Spotter and BBS routes.
+
+Automated acceptance evidence: 246 focused and adjacent Settings/status tests
+pass with 23 intentional environment skips; the stricter SCA-only combined gate
+passes 213 tests. Python compilation and `git diff --check` pass. A 900x560
+render was visually reviewed with all three chip selectors, the identity banner,
+all API fields, and the exact-scope editor actions available. A repository-wide
+run was intentionally stopped after unrelated legacy tests accumulated many
+scheduler executor threads and stalled in a theme-heavy Inbox test; interrupting
+that non-gating run triggered its existing Qt/process teardown fault. No SCA test
+failed, and no schema migration or destructive data operation was introduced.
+
+Linux production qualification is operator-assisted because this macOS worktree
+cannot certify a real Linux window manager, installed application paths, or
+desktop accessibility stack. The production check is: open Settings > Software,
+exercise each chip strip at the three supported sizes and both text sizes, run
+one explicit discovery, switch context before it completes, then close FIO while
+a discovery is active. The UI must remain responsive, stale results must not
+move to the new editor, and shutdown must produce no running-thread warning.
+
+### Production layout correction and permanent presentation contract
+
+Production screenshots exposed a stale-height failure that isolated widget
+tests did not reproduce. The Settings section stack had been fixed to the
+placeholder page's early `sizeHint`; software task editors are created after
+that point, so their content and footer actions were clipped even at 1920x1080.
+The Software page must instead track the current Settings viewport. It must not
+derive its height from either the initial placeholder or the largest hidden
+legacy page, and it must not create page-level horizontal or multi-screen
+vertical overflow. A resize, family change, radio change, or task change must
+leave the active editor and its bottom action row reachable.
+
+`All` is a read-only family overview, not an implicit editable radio. It shows
+the software-to-radio assignments, instance names, cached status, shared use,
+and unassigned instances, then directs the operator to choose one radio.
+Radio-owned task forms, Browse controls, health checks, and exact save actions
+must never appear active in the All context. The task strip is hidden there to
+avoid implying that blank aggregate fields can be edited. Selecting one radio
+restores the complete task strip and exact radio editor.
+
+The embedded workspace has one visible Software Administration heading. At
+constrained height it removes duplicated status and secondary assignment text,
+while preserving software and radio selection, the selected-context banner,
+task selection for a chosen radio, complete form controls, explicit operational
+actions, and the exact-scope save. Editor footers use one row when width allows
+and wrap at compact width. Empty and read-only tasks do not show meaningless
+save controls or consume the editor with an empty form scroller.
+
+No-field and action-only tasks must also clear the hidden form scroller's
+stretch allocation. Their heading, explanation, current status, and action
+form one compact top-aligned card with ordinary spacing; unused room remains
+below the card. This rule applies consistently to Overview, Health,
+cluster/route, import, and synchronization tasks in every software family.
+
+The neutral state for an assigned instance with no current readiness evidence
+is **Not yet verified**. It means FIO has not run or received a current check
+for that software instance; it is not a failure, offline result, or setup
+warning. The radio chip tooltip directs the operator to select the radio and
+open Health. User-facing Software Administration must not use the ambiguous
+`Not checked` wording.
+
+Permanent matrix coverage includes every declared family and task, selected
+radio plus All, light and dark themes, Normal and Large Text, and 1920x1080,
+1000x700, and 900x560. The real SettingsTab integration must additionally prove
+that the stack follows the viewport, has no outer scroll at the supported
+compact size, retains a usable editor, and keeps the footer reachable.
+
+Regression correction: section-navigation controls must only be constructed
+when they have an owning layout and parent. Software uses the top-level Settings
+navigation plus its embedded family/radio/task chips; it must not create a
+second section-nav button. A parentless Qt button becomes a top-level window and
+can cover the application when visibility is refreshed. The integration gate
+opens Software and clicks each navigation tier while asserting that no new
+top-level window appears and the workspace remains embedded in Settings.
 
 ## Phase 1: Settings IA Cleanup
 

@@ -2680,11 +2680,15 @@ def test_settings_contextual_autofill_publishes_scan_and_result_feedback() -> No
     section_attempt_block = source[source.index("def _attempt_fast_light_autofill") : source.index("def _apply_autofill_results")]
     apply_block = source[source.index("def _apply_autofill_results") : source.index("def _set_autofill_status")]
 
+    assert '_request_software_autofill(section, keys, target="legacy")' in attempt_block
     assert "_publish_autofill_feedback(" in attempt_block
-    assert 'summary=f"Auto-fill scanning {section_label}."' in attempt_block
-    assert 'self._apply_autofill_results("fast_light", self._detect_autofill_results("fast_light"))' in section_attempt_block
-    assert 'self._apply_autofill_results("js8", self._detect_autofill_results("js8"))' in section_attempt_block
-    assert 'self._apply_autofill_results("varac", self._detect_autofill_results("varac"))' in section_attempt_block
+    assert "QThread(self)" in attempt_block
+    assert "_software_autofill_generation" in attempt_block
+    assert "_software_autofill_pending_request" in attempt_block
+    assert "_software_autofill_request_is_current" in attempt_block
+    assert "_detect_autofill_results(" not in attempt_block
+    assert section_attempt_block.count("_request_software_autofill(") == 3
+    assert "_detect_autofill_results(" not in section_attempt_block
     assert "_publish_autofill_feedback(" in apply_block
     assert "_autofill_feedback_status(" in apply_block
     assert "_autofill_visible_review_text(summary, detail_lines)" in apply_block
@@ -5251,7 +5255,13 @@ def test_main_window_wires_shared_action_feedback_service_to_settings() -> None:
 
     assert "from freqinout.core.shared_state import ActionFeedbackEvent, ActionFeedbackService" in source
     assert "self.action_feedback_service = ActionFeedbackService()" in source
-    assert "SettingsTab(self, action_feedback_service=self.action_feedback_service)" in source
+    assert 'self.settings_tab = _construct_startup_component(' in source
+    settings_ctor = source[
+        source.index('self.settings_tab = _construct_startup_component(') :
+        source.index("self._sync_settings_runtime_status(", source.index('self.settings_tab = _construct_startup_component('))
+    ]
+    assert "lambda: SettingsTab(" in settings_ctor
+    assert "action_feedback_service=self.action_feedback_service" in settings_ctor
 
 
 def test_main_window_has_action_feedback_banner_subscriber() -> None:

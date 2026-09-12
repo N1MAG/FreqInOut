@@ -71,7 +71,7 @@
     <li><strong>Start in <a href="#settings">Settings</a> and complete <a href="#settings-operator-info">Operator Information</a></strong>: enter your callsign, name, state, and grid. This identity is reused throughout FreqInOut in filenames, message composition, operator matching, map context, and some automated defaults. If this section is wrong, later tabs can look confusing even when the software itself is working.</li>
     <li><strong>Tell FreqInOut which software you actually use</strong>: in <a href="#settings">Settings</a>, choose the software stack that belongs to your station. This matters because setup review, status LEDs, launch behavior, and readiness guidance should reflect your real workflow, not every program FreqInOut is capable of supporting.</li>
     <li><strong>Configure the core station behavior in <a href="#settings-freqinout-details">FreqInOut Settings Details</a></strong>: this is where you decide how strongly the scheduler should enforce frequency changes, how prompts should behave, and what operating assumptions FreqInOut should make while you are active. Read this section if you are unsure why ControlFreq seems advisory in one case and corrective in another.</li>
-    <li><strong>Configure the radio software sections that match your station</strong>: use <a href="#settings-js8call-details">JS8Call Settings Details</a>, <a href="#settings-fast-light-details">Fast Light Settings Details</a>, and <a href="#settings-varac-details">VarAC Settings Details</a> as needed. Do not rush this step. These sections do more than store paths; they determine how Messages, Map, scheduler busy-state protection, launch behavior, BBS handling, and other workflows interact with the outside radio software.</li>
+    <li><strong>Configure software by task</strong>: open <a href="#settings-software-administration">Settings &gt; Software</a>, choose the software family, choose the radio that uses it, then choose the task. This keeps application work tied to the correct radio without turning the Radio page into a long software form.</li>
     <li><strong>Add optional helpers only after the core paths work</strong>: if you use station-specific scripts or support utilities, add them in <a href="#settings-custom-tools-details">Custom Tools Details</a>. If you plan to launch supported software from FIO, finish by reviewing <a href="#settings-launch-control">Launch Control</a>. This keeps the launch surface clean and prevents helper tools from being mistaken for primary integrations.</li>
     <li><strong>Build your operating plan</strong>: define your baseline station logic in <a href="#settings-hf-groups">HF Operating Groups</a>, then build the actual schedule in <a href="#hf-daily">HF Daily</a> and <a href="#hf-nets">HF Nets</a>. Think of Settings as the station definition and the schedule tabs as the operating plan that station will follow.</li>
     <li><strong>Save, then read the setup review before moving on</strong>: after clicking <em>Save Settings</em>, use the readiness guidance shown in Settings and <a href="#controlfreq">ControlFreq</a>. That review is meant to catch the most common causes of “the app looks wrong” before you begin operating.</li>
@@ -213,7 +213,7 @@
       <tr>
         <td><a href="#settings">Settings</a></td>
         <td>This tells FIO who you are and what station software you use.</td>
-        <td>Operator, FreqInOut, JS8Call, Fast Light, groups, VarAC, Message Auth, Custom Tools, Launch Control, and Diagnostics sections each define one part of station behavior.</td>
+        <td>Use Main for station-wide choices, Radios for radio identity/control/plan assignment, and Software for task-oriented application administration.</td>
         <td>Most other tabs are downstream of Settings. When a feature is missing, disabled, or confusing, confirm the related Settings section first.</td>
       </tr>
       <tr>
@@ -278,6 +278,7 @@
       <tr><td><a href="#settings-sections">Settings Sections</a></td><td>This is the index of station setup areas. Start here when a feature is missing or disabled.</td></tr>
       <tr><td><a href="#settings-operator-info">Operator Information</a></td><td>This is your station identity. It affects filenames, messages, map position, and operator matching.</td></tr>
       <tr><td><a href="#settings-freqinout-details">FreqInOut Settings Details</a></td><td>These choices control the app's look, scheduler behavior, and how strongly FIO should correct off-schedule conditions.</td></tr>
+      <tr><td><a href="#settings-software-administration">Software Administration</a></td><td>Choose software, then its radio and task, to work in a focused application editor with exact-scope saves.</td></tr>
       <tr><td><a href="#settings-scheduler-behavior">Scheduler Behavior Examples</a></td><td>This explains how FIO decides whether to control frequency, mode, and offsets, with examples for common settings.</td></tr>
       <tr><td><a href="#settings-js8call-details">JS8Call Settings Details</a></td><td>These tell FIO where JS8Call is and where its traffic files live.</td></tr>
       <tr><td><a href="#settings-fast-light-details">Fast Light Settings Details</a></td><td>These connect FIO to FLRig, FLDigi, FLMsg, and FLAmp paths, ports, logs, and message folders.</td></tr>
@@ -526,7 +527,7 @@
   </ul>
 
   <h3 id="map-top-controls">Top Map Controls</h3>
-  <p><strong>Explain this to me</strong>: the top controls decide what kind of operating picture the map should show right now. Stations and links answer “who is active and who may hear whom?” Report layers answer “what has been reported from known station locations?” The report layers depend on <a href="#settings-js8call-details">JS8Spotter form mapping</a>, because FIO needs to know whether a form is weather, infrastructure, medical, or an alert before placing it on the map.</p>
+  <p><strong>Explain this to me</strong>: the top controls decide what kind of operating picture the map should show right now. Stations and links answer “who is active and who may hear whom?” Report layers answer “what has been reported from known station locations?” The report layers depend on <a href="#settings-software-administration">FIO Spotter form administration</a>, because FIO needs to know whether a form is weather, infrastructure, medical, or an alert before placing it on the map.</p>
   <table>
     <thead>
       <tr><th>Control</th><th>What It Does</th></tr>
@@ -1259,11 +1260,12 @@
 
   <h2 id="settings">Settings</h2>
   <p><strong>Purpose</strong>: configure station identity, scheduler behavior, integration paths, data trust, and launch behavior.</p>
-  <p>The Settings tab uses a left section list and collapsible section cards. Select a section in the list to jump directly.</p>
+  <p>Settings uses <strong>Main</strong>, <strong>Radios</strong>, and <strong>Software</strong> navigation. Main owns station-wide choices. Radios owns radio identity, control backend, activation, plan assignment, RF Guard, and the concise software-assignment summary. Software owns detailed application administration.</p>
   <p><strong>Warning highlights</strong>: the left section list uses warning highlighting to call out incomplete setup for the current single-radio station. This is meant as inline guidance, not as a generic error state for every optional integration.</p>
   <p><strong>Why you use it</strong>: Settings is where you teach FreqInOut what kind of station you are running. Almost every other tab depends on this information. When something elsewhere in the app feels incomplete, missing, or inconsistent, Settings is often the real starting point.</p>
   <ul class="section-list">
-    <li><strong>Good setup order</strong>: start with Operator Information, then choose the software your station actually uses, then fill in the matching software paths and operating groups. After that, set schedules and optional features such as Managed BBS Library, Launch Control, and message-auth trust.</li>
+    <li><strong>Good setup order</strong>: start with Operator Information and Radios, then use Software to configure the applications assigned to each radio. After that, set operating groups, schedules, and optional features such as BBS, Launch Control, and message-auth trust.</li>
+    <li><strong>Software workflow</strong>: choose software, review the radios using it, choose one radio chip, choose the task, then save that exact software scope. Selecting a chip or task only changes the workspace; it does not save, scan folders, probe a program, or contact a radio.</li>
     <li><strong>Cross-tab interaction</strong>: most other tabs take their cues from Settings. Scheduler behavior, message actions, map evidence, launch readiness, BBS management, and setup warnings all depend on what is configured here.</li>
     <li><strong>How to read warnings</strong>: a warning highlight usually means “you started configuring this workflow but left out a companion field,” not “every operator must use this feature.” If you do not use a program, leave that program unchecked in Software Used.</li>
     <li><strong>Plain-language rule</strong>: Settings should answer, “Who am I operating as?”, “Which tools do I actually use?”, “Where are those tools and their files?”, and “How much should FIO help me stay on plan?”</li>
@@ -1285,7 +1287,11 @@
       </tr>
       <tr>
         <td>Radio Profile</td>
-        <td>One-radio-at-a-time identity, software options, connection readiness, assigned plan, timer behavior, launch behavior, and advanced radio inventory</td>
+        <td>Radio identity, hardware/control backend, activation, plan assignment, RF Guard, and software assignment summary. Use the software chips to open detailed application administration.</td>
+      </tr>
+      <tr>
+        <td>Software Administration</td>
+        <td>Choose a software family, then a radio chip and task. JS8Call, Fast Light, VarAC, CommStat, External Spotter, and built-in FIO Spotter each keep their own responsibilities clear.</td>
       </tr>
       <tr>
         <td>Frequency Plans</td>
@@ -1305,15 +1311,15 @@
       </tr>
       <tr>
         <td>JS8Call Settings</td>
-        <td>JS8Call connection fields, JS8 offset, mark-read option, JS8Call traffic files, CommStat launcher, JS8Spotter launcher, JS8Spotter forms folder, JS8Spotter form mapping, and <code>Load JS8 Traffic</code></td>
+        <td>Software &gt; JS8Call: application/profile, API &amp; radio, message storage, ingest, launch, health, and advanced tasks. CommStat and Spotter are separate software families.</td>
       </tr>
       <tr>
         <td>Fast Light Settings</td>
-        <td>FLRig/FLDigi/FLMsg/FLAmp paths, FLRig/FLDigi connection fields, FLDigi check-in/log paths, message folders, and Fast Light auto-fill helpers</td>
+        <td>Software &gt; Fast Light: FLRig control, FLDigi modem/logs, FLMsg, FLAmp/signing, message folders, launch, health, and advanced tasks.</td>
       </tr>
       <tr>
         <td>VarAC Settings</td>
-        <td>VarAC install/launch paths, incoming/outbox folders, BBS folders, allowed callsigns, Managed BBS Library, FLAMP relay, and BBS Access Guard protection</td>
+        <td>Software &gt; VarAC: application/radio, runtime paths, inbox/outbox, inbound guard, cluster, launch, health, and advanced tasks. The station BBS service is administered from top-level BBS.</td>
       </tr>
       <tr>
         <td>Message Auth (Key/Hash)</td>
@@ -1337,7 +1343,7 @@
       </tr>
       <tr>
         <td>Save</td>
-        <td><code>Save Settings</code> persists all sections and triggers cross-tab refresh.</td>
+        <td><code>Save Settings</code> persists Main and Radios settings; it deliberately does not commit unsaved Software drafts. Use the exact-scope Software save button, or the explicit <code>Save All Changes</code> action there.</td>
       </tr>
     </tbody>
   </table>
@@ -1360,6 +1366,17 @@
     <li><strong>Copy Summary</strong>: copies a support-safe summary with FIO version, platform, startup mode, migration state, and runtime radio names. It does not include access codes, private keys, or message contents.</li>
   </ul>
   <p><strong>Where this interacts</strong>: Multi-Rig status explains which radio context downstream tabs should trust. Use <a href="#station-health">Station Health</a> for live external-software or scheduler problems, not for normal setup-paused states.</p>
+
+  <h3 id="settings-software-administration">Software Administration</h3>
+  <p><strong>Use this when you want to work on software rather than radio hardware.</strong> The workspace follows one repeatable path: <strong>choose software &rarr; see radios using it &rarr; choose a radio &rarr; choose a task &rarr; configure and save</strong>. A software chip on the Radios page opens the same workspace.</p>
+  <ul class="section-list">
+    <li><strong>Software family</strong>: select JS8Call, Fast Light, VarAC, CommStat, External Spotter, or FIO Spotter. The family card describes the application role and reports radios that need attention. Status wording, not color alone, explains the state.</li>
+    <li><strong>Radio chips</strong>: <code>All</code> is a summary. Choose a named radio chip before editing. The identity banner names the selected software, radio, and instance. If an instance is shared, the banner names the other affected radios before saving.</li>
+    <li><strong>Tasks</strong>: tasks keep the form focused on the work at hand, such as API &amp; Radio, Message Storage, FLRig Control, Inbox &amp; Outbox, Launch, or Health. Task selection is navigation only; it does not change configuration.</li>
+    <li><strong>Exact-scope save</strong>: the editor button names both the software and radio it saves. It saves only that family for that radio. <code>Save All Changes</code> is a deliberate secondary action for every marked Software draft. The general <code>Save Settings</code> action does not silently save Software drafts.</li>
+    <li><strong>Discovery and health</strong>: selecting software, radio, or task never scans folders, starts a process, probes an API, or contacts a radio. Use a visible check, import, refresh, or browse action when you want that work done. While a check runs, the last known configuration remains usable.</li>
+    <li><strong>Ownership</strong>: CommStat is a standalone tool mapped to the selected radio's JS8 transport. External Spotter is optional and separate from built-in FIO Spotter. FIO Spotter rules, Expect queries, watches, forms, and activity are managed in the top-level FIO Spotter workspace. Station BBS locations, access, retention, publication, visitor preview, and helpers are managed in the top-level BBS service; VarAC software settings retain only native runtime paths and inbound protection.</li>
+  </ul>
 
   <h3 id="settings-operator-info">Operator Information</h3>
   <ul class="section-list">
@@ -1420,6 +1437,7 @@
   <p><strong>Where to look when something seems wrong</strong>: use <a href="#controlfreq">ControlFreq</a> for the live badge and next action, <a href="#left-rail-status">Schedule Status</a> for the always-visible summary, <a href="#station-health">Station Health</a> for recent holds and failures, and <a href="#hf-daily">HF Daily</a>, <a href="#hf-nets">HF Nets</a>, <a href="#sop-builder">SOP Builder</a>, or Radio Profiles when the plan itself needs to be corrected.</p>
 
   <h3 id="settings-js8call-details">JS8Call Settings Details</h3>
+  <p><strong>Where to configure it</strong>: open <a href="#settings-software-administration">Settings &gt; Software</a>, choose JS8Call, then choose the radio and task. CommStat, External Spotter, and FIO Spotter are intentionally not JS8Call settings.</p>
   <ul class="section-list">
     <li><strong>Host and Port</strong>: tell FreqInOut how to talk to JS8Call on this computer. Most local stations use host <code>127.0.0.1</code> and port <code>2442</code>.</li>
     <li><strong>Offset (Hz)</strong>: the JS8 audio offset FIO should expect when checking schedule alignment. If you are unsure, start with your normal JS8 operating offset and adjust only when your group uses a specific offset plan.</li>
@@ -1430,10 +1448,8 @@
     <li><strong>Save folder</strong>: this is JS8Call's <code>SaveDir</code> for operator-saved or received transfer files. It is separate from <strong>Message storage</strong>, which owns <code>ALL.TXT</code>, <code>DIRECTED.TXT</code>, and <code>inbox.db3</code>; changing the save folder does not relocate message logs or the inbox database.</li>
     <li><strong>Message storage status</strong>: each radio shows <code>Isolated · &lt;rig name&gt;</code>, <code>Shared</code>, or <code>Needs verification</code>. Review the affected radio configurations before running concurrent local instances when storage is shared or needs verification.</li>
     <li><strong>JS8Call DIRECTED.TXT</strong>: the JS8Call file that records directed traffic. FIO reads it so operator activity and link evidence can appear in FIO views.</li>
-    <li><strong>CommStat Script/Launcher</strong>: optional launcher for CommStat when your station uses it alongside JS8Call. CommStat is a separate application that can provide structured STATREP-style station awareness. Learn more at <a href="https://commstat.app/">commstat.app</a>.</li>
-    <li><strong>External JS8Spotter App</strong>: optional launcher for the separate JS8Spotter application when your station still uses it alongside FIO. Built-in FIO Spotter does not require this path.</li>
-    <li><strong>FIO Spotter forms folder</strong>: select the folder that contains your MCForms definition files. These files usually have names such as <code>MCF103.txt</code> or <code>MCF702A.txt</code>. FreqInOut reads the file names and titles so the mapper can show the Spotter forms your station actually has available.</li>
-    <li><strong>Refresh JS8Spotter Forms</strong>: scans the selected JS8Spotter forms folder again. Use this after adding, removing, or replacing JS8Spotter form files while FreqInOut is open.</li>
+    <li><strong>CommStat</strong>: configure the optional CommStat launcher under the separate CommStat family. It maps to the selected radio's JS8 transport and can provide structured STATREP-style station awareness. Learn more at <a href="https://commstat.app/">commstat.app</a>.</li>
+    <li><strong>Spotter</strong>: configure an optional External Spotter launcher in External Spotter. Configure the FIO Spotter forms folder and manage rules, Expect queries, watches, forms, and activity from top-level FIO Spotter.</li>
     <li><strong>Auto-Classify</strong>: asks FreqInOut to make a first guess about each form. For example, common check-in forms are marked for Net Control, SitRep forms are marked for status/map use, and alert-type forms are marked for alert handling. Treat this as a starting point. Your group may use a form differently, and you can change the purpose or checkboxes before saving.</li>
     <li><strong>Purpose</strong>: describes what a JS8Spotter form means to your operation. This is the plain-language label FreqInOut uses to decide whether a form is a net check-in, a situation report, a weather report, a net notice, an information request, or something else. If a form should be ignored by FreqInOut, choose <code>Ignore</code>.</li>
     <li><strong>Messages</strong>: shows matching received JS8Spotter forms in the Messages tab. Turn this off for JS8Spotter forms you want FreqInOut to keep out of the operator message list.</li>
@@ -1447,6 +1463,7 @@
   </ul>
 
   <h3 id="settings-fast-light-details">Fast Light Settings Details</h3>
+  <p><strong>Where to configure it</strong>: open <a href="#settings-software-administration">Settings &gt; Software</a>, choose Fast Light, then choose the radio and task. FLMsg and FLAmp are normally shared station applications; the workspace still identifies the radio workflow that uses their folders.</p>
   <ul class="section-list">
     <li><strong>Software paths</strong>: configure FLRig, FLDigi, FLMsg, and FLAmp launch paths or executables. Only fill in the tools your station actually uses.</li>
     <li><strong>Connection fields</strong>: when FLRig or FLDigi paths are configured, confirm their companion fields: <code>FLRig XMLRPC Port</code>, <code>FLDigi XMLRPC Host</code>, and <code>FLDigi XMLRPC Port</code>. In plain terms, these tell FIO where the running program is listening on your computer.</li>
@@ -1485,6 +1502,7 @@
   </ul>
 
   <h3 id="settings-varac-details">VarAC Settings Details</h3>
+  <p><strong>Where to configure it</strong>: open <a href="#settings-software-administration">Settings &gt; Software</a>, choose VarAC, then choose the radio and task. Use top-level <a href="#fio-bbs">BBS</a> for station catalog, locations, access, retention, publication, visitor preview, and visitor helpers.</p>
   <p><strong>Concept of use</strong>: treat the VarAC paths as three different jobs. <code>Incoming Files</code> is where files addressed to you arrive. <code>VarAC Outbox Directory</code> is where FreqInOut stages files that VarAC should transmit directly. <code>BBS Directory</code> is the live published file shelf remote stations can browse and pull from.</p>
   <ul class="section-list">
     <li><strong>Recommended first setup</strong>: start with <code>VarAC Install Folder</code>, <code>Incoming Files</code>, and the normal BBS folders. Confirm basic send/receive and BBS behavior before enabling Managed BBS Library or BBS Access Guard.</li>

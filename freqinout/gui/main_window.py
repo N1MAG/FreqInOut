@@ -518,6 +518,7 @@ class MainWindow(QMainWindow):
             ("Health Details", "Station Health"),
             ("Main", "Settings"),
             ("Radios", "Settings"),
+            ("Software", "Settings"),
             ("Help", "Help"),
         ]
         if resource_catalog_authority_state(get_config_dir() / "config" / "freqinout_nets.db") != "canonical":
@@ -621,6 +622,13 @@ class MainWindow(QMainWindow):
                 btn.clicked.connect(lambda _=False: self.open_settings_section("operator_info", settings_nav_context="main"))
             elif screen_label == "Settings" and button_label == "Radios":
                 btn.clicked.connect(lambda _=False: self.open_settings_section("radio_profiles", settings_nav_context="radios"))
+            elif screen_label == "Settings" and button_label == "Software":
+                btn.clicked.connect(
+                    lambda _=False: self.open_settings_section(
+                        "software_administration",
+                        settings_nav_context="software",
+                    )
+                )
             elif screen_label == "Messages" and button_label == "Inbox":
                 btn.clicked.connect(lambda _=False: self.open_messages_section("inbox"))
             elif screen_label == "Messages" and button_label == "Compose":
@@ -643,6 +651,8 @@ class MainWindow(QMainWindow):
                 self._nav_screen_index_map.setdefault(screen_idx, btn_idx)
             elif screen_label == "Settings" and button_label == "Radios":
                 self._settings_nav_button_indices["radios"] = btn_idx
+            elif screen_label == "Settings" and button_label == "Software":
+                self._settings_nav_button_indices["software"] = btn_idx
             elif screen_label == "Messages" and button_label == "Inbox":
                 self._messages_nav_button_indices["inbox"] = btn_idx
                 self._nav_screen_index_map.setdefault(screen_idx, btn_idx)
@@ -4333,7 +4343,10 @@ class MainWindow(QMainWindow):
                 "logging",
             }
             context = "main" if target in main_targets else "radios"
-        self._settings_nav_context = "main" if context == "main" else "radios"
+        if context == "software":
+            self._settings_nav_context = "software"
+        else:
+            self._settings_nav_context = "main" if context == "main" else "radios"
         self._set_screen(idx)
         if hasattr(self.settings_tab, "show_settings_context"):
             QTimer.singleShot(

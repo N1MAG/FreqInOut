@@ -101,6 +101,14 @@ from freqinout.core.system_timezone import detect_system_timezone_name
 from freqinout.core.js8_defaults import coerce_js8_offset_hz
 from freqinout.core.sdr_compatibility import get_sdr_compatibility_registry
 from freqinout.core.receiver_control import receiver_control_verification_matches
+from freqinout.core.software_administration_model import (
+    SoftwareAdministrationSnapshot,
+    build_software_administration_snapshot,
+)
+from freqinout.core.software_administration_persistence import (
+    family_state_keys,
+    merge_family_state,
+)
 from freqinout.core.js8_msg_auth import generate_msg_auth_secret_key
 from freqinout.core.js8_msg_auth_store import (
     MSG_AUTH_ANY_SENDER,
@@ -353,6 +361,11 @@ from freqinout.core.js8_runtime_ingest import ingest_js8_links_for_runtime_sourc
 from freqinout.core.js8_runtime_messages import ingest_js8_messages_for_runtime_sources
 from freqinout.gui.help_registry import resolve_help_host
 from freqinout.gui.mesh_channel_admin import MeshChannelAdminWidget
+from freqinout.gui.software_administration_workspace import SoftwareAdministrationWorkspace
+from freqinout.gui.software_administration_editor import (
+    SoftwareTaskEditor,
+    merge_draft_value,
+)
 from freqinout.gui.theme import (
     apply_text_size_accessibility_guards,
     button_height_for_font,
@@ -714,6 +727,95 @@ class _MeshCoreBleScanWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class _SoftwareAutofillWorker(QObject):
+    """One bounded filesystem-discovery request running off the UI thread."""
+
+    finished = Signal(int, str, object)
+    cancelled = Signal(int)
+    failed = Signal(int, str, str)
+
+    def __init__(
+        self,
+        generation: int,
+        section: str,
+        settings_values: Mapping[str, Any],
+        *,
+        js8_port: str = "",
+        profile_name: str = "",
+    ) -> None:
+        super().__init__()
+        self.generation = int(generation)
+        self.section = str(section or "").strip().lower()
+        self.settings_values = dict(settings_values or {})
+        self.js8_port = str(js8_port or "").strip()
+        self.profile_name = str(profile_name or "").strip()
+        self._cancel_event = threading.Event()
+
+    def request_cancel(self) -> None:
+        self._cancel_event.set()
+
+    def run(self) -> None:
+        try:
+            if self._cancel_event.is_set():
+                self.cancelled.emit(self.generation)
+                return
+            detector = SoftwarePathDetector(self.settings_values)
+            if self.section == "fast_light":
+                results = detector.detect_fast_light()
+            elif self.section == "varac":
+                results = detector.detect_varac()
+            elif self.section == "js8":
+                results = detector.detect_js8()
+                profiles = discover_js8call_file_profiles()
+                selected = select_js8call_file_profile(
+                    profiles,
+                    tcp_port=self.js8_port,
+                    profile_name=self.profile_name,
+                )
+                if selected is not None:
+                    results["js8_directed_path"] = PathDetectionResult(
+                        key="js8_directed_path",
+                        label="JS8Call DIRECTED.TXT path",
+                        path=selected.directed_path,
+                        confidence=selected.confidence,
+                        reason=selected.reason,
+                        exists=Path(selected.directed_path).is_file(),
+                        target_type="file",
+                    )
+                elif sum(1 for profile in profiles if profile.directed_path) > 1:
+                    results["js8_directed_path"] = PathDetectionResult(
+                        key="js8_directed_path",
+                        label="JS8Call DIRECTED.TXT path",
+                        path="",
+                        confidence="not_found",
+                        reason=(
+                            "Multiple JS8Call profiles contain DIRECTED.TXT, but none matched "
+                            f"the selected radio's TCP port {self.js8_port or '--'}."
+                        ),
+                        exists=False,
+                        target_type="file",
+                    )
+            else:
+                results = {}
+            if self._cancel_event.is_set():
+                self.cancelled.emit(self.generation)
+                return
+            self.finished.emit(self.generation, self.section, dict(results))
+        except Exception as exc:
+            self.failed.emit(self.generation, self.section, str(exc))
+
+
+# A discovery operation that outlives the bounded application-shutdown wait
+# must retain its Python wrappers until Qt reports that its thread ended. This
+# prevents ``QThread: Destroyed while thread is still running`` without ever
+# extending the UI-thread wait indefinitely.
+_DETACHED_SOFTWARE_AUTOFILL_JOBS: Dict[int, Tuple[QThread, QObject]] = {}
+
+
+def _release_detached_software_autofill_job(job_id: int) -> None:
+    _DETACHED_SOFTWARE_AUTOFILL_JOBS.pop(int(job_id), None)
+
+
 class SettingsTab(QWidget):
     """
     Global settings for FreqInOut.
@@ -831,6 +933,12 @@ class SettingsTab(QWidget):
         self._autofill_preserved_suggestions: Dict[str, List[Dict[str, str]]] = {}
         self._contextual_autofill_buttons: Dict[str, QPushButton] = {}
         self._contextual_autofill_rules: Dict[str, Dict[str, object]] = {}
+        self._software_autofill_thread: QThread | None = None
+        self._software_autofill_worker: _SoftwareAutofillWorker | None = None
+        self._software_autofill_generation = 0
+        self._software_autofill_active_request: Dict[str, Any] | None = None
+        self._software_autofill_pending_request: Dict[str, Any] | None = None
+        self._software_autofill_shutdown = False
         self._radio_profile_software_flag_checks: Dict[str, QCheckBox] = {}
         self._refreshing_radio_profile_software_flags = False
         self._radio_profile_timer_policy_controls: Dict[str, QWidget] = {}
@@ -911,6 +1019,10 @@ class SettingsTab(QWidget):
         self._software_radio_combo_loading = False
         self._software_radio_current_id: Optional[int] = None
         self._software_radio_drafts: Dict[int, Dict[str, Any]] = {}
+        self._software_administration_snapshot = SoftwareAdministrationSnapshot(families=())
+        self._software_administration_selected_radio_id: Optional[int] = None
+        self._software_task_editors: Dict[Tuple[str, Optional[int], str], SoftwareTaskEditor] = {}
+        self._software_dirty_families: set[Tuple[int, str]] = set()
         self._multi_rig_runtime_status: MultiRigRuntimeStatus | None = None
         self._multi_rig_radio_catalog_payload: Dict[str, Any] | None = None
         self._active = False
@@ -6012,6 +6124,42 @@ class SettingsTab(QWidget):
         self.local_mesh_section_group = mesh_section
         self._add_settings_section(mesh_section, scope="global")
 
+        self.software_administration_workspace = SoftwareAdministrationWorkspace(self)
+        self.software_administration_workspace.set_embedded(True)
+        self.software_administration_workspace.family_selected.connect(
+            self._on_software_administration_family_selected
+        )
+        self.software_administration_workspace.radio_selected.connect(
+            self._on_software_administration_radio_selected
+        )
+        self.software_administration_workspace.task_selected.connect(
+            self._on_software_administration_task_selected
+        )
+        self.software_administration_workspace.assign_requested.connect(
+            self._on_software_administration_assign_requested
+        )
+        self.software_administration_workspace.operational_route_requested.connect(
+            self._on_software_administration_operational_route_requested
+        )
+        self.software_administration_workspace.save_all_requested.connect(
+            self._save_all_software_family_drafts
+        )
+        software_administration_group = self._make_collapsible_group(
+            "Software Administration",
+            self.software_administration_workspace,
+            checked=True,
+            fit_content=False,
+            help_context_key="settings.software",
+        )
+        self._register_collapsible_group(
+            software_administration_group,
+            lambda: "Choose software, radio, and task",
+        )
+        self._set_section_health_key(software_administration_group, "software_administration")
+        software_administration_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.software_administration_section_group = software_administration_group
+        self._add_settings_section(software_administration_group, scope="software")
+
         software_scope_group = QGroupBox("Radio Software View")
         software_scope_layout = QVBoxLayout()
         software_scope_layout.setSpacing(6)
@@ -6640,7 +6788,10 @@ class SettingsTab(QWidget):
         self._set_section_health_key(js8_group, "js8call")
         js8_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.js8_section_group = js8_group
-        self._add_settings_section(js8_group, scope="radio")
+        # Retain the legacy widgets as compatibility adapters for the existing
+        # state loader, but do not expose a competing detailed editor under
+        # Radios. Software Administration is the operator-facing owner.
+        self._add_settings_section(js8_group, scope="legacy_software")
 
         msg_label_width = 170
 
@@ -6892,7 +7043,7 @@ class SettingsTab(QWidget):
         self._set_section_health_key(fast_light_group, "fast_light")
         fast_light_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.fast_light_section_group = fast_light_group
-        self._add_settings_section(fast_light_group, scope="radio")
+        self._add_settings_section(fast_light_group, scope="legacy_software")
 
         # Message Authenticity (Key/Hash)
         gpg_group = QGroupBox("Message Auth (Key/Hash)")
@@ -8458,7 +8609,7 @@ class SettingsTab(QWidget):
         self._set_section_health_key(varac_group, "varac")
         varac_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.varac_section_group = varac_group
-        self._add_settings_section(varac_group, scope="radio")
+        self._add_settings_section(varac_group, scope="legacy_software")
         self._add_settings_section(self.varac_clusters_section_group, scope="radio")
         self._add_settings_section(self.varac_memberships_section_group, scope="radio")
         self.message_auth_section_group = gpg_group
@@ -8906,23 +9057,26 @@ class SettingsTab(QWidget):
         meta.setdefault("section_visible", True)
         self._section_meta[group] = meta
         self.sections_stack.addWidget(group)
-        btn = QPushButton(title)
-        btn.setObjectName("settingsSectionNavButton")
-        btn.setProperty("settings_scope", normalized_scope)
-        btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        btn.setMinimumHeight(button_height_for_font(btn))
-        btn.setAccessibleName(f"Settings navigation: {title}")
-        btn.clicked.connect(lambda _checked=False, g=group: self._select_settings_section_group(g))
-        target_layout = (
-            self.global_section_buttons_layout
-            if normalized_scope == "global" and hasattr(self, "global_section_buttons_layout")
-            else self.radio_section_buttons_layout
-            if hasattr(self, "radio_section_buttons_layout")
-            else None
-        )
+        target_layout = None
+        if normalized_scope == "global" and hasattr(self, "global_section_buttons_layout"):
+            target_layout = self.global_section_buttons_layout
+        elif normalized_scope == "radio" and hasattr(self, "radio_section_buttons_layout"):
+            target_layout = self.radio_section_buttons_layout
         if target_layout is not None:
+            # A visible QWidget with no parent is a top-level window in Qt.
+            # Software and compatibility-only sections intentionally have no
+            # secondary section-nav layout, so do not create an orphan button
+            # for them. Software is reached from the main navigation and then
+            # uses its own family/radio/task chips.
+            btn = QPushButton(title, self)
+            btn.setObjectName("settingsSectionNavButton")
+            btn.setProperty("settings_scope", normalized_scope)
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            btn.setMinimumHeight(button_height_for_font(btn))
+            btn.setAccessibleName(f"Settings navigation: {title}")
+            btn.clicked.connect(lambda _checked=False, g=group: self._select_settings_section_group(g))
             target_layout.addWidget(btn)
-        self._section_nav_buttons[group] = btn
+            self._section_nav_buttons[group] = btn
         self._add_settings_task_button(group, normalized_scope)
         if hasattr(self, "settings_section_combo"):
             self.settings_section_combo.addItem(self._settings_section_combo_label(group), stack_index)
@@ -9061,10 +9215,418 @@ class SettingsTab(QWidget):
         if not profile:
             QMessageBox.information(self, "Software Details", "Select one radio before reviewing its software configuration.")
             return
-        self._sync_software_radio_to_device_focus()
-        self._select_settings_section_group(getattr(self, "radio_software_scope_section_group", None))
-        QTimer.singleShot(0, self._refresh_software_radio_selector)
-        QTimer.singleShot(0, self._sync_current_section_scroll_size)
+        family_key = self._first_software_family_for_profile(profile)
+        self.open_software_administration(family_key=family_key, radio_id=int(profile.get("id", 0) or 0))
+
+    @staticmethod
+    def _first_software_family_for_profile(profile: Mapping[str, Any]) -> str:
+        if bool(int(profile.get("use_js8call", 0) or 0)):
+            return "js8call"
+        if any(bool(int(profile.get(key, 0) or 0)) for key in ("use_flrig", "use_fldigi", "use_flmsg", "use_flamp")):
+            return "fast_light"
+        if bool(int(profile.get("use_varac", 0) or 0)):
+            return "varac"
+        if bool(int(profile.get("use_commstat", 0) or 0)):
+            return "commstat"
+        if bool(int(profile.get("use_js8spotter", 0) or 0)):
+            return "external_spotter"
+        return "js8call"
+
+    def open_software_administration(
+        self,
+        *,
+        family_key: str = "",
+        radio_id: int | None = None,
+        task_key: str | None = None,
+    ) -> None:
+        workspace = getattr(self, "software_administration_workspace", None)
+        if isinstance(workspace, SoftwareAdministrationWorkspace):
+            selected_family = str(family_key or workspace.selected_family_key() or "js8call").strip().lower()
+            workspace.select_context(selected_family, radio_id, task_key)
+            self._software_administration_selected_radio_id = radio_id
+        host = resolve_help_host(self)
+        if host is not None and hasattr(host, "open_settings_section"):
+            host.open_settings_section(
+                "software_administration",
+                radio_id=radio_id,
+                settings_nav_context="software",
+            )
+            QTimer.singleShot(0, self._show_software_task_editor)
+            return
+        self.show_settings_context("software", health_key="software_administration", radio_id=radio_id)
+        self._show_software_task_editor()
+
+    def _on_software_administration_family_selected(self, _family_key: str) -> None:
+        self._software_administration_selected_radio_id = None
+        self._show_software_task_editor()
+
+    def _on_software_administration_radio_selected(self, radio_id: object) -> None:
+        try:
+            parsed = int(radio_id) if radio_id is not None else 0
+        except (TypeError, ValueError):
+            parsed = 0
+        self._software_administration_selected_radio_id = parsed or None
+        self._show_software_task_editor()
+
+    def _activate_software_editor_radio_cache(self, radio_id: int | None) -> None:
+        """Select an already-loaded radio draft without endpoint or database work."""
+
+        ident = int(radio_id or 0)
+        if ident <= 0 or not self._device_profile_by_id(ident):
+            return
+        previous_id = int(self._software_radio_current_id or 0)
+        if previous_id > 0 and previous_id != ident:
+            self._stash_current_software_radio_state()
+        self._software_radio_current_id = ident
+        self._settings_radio_focus_id = ident
+        self._load_selected_software_radio_state()
+        self._refresh_radio_context_labels()
+
+    def _on_software_administration_task_selected(self, task_key: str) -> None:
+        workspace = getattr(self, "software_administration_workspace", None)
+        if not isinstance(workspace, SoftwareAdministrationWorkspace):
+            return
+        del task_key
+        self.show_settings_context("software", health_key="software_administration")
+        self._show_software_task_editor()
+
+    def _software_editor_state(self, radio_id: int) -> Dict[str, Any]:
+        if radio_id in self._software_radio_drafts:
+            return dict(self._software_radio_drafts[radio_id])
+        profile = self._device_profile_by_id(radio_id)
+        return self._radio_software_state_from_profile(profile if isinstance(profile, dict) else {})
+
+    def _show_software_task_editor(self) -> None:
+        """Show one cache-backed task editor without selecting legacy pages."""
+
+        workspace = getattr(self, "software_administration_workspace", None)
+        if not isinstance(workspace, SoftwareAdministrationWorkspace):
+            return
+        family_key = workspace.selected_family_key()
+        task_key = workspace.selected_task_key()
+        family = self._software_administration_snapshot.family(family_key)
+        if family is None or not task_key:
+            workspace.set_editor_widget(None)
+            return
+        radio_id = workspace.selected_radio_id()
+        if radio_id is None:
+            workspace.show_family_summary(family)
+            self._sync_current_section_scroll_size()
+            return
+        assignment = next(
+            (item for item in family.assignments if item.radio_id == radio_id),
+            None,
+        )
+        state: Dict[str, Any] = {}
+        radio_name = ""
+        status_text = ""
+        shared_names: Tuple[str, ...] = ()
+        if assignment is not None:
+            radio_id = int(assignment.radio_id)
+            state = self._software_editor_state(radio_id)
+            radio_name = assignment.radio_name
+            status_text = assignment.status_text
+            shared_names = assignment.shared_radio_names
+        key = (family_key, radio_id, task_key)
+        editor = self._software_task_editors.get(key)
+        if editor is None:
+            editor = SoftwareTaskEditor()
+            editor.value_changed.connect(
+                lambda field_key, value, ident=radio_id, family_name=family_key: self._on_software_task_value_changed(
+                    ident, family_name, field_key, value
+                )
+            )
+            editor.browse_requested.connect(
+                lambda field_key, ident=radio_id, task_editor=editor: self._browse_software_task_field(
+                    task_editor, ident, field_key
+                )
+            )
+            editor.action_requested.connect(self._on_software_task_action_requested)
+            editor.save_requested.connect(
+                lambda family_name, ident: self._save_selected_software_family(family_name, ident)
+            )
+            editor.set_context(
+                family_key=family_key,
+                family_title=family.title,
+                task_key=task_key,
+                radio_id=radio_id,
+                radio_name=radio_name,
+                state=state,
+                status_text=status_text,
+                shared_radio_names=shared_names,
+            )
+            editor.set_dirty(bool(radio_id and (radio_id, family_key) in self._software_dirty_families))
+            self._software_task_editors[key] = editor
+            workspace.register_task_editor(family_key, task_key, editor, radio_id=radio_id)
+        else:
+            editor.set_state(
+                state,
+                dirty=bool(radio_id and (radio_id, family_key) in self._software_dirty_families),
+            )
+        workspace.set_editor_widget(editor)
+        self._sync_current_section_scroll_size()
+
+    def _on_software_task_value_changed(
+        self,
+        radio_id: Optional[int],
+        family_key: str,
+        field_key: str,
+        value: object,
+    ) -> None:
+        ident = int(radio_id or 0)
+        if ident <= 0:
+            return
+        state = self._software_editor_state(ident)
+        self._software_radio_drafts[ident] = merge_draft_value(state, field_key, value)
+        self._software_dirty_families.add((ident, str(family_key or "").strip().lower()))
+        for (editor_family, editor_radio, _task), editor in self._software_task_editors.items():
+            if editor_family == family_key and editor_radio == ident:
+                editor.set_dirty(True)
+        self._sync_software_dirty_ui()
+
+    @staticmethod
+    def _software_browse_uses_directory(field_key: str) -> bool:
+        return field_key in {
+            "js8_profile_path",
+            "message_paths.flmsg",
+            "message_paths.flamp",
+            "message_paths.varac",
+            "fldigi_log_path",
+            "fldigi_checkin_dir",
+            "varac_path",
+            "varac_outbox_dir",
+            "varac_bbs_dir",
+            "varac_bbs_archive_dir",
+            "js8_forms_path",
+        }
+
+    def _browse_software_task_field(
+        self,
+        editor: SoftwareTaskEditor,
+        radio_id: Optional[int],
+        field_key: str,
+    ) -> None:
+        """Run one operator-requested picker; navigation itself remains I/O-free."""
+
+        if int(radio_id or 0) <= 0:
+            return
+        current = str(editor.state().get(field_key, "") or "")
+        if "." in field_key:
+            current = str(
+                editor.state().get(field_key.split(".", 1)[0], {}).get(field_key.split(".", 1)[1], "")
+                if isinstance(editor.state().get(field_key.split(".", 1)[0]), Mapping)
+                else ""
+            )
+        if self._software_browse_uses_directory(field_key):
+            selected = QFileDialog.getExistingDirectory(self, "Select folder", current)
+        else:
+            selected, _selected_filter = QFileDialog.getOpenFileName(self, "Select application or file", current)
+        if not selected:
+            return
+        widget = editor.field_widget(field_key)
+        if isinstance(widget, QLineEdit):
+            widget.setText(selected)
+        editor.apply_value(field_key, selected)
+
+    def _on_software_task_action_requested(self, action: str) -> None:
+        action_key = str(action or "").strip().lower()
+        host = resolve_help_host(self)
+        if action_key == "discover":
+            workspace = getattr(self, "software_administration_workspace", None)
+            if not isinstance(workspace, SoftwareAdministrationWorkspace):
+                return
+            family_key = workspace.selected_family_key()
+            radio_id = workspace.selected_radio_id()
+            task_key = workspace.selected_task_key()
+            editor = self._software_task_editors.get((family_key, radio_id, task_key))
+            if editor is None or radio_id is None:
+                return
+            section = {
+                "fast_light": "fast_light",
+                "varac": "varac",
+                "js8call": "js8",
+                "commstat": "js8",
+                "external_spotter": "js8",
+                "fio_spotter": "js8",
+            }.get(family_key, "")
+            if not section:
+                editor.set_operation_status("No automatic discovery is available for this software.")
+                return
+            self._request_software_autofill(
+                section,
+                editor.field_keys(),
+                target="software",
+                family_key=family_key,
+                task_key=task_key,
+                radio_id=radio_id,
+            )
+        elif action_key == "fio_spotter" and host is not None and hasattr(host, "open_fio_spotter"):
+            host.open_fio_spotter()
+        elif action_key == "bbs" and host is not None and hasattr(host, "open_station_bbs"):
+            host.open_station_bbs()
+        elif action_key == "message_signing":
+            self._settings_nav_context = "main"
+            self._apply_settings_nav_scope_visibility()
+            self._select_settings_section_group(getattr(self, "message_auth_section_group", None))
+        elif action_key == "varac_cluster":
+            self._settings_nav_context = "radios"
+            self._apply_settings_nav_scope_visibility()
+            self._select_settings_section_group(getattr(self, "varac_clusters_section_group", None))
+        elif action_key == "external_spotter_import":
+            self._choose_js8spotter_import_db()
+        elif action_key == "validate":
+            try:
+                self._status_service.refresh_now(reason="software_settings", force=True)
+            except Exception:
+                log.exception("Unable to request software status refresh.")
+
+    def _software_family_assignment(self, family_key: str, radio_id: int) -> object | None:
+        family = self._software_administration_snapshot.family(family_key)
+        if family is None:
+            return None
+        return next((item for item in family.assignments if item.radio_id == int(radio_id)), None)
+
+    def _confirm_shared_software_save(self, family_key: str, radio_id: int) -> bool:
+        assignment = self._software_family_assignment(family_key, radio_id)
+        if assignment is None or not bool(getattr(assignment, "is_shared", False)):
+            return True
+        other_names = tuple(
+            name
+            for name in getattr(assignment, "shared_radio_names", ()) or ()
+            if name and name != getattr(assignment, "radio_name", "")
+        )
+        if not other_names:
+            return True
+        family = self._software_administration_snapshot.family(family_key)
+        family_title = family.title if family is not None else family_key
+        response = QMessageBox.question(
+            self,
+            f"Save shared {family_title} instance?",
+            (
+                f"This {family_title} instance is also used by {', '.join(other_names)}. "
+                "Saving may affect those radios. Continue?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return response == QMessageBox.Yes
+
+    def _replace_cached_device_profile(self, saved: Mapping[str, Any]) -> None:
+        saved_id = int(saved.get("id", 0) or 0)
+        if saved_id <= 0:
+            return
+        self.device_profiles = [
+            dict(saved) if int(row.get("id", 0) or 0) == saved_id else row
+            for row in self.device_profiles
+        ]
+
+    def _sync_software_dirty_ui(self) -> None:
+        workspace = getattr(self, "software_administration_workspace", None)
+        setter = getattr(workspace, "set_dirty_contexts", None)
+        if callable(setter):
+            setter(tuple(sorted(self._software_dirty_families)))
+
+    def _save_selected_software_family(self, family_key: str, radio_id: object) -> None:
+        family_key = str(family_key or "").strip().lower()
+        try:
+            ident = int(radio_id or 0)
+        except (TypeError, ValueError):
+            ident = 0
+        profile = self._device_profile_by_id(ident)
+        if ident <= 0 or not isinstance(profile, dict) or not family_state_keys(family_key):
+            QMessageBox.information(self, "Software Administration", "Select one configured radio and software family to save.")
+            return
+        if not self._confirm_shared_software_save(family_key, ident):
+            return
+        draft = self._software_editor_state(ident)
+        persisted = self._radio_software_state_from_profile(profile)
+        scoped_state = merge_family_state(persisted, draft, family_key)
+        try:
+            saved = self._save_radio_software_bundle(profile, scoped_state)
+            primary_id = self._runtime_primary_device_profile_id()
+            if primary_id:
+                self.multi_radio_store.sync_runtime_active_device_to_legacy_settings_if_single_active(int(primary_id))
+        except ValueError as exc:
+            QMessageBox.warning(self, "Software Administration", str(exc))
+            return
+        except Exception:
+            log.exception("Failed to save %s for radio %s.", family_key, ident)
+            QMessageBox.warning(self, "Software Administration", "The selected software settings were not saved.")
+            return
+        if isinstance(saved, Mapping):
+            self._replace_cached_device_profile(saved)
+        self._software_dirty_families.discard((ident, family_key))
+        if not any(dirty_id == ident for dirty_id, _family in self._software_dirty_families):
+            self._software_radio_drafts.pop(ident, None)
+        for (editor_family, editor_radio, _task), editor in self._software_task_editors.items():
+            if editor_family == family_key and editor_radio == ident:
+                editor.set_dirty(False)
+        self._sync_software_dirty_ui()
+        self._refresh_software_administration_snapshot()
+        family = self._software_administration_snapshot.family(family_key)
+        family_title = family.title if family is not None else family_key
+        self.settings_action_feedback_label.setText(f"Saved {family_title} for {self._profile_display_name(profile)}.")
+
+    def _save_all_software_family_drafts(self) -> None:
+        dirty = tuple(sorted(self._software_dirty_families))
+        if not dirty:
+            return
+        for ident, family_key in dirty:
+            if not self._confirm_shared_software_save(family_key, ident):
+                return
+        saved_rows: list[Mapping[str, Any]] = []
+        try:
+            for ident in sorted({radio_id for radio_id, _family in dirty}):
+                profile = self._device_profile_by_id(ident)
+                if not isinstance(profile, dict):
+                    continue
+                draft = self._software_editor_state(ident)
+                merged = self._radio_software_state_from_profile(profile)
+                for _radio_id, family_key in dirty:
+                    if _radio_id == ident:
+                        merged = merge_family_state(merged, draft, family_key)
+                saved = self._save_radio_software_bundle(profile, merged)
+                if isinstance(saved, Mapping):
+                    saved_rows.append(saved)
+            primary_id = self._runtime_primary_device_profile_id()
+            if primary_id:
+                self.multi_radio_store.sync_runtime_active_device_to_legacy_settings_if_single_active(int(primary_id))
+        except ValueError as exc:
+            QMessageBox.warning(self, "Software Administration", str(exc))
+            return
+        except Exception:
+            log.exception("Failed to save all software administration drafts.")
+            QMessageBox.warning(
+                self,
+                "Software Administration",
+                "Not all software changes could be saved. Draft indicators were retained so you can retry.",
+            )
+            return
+        for row in saved_rows:
+            self._replace_cached_device_profile(row)
+        self._software_dirty_families.clear()
+        self._software_radio_drafts.clear()
+        for editor in self._software_task_editors.values():
+            editor.set_dirty(False)
+        self._sync_software_dirty_ui()
+        self._refresh_software_administration_snapshot()
+        self.settings_action_feedback_label.setText("Saved all Software Administration changes.")
+
+    def _on_software_administration_assign_requested(self, family_key: str) -> None:
+        radio_id = int(self._software_administration_selected_radio_id or 0)
+        if radio_id > 0:
+            self._settings_radio_focus_id = radio_id
+        self._settings_nav_context = "radios"
+        self._apply_settings_nav_scope_visibility()
+        self._select_settings_section_group(getattr(self, "radio_profile_section_group", None))
+        self._select_radio_profile_guided_task("apps")
+
+    def _on_software_administration_operational_route_requested(self, route: str) -> None:
+        if str(route or "").strip().lower() != "fio spotter":
+            return
+        host = resolve_help_host(self)
+        if host is not None and hasattr(host, "open_fio_spotter"):
+            host.open_fio_spotter()
 
     def _radio_profile_guided_task_role(
         self,
@@ -9261,6 +9823,7 @@ class SettingsTab(QWidget):
             "HF Operating Groups": "HF Groups",
             "Local Comms Groups": "Local Groups",
             "Local Mesh": "Local Mesh",
+            "Software Administration": "Software",
             "JS8Call Settings": "JS8Call",
             "Fast Light Settings": "Fast Light",
             "VarAC Settings": "VarAC",
@@ -9276,9 +9839,12 @@ class SettingsTab(QWidget):
         return labels.get(normalized, normalized or "Section")
 
     def _add_settings_task_button(self, group: QGroupBox, scope: str) -> None:
+        normalized_scope = str(scope or "").strip().lower()
+        if normalized_scope == "software":
+            return
         layout = (
             getattr(self, "settings_global_tasks_layout", None)
-            if str(scope or "").strip().lower() == "global"
+            if normalized_scope == "global"
             else getattr(self, "settings_radio_tasks_layout", None)
         )
         if layout is None:
@@ -9343,7 +9909,7 @@ class SettingsTab(QWidget):
         meta = self._section_meta.get(group, {})
         title = str(meta.get("title", group.title() if hasattr(group, "title") else "Section")).strip() or "Section"
         scope = str(meta.get("scope", "radio") or "radio").strip().lower()
-        prefix = "Global" if scope == "global" else "Selected Radio"
+        prefix = "Global" if scope == "global" else "Software" if scope == "software" else "Selected Radio"
         return f"{prefix}: {title}"
 
     def _sync_settings_section_combo_to_group(self, group: QGroupBox | None) -> None:
@@ -9377,7 +9943,7 @@ class SettingsTab(QWidget):
         try:
             combo.clear()
             context = str(getattr(self, "_settings_nav_context", "main") or "main").strip().lower()
-            desired_scope = "radio" if context in {"radio", "radios"} else "global"
+            desired_scope = "software" if context == "software" else "radio" if context in {"radio", "radios"} else "global"
             for group, meta in self._section_meta.items():
                 if not bool(meta.get("section_visible", True)):
                     continue
@@ -9454,18 +10020,28 @@ class SettingsTab(QWidget):
         health_key: str | None = None,
         radio_id: int | None = None,
     ) -> bool:
-        scope = "global" if str(context or "").strip().lower() in {"main", "global"} else "radio"
-        self._settings_nav_context = "main" if scope == "global" else "radios"
+        requested_context = str(context or "").strip().lower()
+        scope = (
+            "software"
+            if requested_context == "software"
+            else "global"
+            if requested_context in {"main", "global"}
+            else "radio"
+        )
+        self._settings_nav_context = "software" if scope == "software" else "main" if scope == "global" else "radios"
         if scope == "global":
             if hasattr(self, "global_settings_toggle_btn"):
                 self.global_settings_toggle_btn.setChecked(True)
             self._on_global_settings_toggle(True)
             target_key = str(health_key or "operator_info").strip().lower()
-        else:
+        elif scope == "radio":
             if hasattr(self, "radio_settings_toggle_btn"):
                 self.radio_settings_toggle_btn.setChecked(True)
             self._on_radio_settings_toggle(True)
             target_key = str(health_key or "radio_profiles").strip().lower()
+        else:
+            self._apply_settings_nav_scope_visibility()
+            target_key = str(health_key or "software_administration").strip().lower()
 
         target_group = self._settings_section_group_by_health_key(target_key)
         if target_group is not None:
@@ -9480,11 +10056,14 @@ class SettingsTab(QWidget):
 
     def _refresh_settings_mode_visibility(self) -> None:
         scope = self._current_settings_section_scope()
-        radio_mode = scope != "global"
+        radio_mode = scope == "radio"
+        software_mode = scope == "software"
         if hasattr(self, "settings_compact_header"):
-            self.settings_compact_header.setVisible(True)
+            self.settings_compact_header.setVisible(not software_mode)
         if hasattr(self, "configured_radios_group"):
             self.configured_radios_group.setVisible(radio_mode)
+        if hasattr(self, "settings_section_nav_scroll"):
+            self.settings_section_nav_scroll.setVisible(not software_mode)
         if hasattr(self, "settings_global_tasks_label"):
             self.settings_global_tasks_label.setVisible(False)
         if hasattr(self, "settings_global_tasks_widget"):
@@ -9510,44 +10089,28 @@ class SettingsTab(QWidget):
         if not hasattr(self, "sections_nav_list"):
             return
         context = str(getattr(self, "_settings_nav_context", "main") or "main").strip().lower()
-        radio_context = context in {"radio", "radios"}
-        hide_global = radio_context
-        hide_radio = not radio_context
+        desired_scope = "software" if context == "software" else "radio" if context in {"radio", "radios"} else "global"
         if hasattr(self, "global_settings_toggle_btn"):
             self.global_settings_toggle_btn.setVisible(False)
         if hasattr(self, "radio_settings_toggle_btn"):
             self.radio_settings_toggle_btn.setVisible(False)
         if hasattr(self, "global_section_buttons_widget"):
-            self.global_section_buttons_widget.setVisible(not hide_global)
+            self.global_section_buttons_widget.setVisible(desired_scope == "global")
         if hasattr(self, "radio_section_buttons_widget"):
-            self.radio_section_buttons_widget.setVisible(not hide_radio)
+            self.radio_section_buttons_widget.setVisible(desired_scope == "radio")
         for group, item in self._section_nav_items.items():
             if item is None:
                 continue
             scope = str(self._section_meta.get(group, {}).get("scope", item.data(self.SECTION_SCOPE_ROLE) or "radio")).strip().lower()
             section_visible = bool(self._section_meta.get(group, {}).get("section_visible", True))
-            if scope == "global":
-                item.setHidden(hide_global or not section_visible)
-                btn = self._section_nav_buttons.get(group)
-                if btn is not None:
-                    btn.setVisible(not hide_global and section_visible)
-            else:
-                item.setHidden(hide_radio or not section_visible)
-                btn = self._section_nav_buttons.get(group)
-                if btn is not None:
-                    btn.setVisible(not hide_radio and section_visible)
+            item.setHidden(scope != desired_scope or not section_visible)
+            btn = self._section_nav_buttons.get(group)
+            if btn is not None:
+                btn.setVisible(scope == desired_scope and section_visible)
         current_widget = self.sections_stack.currentWidget() if hasattr(self, "sections_stack") else None
-        if (
-            hide_global
-            and isinstance(current_widget, QGroupBox)
-            and str(self._section_meta.get(current_widget, {}).get("scope", "")).strip().lower() == "global"
-        ):
-            self._select_first_visible_settings_section()
-        if (
-            hide_radio
-            and isinstance(current_widget, QGroupBox)
-            and str(self._section_meta.get(current_widget, {}).get("scope", "")).strip().lower() != "global"
-        ):
+        if isinstance(current_widget, QGroupBox) and str(
+            self._section_meta.get(current_widget, {}).get("scope", "")
+        ).strip().lower() != desired_scope:
             self._select_first_visible_settings_section()
         self._update_sections_nav_size()
         self._refresh_settings_section_combo()
@@ -9563,10 +10126,14 @@ class SettingsTab(QWidget):
             meta = self._section_meta.get(group, {})
             section_visible = bool(meta.get("section_visible", True))
             scope = str(meta.get("scope", "")).strip().lower()
-            if scope == "global":
+            if scope == "software":
+                nav_visible = section_visible and str(getattr(self, "_settings_nav_context", "") or "") == "software"
+            elif scope == "global":
                 nav_visible = section_visible and not bool(self._global_settings_nav_collapsed)
-            else:
+            elif scope == "radio":
                 nav_visible = section_visible and not bool(self._radio_settings_nav_collapsed)
+            else:
+                nav_visible = False
             btn.setVisible(nav_visible)
             btn.setStyleSheet(self._settings_nav_button_style(role, theme))
         if hasattr(self, "global_settings_toggle_btn"):
@@ -9615,7 +10182,9 @@ class SettingsTab(QWidget):
         nav_btn = self._section_nav_buttons.get(group)
         if nav_btn is not None:
             scope = str(self._section_meta.get(group, {}).get("scope", "")).strip().lower()
-            if scope == "global":
+            if scope == "software":
+                scope_visible = str(getattr(self, "_settings_nav_context", "") or "") == "software"
+            elif scope == "global":
                 scope_visible = not bool(self._global_settings_nav_collapsed)
             else:
                 scope_visible = not bool(self._radio_settings_nav_collapsed)
@@ -9869,6 +10438,27 @@ class SettingsTab(QWidget):
         if page is None:
             return
         try:
+            meta = self._section_meta.get(page, {})
+            if str(meta.get("scope", "")).strip().lower() == "software":
+                # Software task editors are created after the section is
+                # selected. Size this expanding workspace from the visible
+                # viewport, never from the initial placeholder's sizeHint (or
+                # QStackedWidget's largest hidden legacy page). This keeps the
+                # editor footer visible without creating a multi-screen outer
+                # scroll surface.
+                viewport = getattr(self, "sections_scroll", None)
+                viewport_h = int(viewport.viewport().height()) if viewport is not None else 0
+                target_h = max(240, viewport_h)
+                page.setMinimumHeight(target_h)
+                page.setMaximumHeight(target_h)
+                self.sections_stack.setMinimumHeight(target_h)
+                self.sections_stack.setMaximumHeight(target_h)
+                self.sections_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                self._last_section_stack_index = int(self.sections_stack.currentIndex())
+                self._last_section_target_height = target_h
+                page.updateGeometry()
+                self.sections_stack.updateGeometry()
+                return
             target_h = max(0, int(page.sizeHint().height()))
             row = int(self.sections_stack.currentIndex())
             if row != int(self._last_section_stack_index) or target_h != int(self._last_section_target_height):
@@ -11265,6 +11855,28 @@ class SettingsTab(QWidget):
     def shutdown(self) -> None:
         """Cancel Settings-owned device work before QObject teardown."""
 
+        self._software_autofill_shutdown = True
+        self._software_autofill_pending_request = None
+        software_worker = getattr(self, "_software_autofill_worker", None)
+        software_thread = getattr(self, "_software_autofill_thread", None)
+        if software_worker is not None:
+            software_worker.request_cancel()
+        if isinstance(software_thread, QThread) and software_thread.isRunning():
+            software_thread.requestInterruption()
+            software_thread.quit()
+            if not software_thread.wait(1200):
+                # Discovery uses bounded candidate lists, but an unhealthy
+                # filesystem can still delay a stat call. Detach rather than
+                # freeze shutdown or destroy a running QThread.
+                software_thread.setParent(None)
+                job_id = id(software_thread)
+                _DETACHED_SOFTWARE_AUTOFILL_JOBS[job_id] = (software_thread, software_worker)
+                software_thread.finished.connect(
+                    lambda ident=job_id: _release_detached_software_autofill_job(ident)
+                )
+        self._software_autofill_thread = None
+        self._software_autofill_worker = None
+        self._software_autofill_active_request = None
         timer = getattr(self, "_mesh_ble_scan_timer", None)
         if isinstance(timer, QTimer):
             timer.stop()
@@ -12379,18 +12991,204 @@ class SettingsTab(QWidget):
         return scoped
 
     def _attempt_scoped_autofill(self, section: str, keys: List[str]) -> None:
-        section_label = self._autofill_section_label(section)
+        self._request_software_autofill(section, keys, target="legacy")
+
+    def _request_software_autofill(
+        self,
+        section: str,
+        keys: Sequence[str],
+        *,
+        target: str,
+        family_key: str = "",
+        task_key: str = "",
+        radio_id: int | None = None,
+    ) -> None:
+        """Queue one explicit, off-UI-thread discovery request.
+
+        Only the newest request is retained while a scan is active. Results
+        carry both a generation token and the originating editor identity so a
+        late completion can never update a different radio or task.
+        """
+
+        if bool(getattr(self, "_software_autofill_shutdown", False)):
+            return
+        normalized = str(section or "").strip().lower()
+        if normalized not in {"fast_light", "js8", "varac"}:
+            return
+        self._software_autofill_generation = int(getattr(self, "_software_autofill_generation", 0)) + 1
+        generation = self._software_autofill_generation
+        settings_values = dict(self.settings.all())
+        port_txt = self.js8_port_edit.text().strip() if hasattr(self, "js8_port_edit") else ""
+        profile_name = ""
+        try:
+            _selected_id, profile_name = self._selected_settings_feedback_target()
+        except Exception:
+            profile_name = ""
+        request: Dict[str, Any] = {
+            "generation": generation,
+            "section": normalized,
+            "keys": tuple(dict.fromkeys(str(key) for key in keys if str(key))),
+            "target": str(target or "legacy").strip().lower(),
+            "family_key": str(family_key or "").strip().lower(),
+            "task_key": str(task_key or "").strip().lower(),
+            "radio_id": int(radio_id) if radio_id else None,
+            "settings_values": settings_values,
+            "js8_port": port_txt,
+            "profile_name": profile_name,
+        }
+        active_thread = getattr(self, "_software_autofill_thread", None)
+        if isinstance(active_thread, QThread):
+            self._software_autofill_pending_request = request
+            worker = getattr(self, "_software_autofill_worker", None)
+            if worker is not None and active_thread.isRunning():
+                try:
+                    worker.request_cancel()
+                except RuntimeError:
+                    pass
+            self._set_software_autofill_feedback(request, "Waiting for the current search to finish…")
+            return
+        self._start_software_autofill_request(request)
+
+    def _set_software_autofill_feedback(self, request: Mapping[str, Any], text: str) -> None:
+        if str(request.get("target") or "") == "software":
+            key = (
+                str(request.get("family_key") or ""),
+                request.get("radio_id"),
+                str(request.get("task_key") or ""),
+            )
+            editor = self._software_task_editors.get(key)
+            if editor is not None:
+                editor.set_operation_status(text)
+            return
+        section = str(request.get("section") or "")
         self._publish_autofill_feedback(
             status="in_progress",
-            summary=f"Auto-fill scanning {section_label}.",
-            detail="FreqInOut is looking for blank fields it can fill for the selected radio.",
+            summary=text,
+            detail="FreqInOut searches only when requested; Settings remains usable during the search.",
             section=section,
             operation="scan",
         )
-        all_results = self._detect_autofill_results(section)
-        wanted = set(keys)
-        scoped = {key: result for key, result in all_results.items() if key in wanted}
-        self._apply_autofill_results(section, scoped)
+
+    def _start_software_autofill_request(self, request: Mapping[str, Any]) -> None:
+        request_copy = dict(request)
+        worker = _SoftwareAutofillWorker(
+            int(request_copy["generation"]),
+            str(request_copy["section"]),
+            dict(request_copy.get("settings_values") or {}),
+            js8_port=str(request_copy.get("js8_port") or ""),
+            profile_name=str(request_copy.get("profile_name") or ""),
+        )
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_software_autofill_finished)
+        worker.cancelled.connect(self._on_software_autofill_cancelled)
+        worker.failed.connect(self._on_software_autofill_failed)
+        worker.finished.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.cancelled.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._on_software_autofill_thread_finished)
+        self._software_autofill_active_request = request_copy
+        self._software_autofill_thread = thread
+        self._software_autofill_worker = worker
+        self._set_software_autofill_feedback(
+            request_copy,
+            f"Searching for {self._autofill_section_label(str(request_copy['section']))}…",
+        )
+        thread.start()
+
+    def _software_autofill_request_is_current(self, request: Mapping[str, Any]) -> bool:
+        if int(request.get("generation") or 0) != int(self._software_autofill_generation):
+            return False
+        if str(request.get("target") or "") != "software":
+            return True
+        workspace = getattr(self, "software_administration_workspace", None)
+        return bool(
+            isinstance(workspace, SoftwareAdministrationWorkspace)
+            and workspace.selected_family_key() == str(request.get("family_key") or "")
+            and workspace.selected_task_key() == str(request.get("task_key") or "")
+            and workspace.selected_radio_id() == request.get("radio_id")
+        )
+
+    def _on_software_autofill_finished(
+        self,
+        generation: int,
+        section: str,
+        results: object,
+    ) -> None:
+        request = dict(getattr(self, "_software_autofill_active_request", None) or {})
+        if int(request.get("generation") or 0) != int(generation):
+            return
+        if not self._software_autofill_request_is_current(request):
+            return
+        result_map = dict(results) if isinstance(results, Mapping) else {}
+        wanted = set(request.get("keys") or ())
+        scoped = {
+            str(key): result
+            for key, result in result_map.items()
+            if str(key) in wanted and isinstance(result, PathDetectionResult)
+        }
+        if str(request.get("target") or "") == "legacy":
+            self._apply_autofill_results(str(section or ""), scoped)
+            return
+        editor_key = (
+            str(request.get("family_key") or ""),
+            request.get("radio_id"),
+            str(request.get("task_key") or ""),
+        )
+        editor = self._software_task_editors.get(editor_key)
+        if editor is None:
+            return
+        filled = 0
+        preserved = 0
+        missing = 0
+        for key, result in scoped.items():
+            widget = editor.field_widget(key)
+            if not isinstance(widget, QLineEdit):
+                continue
+            if widget.text().strip():
+                preserved += 1
+            elif result.path and result.confidence != "not_found":
+                editor.apply_value(key, result.path)
+                filled += 1
+            else:
+                missing += 1
+        summary = f"Search complete: filled {filled}, preserved {preserved}, not found {missing}."
+        editor.set_operation_status(summary)
+
+    def _on_software_autofill_cancelled(self, generation: int) -> None:
+        request = dict(getattr(self, "_software_autofill_active_request", None) or {})
+        if int(request.get("generation") or 0) != int(generation):
+            return
+        if self._software_autofill_request_is_current(request):
+            self._set_software_autofill_feedback(request, "Search cancelled.")
+
+    def _on_software_autofill_failed(self, generation: int, section: str, detail: str) -> None:
+        request = dict(getattr(self, "_software_autofill_active_request", None) or {})
+        if int(request.get("generation") or 0) != int(generation):
+            return
+        log.warning("Software discovery failed for %s: %s", section, detail)
+        if self._software_autofill_request_is_current(request):
+            self._set_software_autofill_feedback(
+                request,
+                "Search could not complete. Existing settings were not changed.",
+            )
+
+    def _on_software_autofill_thread_finished(self) -> None:
+        thread = self.sender()
+        if thread is not getattr(self, "_software_autofill_thread", None):
+            return
+        self._software_autofill_thread = None
+        self._software_autofill_worker = None
+        self._software_autofill_active_request = None
+        pending = self._software_autofill_pending_request
+        self._software_autofill_pending_request = None
+        if not bool(getattr(self, "_software_autofill_shutdown", False)) and pending:
+            self._start_software_autofill_request(pending)
 
     def _refresh_contextual_autofill_buttons(self) -> None:
         if not hasattr(self, "_contextual_autofill_buttons"):
@@ -12433,34 +13231,35 @@ class SettingsTab(QWidget):
                 btn.setToolTip(base_tip)
 
     def _attempt_fast_light_autofill(self) -> None:
-        self._publish_autofill_feedback(
-            status="in_progress",
-            summary=f"Auto-fill scanning {self._autofill_section_label('fast_light')}.",
-            detail="FreqInOut is looking for blank fields it can fill for the selected radio.",
-            section="fast_light",
-            operation="scan",
+        self._request_software_autofill(
+            "fast_light",
+            (
+                "path_flrig", "path_fldigi", "path_flmsg", "path_flamp",
+                "fldigi_log_path", "message_paths.flmsg", "message_paths.flamp",
+            ),
+            target="legacy",
         )
-        self._apply_autofill_results("fast_light", self._detect_autofill_results("fast_light"))
 
     def _attempt_js8_autofill(self) -> None:
-        self._publish_autofill_feedback(
-            status="in_progress",
-            summary=f"Auto-fill scanning {self._autofill_section_label('js8')}.",
-            detail="FreqInOut is looking for blank fields it can fill for the selected radio.",
-            section="js8",
-            operation="scan",
+        self._request_software_autofill(
+            "js8",
+            (
+                "path_js8call", "js8_directed_path", "js8_forms_path",
+                "path_js8spotter", "path_commstat",
+            ),
+            target="legacy",
         )
-        self._apply_autofill_results("js8", self._detect_autofill_results("js8"))
 
     def _attempt_varac_autofill(self) -> None:
-        self._publish_autofill_feedback(
-            status="in_progress",
-            summary=f"Auto-fill scanning {self._autofill_section_label('varac')}.",
-            detail="FreqInOut is looking for blank fields it can fill for the selected radio.",
-            section="varac",
-            operation="scan",
+        self._request_software_autofill(
+            "varac",
+            (
+                "varac_path", "varac_db_path", "varac_ini_path",
+                "message_paths.varac", "varac_outbox_dir", "varac_bbs_dir",
+                "varac_bbs_archive_dir",
+            ),
+            target="legacy",
         )
-        self._apply_autofill_results("varac", self._detect_autofill_results("varac"))
 
     def _apply_autofill_results(self, section: str, results: Dict[str, PathDetectionResult]) -> None:
         filled: List[str] = []
@@ -12997,10 +13796,10 @@ class SettingsTab(QWidget):
         self.js8_forms_edit.setText(data.get("js8_forms_path", "") or "")
         if hasattr(self, "js8spotter_import_db_edit"):
             self.js8spotter_import_db_edit.setText(str(data.get("js8spotter_import_db_path", "") or ""))
-        self._refresh_js8_expect_policies_table()
-        self._refresh_js8_expect_entries_table()
-        self._refresh_js8spotter_watch_review()
-        self._refresh_js8spotter_activity_review()
+        # Legacy JS8Spotter/Expect compatibility widgets remain available to
+        # import code, but the top-level FIO Spotter workspace owns their
+        # operator UI. Do not synchronously query and populate hidden tables
+        # during Settings startup.
         self.js8call_path_edit.setText((data.get("path_js8call", "") or "").strip())
         self.js8spotter_path_edit.setText((data.get("path_js8spotter", "") or "").strip())
         self.commstat_path_edit.setText((data.get("path_commstat", "") or "").strip())
@@ -15009,6 +15808,26 @@ class SettingsTab(QWidget):
             )
         return f"{count} radio{'s' if count != 1 else ''}"
 
+    def _refresh_software_administration_snapshot(self) -> None:
+        """Refresh the bounded snapshot from the same explicit Settings load."""
+
+        try:
+            snapshot = build_software_administration_snapshot(
+                tuple(self.device_profiles),
+                js8_instances=tuple(self.multi_radio_store.list_js8_instances()),
+                fast_light_configs=tuple(self.multi_radio_store.list_fast_light_configs()),
+                varac_nodes=tuple(self.multi_radio_store.list_varac_nodes()),
+            )
+        except Exception:
+            log.exception("Failed building the software administration snapshot.")
+            snapshot = SoftwareAdministrationSnapshot(families=())
+        self._software_administration_snapshot = snapshot
+        workspace = getattr(self, "software_administration_workspace", None)
+        if isinstance(workspace, SoftwareAdministrationWorkspace):
+            workspace.set_snapshot(snapshot)
+            self._sync_software_dirty_ui()
+            self._show_software_task_editor()
+
     def _effective_assignment_map(self) -> Dict[int, Dict[str, Any]]:
         mapping: Dict[int, Dict[str, Any]] = {}
         try:
@@ -16722,23 +17541,23 @@ class SettingsTab(QWidget):
             readiness_report = self._station_readiness_report_for_software_chips()
         radio_id = int(profile.get("id", 0) or 0) if isinstance(profile, dict) else 0
         chip_defs = [
-            ("JS8Call", "js8", getattr(self, "js8_section_group", None), bool(isinstance(profile, dict) and (
+            ("JS8Call", "js8", "js8call", bool(isinstance(profile, dict) and (
                 self._radio_software_enabled(profile, "js8call")
                 or self._radio_software_enabled(profile, "js8spotter")
                 or self._radio_software_enabled(profile, "commstat")
             ))),
-            ("Fast Light", "fast_light", getattr(self, "fast_light_section_group", None), bool(isinstance(profile, dict) and (
+            ("Fast Light", "fast_light", "fast_light", bool(isinstance(profile, dict) and (
                 self._radio_software_enabled(profile, "flrig")
                 or self._radio_software_enabled(profile, "fldigi")
                 or self._radio_software_enabled(profile, "flmsg")
                 or self._radio_software_enabled(profile, "flamp")
                 or self._radio_software_enabled(profile, "rigctld")
             ))),
-            ("VarAC", "varac", getattr(self, "varac_section_group", None), bool(isinstance(profile, dict) and self._radio_software_enabled(profile, "varac"))),
+            ("VarAC", "varac", "varac", bool(isinstance(profile, dict) and self._radio_software_enabled(profile, "varac"))),
             (
                 "Launch Control",
                 "launch_control",
-                getattr(self, "launch_control_section_group", None),
+                "",
                 self._radio_profile_launch_control_enabled(profile) or self._radio_profile_has_software_option(profile),
             ),
         ]
@@ -16758,8 +17577,17 @@ class SettingsTab(QWidget):
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             btn.setStyleSheet(button_style(role, theme))
             btn.setToolTip(f"Open {label} settings for the selected radio. Status: {status_label}.")
-            if isinstance(target_group, QGroupBox):
-                btn.clicked.connect(lambda _checked=False, g=target_group: self._select_settings_section_group(g))
+            if target_group:
+                btn.clicked.connect(
+                    lambda _checked=False, key=target_group, ident=radio_id: self.open_software_administration(
+                        family_key=key,
+                        radio_id=ident,
+                    )
+                )
+            else:
+                launch_group = getattr(self, "launch_control_section_group", None)
+                if isinstance(launch_group, QGroupBox):
+                    btn.clicked.connect(lambda _checked=False, g=launch_group: self._select_settings_section_group(g))
             layout.addWidget(btn, added // columns, added % columns)
             added += 1
         if added <= 0:
@@ -18079,13 +18907,16 @@ class SettingsTab(QWidget):
                 return default
 
         existing_js8_id = int(profile.get("js8_instance_id", 0) or 0)
+        js8_endpoint_customized = (
+            _txt("js8_host", "127.0.0.1").lower() not in {"", "127.0.0.1", "localhost", "::1"}
+            or _num("js8_port", 2442) != 2442
+        )
         js8_needed = any(
             [
                 self._radio_software_enabled(profile, "js8call"),
                 self._radio_software_enabled(profile, "js8spotter"),
                 self._radio_software_enabled(profile, "commstat"),
-                _txt("js8_host"),
-                _txt("js8_port"),
+                js8_endpoint_customized,
                 _txt("path_js8call"),
                 _txt("js8_directed_path"),
                 _txt("js8_forms_path"),
@@ -18113,17 +18944,20 @@ class SettingsTab(QWidget):
             payload["js8_instance_id"] = int(js8_saved.get("id", 0) or 0)
 
         existing_fast_id = int(profile.get("fast_light_config_id", 0) or 0)
+        fast_endpoint_customized = (
+            _num("flrig_port", 12345) != 12345
+            or _txt("fldigi_host", "127.0.0.1").lower() not in {"", "127.0.0.1", "localhost", "::1"}
+            or _num("fldigi_port", 7362) != 7362
+        )
         fast_needed = any(
             [
                 self._radio_software_enabled(profile, "flrig"),
                 self._radio_software_enabled(profile, "fldigi"),
                 _txt("path_flrig"),
                 _txt("path_fldigi"),
-                _txt("fldigi_host"),
-                _txt("fldigi_port"),
+                fast_endpoint_customized,
                 _txt("fldigi_log_path"),
                 _txt("fldigi_checkin_dir"),
-                _txt("flrig_port"),
                 existing_fast_id > 0,
             ]
         )
@@ -18264,30 +19098,15 @@ class SettingsTab(QWidget):
         return self.multi_radio_store.save_device_profile(payload)
 
     def _persist_staged_radio_software_bundles(self) -> bool:
-        self._stash_current_software_radio_state()
-        if not self._software_radio_drafts:
-            return True
-        try:
-            for radio_id, state in list(self._software_radio_drafts.items()):
-                profile = self._device_profile_by_id(int(radio_id))
-                if not isinstance(profile, dict):
-                    continue
-                self._save_radio_software_bundle(profile, dict(state))
-            primary_id = self._runtime_primary_device_profile_id()
-            if primary_id:
-                self.multi_radio_store.sync_runtime_active_device_to_legacy_settings_if_single_active(int(primary_id))
-        except ValueError as exc:
-            QMessageBox.warning(self, "Radio Software View", str(exc))
-            return False
-        except Exception:
-            log.exception("Failed to persist radio-scoped software settings.")
-            QMessageBox.warning(
-                self,
-                "Radio Software View",
-                "Unable to save the selected radio software settings.",
+        # The global Settings save deliberately excludes Software workspace
+        # drafts. Each family has an exact-scope Save action and the workspace
+        # exposes an explicit Save All Changes action; a generic save must not
+        # silently commit another radio or software family.
+        if self._software_dirty_families:
+            log.info(
+                "Software Administration retained %s scoped draft(s) during global Settings save.",
+                len(self._software_dirty_families),
             )
-            return False
-        self._software_radio_drafts.clear()
         return True
 
     def set_multi_rig_runtime_status(self, status: MultiRigRuntimeStatus | None) -> None:
@@ -19814,6 +20633,7 @@ class SettingsTab(QWidget):
         self._update_device_profile_readiness_detail(readiness_report)
         self._refresh_radio_specific_section_visibility()
         self._refresh_launch_control_guidance()
+        self._refresh_software_administration_snapshot()
         self._refresh_section_nav_health()
         if refresh_section_titles:
             self._refresh_section_titles()
@@ -27661,6 +28481,8 @@ class SettingsTab(QWidget):
                 self._refresh_section_nav_health()
             if hasattr(self, "mesh_channel_admin"):
                 self._refresh_mesh_channel_table()
+            if hasattr(self, "software_administration_workspace"):
+                self.software_administration_workspace.apply_theme(theme)
             for btn in getattr(self, "_context_help_buttons", []):
                 try:
                     btn.setStyleSheet(button_style("secondary", theme))
@@ -27683,6 +28505,7 @@ class SettingsTab(QWidget):
     def _flush_resize_update(self) -> None:
         self._settings_resize_update_pending = False
         self._update_logging_actions_layout()
+        self._sync_current_section_scroll_size()
 
     def _js8_api_reachable(self) -> bool:
         try:

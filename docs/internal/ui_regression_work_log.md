@@ -4149,3 +4149,250 @@ reviewed with the highlighted selected-group cue and reachable `Use Target` and
 0.750 ms median, 0.899 ms p95, and 1.295 ms maximum against the 16 ms p95 and
 50 ms maximum Compose budgets. No schema migration, production-data mutation,
 periodic polling, or destructive operation was introduced.
+
+## 2026-09-12 — Software administration SCA-S0 specification and read model
+
+Status: implementation and automated exit gate passed.
+
+The Settings Configuration Assistant now defines the software-centered operator
+workflow `choose software -> see radios -> choose radio -> choose task ->
+configure`, explicit software ownership boundaries, scoped-save behavior,
+cache-only navigation, responsive/accessibility requirements, and five gated
+delivery slices. A new immutable, DB-free software-administration read model
+builds deterministic reverse radio assignments for JS8Call, Fast Light, VarAC,
+CommStat, External Spotter, and FIO Spotter from already-loaded configuration
+rows. It retains disabled linked assignments, identifies missing and unassigned
+instances, discloses shared instances, and consumes only supplied cached
+readiness evidence. It performs no database, filesystem, process, socket, or
+radio work and introduces no schema or runtime-data mutation.
+
+Model ownership: the high-reasoning primary model owned the information
+architecture, ownership taxonomy, immutable model design, implementation,
+delegated-diff review, and exit gate. `gpt-5.6-luna` at medium reasoning added
+the focused pure-model tests. The primary rejected and corrected the first test
+contract because it regrouped JS8Call, FIO Spotter, External Spotter, and
+CommStat under one JS8 family, which would have contradicted the specification.
+
+Acceptance evidence: `pytest -q tests/test_software_administration_model.py`
+passes 6 tests; Python compilation and `git diff --check` pass. SCA-S0 is closed
+and SCA-S1 may begin.
+
+## 2026-09-12 — Software administration SCA-S1 workspace and navigation
+
+Status: implementation and automated exit gate passed.
+
+Settings now exposes Software as a first-class administration context beside
+Main and Radios. The new cache-only Software Administration workspace presents
+software families first, then the radios that use the selected software, then
+task choices for that family. Radio chips disclose disabled, missing, shared,
+and unassigned configuration without opening a database, scanning a path,
+probing a process, or contacting an endpoint. Radio Profile software actions
+deep-link to the same family and radio context instead of opening a competing
+legacy surface. The workspace retains usable controls at 900x560 and 1000x700,
+uses stable deterministic selection, and exposes accessible state text.
+
+Model ownership: the high-reasoning primary model owned navigation architecture,
+cached integration, compatibility routing, delegated-diff review, and the exit
+gate. `gpt-5.6-terra` at medium reasoning implemented the bounded workspace UI.
+`gpt-5.6-luna` at medium reasoning implemented focused widget and integration
+tests. Primary review corrected nondeterministic family fallback, excess minimum
+height at the supported compact size, shared-instance wording, and two test
+drafts that assumed APIs or layout restrictions outside the approved contract.
+
+Acceptance evidence: the combined software workspace, immutable model, and
+radio-scoped software settings suite passes 170 tests under the offscreen Qt
+platform. A real deferred SettingsTab smoke test opens the Software context with
+radio chrome hidden and the workspace selected. Python compilation and
+`git diff --check` pass. No schema migration or production-data mutation was
+introduced. SCA-S1 is closed and SCA-S2 may begin.
+
+## 2026-09-12 — Software administration SCA-S2 task ownership and editors
+
+Status: implementation and automated exit gate passed.
+
+Software Administration now keeps the operator in one software-centered
+workspace while switching family, radio, and task. Declarative task editors
+cover JS8Call, Fast Light, VarAC, CommStat, External Spotter, and FIO Spotter
+using the existing radio software state keys. JS8Call no longer visually owns
+CommStat, the external Spotter launcher, or legacy Expect administration.
+Built-in FIO Spotter Settings is limited to dependencies and radio mapping and
+links to the top-level operational workspace. The old monolithic JS8Call,
+Fast Light, and VarAC forms remain hidden compatibility adapters for existing
+load/capture behavior rather than navigable duplicate editors.
+
+Ordinary task navigation is cache-only and preserves registered editor widgets
+and drafts. Dotted message-folder state round-trips without flattening, returned
+editor state is defensively copied, compact form rows wrap, controls have
+accessible names, and literal ampersands remain visible in task labels. Settings
+startup no longer performs the four synchronous hidden-table refreshes for the
+legacy Expect and imported-Spotter review UI.
+
+Model ownership: the high-reasoning primary model owned product boundaries,
+state-adapter design, Settings integration, startup behavior, delegated-diff
+review, visual QA, and the exit gate. `gpt-5.6-terra` at medium reasoning added
+the durable task-editor registry and revised the S1 routing contract.
+`gpt-5.6-luna` at medium reasoning audited legacy ownership/coupling and added
+the focused SCA-S2 ownership/editor tests. Primary review rejected the first
+test draft's invented constructor and state-cache API, aligned it to the actual
+host-owned draft architecture, and corrected defensive nested-state copying.
+
+Acceptance evidence: the combined SCA-S0/S1/S2 and radio-scoped settings suite
+passes 178 tests under offscreen Qt. Python compilation and `git diff --check`
+pass. A 1000x700 offscreen render was visually reviewed with the software,
+radio, and task choices plus the exact JS8Call/FIO-A editor scope all visible.
+No schema migration or production-data mutation was introduced. SCA-S2 is
+closed and SCA-S3 may begin.
+
+## 2026-09-12 — Software administration SCA-S3 scoped drafts and saves
+
+Status: implementation and automated exit gate passed.
+
+Software editor drafts are now keyed by radio and software family. Family and
+radio chips, the identity banner, and editor state all include explicit
+`Unsaved changes` text; color is supplementary. The selected editor's save
+label names the exact family and radio. Saving merges only that family's owned
+keys into a fresh persisted base and preserves unrelated fields, nested
+message-folder ownership, and other family drafts. Shared instances disclose
+the other affected radios before confirmation. Failed saves retain draft and
+dirty state. A deliberate secondary Save All action saves all staged families,
+while global Save Settings explicitly leaves Software drafts untouched.
+
+Primary review also corrected the legacy bundle writer so default host/port
+values alone do not create unrelated JS8Call or Fast Light instance records.
+Wrong-radio source identity rejection remains in force, and the existing
+single-active-radio legacy projection runs only after successful scoped writes.
+
+Model ownership: the high-reasoning primary model owned persistence partitions,
+merge semantics, shared-instance confirmation, exact-scope and Save All
+integration, failure behavior, legacy projection review, and the exit gate.
+`gpt-5.6-terra` at medium reasoning implemented the accessible dirty-state and
+Save All workspace UI. `gpt-5.6-luna` at medium reasoning implemented the pure
+partition/merge tests. The primary added behavioral save/failure/shared-instance
+tests and corrected a nondeterministic JS8 offset comparison that could have
+created an unrelated JS8 record during a Fast Light save.
+
+Acceptance evidence: the combined SCA-S0 through SCA-S3 and radio-scoped
+settings suite passes 193 tests under offscreen Qt. Python compilation and
+`git diff --check` pass. No schema migration or destructive data operation was
+introduced. SCA-S3 is closed and SCA-S4 may begin.
+
+## 2026-09-12 — Software administration SCA-S4 discovery and qualification
+
+Status: implementation and automated exit gate passed; software-centered
+Settings delivery is complete.
+
+Software task editors now expose an explicit `Find installed software` action.
+Discovery runs in one Settings-owned `QThread` lane from a captured Settings
+mapping, coalesces repeated requests to the newest request, requests cancellation
+of superseded work, and rejects stale generation or wrong family/radio/task
+results. Only blank fields are filled; existing values are preserved and the
+editor receives a calm completion summary. Navigation and repaint remain
+cache-only. Shutdown is bounded to 1.2 seconds and retains an unusually delayed
+worker until it exits so Qt cannot destroy a running thread.
+
+The compact-height workspace now removes redundant prompt text while preserving
+software, radio, and task chips, the context banner, explicit actions, and a
+substantially larger editor. Help documents the new mental model, exact-scope
+saves, discovery/check behavior, shared instances, and FIO Spotter/BBS ownership.
+
+Model ownership: the high-reasoning primary model owned worker architecture,
+generation/context correctness, lifecycle and shutdown safety, Settings
+integration, compact-layout review, delegated-diff review, visual QA, and final
+integration. `gpt-5.6-terra` at medium reasoning handled the bounded help and
+operator-documentation package. `gpt-5.6-luna` at medium reasoning handled the
+light/dark, supported-size, Large Text, accessibility, repaint, and cache-only
+qualification package. The primary added worker/state-transition tests and
+refined the compact editor after reviewing the 900x560 render.
+
+Acceptance evidence: 246 focused and adjacent Settings/status tests pass with
+23 intentional environment skips; the SCA-only combined gate passes 213 tests.
+Python compilation, contextual-help anchor validation, and `git diff --check`
+pass. A full-repository run was non-gating and was stopped after unrelated
+legacy tests accumulated scheduler executor threads and stalled in a theme-heavy
+Inbox test; the interrupt exposed that run's existing Qt teardown fault. Linux
+window-manager and installed-software discovery checks remain operator-assisted
+and are explicitly listed in the controlling spec. No migration or destructive
+operation was introduced.
+
+## 2026-09-12 — Software navigation orphan-window regression
+
+Status: corrected; focused exit gate passed.
+
+Opening Software exposed an unowned section-navigation button as a top-level Qt
+window. The button was created for every Settings section, but Software has no
+secondary section-button layout because its family/radio/task chips own local
+navigation. Visibility refresh styled and showed the parentless button, creating
+the full-screen blue `Software Administration` surface; every click refreshed
+visibility and made it recur. Section buttons are now created only for global or
+radio layouts and receive an explicit Settings parent. Software and hidden
+compatibility sections create no orphan control.
+
+Model ownership: the high-reasoning primary model matched the screenshot's
+left-aligned, vertically centered button text to the parentless section control,
+implemented the ownership correction, reviewed both delegated findings, and ran
+the integration gate. `gpt-5.6-terra` at medium reasoning performed a bounded
+widget/sizing audit; because it inspected the shared tree after the primary fix,
+its alternative stack-sizing hypothesis was not adopted. `gpt-5.6-luna` at
+medium reasoning added the real SettingsTab interaction regression test. Primary
+review moved its top-level-window baseline before opening Software so the test
+would fail on the reported initial overlay as well as on recurrence.
+
+Acceptance evidence: opening Software and clicking the JS8Call family, FIO-B
+radio, and API & Radio task produces no additional visible top-level widget; the
+workspace remains embedded and active. The combined focused and adjacent gate
+passes 246 tests with 23 intentional environment skips. No migration or
+destructive operation was introduced.
+
+## 2026-09-12 — Software Administration responsive content correction
+
+Status: corrected; automated exit gate passed.
+
+Production screenshots showed the Software editor beginning near the bottom of
+the page with its fields and actions clipped. A complete family/task audit found
+that Settings fixed the shared section stack to the initial placeholder's
+one-time height. The later-created editor could not enlarge that ancestor. The
+same audit found dead editable-looking forms in the All context, a duplicated
+page heading, empty form scrollers and save controls on informational tasks, and
+excess secondary chrome at compact height.
+
+The Software section now follows the live Settings viewport and is resynchronized
+after editor creation and window resize. It no longer inherits the largest
+hidden legacy page or creates outer horizontal/vertical overflow. The editor
+keeps form content in its bounded internal scroller and anchors discovery,
+operational, dirty-state, and exact-save actions in a responsive footer. The
+footer uses one row when space permits and wraps when narrow. Compact height
+hides duplicated status and secondary assignment text so the actual task stays
+usable. Informational and read-only tasks no longer advertise a save operation.
+
+All now renders a cached, read-only summary of radio assignments, instance
+names, readiness, shared use, and unassigned instances. It cannot accept or
+silently discard radio-owned edits. Choosing a radio restores every applicable
+task. The embedded duplicate heading was removed.
+
+Model ownership: the high-reasoning primary model owned the viewport and All
+context architecture, implementation, delegated-diff review, visual QA, and
+integration gate. `gpt-5.6-terra` at medium reasoning performed the read-only
+cross-family layout/root-cause audit. `gpt-5.6-luna` at medium reasoning added
+the bounded family/task/theme/text-size matrix; primary review replaced its
+future-seam and always-save assumptions with the implemented aggregate and
+editable-field contracts, and added the real SettingsTab viewport regression.
+
+Acceptance evidence: the focused layout/editor/workspace/model partition passes 73
+tests. The broader software, Settings, help, status, persistence, and discovery
+partition passes 307 tests with 23 intentional environment skips. Offscreen
+renders at 1000x700 and 900x560 show complete task fields and footer actions,
+zero page-level horizontal or vertical scroll, and a full Settings Help button.
+Python compilation and `git diff --check` pass. No schema migration, endpoint
+I/O on navigation, production-data mutation, or destructive operation was
+introduced.
+
+Follow-up production review found the remaining no-field task defect: hiding
+the form scroller did not clear its layout stretch, so Health, Overview, and
+other action-only tabs distributed their heading, explanation, status, and
+button over the full editor height. Every no-field task now removes that
+stretch and top-aligns its meaningful content. The neutral `Not checked` copy
+is now `Not yet verified`, with a tooltip explaining that no current
+verification evidence exists and directing the operator to Health. Luna added
+the complete no-field/action matrix and terminology regression; the primary
+strengthened it with geometry-order and zero-stretch assertions after reviewing
+Terra's structural audit.
