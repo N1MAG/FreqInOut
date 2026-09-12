@@ -504,6 +504,44 @@ def test_settings_software_page_does_not_freeze_to_placeholder_height(monkeypatc
         app.processEvents()
 
 
+def test_settings_software_workspace_survives_repeated_reflow_and_resize(monkeypatch, tmp_path):
+    """Deferred snapshot/layout passes must not collapse the selected JS8 editor."""
+    from freqinout.gui.settings_tab import SettingsTab
+
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = _app()
+    monkeypatch.setattr(SettingsTab, "_maybe_backfill_js8_geo", lambda self: None)
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status", lambda self, force=False: None)
+    tab = SettingsTab()
+    try:
+        workspace = tab.software_administration_workspace
+        workspace.set_snapshot(_snapshot())
+        tab.show()
+        assert tab.show_settings_context("software", health_key="software_administration") is True
+
+        for width, height in ((1000, 700), (900, 560), (760, 460), (1000, 700)):
+            tab.resize(width, height)
+            workspace.select_context("js8call", 1, "api_radio")
+            # This mirrors the deferred Settings load rebuilding the cached
+            # workspace after the operator has already clicked JS8Call.
+            workspace.set_snapshot(_snapshot())
+            workspace.select_context("js8call", 1, "api_radio")
+            tab._show_software_task_editor()
+            tab._sync_current_section_scroll_size()
+            app.processEvents()
+
+            assert tab.sections_stack.currentWidget() is tab.software_administration_section_group
+            assert workspace.isVisible()
+            assert workspace.editor_stack.currentWidget() is not workspace.editor_placeholder
+            assert workspace.editor_stack.currentWidget().isVisible()
+            assert tab.sections_stack.height() >= 240
+            assert tab.sections_stack.height() < 1000
+            assert tab.sections_scroll.verticalScrollBar().maximum() == 0
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
 def test_software_task_handler_stays_in_software_workspace():
     source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
     block = source[source.index("    def _on_software_administration_task_selected") : source.index("    def _software_editor_state")]

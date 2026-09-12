@@ -294,6 +294,25 @@ can cover the application when visibility is refreshed. The integration gate
 opens Software and clicks each navigation tier while asserting that no new
 top-level window appears and the workspace remains embedded in Settings.
 
+Production family-selection correction: the active Software workspace must not
+derive its hard height from `QScrollArea.viewport()`. That viewport is partly
+child-driven and can briefly report zero or a stale size while the deferred
+Settings load, a software-family selection, and Qt layout activation overlap.
+The shared section stack instead uses the already allocated outer scroll-area
+height with a small nonzero floor. The active Software page and stack receive
+the same stable bound, and the stack returns to a non-expanding policy so a
+large hidden legacy Settings page cannot take over the workspace. A subsequent
+real resize recalculates the bound from the new outer allocation.
+
+The permanent lifecycle gate must open Settings > Software, select JS8Call,
+rebuild the same cached snapshot as the deferred initial load would, and repeat
+family/radio/task selections across 1920x1080, 1000x700, and 900x560. At every
+settled event-loop boundary the Software section and selected editor remain
+visible, the shared stack stays between its usable floor and the containing
+screen, the outer Settings scrollbars remain inactive, and no top-level window
+is created. Navigation, resizing, snapshot rebuilding, and repainting remain
+free of database, filesystem, process, socket, and radio work.
+
 ## Phase 1: Settings IA Cleanup
 
 ### Condition Alerts

@@ -4527,3 +4527,43 @@ Qt/worker teardown segmentation fault after accumulating scheduler threads;
 neither failure touches the files in this correction. No production database,
 external application configuration, endpoint, radio, or external filesystem
 content was mutated.
+
+## 2026-09-12 — Software family-selection swipe/vanish correction
+
+Status: corrected; automated exit gate passed. Linux production confirmation
+remains operator-assisted.
+
+Production review found that Settings > Software could paint normally, then
+appear to swipe away immediately after JS8Call was selected. The click path was
+confirmed to be cache-only and contained no route away from Settings. Both live
+radio-to-JS8 assignments were valid, and the available log contained no matching
+exception. The failure was a layout feedback loop: the shared Settings stack
+was hard-pinned to the inner viewport during a deferred-load reflow, even though
+that viewport's transient size was partly determined by the child being pinned.
+
+Software sizing now uses the height already allocated to the outer Settings
+scroll container, with a 240-pixel startup floor. The active page and shared
+stack use one stable bound, and the stack restores its non-expanding policy so
+large hidden legacy forms cannot make it grow beyond the screen. Normal resize
+settling recalculates the bound. Repeated JS8Call family/radio/task selection and
+same-snapshot rebuilding no longer collapse the workspace or produce outer
+scrollbars at supported sizes.
+
+Model ownership: the high-reasoning primary model owned lifecycle diagnosis,
+layout architecture, delegated-diff review, specification and work-log updates,
+and final integration. `gpt-5.6-terra` at high reasoning audited navigation,
+runtime assignment validity, and the shared-stack feedback path. `gpt-5.6-luna`
+at high reasoning implemented the bounded layout correction and focused
+reflow/resize regression. `gpt-5.6-luna` at medium reasoning independently
+stressed delayed selection and snapshot refresh across light/dark themes,
+Normal/Large Text, and 1920x1080, 1000x700, and 900x560.
+
+Acceptance evidence: the focused Software Administration workspace, layout
+matrix, radio-first ownership, Settings adapter, and radio-scoped Settings gate
+passes 239 tests. The independent layout stress partition passes 64 tests, and
+20 repeated JS8Call selection/task/reflow cycles retained the active section and
+editor with zero outer scroll and no additional visible top-level window. The
+broader multi-instance, persistence, discovery, status, workspace, and Settings
+integration partition passes 336 tests with 4 intentional environment skips.
+Python compilation and `git diff --check` pass. No migration, database write,
+endpoint I/O, external application change, or destructive action was introduced.

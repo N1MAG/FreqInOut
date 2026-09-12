@@ -10892,21 +10892,26 @@ class SettingsTab(QWidget):
             meta = self._section_meta.get(page, {})
             if str(meta.get("scope", "")).strip().lower() == "software":
                 # Software task editors are created after the section is
-                # selected. Size this expanding workspace from the visible
-                # viewport, never from the initial placeholder's sizeHint (or
-                # QStackedWidget's largest hidden legacy page). This keeps the
-                # editor footer visible without creating a multi-screen outer
-                # scroll surface.
-                viewport = getattr(self, "sections_scroll", None)
-                viewport_h = int(viewport.viewport().height()) if viewport is not None else 0
-                target_h = max(240, viewport_h)
-                page.setMinimumHeight(target_h)
-                page.setMaximumHeight(target_h)
-                self.sections_stack.setMinimumHeight(target_h)
-                self.sections_stack.setMaximumHeight(target_h)
-                self.sections_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                # selected. Bound the stack to the height already allocated
+                # to the outer scroll container, not its child-driven
+                # viewport. During deferred loading and a family click the
+                # viewport can briefly report zero or a stale height; copying
+                # that transient value made the workspace collapse. The hard
+                # bound is still required so a large hidden legacy Settings
+                # page cannot expand this embedded workspace to thousands of
+                # pixels.
+                scroll = getattr(self, "sections_scroll", None)
+                container_h = int(scroll.height()) if scroll is not None else 0
+                minimum_h = max(240, container_h)
+                page.setMinimumHeight(minimum_h)
+                page.setMaximumHeight(minimum_h)
+                self.sections_stack.setMinimumHeight(minimum_h)
+                self.sections_stack.setMaximumHeight(minimum_h)
+                # Keep this policy non-expanding so a hidden, large settings
+                # page cannot override the allocated scroll-container size.
+                self.sections_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
                 self._last_section_stack_index = int(self.sections_stack.currentIndex())
-                self._last_section_target_height = target_h
+                self._last_section_target_height = minimum_h
                 page.updateGeometry()
                 self.sections_stack.updateGeometry()
                 return
@@ -10916,6 +10921,7 @@ class SettingsTab(QWidget):
                 page.setMinimumHeight(target_h)
                 self.sections_stack.setMinimumHeight(target_h)
                 self.sections_stack.setMaximumHeight(target_h)
+                self.sections_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
                 self._last_section_stack_index = row
                 self._last_section_target_height = target_h
         except Exception:
