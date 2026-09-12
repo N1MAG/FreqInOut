@@ -4464,3 +4464,66 @@ isolation because its JS8 messages are filtered. Neither failure occurs in or
 is caused by this change's focused/adjacent partitions. No production database,
 external application configuration, endpoint, radio, or filesystem content was
 mutated by the implementation or tests.
+
+## 2026-09-12 — Radio-first software ownership and replacement
+
+Status: MIS-5 implementation complete; automated exit gate passed. Live Linux
+multi-process and real radio/PTT qualification remains an operator-assisted
+release check.
+
+Software Administration now makes ownership explicit before configuration. Its
+family, radio, and task chip rows are exclusive and retain one visible selection
+after repeated clicks. Radio chips identify `Available` or `Assigned:
+<instance>`, while the primary action changes between `Create a radio first`,
+`Create or use instance`, and `Replace instance`. This is a family-scoped rule:
+one radio may use JS8Call, Fast Light, and VarAC together, but it can own only one
+runtime from each family and one independently controlled runtime cannot serve
+two radios.
+
+The assistant no longer creates operational orphan instances. An empty station
+routes directly to Guided Add Radio. Existing unassigned records remain bounded,
+family-filtered recovery choices. An occupied family slot requires an explicit
+replacement acknowledgement and keeps the current/proposed comparison visible
+through Review. The Settings adapter sends the expected current instance ID so
+stale UI state is rejected before mutation.
+
+The store centralizes ownership validation and performs replacement in one
+`BEGIN IMMEDIATE` transaction. The radio link, application/manifest state,
+FIO-managed launch items, and applicable VarAC membership either change together
+or remain unchanged. Replacement preserves every other software family on the
+radio. The prior record is retained disabled for recovery. The confirmed
+Advanced `Disassociate` action clears only the selected family link/use flags,
+FIO-managed launch items, matching control backend, and applicable VarAC
+membership; it retains external applications, profiles, databases, messages,
+inboxes, outboxes, logs, and files. Legacy shared links are not destructively
+rewritten and remain visible for operator recovery.
+
+Work packages and models:
+
+- high-reasoning primary GPT-5 model (exact host runtime submodel identifier not
+  exposed): product architecture, lifecycle/cardinality decisions, migration
+  judgment, host integration, delegated-diff review, documentation, acceptance
+  gate, and final integration;
+- `gpt-5.6-terra`, high reasoning: centralized ownership validation, atomic
+  replace/disassociate lifecycle, rollback behavior, and focused store tests;
+- `gpt-5.6-luna`, high reasoning: exclusive radio-first workspace and guided
+  replacement UX with responsive/accessibility coverage;
+- `gpt-5.6-luna`, medium reasoning: independent integrated regression audit and
+  cross-family preservation coverage.
+
+Primary review refined the delegated work by wiring confirmed disassociation
+through Settings, clearing a matching JS8Call/FLRig control backend to Manual,
+making ownership—not cached verification—the radio-chip label, routing an empty
+station directly to radio creation, filtering Assign Existing to retained
+unassigned records, and qualifying launch cleanup as FIO-managed so legacy
+operator launch records are never guessed at or removed.
+
+Acceptance evidence: the final focused ownership/assistant/workspace/Settings
+partition passes 82 tests. The broader Software Administration, Settings,
+storage, discovery, manifest, database, and launch partition passes 361 tests.
+Python compilation, HTML parsing, and `git diff --check` pass. A wider historical
+suite still contains pre-existing scheduler expectations and can hit the known
+Qt/worker teardown segmentation fault after accumulating scheduler threads;
+neither failure touches the files in this correction. No production database,
+external application configuration, endpoint, radio, or external filesystem
+content was mutated.

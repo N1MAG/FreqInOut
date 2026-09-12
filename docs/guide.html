@@ -1370,15 +1370,15 @@
   <h3 id="settings-software-administration">Software Administration</h3>
   <p><strong>Use this when you want to work on software rather than radio hardware.</strong> The workspace follows one repeatable path: <strong>choose software &rarr; see radios using it &rarr; choose a radio &rarr; choose a task &rarr; configure and save</strong>. A software chip on the Radios page opens the same workspace.</p>
   <ul class="section-list">
-    <li><strong>Software family</strong>: select JS8Call, Fast Light, VarAC, CommStat, External Spotter, or FIO Spotter. The family card describes the application role and reports radios that need attention. Status wording, not color alone, explains the state.</li>
-    <li><strong>Radio chips</strong>: <code>All</code> is a summary. Choose a named radio chip before editing. The identity banner names the selected software, radio, and instance. If an instance is shared, the banner names the other affected radios before saving.</li>
+    <li><strong>Software family</strong>: select one of JS8Call, Fast Light, VarAC, CommStat, External Spotter, or FIO Spotter. Only one family chip is active at a time. A radio can still use several different software families together.</li>
+    <li><strong>Radio chips</strong>: <code>All</code> is a summary. Choose one named radio before editing. <code>Available</code> means that radio has no instance in the selected family; <code>Assigned: &lt;instance&gt;</code> names the one it uses. One independently controlled runtime instance cannot be assigned to two radios.</li>
     <li><strong>Tasks</strong>: tasks keep the form focused on the work at hand, such as API &amp; Radio, Message Storage, FLRig Control, Inbox &amp; Outbox, Launch, or Health. Task selection is navigation only; it does not change configuration.</li>
     <li><strong>Exact-scope save</strong>: the editor button names both the software and radio it saves. It saves only that family for that radio. <code>Save All Changes</code> is a deliberate secondary action for every marked Software draft. The general <code>Save Settings</code> action does not silently save Software drafts.</li>
     <li><strong>Discovery and health</strong>: selecting software, radio, or task never scans folders, starts a process, probes an API, or contacts a radio. Use a visible check, import, refresh, or browse action when you want that work done. While a check runs, the last known configuration remains usable.</li>
     <li><strong>Ownership</strong>: CommStat is a standalone tool mapped to the selected radio's JS8 transport. External Spotter is optional and separate from built-in FIO Spotter. FIO Spotter rules, Expect queries, watches, forms, and activity are managed in the top-level FIO Spotter workspace. Station BBS locations, access, retention, publication, visitor preview, and helpers are managed in the top-level BBS service; VarAC software settings retain only native runtime paths and inbound protection.</li>
   </ul>
   <h4>Adding another software instance</h4>
-  <p>Choose the software family, select <strong>Add software instance</strong>, and follow the seven short steps: Purpose, Find or create, Identity, Connections, Files, Launch, and Review. Choose the radio that owns the instance first. FIO proposes the next unused local ports and, for JS8Call, a stable rig name. Nothing is saved until the final review.</p>
+  <p>Choose the software family, then choose the radio that will own the instance. If no radio exists, use <strong>Create a radio first</strong>. Select <strong>Add software instance</strong> and follow the seven short steps: Purpose, Find or create, Identity, Connections, Files, Launch, and Review. FIO proposes the next unused local ports and, for JS8Call, a stable rig name. Nothing is saved until the final review.</p>
   <table>
     <thead><tr><th>Software</th><th>What makes the instance distinct</th><th>What FIO persists and checks</th></tr></thead>
     <tbody>
@@ -1388,6 +1388,7 @@
     </tbody>
   </table>
   <p><strong>Find existing configurations</strong> is an explicit bounded scan. Select a result before importing it. Imported settings remain operator-managed. <strong>FIO-managed launch</strong> means FIO owns the saved launch recipe; it does not mean FIO rewrites the application's native settings. Use each software family's Health task after saving to distinguish configured, reachable, and verified state.</p>
+  <p>Each radio can have one JS8Call, one Fast Light, and one VarAC instance at the same time, but only one instance from each family. When a family is already assigned, choose <strong>Replace instance</strong> and review the current and proposed identities; FIO swaps the assignment and managed launch links together or leaves the current setup unchanged. <strong>Assign Existing Instance</strong> lists only retained unassigned records for recovery. The Advanced <strong>Disassociate</strong> action stops FIO from using and launching that family for the radio, but does not delete the external application, settings, messages, or files.</p>
 
   <h3 id="settings-operator-info">Operator Information</h3>
   <ul class="section-list">

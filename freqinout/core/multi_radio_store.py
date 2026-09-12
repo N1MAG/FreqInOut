@@ -3290,6 +3290,184 @@ def _save_software_instance_manifest_conn(
     return _software_instance_manifest_row(dict(saved)) if saved is not None else {}
 
 
+_SOFTWARE_INSTANCE_ASSIGNMENTS: Dict[str, tuple[str, str, str]] = {
+    "js8call": ("js8_instance_id", "js8_instances", "JS8Call"),
+    "fast_light": ("fast_light_config_id", "fast_light_configs", "Fast Light"),
+    "varac": ("varac_node_id", "varac_nodes", "VarAC"),
+}
+_SOFTWARE_INSTANCE_USE_FLAGS: Dict[str, tuple[str, ...]] = {
+    "js8call": ("use_js8call",),
+    "fast_light": ("use_flrig", "use_fldigi", "use_flmsg", "use_flamp"),
+    "varac": ("use_varac",),
+}
+_SOFTWARE_INSTANCE_EXPECTATION_UNSET = object()
+_UNASSIGNED_SOFTWARE_SUMMARY = "Unassigned from all radios; FIO launch disabled."
+
+
+def _validate_software_instance_radio_ownership_conn(
+    conn: sqlite3.Connection,
+    *,
+    radio_profile_id: Optional[int],
+    family_key: str,
+    application_id: Optional[int],
+) -> None:
+    """Reject a new application-to-radio link that would share a runtime.
+
+    This deliberately validates links at their mutation boundaries rather than
+    adding a unique database index.  Older installations may already contain
+    shared links; unchanged legacy rows remain readable and editable until an
+    operator deliberately reassigns them.
+    """
+
+    if application_id is None:
+        return
+    family = str(family_key or "").strip().lower()
+    try:
+        link_column, _table_name, label = _SOFTWARE_INSTANCE_ASSIGNMENTS[family]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported software instance family: {family or 'blank'}") from exc
+    params: List[Any] = [int(application_id)]
+    where = ""
+    if radio_profile_id is not None:
+        where = " AND id<>?"
+        params.append(int(radio_profile_id))
+    owner = conn.execute(
+        f"SELECT name FROM device_profiles WHERE {link_column}=?{where} ORDER BY id ASC LIMIT 1",
+        params,
+    ).fetchone()
+    if owner is not None:
+        raise ValueError(
+            f"This {label} runtime instance is already assigned to {owner[0]}; "
+            "each independently controlled radio needs its own instance identity."
+        )
+
+
+def _remove_instance_launch_links_conn(
+    conn: sqlite3.Connection,
+    *,
+    radio_profile_id: int,
+    family_key: str,
+    application_system_key: str,
+) -> None:
+    """Remove only launch items that FIO created for one assigned runtime."""
+
+    manifest_rows = conn.execute(
+        """
+        SELECT instance_key FROM software_instance_manifests
+         WHERE family_key=? AND application_system_key=?
+        """,
+        (str(family_key), str(application_system_key or "")),
+    ).fetchall()
+    manifest_keys = {str(row[0] or "").strip() for row in manifest_rows if str(row[0] or "").strip()}
+    if not manifest_keys:
+        # Do not guess at pre-manifest/legacy launch rows.  They can represent
+        # an operator-managed shared launcher and must survive this operation.
+        return
+    item_rows = conn.execute(
+        "SELECT instance_key FROM radio_launch_bundle_items WHERE radio_profile_id=?",
+        (int(radio_profile_id),),
+    ).fetchall()
+    stale_keys = [
+        str(row[0] or "")
+        for row in item_rows
+        if any(str(row[0] or "") == key or str(row[0] or "").startswith(f"{key}:") for key in manifest_keys)
+    ]
+    if stale_keys:
+        conn.executemany(
+            "DELETE FROM radio_launch_bundle_items WHERE radio_profile_id=? AND instance_key=?",
+            [(int(radio_profile_id), key) for key in stale_keys],
+        )
+
+
+def _remove_varac_cluster_links_for_device_conn(
+    conn: sqlite3.Connection,
+    *,
+    radio_profile_id: int,
+    preserve_cluster_id: Optional[int] = None,
+) -> None:
+    """Detach a radio from VarAC clusters without touching VarAC application data."""
+
+    params: List[Any] = [_utc_now_iso(), int(radio_profile_id)]
+    where = "gateway_handler_device_id=?"
+    if preserve_cluster_id is not None:
+        where += " AND id<>?"
+        params.append(int(preserve_cluster_id))
+    conn.execute(
+        f"UPDATE varac_clusters SET gateway_handler_device_id=NULL, updated_utc=? WHERE {where}",
+        params,
+    )
+    conn.execute(
+        "DELETE FROM varac_cluster_members WHERE device_profile_id=?",
+        (int(radio_profile_id),),
+    )
+    _sync_varac_cluster_member_enabled_flags_conn(conn)
+
+
+def _disable_unowned_software_application_conn(
+    conn: sqlite3.Connection,
+    *,
+    family_key: str,
+    application_id: Optional[int],
+) -> None:
+    """Keep an orphaned application record, but make it non-operational in FIO."""
+
+    if application_id is None:
+        return
+    family = str(family_key or "").strip().lower()
+    link_column, application_table, _label = _SOFTWARE_INSTANCE_ASSIGNMENTS[family]
+    in_use = conn.execute(
+        f"SELECT 1 FROM device_profiles WHERE {link_column}=? LIMIT 1",
+        (int(application_id),),
+    ).fetchone()
+    if in_use is not None:
+        return
+    application = _record_by_id(conn, application_table, int(application_id))
+    if application is None:
+        return
+    now_iso = _utc_now_iso()
+    conn.execute(
+        f"UPDATE {application_table} SET enabled=0, updated_utc=? WHERE id=?",
+        (now_iso, int(application_id)),
+    )
+    conn.execute(
+        """
+        UPDATE software_instance_manifests
+           SET verification_state='needs_attention', verification_summary=?, updated_utc=?
+         WHERE family_key=? AND application_system_key=?
+        """,
+        (_UNASSIGNED_SOFTWARE_SUMMARY, now_iso, family, str(application.get("system_key", "") or "")),
+    )
+
+
+def _activate_software_application_conn(
+    conn: sqlite3.Connection,
+    *,
+    family_key: str,
+    application_id: int,
+) -> Dict[str, Any]:
+    """Reactivate a retained record once it is deliberately assigned again."""
+
+    family = str(family_key or "").strip().lower()
+    _link_column, application_table, _label = _SOFTWARE_INSTANCE_ASSIGNMENTS[family]
+    application = _record_by_id(conn, application_table, int(application_id))
+    if application is None:
+        raise KeyError(f"Unknown {family.replace('_', ' ')} application instance id: {application_id}")
+    now_iso = _utc_now_iso()
+    conn.execute(
+        f"UPDATE {application_table} SET enabled=1, updated_utc=? WHERE id=?",
+        (now_iso, int(application_id)),
+    )
+    conn.execute(
+        """
+        UPDATE software_instance_manifests
+           SET verification_state='configured', verification_summary='', updated_utc=?
+         WHERE family_key=? AND application_system_key=? AND verification_summary=?
+        """,
+        (now_iso, family, str(application.get("system_key", "") or ""), _UNASSIGNED_SOFTWARE_SUMMARY),
+    )
+    return _record_by_id(conn, application_table, int(application_id)) or application
+
+
 def _save_operating_profile_conn(conn: sqlite3.Connection, values: Mapping[str, Any]) -> Dict[str, Any]:
     payload = dict(values)
     record_id = _coerce_optional_int(payload.get("id"))
@@ -5382,6 +5560,38 @@ class MultiRadioStore:
         if varac_node_id is not None and not _record_by_id(conn, "varac_nodes", int(varac_node_id)):
             raise KeyError(f"Unknown VarAC node id: {varac_node_id}")
 
+        requested_links = {
+            "js8call": js8_instance_id,
+            "fast_light": fast_light_config_id,
+            "varac": varac_node_id,
+        }
+        for family, proposed_id in requested_links.items():
+            link_column = _SOFTWARE_INSTANCE_ASSIGNMENTS[family][0]
+            current_id = _coerce_optional_int((existing or {}).get(link_column))
+            if existing is not None and current_id != proposed_id:
+                if proposed_id is None:
+                    raise ValueError(
+                        f"Use disassociate_software_instance() to remove the {family.replace('_', ' ')} "
+                        "assignment and its FIO launch links."
+                    )
+                raise ValueError(
+                    f"Use adopt_software_instance(..., replace_existing=True) to explicitly replace "
+                    f"the {family.replace('_', ' ')} assignment."
+                )
+            if current_id != proposed_id:
+                _validate_software_instance_radio_ownership_conn(
+                    conn,
+                    radio_profile_id=requested_id,
+                    family_key=family,
+                    application_id=proposed_id,
+                )
+                if proposed_id is not None:
+                    _activate_software_application_conn(
+                        conn,
+                        family_key=family,
+                        application_id=proposed_id,
+                    )
+
         flrig_host = _coerce_text(payload.get("flrig_host", (existing or {}).get("flrig_host", "127.0.0.1")), "127.0.0.1") or "127.0.0.1"
         fldigi_host = _coerce_text(payload.get("fldigi_host", (existing or {}).get("fldigi_host", "")), "") or flrig_host or "127.0.0.1"
         js8_host = _coerce_text(payload.get("js8_host", (existing or {}).get("js8_host", "127.0.0.1")), "127.0.0.1") or "127.0.0.1"
@@ -6494,6 +6704,7 @@ class MultiRadioStore:
         application_values: Mapping[str, Any],
         manifest_values: Mapping[str, Any],
         replace_existing: bool = False,
+        expected_current_instance_id: Any = _SOFTWARE_INSTANCE_EXPECTATION_UNSET,
         launch_at_startup: bool = False,
         varac_cluster_db_id: Optional[int] = None,
         varac_cluster_instance_number: Optional[int] = None,
@@ -6515,6 +6726,18 @@ class MultiRadioStore:
                 profile = _record_by_id(conn, "device_profiles", radio_id)
                 if profile is None:
                     raise KeyError(f"Unknown radio profile id: {radio_id}")
+                family_link_column = _SOFTWARE_INSTANCE_ASSIGNMENTS[family][0]
+                expected_current = (
+                    _coerce_optional_int(expected_current_instance_id)
+                    if expected_current_instance_id is not _SOFTWARE_INSTANCE_EXPECTATION_UNSET
+                    else _SOFTWARE_INSTANCE_EXPECTATION_UNSET
+                )
+                actual_current = _coerce_optional_int(profile.get(family_link_column))
+                if (
+                    expected_current is not _SOFTWARE_INSTANCE_EXPECTATION_UNSET
+                    and actual_current != expected_current
+                ):
+                    raise ValueError("The radio's software assignment changed. Refresh and review it before replacing it.")
                 app_values = dict(application_values or {})
                 _validate_software_application_claims_conn(conn, family, app_values)
                 if family == "js8call":
@@ -6560,20 +6783,17 @@ class MultiRadioStore:
                         f"{profile.get('name') or 'This radio'} already has a {family.replace('_', ' ')} "
                         "instance. Confirm replacement before changing the assignment."
                     )
-                used_by = conn.execute(
-                    f"SELECT name FROM device_profiles WHERE {link_column}=? AND id<>? LIMIT 1",
-                    (int(saved_app["id"]), radio_id),
-                ).fetchone()
-                if used_by is not None:
-                    raise ValueError(
-                        f"This application instance is already assigned to {used_by[0]}; "
-                        "each independently controlled radio needs its own instance identity."
-                    )
-
-                updates["updated_utc"] = _utc_now_iso()
-                conn.execute(
-                    f"UPDATE device_profiles SET {', '.join(f'{key}=?' for key in updates)} WHERE id=?",
-                    tuple(updates.values()) + (radio_id,),
+                _validate_software_instance_radio_ownership_conn(
+                    conn,
+                    radio_profile_id=radio_id,
+                    family_key=family,
+                    application_id=int(saved_app["id"]),
+                )
+                replacing = current_link is not None and current_link != int(saved_app["id"])
+                saved_app = _activate_software_application_conn(
+                    conn,
+                    family_key=family,
+                    application_id=int(saved_app["id"]),
                 )
 
                 manifest_payload = dict(manifest_values or {})
@@ -6584,14 +6804,6 @@ class MultiRadioStore:
                     f"{family}:{str(saved_app.get('system_key', '') or '')}",
                 )
                 saved_manifest = _save_software_instance_manifest_conn(conn, manifest_payload)
-                self._upsert_instance_launch_items_conn(
-                    conn,
-                    radio_profile_id=radio_id,
-                    family_key=family,
-                    saved_app=saved_app,
-                    manifest=saved_manifest,
-                    launch_at_startup=bool(launch_at_startup),
-                )
                 if family == "varac" and varac_cluster_db_id is not None:
                     cluster = _varac_cluster_by_id(conn, int(varac_cluster_db_id))
                     if cluster is None:
@@ -6606,7 +6818,7 @@ class MultiRadioStore:
                         radio_id,
                         exclude_cluster_id=int(varac_cluster_db_id),
                     )
-                    if other is not None:
+                    if other is not None and not replacing:
                         raise ValueError("This radio is already an enabled member of another VarAC cluster.")
                     occupied = conn.execute(
                         """
@@ -6618,6 +6830,50 @@ class MultiRadioStore:
                     ).fetchone()
                     if occupied is not None:
                         raise ValueError(f"VarAC cluster instance {instance_number} is already assigned.")
+
+                if replacing:
+                    old_linked_app = _record_by_id(
+                        conn,
+                        _SOFTWARE_INSTANCE_ASSIGNMENTS[family][1],
+                        int(current_link),
+                    ) or {}
+                    _remove_instance_launch_links_conn(
+                        conn,
+                        radio_profile_id=radio_id,
+                        family_key=family,
+                        application_system_key=str(old_linked_app.get("system_key", "") or ""),
+                    )
+                    if family == "varac":
+                        _remove_varac_cluster_links_for_device_conn(
+                            conn,
+                            radio_profile_id=radio_id,
+                            preserve_cluster_id=(
+                                int(varac_cluster_db_id)
+                                if varac_cluster_db_id is not None
+                                else None
+                            ),
+                        )
+
+                updates["updated_utc"] = _utc_now_iso()
+                conn.execute(
+                    f"UPDATE device_profiles SET {', '.join(f'{key}=?' for key in updates)} WHERE id=?",
+                    tuple(updates.values()) + (radio_id,),
+                )
+                if replacing:
+                    _disable_unowned_software_application_conn(
+                        conn,
+                        family_key=family,
+                        application_id=current_link,
+                    )
+                self._upsert_instance_launch_items_conn(
+                    conn,
+                    radio_profile_id=radio_id,
+                    family_key=family,
+                    saved_app=saved_app,
+                    manifest=saved_manifest,
+                    launch_at_startup=bool(launch_at_startup),
+                )
+                if family == "varac" and varac_cluster_db_id is not None:
                     now_iso = _utc_now_iso()
                     conn.execute(
                         """
@@ -6644,6 +6900,93 @@ class MultiRadioStore:
                 "application": dict(saved_app),
                 "manifest": dict(saved_manifest),
                 "radio": dict(resolved),
+            }
+
+    def disassociate_software_instance(
+        self,
+        *,
+        family_key: str,
+        radio_profile_id: int,
+        expected_current_instance_id: Any = _SOFTWARE_INSTANCE_EXPECTATION_UNSET,
+    ) -> Dict[str, Any]:
+        """Remove FIO's radio association without deleting application data.
+
+        The saved application row, manifest, native application files, and
+        compatibility path values remain intact.  Only the radio-to-runtime
+        assignment, FIO-created startup items, and VarAC cluster membership are
+        removed.
+        """
+
+        family = str(family_key or "").strip().lower()
+        try:
+            link_column, application_table, _label = _SOFTWARE_INSTANCE_ASSIGNMENTS[family]
+        except KeyError as exc:
+            raise ValueError(f"Unsupported software instance family: {family or 'blank'}") from exc
+        radio_id = int(radio_profile_id or 0)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                profile = _record_by_id(conn, "device_profiles", radio_id)
+                if profile is None:
+                    raise KeyError(f"Unknown radio profile id: {radio_id}")
+                application_id = _coerce_optional_int(profile.get(link_column))
+                expected_current = (
+                    _coerce_optional_int(expected_current_instance_id)
+                    if expected_current_instance_id is not _SOFTWARE_INSTANCE_EXPECTATION_UNSET
+                    else _SOFTWARE_INSTANCE_EXPECTATION_UNSET
+                )
+                if (
+                    expected_current is not _SOFTWARE_INSTANCE_EXPECTATION_UNSET
+                    and application_id != expected_current
+                ):
+                    raise ValueError("The radio's software assignment changed. Refresh and review it before removing it.")
+                application = (
+                    _record_by_id(conn, application_table, int(application_id))
+                    if application_id is not None
+                    else None
+                )
+                if application is not None:
+                    _remove_instance_launch_links_conn(
+                        conn,
+                        radio_profile_id=radio_id,
+                        family_key=family,
+                        application_system_key=str(application.get("system_key", "") or ""),
+                    )
+                if family == "varac":
+                    _remove_varac_cluster_links_for_device_conn(
+                        conn,
+                        radio_profile_id=radio_id,
+                    )
+                assignments = [f"{link_column}=NULL"] + [
+                    f"{flag}=0" for flag in _SOFTWARE_INSTANCE_USE_FLAGS[family]
+                ]
+                family_control_backend = {"js8call": "js8call", "fast_light": "flrig"}.get(family)
+                if (
+                    family_control_backend
+                    and _coerce_text(profile.get("control_backend", ""), "").lower()
+                    == family_control_backend
+                ):
+                    assignments.append("control_backend='manual'")
+                conn.execute(
+                    f"UPDATE device_profiles SET {', '.join(assignments)}, updated_utc=? WHERE id=?",
+                    (_utc_now_iso(), radio_id),
+                )
+                _disable_unowned_software_application_conn(
+                    conn,
+                    family_key=family,
+                    application_id=application_id,
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            radio = _resolve_device_profile_links_conn(
+                conn,
+                _record_by_id(conn, "device_profiles", radio_id) or profile,
+            )
+            return {
+                "application": dict(application or {}),
+                "radio": dict(radio),
             }
 
     @staticmethod

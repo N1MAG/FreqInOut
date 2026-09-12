@@ -262,6 +262,24 @@ warning. The radio chip tooltip directs the operator to select the radio and
 open Health. User-facing Software Administration must not use the ambiguous
 `Not checked` wording.
 
+Software-instance creation is radio-first. A radio can use JS8Call, Fast Light,
+and VarAC together, but it can have only one assigned instance in each family,
+and one runtime instance cannot be shared by independently controlled radios.
+The family, radio, and task chip rows are exclusive navigation groups: one
+choice is visibly active at each applicable level, including after a repeated
+click. If no radio exists, the instance workflow stops at `Create a radio
+first`; it never creates an operational orphan.
+
+For an occupied family slot, the guided path offers an explicit reviewed
+replacement rather than requiring manual disassociation. Current and proposed
+identities remain visible through Review, and the persistence service uses the
+expected current ID so a stale or failed replacement cannot disturb the working
+assignment. `Assign Existing Instance` is a recovery path limited to compatible
+unassigned records. `Disassociate` is an Advanced, confirmed action that removes
+only FIO's family link, family use flags, managed startup links, and applicable
+VarAC membership. It retains the external application, configuration, storage,
+messages, and files.
+
 Permanent matrix coverage includes every declared family and task, selected
 radio plus All, light and dark themes, Normal and Large Text, and 1920x1080,
 1000x700, and 900x560. The real SettingsTab integration must additionally prove

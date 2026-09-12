@@ -6192,6 +6192,12 @@ class SettingsTab(QWidget):
         self.software_administration_workspace.assign_requested.connect(
             self._on_software_administration_assign_requested
         )
+        self.software_administration_workspace.create_radio_requested.connect(
+            self._on_software_administration_create_radio_requested
+        )
+        self.software_administration_workspace.disassociate_requested.connect(
+            self._on_software_instance_disassociate_requested
+        )
         self.software_administration_workspace.operational_route_requested.connect(
             self._on_software_administration_operational_route_requested
         )
@@ -9673,6 +9679,13 @@ class SettingsTab(QWidget):
         self.settings_action_feedback_label.setText("Saved all Software Administration changes.")
 
     def _on_software_administration_assign_requested(self, family_key: str) -> None:
+        """Compatibility route for older workspace hosts.
+
+        The current workspace handles the family-filtered retained-instance
+        picker in place.  This route remains for callers that explicitly need
+        the radio's general software-capability editor.
+        """
+
         radio_id = int(self._software_administration_selected_radio_id or 0)
         if radio_id > 0:
             self._settings_radio_focus_id = radio_id
@@ -9680,6 +9693,89 @@ class SettingsTab(QWidget):
         self._apply_settings_nav_scope_visibility()
         self._select_settings_section_group(getattr(self, "radio_profile_section_group", None))
         self._select_radio_profile_guided_task("apps")
+
+    def _on_software_administration_create_radio_requested(self) -> None:
+        """Leave the instance draft and open the existing Guided Add Radio flow."""
+
+        self._settings_nav_context = "radios"
+        self._apply_settings_nav_scope_visibility()
+        self._select_settings_section_group(getattr(self, "radio_profile_section_group", None))
+        self._add_device_profile()
+
+    def _on_software_instance_disassociate_requested(self, raw_payload: object) -> None:
+        """Remove one reviewed FIO assignment while retaining external data."""
+
+        workspace = getattr(self, "software_administration_workspace", None)
+        if not isinstance(workspace, SoftwareAdministrationWorkspace) or not isinstance(raw_payload, Mapping):
+            return
+        family = str(raw_payload.get("family_key") or "").strip().lower()
+        family_title = str(raw_payload.get("family_title") or family.replace("_", " ").title()).strip()
+        try:
+            radio_id = int(raw_payload.get("radio_id") or 0)
+            expected_id = int(raw_payload.get("instance_id") or 0)
+        except (TypeError, ValueError):
+            radio_id = 0
+            expected_id = 0
+        profile = self._device_profile_by_id(radio_id)
+        link_column = {
+            "js8call": "js8_instance_id",
+            "fast_light": "fast_light_config_id",
+            "varac": "varac_node_id",
+        }.get(family, "")
+        current_id = (
+            int(profile.get(link_column, 0) or 0)
+            if isinstance(profile, Mapping) and link_column
+            else 0
+        )
+        if radio_id <= 0 or expected_id <= 0 or current_id != expected_id:
+            QMessageBox.warning(
+                self,
+                "Software assignment changed",
+                "The selected assignment changed. Refresh Software Administration and review it again.",
+            )
+            return
+        radio_name = str(raw_payload.get("radio_name") or self._profile_display_name(dict(profile))).strip()
+        instance_name = str(raw_payload.get("instance_name") or f"{family_title} instance").strip()
+        response = QMessageBox.question(
+            self,
+            f"Disassociate {family_title}?",
+            (
+                f"Stop using {instance_name} for {radio_name}?\n\n"
+                "FIO will remove this radio assignment and its FIO-managed startup links. "
+                "VarAC cluster membership is also removed when applicable.\n\n"
+                "The saved instance record, external application, configuration, messages, and files are retained."
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if response != QMessageBox.Yes:
+            return
+        try:
+            result = self.multi_radio_store.disassociate_software_instance(
+                family_key=family,
+                radio_profile_id=radio_id,
+                expected_current_instance_id=expected_id,
+            )
+        except (ValueError, KeyError) as exc:
+            QMessageBox.warning(self, "Disassociate software", str(exc))
+            return
+        except Exception:
+            log.exception("Failed disassociating %s instance %s from radio %s.", family, expected_id, radio_id)
+            QMessageBox.warning(
+                self,
+                "Disassociate software",
+                "The assignment was not changed. Existing settings and files were retained.",
+            )
+            return
+        saved_radio = result.get("radio") if isinstance(result, Mapping) else None
+        if isinstance(saved_radio, Mapping):
+            self._replace_cached_device_profile(saved_radio)
+        self._refresh_device_profiles_table()
+        feedback = getattr(self, "settings_action_feedback_label", None)
+        if isinstance(feedback, QLabel):
+            feedback.setText(
+                f"Disassociated {instance_name} from {radio_name}. External application data was retained."
+            )
 
     def _software_instance_inventory(self, family_key: str) -> tuple[Dict[str, Any], ...]:
         family = str(family_key or "").strip().lower()
@@ -9819,23 +9915,30 @@ class SettingsTab(QWidget):
         }[family]
         imported_id = int(payload.get("imported_id") or 0) or None
         current_id = int(profile.get(link_column, 0) or 0) or None
-        replace_existing = False
-        if current_id is not None and current_id != imported_id:
-            response = QMessageBox.question(
-                self,
-                "Replace software assignment?",
-                (
-                    f"{self._profile_display_name(dict(profile))} already has this software assigned. "
-                    "Replace that radio-to-instance mapping with the reviewed instance? Existing application "
-                    "records are retained."
-                ),
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
+        replace_existing = bool(payload.get("replace_existing", False))
+        replacement_instance_id = int(payload.get("replacement_instance_id") or 0) or None
+        if current_id is None and (replace_existing or replacement_instance_id is not None):
+            workspace.complete_instance_add(
+                success=False,
+                message="This radio no longer has an instance to replace. Refresh and review the assignment.",
             )
-            if response != QMessageBox.Yes:
-                workspace.complete_instance_add(success=False, message="No changes were saved.")
+            return
+        if current_id is not None:
+            if replace_existing and replacement_instance_id != current_id:
+                workspace.complete_instance_add(
+                    success=False,
+                    message="The radio's software assignment changed. Refresh and review it before replacing it.",
+                )
                 return
-            replace_existing = True
+            if not replace_existing and imported_id != current_id:
+                workspace.complete_instance_add(
+                    success=False,
+                    message=(
+                        "This radio already has an instance in the selected software family. "
+                        "Use Replace instance and review the current and proposed assignments first."
+                    ),
+                )
+                return
 
         instance_name = str(payload.get("instance_name") or "").strip()
         system_key = str(payload.get("imported_system_key") or "").strip()
@@ -9944,6 +10047,7 @@ class SettingsTab(QWidget):
                 application_values=app_values,
                 manifest_values=manifest_values,
                 replace_existing=replace_existing,
+                expected_current_instance_id=current_id,
                 launch_at_startup=bool(payload.get("launch_at_startup", False)),
                 varac_cluster_db_id=cluster_db_id,
                 varac_cluster_instance_number=cluster_instance_number,

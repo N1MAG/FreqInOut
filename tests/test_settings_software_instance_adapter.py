@@ -37,6 +37,7 @@ class _Store:
     def __init__(self, *, fail: Exception | None = None) -> None:
         self.fail = fail
         self.adoptions: list[dict[str, Any]] = []
+        self.disassociations: list[dict[str, Any]] = []
         self.js8_rows = [{"id": 11, "name": "Saved JS8", "profile_path": "/saved/js8.ini"}]
         self.fast_rows = [{"id": 12, "name": "Saved Fast", "flrig_port": 12345}]
         self.varac_rows = [{"id": 13, "name": "Saved VarAC", "ini_path": "/saved/VarAC.ini"}]
@@ -55,6 +56,12 @@ class _Store:
 
     def adopt_software_instance(self, **kwargs):
         self.adoptions.append(kwargs)
+        if self.fail is not None:
+            raise self.fail
+        return {"radio": {"id": int(kwargs["radio_profile_id"]), "name": "FIO-A"}}
+
+    def disassociate_software_instance(self, **kwargs):
+        self.disassociations.append(kwargs)
         if self.fail is not None:
             raise self.fail
         return {"radio": {"id": int(kwargs["radio_profile_id"]), "name": "FIO-A"}}
@@ -219,19 +226,98 @@ def test_instance_discovery_completion_is_bound_to_the_originating_assistant(
     assert tab._software_autofill_request_is_current(request) is False
 
 
-def test_settings_instance_replacement_requires_confirmation_before_store_mutation(
+def test_settings_instance_replacement_requires_explicit_review_before_store_mutation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = _Store()
     profile = {"id": 1, "name": "FIO-A", "js8_instance_id": 17}
     tab, workspace, replaced, refreshed, _profile = _tab(monkeypatch, store=store, profile=profile)
-    monkeypatch.setattr(settings_module.QMessageBox, "question", lambda *_args, **_kwargs: settings_module.QMessageBox.No)
-
     tab._on_software_instance_add_requested(
         {"family_key": "js8call", "radio_id": 1, "instance_name": "Replacement", "port": 2448}
     )
 
     assert store.adoptions == []
-    assert workspace.completed == [(False, "No changes were saved.")]
+    assert workspace.completed == [(
+        False,
+        "This radio already has an instance in the selected software family. "
+        "Use Replace instance and review the current and proposed assignments first.",
+    )]
+    assert replaced == []
+    assert refreshed == []
+
+
+def test_settings_instance_replacement_passes_stale_assignment_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _Store()
+    profile = {"id": 1, "name": "FIO-A", "js8_instance_id": 17}
+    tab, workspace, replaced, refreshed, _profile = _tab(monkeypatch, store=store, profile=profile)
+
+    tab._on_software_instance_add_requested(
+        {
+            "family_key": "js8call",
+            "radio_id": 1,
+            "instance_name": "Replacement",
+            "port": 2448,
+            "replace_existing": True,
+            "replacement_instance_id": 17,
+        }
+    )
+
+    assert len(store.adoptions) == 1
+    assert store.adoptions[0]["replace_existing"] is True
+    assert store.adoptions[0]["expected_current_instance_id"] == 17
+    assert workspace.completed[-1][0] is True
+    assert replaced == [{"id": 1, "name": "FIO-A"}]
+    assert refreshed == [True]
+
+
+def test_settings_disassociate_requires_confirmation_and_preserves_expected_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _Store()
+    profile = {"id": 1, "name": "FIO-A", "js8_instance_id": 17}
+    tab, _workspace, replaced, refreshed, _profile = _tab(monkeypatch, store=store, profile=profile)
+    monkeypatch.setattr(
+        settings_module.QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: settings_module.QMessageBox.Yes,
+    )
+
+    tab._on_software_instance_disassociate_requested(
+        {
+            "family_key": "js8call",
+            "family_title": "JS8Call",
+            "radio_id": 1,
+            "radio_name": "FIO-A",
+            "instance_id": 17,
+            "instance_name": "JS8 North",
+        }
+    )
+
+    assert store.disassociations == [{
+        "family_key": "js8call",
+        "radio_profile_id": 1,
+        "expected_current_instance_id": 17,
+    }]
+    assert replaced == [{"id": 1, "name": "FIO-A"}]
+    assert refreshed == [True]
+
+
+def test_settings_disassociate_cancel_is_non_mutating(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _Store()
+    profile = {"id": 1, "name": "FIO-A", "varac_node_id": 23}
+    tab, _workspace, replaced, refreshed, _profile = _tab(monkeypatch, store=store, profile=profile)
+    monkeypatch.setattr(
+        settings_module.QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: settings_module.QMessageBox.No,
+    )
+
+    tab._on_software_instance_disassociate_requested(
+        {"family_key": "varac", "radio_id": 1, "instance_id": 23}
+    )
+
+    assert store.disassociations == []
     assert replaced == []
     assert refreshed == []

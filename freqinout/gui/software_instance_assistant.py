@@ -131,6 +131,8 @@ class SoftwareInstanceDraft:
     notes: str = ""
     imported_id: Optional[int] = None
     imported_system_key: str = ""
+    replace_existing: bool = False
+    replacement_instance_id: Optional[int] = None
 
     def payload(self) -> dict[str, Any]:
         """Return a JSON-friendly copy with stable keys for persistence adapters."""
@@ -224,6 +226,8 @@ class SoftwareInstanceDraft:
             "notes": self.notes,
             "imported_id": self.imported_id,
             "imported_system_key": self.imported_system_key,
+            "replace_existing": bool(self.replace_existing),
+            "replacement_instance_id": self.replacement_instance_id,
         }
         if self.family_key == "js8call":
             payload.update(
@@ -329,6 +333,8 @@ def normalize_instance_draft(value: Mapping[str, Any] | SoftwareInstanceDraft) -
         notes=_text(row.get("notes")),
         imported_id=_int(row.get("imported_id") or row.get("id")),
         imported_system_key=_text(row.get("imported_system_key") or row.get("system_key")),
+        replace_existing=_bool(row.get("replace_existing", False)),
+        replacement_instance_id=_int(row.get("replacement_instance_id")),
     )
 
 
@@ -455,6 +461,7 @@ class SoftwareInstanceAssistant(QWidget):
     completed = Signal(object)
     cancelled = Signal()
     discover_requested = Signal(str)
+    create_radio_requested = Signal()
     validation_requested = Signal(object)
     STEP_TITLES = ("Purpose", "Find or create", "Identity", "Connections", "Files", "Launch", "Review")
 
@@ -469,11 +476,16 @@ class SoftwareInstanceAssistant(QWidget):
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
-        self._family_key = _text(family_key).lower()
+        requested_family = _text(family_key).lower()
+        self._family_locked = bool(requested_family)
+        self._family_key = requested_family
         self._existing_instances = tuple(dict(row) for row in existing_instances if isinstance(row, Mapping))
         self._radios = tuple(dict(row) for row in radios if isinstance(row, Mapping))
         self._varac_clusters = tuple(dict(row) for row in varac_clusters if isinstance(row, Mapping))
         self._selected_radio_id = _int(selected_radio_id)
+        self._radio_assignments: dict[int, Mapping[str, Any]] = {}
+        self._replacement_instance: Optional[Mapping[str, Any]] = None
+        self._replacement_confirmed = False
         self._imported_id: Optional[int] = None
         self._imported_system_key = ""
         self._discovery_selected = False
@@ -487,6 +499,15 @@ class SoftwareInstanceAssistant(QWidget):
             if selected_index >= 0:
                 self.radio_combo.setCurrentIndex(selected_index)
         self._load_family(self._family_key)
+        # A workspace-launched operation is intentionally scoped to exactly
+        # one family; changing family would mix the supplied inventory and
+        # radio link columns.  A standalone assistant (no family argument)
+        # may still choose its family.
+        self.family_combo.setEnabled(not self._family_locked)
+        if self._family_locked:
+            self.family_combo.setToolTip(
+                "Family is fixed for this operation; start another Add Instance flow to choose a different family."
+            )
         self._refresh()
 
     def _build_ui(self) -> None:
@@ -505,6 +526,11 @@ class SoftwareInstanceAssistant(QWidget):
         self.operation_status_label.setAccessibleName("Software instance operation status")
         self.status_label = self.operation_status_label
         root.addWidget(self.operation_status_label)
+        self.replacement_banner = QLabel()
+        self.replacement_banner.setWordWrap(True)
+        self.replacement_banner.setObjectName("softwareInstanceReplacementBanner")
+        self.replacement_banner.setAccessibleName("Software instance replacement status")
+        root.addWidget(self.replacement_banner)
         self.step_label = QLabel()
         self.step_label.setAccessibleName("Software instance setup step")
         root.addWidget(self.step_label)
@@ -538,7 +564,10 @@ class SoftwareInstanceAssistant(QWidget):
     def _build_choose_page(self) -> None:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.addWidget(QLabel("Choose the application family for this instance."))
+        self.family_scope_label = QLabel("Choose the application family for this instance.")
+        self.family_scope_label.setWordWrap(True)
+        self.family_scope_label.setAccessibleName("Software family scope guidance")
+        layout.addWidget(self.family_scope_label)
         self.family_combo = QComboBox()
         self.family_combo.setAccessibleName("Software family")
         for key, label in SUPPORTED_INSTANCE_FAMILIES:
@@ -547,14 +576,28 @@ class SoftwareInstanceAssistant(QWidget):
         layout.addWidget(self.family_combo)
         radio_group = QGroupBox("Radio context (required)")
         radio_layout = QVBoxLayout(radio_group)
+        self.radio_guidance_label = QLabel()
+        self.radio_guidance_label.setWordWrap(True)
+        self.radio_guidance_label.setAccessibleName("Radio selection guidance")
+        radio_layout.addWidget(self.radio_guidance_label)
         self.radio_combo = QComboBox()
         self.radio_combo.setAccessibleName("Radio for software instance")
-        self.radio_combo.addItem("Not assigned yet", None)
-        for row in self._radios:
-            rid = _int(row.get("id"))
-            if rid:
-                self.radio_combo.addItem(_text(row.get("name")) or f"Radio {rid}", rid)
+        self.radio_combo.currentIndexChanged.connect(lambda _index: self._refresh_radio_context())
         radio_layout.addWidget(self.radio_combo)
+        self.create_radio_button = QPushButton("Create a radio first…")
+        self.create_radio_button.setAccessibleName("Create a radio before adding a software instance")
+        self.create_radio_button.setToolTip(
+            "Open Radio Profiles to create a radio, then return to this guided setup"
+        )
+        self.create_radio_button.clicked.connect(self.create_radio_requested.emit)
+        radio_layout.addWidget(self.create_radio_button)
+        self.replacement_checkbox = QCheckBox("Replace the existing instance assigned to this radio")
+        self.replacement_checkbox.setAccessibleName("Confirm replacement of existing software instance")
+        self.replacement_checkbox.setToolTip(
+            "Replacement updates the radio-to-instance mapping; the existing application record is retained."
+        )
+        self.replacement_checkbox.toggled.connect(self._set_replacement_confirmed)
+        radio_layout.addWidget(self.replacement_checkbox)
         layout.addWidget(radio_group)
         layout.addStretch(1)
         self.pages.addWidget(page)
@@ -724,6 +767,11 @@ class SoftwareInstanceAssistant(QWidget):
                 detail
                 + " Existing settings are evidence for review. FIO does not claim to write third-party application configuration unless a supported, explicit apply is provided."
             )
+            if getattr(self, "_family_locked", False):
+                self.family_scope_label.setText(
+                    f"Family fixed by the selected workspace: {dict(SUPPORTED_INSTANCE_FAMILIES).get(normalized, title)}. "
+                    "This operation creates exactly one instance in this family."
+                )
         host = self._field_widgets.get("host")
         port = self._field_widgets.get("port")
         if isinstance(host, QLineEdit) and not host.text():
@@ -741,6 +789,7 @@ class SoftwareInstanceAssistant(QWidget):
         elif isinstance(port, QLineEdit) and normalized == "fast_light" and port.text() == str(_DEFAULT_PORTS[normalized]):
             port.setText(str(self._next_port(12345, "flrig_port", "port")))
         self._sync_family_fields()
+        self._rebuild_radio_choices()
 
     def _next_port(self, base: int, *keys: str) -> int:
         used: set[int] = set()
@@ -772,6 +821,146 @@ class SoftwareInstanceAssistant(QWidget):
             candidate = f"{base[:43]}-{suffix}"
             suffix += 1
         rig_widget.setText(candidate)
+
+    def _family_link_column(self) -> str:
+        return {
+            "js8call": "js8_instance_id",
+            "fast_light": "fast_light_config_id",
+            "varac": "varac_node_id",
+        }.get(self._family_key, "")
+
+    def _rebuild_radio_choices(self) -> None:
+        """Render every known radio with same-family ownership status."""
+
+        assignments: dict[int, Mapping[str, Any]] = {}
+        by_id = {
+            _int(row.get("id")): row
+            for row in self._existing_instances
+            if _int(row.get("id")) is not None
+        }
+        link_column = self._family_link_column()
+        for row in self._radios:
+            radio_id = _int(row.get("id") or row.get("radio_id"))
+            if radio_id is None:
+                continue
+            assigned_id = _int(row.get(link_column)) if link_column else None
+            direct = _int(row.get("instance_id"))
+            assigned_id = assigned_id or direct
+            if assigned_id is not None:
+                assignments[radio_id] = by_id.get(
+                    assigned_id,
+                    {"id": assigned_id, "name": f"Instance {assigned_id}"},
+                )
+            else:
+                direct_row = next(
+                    (
+                        candidate for candidate in self._existing_instances
+                        if _int(candidate.get("radio_id")) == radio_id
+                    ),
+                    None,
+                )
+                if direct_row is not None:
+                    assignments[radio_id] = direct_row
+        self._radio_assignments = assignments
+
+        prior_id = _int(self.radio_combo.currentData())
+        desired_id = self._selected_radio_id if self._selected_radio_id in {
+            _int(row.get("id") or row.get("radio_id")) for row in self._radios
+        } else prior_id
+        self.radio_combo.blockSignals(True)
+        self.radio_combo.clear()
+        candidate_rows = [
+            row for row in self._radios
+            if _int(row.get("id") or row.get("radio_id")) is not None
+        ]
+        if candidate_rows:
+            self.radio_combo.addItem("Choose an existing radio…", None)
+        seen: set[int] = set()
+        for row in self._radios:
+            radio_id = _int(row.get("id") or row.get("radio_id"))
+            if radio_id is None or radio_id in seen:
+                continue
+            seen.add(radio_id)
+            name = _text(row.get("name")) or f"Radio {radio_id}"
+            assigned = assignments.get(radio_id)
+            instance_name = _text(assigned.get("name") or assigned.get("instance_name")) if assigned else ""
+            label = f"{name} — Assigned to {instance_name}" if assigned else f"{name} — Available"
+            self.radio_combo.addItem(label, radio_id)
+            index = self.radio_combo.count() - 1
+            tooltip = (
+                "This radio already has a %s instance. Replacement mode is explicit and retains the existing record."
+                % (instance_name or "software")
+                if assigned
+                else "This radio has no instance in the selected software family."
+            )
+            self.radio_combo.setItemData(index, tooltip, Qt.ToolTipRole)
+        if self.radio_combo.count():
+            index = self.radio_combo.findData(desired_id)
+            self.radio_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.radio_combo.blockSignals(False)
+        self._selected_radio_id = _int(self.radio_combo.currentData())
+        self._refresh_radio_context()
+
+    def _set_replacement_confirmed(self, checked: bool) -> None:
+        self._replacement_confirmed = bool(checked)
+        self._refresh_radio_context()
+        self._refresh()
+
+    def _refresh_radio_context(self) -> None:
+        radio_id = _int(self.radio_combo.currentData())
+        self._selected_radio_id = radio_id
+        replacement = self._radio_assignments.get(radio_id) if radio_id is not None else None
+        prior = self._replacement_instance
+        self._replacement_instance = replacement
+        if replacement is not prior:
+            self._replacement_confirmed = False
+            if hasattr(self, "replacement_checkbox"):
+                blocked = self.replacement_checkbox.blockSignals(True)
+                self.replacement_checkbox.setChecked(False)
+                self.replacement_checkbox.blockSignals(blocked)
+        has_radios = any(
+            _int(row.get("id") or row.get("radio_id")) is not None
+            for row in self._radios
+        )
+        self.create_radio_button.setVisible(not has_radios)
+        self.radio_combo.setEnabled(has_radios)
+        if not has_radios:
+            self.radio_guidance_label.setText(
+                "No radios exist yet. Create a radio first in Radio Profiles, then return here; "
+                "a software instance cannot be created without an existing radio."
+            )
+            self.replacement_checkbox.setVisible(False)
+            self.replacement_banner.setText("Radio required before entering instance data.")
+        elif radio_id is None:
+            self.radio_guidance_label.setText(
+                "Choose an existing radio before entering instance data."
+            )
+            self.replacement_checkbox.setVisible(False)
+            self.replacement_checkbox.setEnabled(False)
+            self.replacement_banner.setText("Choose a radio before entering instance data.")
+        elif replacement is not None:
+            name = _text(replacement.get("name") or replacement.get("instance_name")) or "existing instance"
+            self.radio_guidance_label.setText(
+                "This radio is already assigned to this software family. "
+                "Choose replacement mode before entering instance data; the existing record is retained."
+            )
+            self.replacement_checkbox.setText(f"Replace the existing instance assigned to {self.radio_combo.currentText().split(' — ', 1)[0]}")
+            self.replacement_checkbox.setVisible(True)
+            self.replacement_checkbox.setEnabled(True)
+            mode = "active" if self._replacement_confirmed else "required"
+            self.replacement_banner.setText(
+                f"Replacement mode {mode}: {name} is currently assigned. "
+                "Review will compare the current instance with the proposed one; no manual disassociate is required."
+            )
+        else:
+            self.radio_guidance_label.setText(
+                "Choose an existing radio. Available radios can accept one instance of each software family."
+            )
+            self.replacement_checkbox.setVisible(False)
+            self.replacement_checkbox.setEnabled(False)
+            self.replacement_banner.setText(
+                "Radio selected: Available for this software family."
+            )
 
     def _sync_family_fields(self) -> None:
         visible = _FAMILY_FIELDS.get(self._family_key, frozenset())
@@ -913,6 +1102,11 @@ class SoftwareInstanceAssistant(QWidget):
             notes=value("notes"),
             imported_id=self._imported_id,
             imported_system_key=self._imported_system_key,
+            replace_existing=bool(self._replacement_instance and self._replacement_confirmed),
+            replacement_instance_id=(
+                _int(self._replacement_instance.get("id"))
+                if self._replacement_instance is not None else None
+            ),
         )
 
     def set_operation_status(self, message: str, error: bool = False) -> None:
@@ -954,6 +1148,21 @@ class SoftwareInstanceAssistant(QWidget):
             f"Source: {draft.mode.replace('-', ' ').title()}",
             f"Ownership: {draft.ownership.replace('-', ' ').title()}",
         ]
+        if self._replacement_instance is not None:
+            old = self._replacement_instance
+            old_name = _text(old.get("name") or old.get("instance_name")) or "existing instance"
+            old_id = _int(old.get("id"))
+            old_endpoint = _endpoint(old)
+            old_detail = f"{old_name} (id {old_id})" if old_id else old_name
+            if old_endpoint[0] and old_endpoint[1]:
+                old_detail += f" · {old_endpoint[0]}:{old_endpoint[1]}"
+            lines.extend(
+                (
+                    "Replacement comparison:",
+                    f"Current assignment: {old_detail}",
+                    f"Proposed assignment: {draft.instance_name or 'Not set'}",
+                )
+            )
         if draft.family_key == "js8call":
             lines.extend(
                 (
@@ -1006,8 +1215,12 @@ class SoftwareInstanceAssistant(QWidget):
         self.back_button.setEnabled(self._step > 0)
         last_step = len(self.STEP_TITLES) - 1
         self.next_button.setText("Add instance" if self._step == last_step else "Next")
+        blocked_for_radio = not self._selected_radio_id
+        blocked_for_replacement = self._replacement_instance is not None and not self._replacement_confirmed
         self.next_button.setEnabled(
-            not (self._step == last_step and any(item.severity == "error" for item in self.validation()))
+            not blocked_for_radio
+            and not blocked_for_replacement
+            and not (self._step == last_step and any(item.severity == "error" for item in self.validation()))
         )
         if self._step == 1:
             self._refresh_source()

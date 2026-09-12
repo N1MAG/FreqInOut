@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QButtonGroup,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -78,6 +79,11 @@ class SoftwareAdministrationWorkspace(QWidget):
     assign_requested = Signal(str)
     instance_add_requested = Signal(object)
     instance_discovery_requested = Signal(object)
+    # Keep ``assign_requested`` compatible with Settings while exposing a
+    # richer seam for hosts that distinguish this explicit action.
+    assign_existing_requested = Signal(object)
+    create_radio_requested = Signal()
+    disassociate_requested = Signal(object)
     operational_route_requested = Signal(str)
     save_all_requested = Signal()
 
@@ -97,6 +103,12 @@ class SoftwareAdministrationWorkspace(QWidget):
         self._family_buttons: dict[str, QToolButton] = {}
         self._radio_buttons: dict[Optional[int], QToolButton] = {}
         self._task_buttons: dict[str, QToolButton] = {}
+        self._family_group = QButtonGroup(self)
+        self._family_group.setExclusive(True)
+        self._radio_group = QButtonGroup(self)
+        self._radio_group.setExclusive(True)
+        self._task_group = QButtonGroup(self)
+        self._task_group.setExclusive(True)
         # A registered editor has one clear owner: (family, optional radio,
         # task).  Editors remain in the stack when the operator changes chips,
         # so partially completed values and focus state are not discarded.
@@ -149,19 +161,29 @@ class SoftwareAdministrationWorkspace(QWidget):
 
         self.unassigned_label = QLabel()
         self.unassigned_label.setWordWrap(True)
-        self.unassigned_label.setAccessibleName("Unassigned software instances")
+        self.unassigned_label.setAccessibleName("Legacy unassigned software instances for recovery")
         root.addWidget(self.unassigned_label)
 
-        self.assign_button = QPushButton("Assign software to a radio")
-        self.assign_button.setAccessibleName("Assign selected software to a radio")
-        self.assign_button.setToolTip("Open assignment for the selected software family")
+        self.assign_button = QPushButton("Assign Existing Instance…")
+        self.assign_existing_button = self.assign_button
+        self.assign_button.setAccessibleName("Assign an existing software instance to a radio")
+        self.assign_button.setToolTip(
+            "Open the radio assignment editor for an existing instance in the selected software family"
+        )
         self.assign_button.clicked.connect(self._emit_assign_request)
         self.add_instance_button = QPushButton("Add software instance…")
         self.add_instance_button.setAccessibleName("Add software instance")
         self.add_instance_button.setToolTip(
             "Guided setup for an existing, FIO-managed, manual, or remote software instance"
         )
-        self.add_instance_button.clicked.connect(self._open_instance_assistant)
+        self.add_instance_button.clicked.connect(self._start_instance_action)
+        self.disassociate_button = QPushButton("Disassociate…")
+        self.disassociate_button.setAccessibleName("Disassociate software instance from selected radio")
+        self.disassociate_button.setToolTip(
+            "Remove only the FIO radio assignment and launch links; external applications and files are retained"
+        )
+        self.disassociate_button.clicked.connect(self._emit_disassociate_request)
+        self.disassociate_button.setVisible(False)
         self.save_all_button = QPushButton("Save All Changes")
         self.save_all_button.setObjectName("softwareAdministrationSaveAllButton")
         self.save_all_button.setAccessibleName("Save all unsaved software changes")
@@ -175,6 +197,7 @@ class SoftwareAdministrationWorkspace(QWidget):
         action_row.setSpacing(6)
         action_row.addWidget(self.assign_button)
         action_row.addWidget(self.add_instance_button)
+        action_row.addWidget(self.disassociate_button)
         action_row.addWidget(self.save_all_button)
         action_row.addStretch(1)
         root.addLayout(action_row)
@@ -229,7 +252,8 @@ class SoftwareAdministrationWorkspace(QWidget):
         elif not family.assignments:
             self.editor_placeholder.setText(
                 f"{family.title} is not assigned to a radio.\n\n"
-                "Choose Assign software to a radio to create a clear radio-to-software mapping."
+                "Choose Assign Existing Instance… to route an existing record to a radio, "
+                "or use Add software instance… for a new radio-first instance."
             )
         else:
             rows = []
@@ -252,7 +276,7 @@ class SoftwareAdministrationWorkspace(QWidget):
             suffix = f", plus {remaining} more" if remaining > 0 else ""
             self.editor_placeholder.setText(
                 self.editor_placeholder.text()
-                + f"\n\nUnassigned instances ({len(family.unassigned_instances)}): {names}{suffix}."
+                + f"\n\nLegacy/unassigned instances for recovery ({len(family.unassigned_instances)}): {names}{suffix}."
             )
         self.editor_stack.setCurrentWidget(self.editor_placeholder)
 
@@ -512,10 +536,13 @@ class SoftwareAdministrationWorkspace(QWidget):
             button.setMinimumHeight(height)
         self.assign_button.setMinimumHeight(height)
         self.add_instance_button.setMinimumHeight(height)
+        self.disassociate_button.setMinimumHeight(height)
         self.save_all_button.setMinimumHeight(height)
 
     def _rebuild_family_buttons(self) -> None:
         self._clear_layout(self.family_layout)
+        for button in self._family_group.buttons():
+            self._family_group.removeButton(button)
         self._family_buttons = {}
         for family in self._snapshot.families:
             summary = f"{family.assigned_radio_count} radio{'s' if family.assigned_radio_count != 1 else ''}"
@@ -534,12 +561,15 @@ class SoftwareAdministrationWorkspace(QWidget):
                 f"Select {family.title}. {family.description}{dirty_hint}",
             )
             button.clicked.connect(lambda _checked=False, key=family.key: self._choose_family(key))
+            self._family_group.addButton(button)
             self.family_layout.addWidget(button)
             self._family_buttons[family.key] = button
         self.family_layout.addStretch(1)
 
     def _rebuild_radio_buttons(self, family: Optional[SoftwareFamilySummary]) -> None:
         self._clear_layout(self.radio_layout)
+        for button in self._radio_group.buttons():
+            self._radio_group.removeButton(button)
         self._radio_buttons = {}
         dirty_count = self._dirty_count_for_family(family.key) if family else 0
         all_text = "All"
@@ -551,12 +581,18 @@ class SoftwareAdministrationWorkspace(QWidget):
             + (f". {dirty_count} radio draft{'s are' if dirty_count != 1 else ' is'} unsaved." if dirty_count else ""),
         )
         all_button.clicked.connect(lambda: self._choose_radio(None))
+        self._radio_group.addButton(all_button)
         self.radio_layout.addWidget(all_button)
         self._radio_buttons[None] = all_button
         for assignment in family.assignments if family else ():
             state = assignment.status_text or "Not yet verified"
             shared = " Shared instance." if assignment.is_shared else ""
-            text = f"{assignment.radio_name} — {state}" + (" · Shared" if assignment.is_shared else "")
+            ownership = (
+                f"Assigned: {assignment.instance_name or 'Missing instance'}"
+                if assignment.instance_id is not None
+                else "Available"
+            )
+            text = f"{assignment.radio_name} — {ownership}" + (" · Shared" if assignment.is_shared else "")
             dirty = self._is_dirty(assignment.radio_id, family.key) if family else False
             if dirty:
                 text += " · Unsaved changes"
@@ -568,17 +604,20 @@ class SoftwareAdministrationWorkspace(QWidget):
             )
             button = self._make_chip(
                 text,
-                f"Select {assignment.radio_name}. Status: {state}.{shared}"
+                f"Select {assignment.radio_name}. {ownership}. Status: {state}.{shared}"
                 + verification_hint
                 + (" Unsaved changes for this software and radio." if dirty else ""),
             )
             button.clicked.connect(lambda _checked=False, radio_id=assignment.radio_id: self._choose_radio(radio_id))
+            self._radio_group.addButton(button)
             self.radio_layout.addWidget(button)
             self._radio_buttons[assignment.radio_id] = button
         self.radio_layout.addStretch(1)
 
     def _rebuild_task_buttons(self, tasks: tuple[tuple[str, str], ...]) -> None:
         self._clear_layout(self.task_layout)
+        for button in self._task_group.buttons():
+            self._task_group.removeButton(button)
         self._task_buttons = {}
         for key, label in tasks:
             all_context = self._radio_id is None
@@ -591,6 +630,7 @@ class SoftwareAdministrationWorkspace(QWidget):
             button = self._make_chip(label, tooltip)
             button.setEnabled(enabled)
             button.clicked.connect(lambda _checked=False, task_key=key: self._choose_task(task_key))
+            self._task_group.addButton(button)
             self.task_layout.addWidget(button)
             self._task_buttons[key] = button
         self.task_layout.addStretch(1)
@@ -611,6 +651,7 @@ class SoftwareAdministrationWorkspace(QWidget):
         if self._keep_open_instance_assistant_visible():
             return
         if key == self._family_key:
+            self._sync_checked_buttons()
             return
         self.select_context(key)
         self.family_selected.emit(self._family_key)
@@ -619,6 +660,7 @@ class SoftwareAdministrationWorkspace(QWidget):
         if self._keep_open_instance_assistant_visible():
             return
         if radio_id == self._radio_id:
+            self._sync_checked_buttons()
             return
         self._radio_id = radio_id
         tasks = _TASKS.get(self._family_key, ())
@@ -635,6 +677,9 @@ class SoftwareAdministrationWorkspace(QWidget):
             return
         if self._radio_id is None and key != "overview":
             return
+        if key == self._task_key:
+            self._sync_checked_buttons()
+            return
         self._task_key = key
         self._sync_checked_buttons()
         self._show_registered_editor_for_context()
@@ -644,10 +689,47 @@ class SoftwareAdministrationWorkspace(QWidget):
         self.task_selected.emit(key)
 
     def _emit_assign_request(self) -> None:
-        if self._family_key:
-            self.assign_requested.emit(self._family_key)
+        family = self._snapshot.family(self._family_key)
+        if family is None:
+            return
+        assigned_ids = {
+            int(item.instance_id)
+            for item in family.assignments
+            if item.instance_id is not None
+        }
+        recovery_rows = tuple(
+            row
+            for row in self._instance_inventory.get(self._family_key, ())
+            if int(row.get("id", 0) or 0) not in assigned_ids
+        )
+        if not recovery_rows:
+            self.context_banner.setText(
+                f"No unassigned {family.title} instances are available. "
+                "Create a new instance or select a radio to review its current assignment."
+            )
+            return
+        self.assign_existing_requested.emit(
+            {"family_key": self._family_key, "radio_id": self._radio_id}
+        )
+        self._open_instance_assistant(
+            initial_source="discover",
+            initial_discovery_results=recovery_rows,
+        )
 
-    def _open_instance_assistant(self) -> None:
+    def _start_instance_action(self) -> None:
+        """Route the primary action without creating an operational orphan."""
+
+        if not self._available_radios:
+            self.create_radio_requested.emit()
+            return
+        self._open_instance_assistant()
+
+    def _open_instance_assistant(
+        self,
+        *,
+        initial_source: str = "managed",
+        initial_discovery_results: Iterable[Mapping[str, Any]] = (),
+    ) -> None:
         """Open the cache-only instance flow for the selected family.
 
         The assistant emits a stable payload; this workspace never turns the
@@ -677,6 +759,7 @@ class SoftwareAdministrationWorkspace(QWidget):
         )
         assistant.completed.connect(self._on_instance_assistant_completed)
         assistant.cancelled.connect(self._close_instance_assistant)
+        assistant.create_radio_requested.connect(self._on_create_radio_requested)
         # Keep the shell's cache-only source contract explicit; the optional
         # discovery adapter is looked up only when this button is opened.
         getattr(assistant, "discover" + "_requested").connect(
@@ -685,6 +768,12 @@ class SoftwareAdministrationWorkspace(QWidget):
         self._instance_assistant = assistant
         self._ensure_editor_in_stack(assistant)
         self.editor_stack.setCurrentWidget(assistant)
+        if str(initial_source or "").strip().lower() == "discover":
+            assistant.source_buttons["discover"].setChecked(True)
+            assistant.set_discovery_results(initial_discovery_results)
+            assistant.discovery_hint.setText(
+                "Choose one retained, unassigned instance. It remains inactive until this reviewed radio assignment is saved."
+            )
 
     def _keep_open_instance_assistant_visible(self) -> bool:
         """Protect the assistant draft from background context navigation."""
@@ -711,6 +800,34 @@ class SoftwareAdministrationWorkspace(QWidget):
 
         self.instance_discovery_requested.emit(
             {"family_key": assistant.draft().family_key, "assistant": assistant}
+        )
+
+    def _on_create_radio_requested(self) -> None:
+        """Route the empty-radio guidance at the UI seam only."""
+
+        self._close_instance_assistant()
+        self.create_radio_requested.emit()
+
+    def _emit_disassociate_request(self) -> None:
+        family = self._snapshot.family(self._family_key)
+        assignment = next(
+            (
+                item for item in family.assignments
+                if item.radio_id == self._radio_id and item.instance_id is not None
+            ),
+            None,
+        ) if family is not None else None
+        if assignment is None:
+            return
+        self.disassociate_requested.emit(
+            {
+                "family_key": self._family_key,
+                "family_title": family.title,
+                "radio_id": assignment.radio_id,
+                "radio_name": assignment.radio_name,
+                "instance_id": assignment.instance_id,
+                "instance_name": assignment.instance_name,
+            }
         )
 
     def _close_instance_assistant(self) -> None:
@@ -743,9 +860,40 @@ class SoftwareAdministrationWorkspace(QWidget):
             self.context_banner.setToolTip("")
             self.unassigned_label.setText("")
             self.assign_button.setEnabled(False)
+            self.disassociate_button.setVisible(False)
+            self.add_instance_button.setText("Add software instance…")
             return
-        self.assign_button.setEnabled(True)
+        self.assign_button.setEnabled(bool(family.unassigned_instances and self._available_radios))
+        if self.assign_button.isEnabled():
+            self.assign_button.setToolTip(
+                f"Choose one retained, unassigned {family.title} instance and assign it to an existing radio"
+            )
+        else:
+            self.assign_button.setToolTip(
+                f"No retained, unassigned {family.title} instance is available to assign"
+            )
         assignment = next((item for item in family.assignments if item.radio_id == self._radio_id), None)
+        if not self._available_radios:
+            self.add_instance_button.setText("Create a radio first…")
+            self.add_instance_button.setToolTip(
+                "Open Guided Add Radio; every operational software instance needs one owning radio"
+            )
+        elif assignment is not None and assignment.instance_id is not None:
+            self.add_instance_button.setText("Replace instance…")
+            self.add_instance_button.setToolTip(
+                f"Review the current and proposed {family.title} identities before replacing this radio's assignment"
+            )
+        else:
+            self.add_instance_button.setText("Create or use instance…")
+            self.add_instance_button.setToolTip(
+                f"Set up or import one {family.title} instance for an existing radio"
+            )
+        self.disassociate_button.setVisible(
+            assignment is not None
+            and assignment.instance_id is not None
+            and self._task_key == "advanced"
+        )
+        self.disassociate_button.setEnabled(self.disassociate_button.isVisible())
         if assignment is None:
             dirty_count = self._dirty_count_for_family(family.key)
             suffix = (
@@ -796,9 +944,12 @@ class SoftwareAdministrationWorkspace(QWidget):
             )
             remaining = len(unassigned) - 4
             suffix = f", plus {remaining} more" if remaining > 0 else ""
-            self.unassigned_label.setText(f"Unassigned instances ({len(unassigned)}): {names}{suffix}.")
+            self.unassigned_label.setText(
+                f"Legacy/unassigned instances for recovery ({len(unassigned)}): {names}{suffix}. "
+                "They are retained for compatibility and are not used for normal creation."
+            )
         else:
-            self.unassigned_label.setText("Unassigned instances: none.")
+            self.unassigned_label.setText("Legacy/unassigned instances for recovery: none.")
         self._apply_compact_height(self.height() < 680)
 
     @staticmethod

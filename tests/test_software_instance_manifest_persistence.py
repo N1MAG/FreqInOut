@@ -163,6 +163,12 @@ def test_rejected_adoption_rolls_back_application_and_radio_profile(tmp_path) ->
     assert store.get_js8_instance(first["application"]["id"]) == original_app
     assert store.get_device_profile(radio["id"]) == original_radio
     assert [m["instance_key"] for m in store.list_software_instance_manifests()] == ["js8:first"]
+    with store.connect_readonly() as conn:
+        items = conn.execute(
+            "SELECT instance_key FROM radio_launch_bundle_items WHERE radio_profile_id=?",
+            (radio["id"],),
+        ).fetchall()
+    assert [row[0] for row in items] == ["js8:first:js8call"]
 
 
 @pytest.mark.parametrize(
@@ -238,6 +244,233 @@ def test_replacement_requires_confirmation_and_successfully_changes_radio_link(t
     )
     assert store.get_device_profile(radio["id"])["js8_instance_id"] == second["application"]["id"]
     assert {row["instance_key"] for row in store.list_software_instance_manifests()} == {"js8:first", "js8:second"}
+    assert store.get_js8_instance(first["application"]["id"])["enabled"] == 0
+    assert store.get_js8_instance(second["application"]["id"])["enabled"] == 1
+    with store.connect_readonly() as conn:
+        items = conn.execute(
+            "SELECT instance_key FROM radio_launch_bundle_items WHERE radio_profile_id=?",
+            (radio["id"],),
+        ).fetchall()
+    assert [row[0] for row in items] == ["js8:second:js8call"]
+
+
+def test_replacing_one_family_preserves_other_family_assignment_and_launch_recipe(tmp_path) -> None:
+    """TriMode radios may replace JS8Call without disturbing VarAC."""
+    store = MultiRadioStore(tmp_path / "cross-family-replacement.db")
+    radio = store.save_device_profile({"system_key": "radio-a", "name": "Radio A"})
+    varac = store.adopt_software_instance(
+        family_key="varac", radio_profile_id=radio["id"],
+        application_values={"system_key": "varac-a", "name": "VarAC A", "ini_path": "/varac/a.ini"},
+        manifest_values={"instance_key": "varac:a", "launch_command": "varac-a"},
+        launch_at_startup=True,
+    )
+    js8_a = store.adopt_software_instance(
+        family_key="js8call", radio_profile_id=radio["id"],
+        application_values={"system_key": "js8-a", "name": "JS8 A", "port": 2452},
+        manifest_values={"instance_key": "js8:a", "launch_command": "js8-a"},
+        launch_at_startup=True,
+    )
+    js8_b = store.adopt_software_instance(
+        family_key="js8call", radio_profile_id=radio["id"],
+        application_values={"system_key": "js8-b", "name": "JS8 B", "port": 2453},
+        manifest_values={"instance_key": "js8:b", "launch_command": "js8-b"},
+        replace_existing=True,
+        expected_current_instance_id=js8_a["application"]["id"],
+        launch_at_startup=True,
+    )
+    saved_radio = store.get_device_profile(radio["id"])
+    assert saved_radio["js8_instance_id"] == js8_b["application"]["id"]
+    assert saved_radio["varac_node_id"] == varac["application"]["id"]
+    assert saved_radio["use_js8call"] == 1 and saved_radio["use_varac"] == 1
+    assert store.get_varac_node(varac["application"]["id"])["enabled"] == 1
+    with store.connect_readonly() as conn:
+        items = conn.execute(
+            "SELECT app_name, instance_key FROM radio_launch_bundle_items WHERE radio_profile_id=? ORDER BY app_name",
+            (radio["id"],),
+        ).fetchall()
+    assert [(row[0], row[1]) for row in items] == [
+        ("JS8Call", "js8:b:js8call"),
+        ("VarAC", "varac:a:varac"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("family", "save_method", "application_values", "link_column"),
+    [
+        ("js8call", "save_js8_instance", {"system_key": "js8-a", "name": "JS8", "port": 2452}, "js8_instance_id"),
+        ("fast_light", "save_fast_light_config", {"system_key": "fast-a", "name": "Fast", "flrig_port": 12445, "fldigi_port": 7462}, "fast_light_config_id"),
+        ("varac", "save_varac_node", {"system_key": "varac-a", "name": "VarAC", "ini_path": "/varac/a.ini"}, "varac_node_id"),
+    ],
+)
+def test_direct_radio_assignment_enforces_one_runtime_per_radio(
+    tmp_path, family, save_method, application_values, link_column
+) -> None:
+    store = MultiRadioStore(tmp_path / f"direct-{family}.db")
+    application = getattr(store, save_method)(application_values)
+    radio_a = store.save_device_profile({"system_key": "radio-a", "name": "Radio A", link_column: application["id"]})
+    with pytest.raises(ValueError, match="already assigned"):
+        store.save_device_profile({"system_key": "radio-b", "name": "Radio B", link_column: application["id"]})
+    assert store.get_device_profile(radio_a["id"])[link_column] == application["id"]
+    assert len(store.list_device_profiles()) == 1
+
+
+def test_unchanged_legacy_shared_assignment_remains_compatible(tmp_path) -> None:
+    store = MultiRadioStore(tmp_path / "legacy-shared.db")
+    application = store.save_js8_instance({"system_key": "js8-a", "name": "JS8", "port": 2452})
+    radio_a = store.save_device_profile({"system_key": "radio-a", "name": "Radio A", "js8_instance_id": application["id"]})
+    radio_b = store.save_device_profile({"system_key": "radio-b", "name": "Radio B"})
+    with store.connect() as conn:
+        conn.execute("UPDATE device_profiles SET js8_instance_id=? WHERE id=?", (application["id"], radio_b["id"]))
+        conn.commit()
+    saved = store.save_device_profile({"id": radio_b["id"], "name": "Radio B legacy update"})
+    assert saved["js8_instance_id"] == application["id"]
+    assert store.get_device_profile(radio_a["id"])["js8_instance_id"] == application["id"]
+
+
+def test_varac_replacement_and_disassociation_clean_only_fio_links(tmp_path) -> None:
+    store = MultiRadioStore(tmp_path / "varac-disassociate.db")
+    radio = store.save_device_profile({"system_key": "radio-a", "name": "Radio A"})
+    cluster_a = store.save_varac_cluster({"name": "Cluster A", "cluster_id": "cluster-a"})
+    cluster_b = store.save_varac_cluster({"name": "Cluster B", "cluster_id": "cluster-b"})
+    first = store.adopt_software_instance(
+        family_key="varac",
+        radio_profile_id=radio["id"],
+        application_values={"system_key": "varac-a", "name": "A", "ini_path": "/varac/a.ini"},
+        manifest_values={"instance_key": "varac:a"},
+        launch_at_startup=True,
+        varac_cluster_db_id=cluster_a["id"],
+        varac_cluster_instance_number=1,
+    )
+    store.set_varac_cluster_gateway_handler(cluster_a["id"], radio["id"])
+    second = store.adopt_software_instance(
+        family_key="varac",
+        radio_profile_id=radio["id"],
+        application_values={"system_key": "varac-b", "name": "B", "ini_path": "/varac/b.ini"},
+        manifest_values={"instance_key": "varac:b"},
+        replace_existing=True,
+        expected_current_instance_id=first["application"]["id"],
+        launch_at_startup=True,
+        varac_cluster_db_id=cluster_b["id"],
+        varac_cluster_instance_number=2,
+    )
+    assert store.get_varac_node(first["application"]["id"])["enabled"] == 0
+    assert store.list_varac_cluster_members(cluster_id=cluster_a["id"]) == []
+    assert store.list_varac_cluster_members(cluster_id=cluster_b["id"])[0]["device_profile_id"] == radio["id"]
+    store.set_varac_cluster_gateway_handler(cluster_b["id"], radio["id"])
+
+    removed = store.disassociate_software_instance(
+        family_key="varac",
+        radio_profile_id=radio["id"],
+        expected_current_instance_id=second["application"]["id"],
+    )
+    assert removed["radio"]["varac_node_id"] is None
+    assert removed["radio"]["use_varac"] == 0
+    assert store.get_varac_node(second["application"]["id"])["enabled"] == 0
+    assert store.get_software_instance_manifest("varac:b")["verification_state"] == "needs_attention"
+    assert store.list_varac_cluster_members(device_profile_id=radio["id"]) == []
+    assert next(row for row in store.list_varac_clusters() if row["id"] == cluster_b["id"])["gateway_handler_device_id"] is None
+    with store.connect_readonly() as conn:
+        items = conn.execute(
+            "SELECT instance_key FROM radio_launch_bundle_items WHERE radio_profile_id=?",
+            (radio["id"],),
+        ).fetchall()
+    assert items == []
+
+
+def test_varac_replacement_cluster_failure_restores_old_links(tmp_path) -> None:
+    store = MultiRadioStore(tmp_path / "varac-replacement-rollback.db")
+    radio_a = store.save_device_profile({"system_key": "radio-a", "name": "Radio A"})
+    radio_b = store.save_device_profile({"system_key": "radio-b", "name": "Radio B"})
+    cluster_a = store.save_varac_cluster({"name": "Cluster A", "cluster_id": "cluster-a"})
+    cluster_b = store.save_varac_cluster({"name": "Cluster B", "cluster_id": "cluster-b"})
+    first = store.adopt_software_instance(
+        family_key="varac", radio_profile_id=radio_a["id"],
+        application_values={"system_key": "varac-a", "name": "A", "ini_path": "/varac/a.ini"},
+        manifest_values={"instance_key": "varac:a"}, launch_at_startup=True,
+        varac_cluster_db_id=cluster_a["id"], varac_cluster_instance_number=1,
+    )
+    store.adopt_software_instance(
+        family_key="varac", radio_profile_id=radio_b["id"],
+        application_values={"system_key": "varac-b", "name": "B", "ini_path": "/varac/b.ini"},
+        manifest_values={"instance_key": "varac:b"},
+        varac_cluster_db_id=cluster_b["id"], varac_cluster_instance_number=1,
+    )
+    with pytest.raises(ValueError, match="already assigned"):
+        store.adopt_software_instance(
+            family_key="varac", radio_profile_id=radio_a["id"],
+            application_values={"system_key": "varac-new", "name": "New", "ini_path": "/varac/new.ini"},
+            manifest_values={"instance_key": "varac:new"}, replace_existing=True,
+            expected_current_instance_id=first["application"]["id"],
+            varac_cluster_db_id=cluster_b["id"], varac_cluster_instance_number=1,
+        )
+    assert store.get_device_profile(radio_a["id"])["varac_node_id"] == first["application"]["id"]
+    assert store.get_varac_node(first["application"]["id"])["enabled"] == 1
+    assert [row["device_profile_id"] for row in store.list_varac_cluster_members(cluster_id=cluster_a["id"])] == [radio_a["id"]]
+    with store.connect_readonly() as conn:
+        items = conn.execute(
+            "SELECT instance_key FROM radio_launch_bundle_items WHERE radio_profile_id=?",
+            (radio_a["id"],),
+        ).fetchall()
+    assert [row[0] for row in items] == ["varac:a:varac"]
+
+
+def test_disassociation_clears_all_fast_light_capability_flags(tmp_path) -> None:
+    store = MultiRadioStore(tmp_path / "fast-disassociate.db")
+    radio = store.save_device_profile({"system_key": "radio-a", "name": "Radio A"})
+    adopted = store.adopt_software_instance(
+        family_key="fast_light", radio_profile_id=radio["id"],
+        application_values={"system_key": "fast-a", "name": "Fast", "flrig_port": 12445, "fldigi_port": 7462},
+        manifest_values={"instance_key": "fast:a"},
+    )
+    store.save_device_profile({"id": radio["id"], "use_flmsg": 1, "use_flamp": 1})
+    removed = store.disassociate_software_instance(
+        family_key="fast_light",
+        radio_profile_id=radio["id"],
+        expected_current_instance_id=adopted["application"]["id"],
+    )
+    assert removed["radio"]["fast_light_config_id"] is None
+    assert all(removed["radio"][key] == 0 for key in ("use_flrig", "use_fldigi", "use_flmsg", "use_flamp"))
+    assert removed["radio"]["control_backend"] == "manual"
+    assert store.get_fast_light_config(adopted["application"]["id"])["enabled"] == 0
+
+
+def test_stale_instance_guard_preserves_refreshed_assignment(tmp_path) -> None:
+    store = MultiRadioStore(tmp_path / "stale-guard.db")
+    radio = store.save_device_profile({"system_key": "radio-a", "name": "Radio A", "control_backend": "js8call"})
+    first = store.adopt_software_instance(
+        family_key="js8call", radio_profile_id=radio["id"],
+        application_values={"system_key": "js8-a", "name": "First", "port": 2452},
+        manifest_values={"instance_key": "js8:first", "ports": [{"name": "API", "port": 2452}]},
+    )
+    second = store.adopt_software_instance(
+        family_key="js8call", radio_profile_id=radio["id"],
+        application_values={"system_key": "js8-b", "name": "Second", "port": 2453},
+        manifest_values={"instance_key": "js8:second", "ports": [{"name": "API", "port": 2453}]},
+        replace_existing=True,
+        expected_current_instance_id=first["application"]["id"],
+    )
+    with pytest.raises(ValueError, match="assignment changed"):
+        store.adopt_software_instance(
+            family_key="js8call", radio_profile_id=radio["id"],
+            application_values={"system_key": "js8-stale", "name": "Stale", "port": 2454},
+            manifest_values={"instance_key": "js8:stale", "ports": [{"name": "API", "port": 2454}]},
+            replace_existing=True,
+            expected_current_instance_id=first["application"]["id"],
+        )
+    with pytest.raises(ValueError, match="assignment changed"):
+        store.disassociate_software_instance(
+            family_key="js8call",
+            radio_profile_id=radio["id"],
+            expected_current_instance_id=first["application"]["id"],
+        )
+    assert store.get_device_profile(radio["id"])["js8_instance_id"] == second["application"]["id"]
+    removed = store.disassociate_software_instance(
+        family_key="js8call",
+        radio_profile_id=radio["id"],
+        expected_current_instance_id=second["application"]["id"],
+    )
+    assert removed["radio"]["control_backend"] == "manual"
+    assert removed["radio"]["use_js8call"] == 0
 
 
 def test_varac_cluster_membership_and_instance_collision_roll_back_adoption(tmp_path) -> None:

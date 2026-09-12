@@ -1,8 +1,8 @@
 # Multi-Instance Software Administration Specification
 
-Status: implementation complete; automated exit gate passed. Live Linux
-multi-process and radio/PTT qualification remains an operator-assisted release
-check.
+Status: MIS-0 through MIS-5 complete; automated exit gate passed. Live Linux
+multi-process and radio/PTT qualification remains an
+operator-assisted release check.
 
 Governing delivery contract: `project_delivery_rules.md`
 
@@ -24,7 +24,7 @@ internals by hand.
 
 The normal workflow is:
 
-`Software -> application -> radio -> Add software instance -> review -> save -> verify`
+`Software -> one application family -> one radio -> create/use/replace one instance -> review -> save -> verify`
 
 The operator must be able to understand, before applying anything:
 
@@ -113,8 +113,10 @@ cross-application lifecycle evidence that those tables do not share:
 - bounded family-specific metadata.
 
 The manifest does not duplicate the radio assignment. The radio profile's
-existing application link remains the source of truth, so an unassigned imported
-instance can exist without fabricating a radio relationship.
+existing application link remains the source of truth. New runtime instances
+cannot be created without an owning radio. Historical, imported, replaced, or
+disassociated records may remain unassigned for recovery, but are inactive and
+are not part of the normal creation path.
 
 All manifest JSON is bounded, versioned, normalized, and free of credentials.
 Additive schema assurance creates missing columns/tables without transforming or
@@ -191,6 +193,39 @@ external writer must use this staged plan:
 
 Unsupported external writers never receive a generic best-effort rewrite.
 
+### Assignment cardinality and replacement
+
+The durable invariant is one-to-one within a software family:
+
+- one radio has at most one JS8Call instance, one Fast Light instance, and one
+  VarAC instance;
+- one runtime instance is assigned to at most one radio; and
+- a radio may use one instance from each different family because FIO's normal
+  TriMode workflow can legitimately configure JS8Call, Fast Light, and VarAC for
+  the same physical radio.
+
+Every assignment path uses the same store service. Creating a new orphan runtime
+instance is blocked. If no radio exists, the primary action is `Create a radio
+first`. Existing unassigned records remain available through a bounded recovery
+picker and cannot launch, ingest, or participate in a VarAC cluster while
+unassigned.
+
+An occupied family slot is never silently overwritten and the operator is not
+required to disassociate it first. `Replace instance` shows the current and
+proposed identities before entry and again at Review. The store receives the
+expected current instance ID, validates the complete proposed state, then swaps
+the radio link, launch identity, and optional cluster membership in one
+transaction. A stale selection, collision, or write failure rolls back the whole
+operation and leaves the current assignment operational. The replaced record is
+retained disabled as a previous configuration for recovery; external files are
+not changed.
+
+`Disassociate` is an explicit Advanced action. It clears only the selected
+family's radio link/use flags, FIO launch items, and applicable VarAC membership;
+it disables and retains the application record and manifest. Deleting the
+external application, profiles, logs, messages, database, inbox, or outbox is a
+separate operation and is never implied by disassociation.
+
 ## Launch And Verification
 
 Startup and manual launch use the same persisted station launch planner. The
@@ -222,9 +257,17 @@ The software-family workspace retains the existing three-level chip model:
 2. radio context;
 3. configuration task.
 
-The primary action is `Add software instance`. `Assign software to a radio`
-remains available for linking a saved unassigned instance. The assistant is a
-responsive in-workspace step surface rather than a dense all-fields dialog.
+Each level is a true exclusive, non-empty selection group. Exactly one family is
+active; selecting or re-selecting a chip cannot leave multiple highlighted
+choices or visually clear the current choice. This is navigation state, not a
+claim that a radio can use only one family.
+
+The primary action is contextual. An available radio shows `Create or use
+instance`; an occupied family slot shows `Review current` and `Replace
+instance`; no configured radio shows `Create a radio first`. `Assign existing`
+opens a family-filtered picker containing only compatible unassigned records.
+The assistant is a responsive in-workspace step surface rather than a dense
+all-fields dialog.
 
 Steps are `Purpose`, `Find or create`, `Identity`, `Connections`, `Files`,
 `Launch`, and `Review`. Completed steps use concise text/icon state. At compact
@@ -294,6 +337,31 @@ Exit gate: automated focused and adjacent Settings/launch/database tests pass;
 `py_compile` and `git diff --check` pass. Linux operator qualification remains a
 separate external gate for two simultaneous instances of each installed family,
 including real radio/PTT resource behavior.
+
+### MIS-5 — Radio-First Ownership And Atomic Replacement
+
+- Make family, radio, and task chips true exclusive non-empty selectors.
+- Remove `Not assigned yet` from normal creation and route an empty station to
+  `Create a radio first`.
+- Show `Available` or `Assigned: <instance>` before the operator enters instance
+  details.
+- Provide explicit new, assign-existing, and replace paths with current/proposed
+  review.
+- Centralize one-radio/one-instance-per-family enforcement for every write path.
+- Add rollback-safe replacement and non-destructive disassociation, including
+  launch-item and VarAC-membership cleanup.
+- Keep legacy unassigned/shared records visible as `Needs attention`; never
+  transform or delete them automatically.
+
+Exit gate: exactly one chip at each active selection level after arbitrary and
+repeat click sequences; a new instance cannot be saved without a radio; the same
+runtime instance cannot be assigned to two radios; failed/stale replacement
+leaves the prior application, radio link, launch recipe, and cluster membership
+unchanged; successful replacement leaves no obsolete FIO-managed startup item
+or active cluster membership; disassociation changes no external files; responsive light/dark,
+Normal/Large Text checks pass at 1920x1080, 1000x700, and 900x560; focused and
+adjacent Settings/store/launch tests, `py_compile`, HTML parsing, and
+`git diff --check` pass.
 
 ## Model Assignment
 
