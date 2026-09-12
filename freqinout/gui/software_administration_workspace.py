@@ -278,6 +278,8 @@ class SoftwareAdministrationWorkspace(QWidget):
                 self.editor_placeholder.text()
                 + f"\n\nLegacy/unassigned instances for recovery ({len(family.unassigned_instances)}): {names}{suffix}."
             )
+        if self.keep_instance_assistant_visible():
+            return
         self.editor_stack.setCurrentWidget(self.editor_placeholder)
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
@@ -424,6 +426,8 @@ class SoftwareAdministrationWorkspace(QWidget):
         navigation.
         """
         self._legacy_editor = widget
+        if self.keep_instance_assistant_visible():
+            return
         if widget is None:
             self.editor_stack.setCurrentWidget(self.editor_placeholder)
             return
@@ -775,17 +779,28 @@ class SoftwareAdministrationWorkspace(QWidget):
                 "Choose one retained, unassigned instance. It remains inactive until this reviewed radio assignment is saved."
             )
 
-    def _keep_open_instance_assistant_visible(self) -> bool:
-        """Protect the assistant draft from background context navigation."""
+    def keep_instance_assistant_visible(self, *, announce: bool = False) -> bool:
+        """Keep an active assistant current during cache/editor refreshes.
+
+        Settings owns editor construction and may refresh the snapshot while
+        the assistant is open.  This seam lets those cache-only refreshes
+        reassert the assistant without changing its draft or lifecycle.
+        """
 
         assistant = self._instance_assistant
         if assistant is None:
             return False
         self.editor_stack.setCurrentWidget(assistant)
-        assistant.set_operation_status(
-            "Finish this setup or choose Cancel before changing software, radio, or task."
-        )
+        if announce:
+            assistant.set_operation_status(
+                "Finish this setup or choose Cancel before changing software, radio, or task."
+            )
         return True
+
+    def _keep_open_instance_assistant_visible(self) -> bool:
+        """Protect the assistant draft from interactive context navigation."""
+
+        return self.keep_instance_assistant_visible(announce=True)
 
     def _instance_discovery_unavailable(self, assistant: SoftwareInstanceAssistant) -> None:
         """Explain the adapter boundary until the Settings host supplies discovery."""
@@ -836,7 +851,13 @@ class SoftwareAdministrationWorkspace(QWidget):
         if assistant is not None:
             self.editor_stack.removeWidget(assistant)
             assistant.deleteLater()
-        self._show_registered_editor_for_context()
+        if self._radio_id is None:
+            # An All-radios workflow has no task editor of its own. Rebuild the
+            # cached family summary explicitly so a previously viewed radio's
+            # legacy editor cannot leak back into view after Cancel.
+            self.show_family_summary(self._snapshot.family(self._family_key))
+        else:
+            self._show_registered_editor_for_context()
 
     def _on_instance_assistant_completed(self, payload: object) -> None:
         self.instance_add_requested.emit(payload)

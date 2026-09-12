@@ -542,6 +542,86 @@ def test_settings_software_workspace_survives_repeated_reflow_and_resize(monkeyp
         app.processEvents()
 
 
+@pytest.mark.parametrize("radio_id", [None, 1])
+def test_settings_instance_assistant_survives_host_refresh_and_cancel(monkeypatch, tmp_path, radio_id):
+    """Host editor/snapshot refreshes cannot replace an active instance draft."""
+    from freqinout.gui.settings_tab import SettingsTab
+
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = _app()
+    monkeypatch.setattr(SettingsTab, "_maybe_backfill_js8_geo", lambda self: None)
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status", lambda self, force=False: None)
+    tab = SettingsTab()
+    try:
+        snapshot = _snapshot()
+        workspace = tab.software_administration_workspace
+        tab._software_administration_snapshot = snapshot
+        workspace.set_instance_context(
+            radios=(
+                {"id": 1, "name": "FIO-A", "use_js8call": 1, "js8_instance_id": 11},
+                {"id": 2, "name": "FIO-B", "use_js8call": 1, "js8_instance_id": 12},
+            ),
+            inventory_by_family={"js8call": (), "fast_light": (), "varac": ()},
+        )
+        workspace.set_snapshot(snapshot)
+        tab.resize(1000, 700)
+        tab.show()
+        app.processEvents()
+        assert tab.show_settings_context("software", health_key="software_administration") is True
+        if radio_id is None:
+            # Exercise the realistic path where the operator reviewed one
+            # radio before returning to All and starting a new instance. A
+            # stale legacy editor must not reappear when Cancel is chosen.
+            workspace.select_context("js8call", 1, "api_radio")
+            tab._show_software_task_editor()
+        workspace.select_context("js8call", radio_id, "api_radio")
+        tab._show_software_task_editor()
+        app.processEvents()
+
+        expected_action = "Replace instance…" if radio_id is not None else "Create or use instance…"
+        assert workspace.add_instance_button.text() == expected_action
+        baseline_top_level_count = len(
+            [window for window in app.topLevelWidgets() if window.isVisible()]
+        )
+        workspace.add_instance_button.click()
+        app.processEvents()
+
+        assistant = workspace._instance_assistant
+        assert assistant is not None
+        assert assistant.parent() is workspace.editor_stack
+        assert assistant.window() is tab
+        assert assistant.isVisible()
+        assert len([window for window in app.topLevelWidgets() if window.isVisible()]) == baseline_top_level_count
+        assistant.set_operation_status("Draft values retained.")
+
+        # Both the host's direct editor refresh and the deferred, same-snapshot
+        # rebuild occur while the assistant draft is active.
+        tab._show_software_task_editor()
+        workspace.set_snapshot(snapshot)
+        tab._show_software_task_editor()
+        app.processEvents()
+        assert workspace.editor_stack.currentWidget() is assistant
+        assert assistant.isVisible()
+        assert assistant.parent() is workspace.editor_stack
+        assert assistant.window() is tab
+        assert assistant.operation_status_label.text() == "Draft values retained."
+        assert len([window for window in app.topLevelWidgets() if window.isVisible()]) == baseline_top_level_count
+
+        assistant.cancelled.emit()
+        app.processEvents()
+        assert workspace._instance_assistant is None
+        if radio_id is None:
+            assert workspace.editor_stack.currentWidget() is workspace.editor_placeholder
+            assert workspace.editor_placeholder.isVisible()
+        else:
+            editor = tab._software_task_editors[("js8call", radio_id, "api_radio")]
+            assert workspace.editor_stack.currentWidget() is editor
+            assert editor.isVisible()
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
 def test_software_task_handler_stays_in_software_workspace():
     source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
     block = source[source.index("    def _on_software_administration_task_selected") : source.index("    def _software_editor_state")]

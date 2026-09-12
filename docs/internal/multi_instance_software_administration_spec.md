@@ -363,6 +363,13 @@ Normal/Large Text checks pass at 1920x1080, 1000x700, and 900x560; focused and
 adjacent Settings/store/launch tests, `py_compile`, HTML parsing, and
 `git diff --check` pass.
 
+Corrective lifecycle gate: once the embedded assistant is opened from either
+`Create or use instance` or `Replace instance`, host snapshot and editor
+refreshes must preserve it as the visible `QStackedWidget` page without changing
+its draft or passive status. It is never promoted to a dialog or other top-level
+window. Cancel restores the refreshed All-family summary or exact radio task;
+successful completion closes only after persistence reports success.
+
 ## Model Assignment
 
 - High-reasoning primary: architecture, additive schema, migration safety,

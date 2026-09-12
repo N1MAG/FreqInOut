@@ -313,6 +313,17 @@ screen, the outer Settings scrollbars remain inactive, and no top-level window
 is created. Navigation, resizing, snapshot rebuilding, and repainting remain
 free of database, filesystem, process, socket, and radio work.
 
+An open `Create or use instance` or `Replace instance` assistant is an explicit
+in-progress operator workflow. It remains the current embedded editor through
+Settings activation, cached-snapshot rebuilding, health/status refresh, and
+normal host editor reconstruction. Those passive updates may refresh the hidden
+summary or task editor for later use, but they must neither hide the assistant
+nor replace its status with an interaction warning. Only Cancel, a successful
+reviewed save, or the explicit `Create a radio first` route closes the assistant.
+The lifecycle gate covers both the All-radio create path and selected-radio
+replacement path, verifies that the assistant never becomes a top-level window,
+and verifies that Cancel reveals the newly refreshed summary or task editor.
+
 ## Phase 1: Settings IA Cleanup
 
 ### Condition Alerts

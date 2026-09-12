@@ -4567,3 +4567,46 @@ broader multi-instance, persistence, discovery, status, workspace, and Settings
 integration partition passes 336 tests with 4 intentional environment skips.
 Python compilation and `git diff --check` pass. No migration, database write,
 endpoint I/O, external application change, or destructive action was introduced.
+
+## 2026-09-12 — Software instance-assistant swipe/vanish correction
+
+Status: corrected; automated exit gate passed. Linux production confirmation
+remains operator-assisted.
+
+The JS8Call `Create or use instance` and `Replace instance` actions correctly
+opened an embedded assistant, but a subsequent cached Settings refresh selected
+the family summary or radio task editor over it. The assistant and its draft
+were still alive; the host had merely hidden the active workflow, producing the
+same apparent swipe-and-vanish failure seen in production.
+
+Passive family-summary, task-editor, snapshot, and health/status refreshes now
+update their cached state while preserving the assistant as the current stacked
+page. They do not overwrite the assistant's draft or status. Explicit
+navigation still tells the operator to finish or cancel the workflow. Cancel
+restores the current radio task editor, or the refreshed All-radio summary; the
+latter is explicit so a previously viewed radio editor cannot leak into the
+All-radio context. Successful persistence remains the only non-cancel path that
+closes the assistant.
+
+Work packages and models:
+
+- high-reasoning primary GPT-5 model (exact host runtime submodel identifier not
+  exposed): deterministic host-level reproduction, lifecycle architecture,
+  delegated-diff review and refinement, specification/work-log updates, and
+  final integration gate;
+- `gpt-5.6-terra`, high reasoning: read-only signal, parent, modality, deferred
+  refresh, and ownership audit that isolated the unconditional stack selection;
+- `gpt-5.6-luna`, high reasoning: bounded workspace correction and focused
+  lifecycle regression implementation;
+- `gpt-5.6-luna`, medium reasoning: independent final verification across both
+  actions, host refreshes, themes, text sizes, resizing, and Cancel restoration.
+
+Acceptance evidence: the focused assistant/workspace/layout/Settings partition
+passes 95 tests. The broader Software Administration, Settings, persistence,
+discovery, manifest, and status partition passes 338 tests with 4 intentional
+environment skips. Independent manual offscreen verification passed All-radio
+Create and selected-radio Replace through cached refresh, dark/light themes,
+Normal/Large Text, and 1000x700, 900x560, and 760x460 resizes, with no additional
+top-level window or outer scrollbar. Python compilation and `git diff --check`
+pass. No migration, database write, endpoint I/O, external application change,
+or destructive action was introduced.
