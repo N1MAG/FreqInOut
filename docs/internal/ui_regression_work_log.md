@@ -4758,3 +4758,39 @@ and QSY partition passes **289 tests with 5 intentional skips**. The focused P1
 file passes 20 tests, Python compilation succeeds, and `git diff --check` is
 clean. The current FIO process started before this follow-up source change, so
 one additional restart and operator confirmation remain the external gate.
+
+## 2026-09-12 — Station Control Bar attention summary
+
+Status: implementation complete and automated exit gate passed. The ambiguous
+`! N` indicator is now `ATTN: N` at roomy and compact densities and remains the
+short `! N` form only in the most constrained layout. Its accessible name states
+the affected radio/source count, and duplicate transitional snapshots do not
+inflate that count.
+
+Activating the chip opens a bounded summary with one row per affected source,
+the highest-priority reason available from cached PTT, shared-resource,
+off-schedule, RF Guard, endpoint, warning, or software-service state, and a
+`Review` action that opens Station Health focused on that source. Three rows are
+shown before an overflow route; `Open Station Health` always exposes the full
+cross-station view. The disclosure path uses only the snapshots and caches
+already held by the command bar. It performs no database/configuration read,
+process inventory, endpoint/API request, schedule projection, command, worker,
+or timer activity.
+
+Work packages and models:
+
+- high-reasoning primary GPT-5 model (exact host runtime submodel identifier not
+  exposed): interaction contract, cached-data/concurrency boundary, governing
+  specification, review and correction of every delegated diff, final
+  integration, and exit gate;
+- `gpt-5.6-terra`, medium reasoning: bounded chip/menu UI implementation;
+- `gpt-5.6-luna`, medium reasoning: focused attention-summary regression tests.
+
+Acceptance evidence: the focused attention and adaptive-shell suite passes 21
+tests across one-radio Light/Dark, two-radio-plus-Mesh, three-radio, duplicate,
+roomy, compact, condensed, bounded-overflow, focused-navigation, and fail-fast
+no-I/O cases. The adjacent presenter, state, navigation-epoch, and shell suite
+was also run: 157 tests passed; 10 pre-existing legacy assigned-plan/settings
+contract failures remain outside this change and are unchanged by it. Python
+compilation and `git diff --check` pass. No migration, external endpoint action,
+application restart, or destructive operation was performed.

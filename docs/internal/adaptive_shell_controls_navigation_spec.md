@@ -53,6 +53,30 @@ The tray must not create page-level horizontal scrolling. Text-bearing controls
 derive height from font metrics. Health and Plan may use compact familiar icons,
 but require accessible names, tooltips, keyboard focus, and visible focus state.
 
+## Attention Summary Disclosure
+
+The awareness rail counts affected radios or sources, not individual diagnostic
+items. When at least one source needs operator review, the control uses
+`ATTN: N` wherever the available density can display it without displacing
+Where/When context. Only the most constrained layout may shorten this to `! N`;
+the accessible name always states that N radios or sources need attention.
+
+Activating the control opens a small bounded summary built exclusively from the
+immutable radio/source snapshots already supplied to the command bar. Each
+affected source appears once with its name, highest-priority concise reason, and
+a `Review` action that opens Station Health focused to that source. A final
+`Open Station Health` action opens the complete cross-station view. The summary
+must not imply that N is an unread-message count or an individual-issue count.
+
+Opening, closing, navigating, resizing, or repainting this disclosure performs
+no database/configuration read, process inventory, endpoint/API request, PTT or
+frequency read, schedule projection, or command. It creates no worker or timer.
+The menu is capped to the supported three-radio stress presentation, with a
+concise overflow route to Station Health if a larger configuration is present.
+Reasons use cached PTT/shared-resource, RF Guard, off-schedule, endpoint status,
+warning text, and software-service state only; unavailable detail is stated as
+`Review status` rather than guessed.
+
 ## Compact Main Navigation
 
 Collapsed navigation represents the full menu's master hierarchy, not a curated
@@ -103,4 +127,7 @@ an empty destination in advance of implementation.
 - Map uses a map marker symbol rather than a folder; Messages uses an envelope;
   Net Control uses a radio/wave symbol.
 - Light and Dark themes retain readable icons, labels, focus, and selection.
+- `ATTN: N` is used when space permits, `! N` is limited to the tightest layout,
+  and activating either presents one cached summary row per affected source plus
+  a complete Station Health route without endpoint, process, or database I/O.
 - No database or configuration schema change is required.

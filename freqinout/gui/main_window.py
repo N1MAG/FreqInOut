@@ -8648,6 +8648,204 @@ class MainWindow(QMainWindow):
         except Exception:
             self._open_station_health_detail(device_profile_id=ident)
 
+    def _station_command_attention_key(self, snapshot: object) -> tuple[str, object]:
+        """Return a stable display key without resolving any external state."""
+        ident = self._station_command_snapshot_id(snapshot)
+        if ident > 0:
+            return ("id", ident)
+        name = self._station_command_snapshot_name(snapshot).strip().casefold()
+        return ("name", name or id(snapshot))
+
+    def _station_command_unique_attention_snapshots(
+        self,
+        choices: Sequence[object],
+    ) -> list[object]:
+        """Deduplicate already-classified snapshots while preserving order."""
+        unique: list[object] = []
+        seen: set[tuple[str, object]] = set()
+        for snapshot in choices:
+            key = self._station_command_attention_key(snapshot)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(snapshot)
+        return unique
+
+    def _station_command_cached_attention_reason(self, snapshot: object) -> str:
+        """Describe cached attention state without health, scheduler, or endpoint calls."""
+        if self._station_command_bool(self._station_command_value(snapshot, "ptt_active", False)):
+            return "PTT active"
+        if self._station_command_bool(self._station_command_value(snapshot, "shared_ptt_blocked", False)):
+            return (
+                str(self._station_command_value(snapshot, "shared_ptt_status_text", "") or "").strip()
+                or "Shared PTT blocked"
+            )
+
+        off_schedule = self._station_command_off_schedule_payload_for_profile(snapshot)
+        if isinstance(off_schedule, Mapping):
+            return "Off Schedule"
+
+        # Read a previously rendered lane cache directly. Calling the lane
+        # accessor here could build a schedule projection, which is forbidden
+        # while opening this lightweight disclosure.
+        ident = self._station_command_snapshot_id(snapshot)
+        lane_cache = getattr(self, "_station_command_lane_cache_data", None)
+        lane = lane_cache.get(ident) if isinstance(lane_cache, Mapping) else None
+        if isinstance(lane, Mapping):
+            try:
+                validation = json.loads(str(lane.get("assignment_validation_status_json", "") or "{}"))
+            except Exception:
+                validation = {}
+            if isinstance(validation, Mapping) and str(validation.get("state", "") or "").strip().lower() in {
+                "blocked",
+                "warning",
+            }:
+                return "RF Guard"
+
+        service_states = self._station_command_value(snapshot, "service_states", {})
+        service_candidates: list[tuple[int, str]] = []
+        if isinstance(service_states, Mapping):
+            for key, raw_info in service_states.items():
+                if not isinstance(raw_info, Mapping):
+                    continue
+                state = str(raw_info.get("state", "idle") or "idle").strip().lower()
+                is_live_idle = state not in {"ok", "error", "warn", "warning", "attention"} and self._station_command_health_is_live_dependency(
+                    str(key), snapshot
+                )
+                if state not in {"error", "warn", "warning", "attention"} and not is_live_idle:
+                    continue
+                label = str(key or "Service").replace("_API", "").strip() or "Service"
+                tooltip = str(raw_info.get("tooltip", "") or "").strip()
+                if tooltip and len(tooltip) <= 64:
+                    reason = tooltip.rstrip(".")
+                elif state == "error":
+                    reason = f"{label} error"
+                elif is_live_idle:
+                    reason = f"{label} unavailable"
+                else:
+                    reason = f"{label} needs review"
+                service_candidates.append((2 if state == "error" else 1, reason))
+        if service_candidates:
+            service_candidates.sort(key=lambda item: (-item[0], item[1].casefold()))
+            return service_candidates[0][1]
+
+        warning = str(self._station_command_value(snapshot, "warning_text", "") or "").strip()
+        if warning:
+            return warning if len(warning) <= 64 else "Configuration warning"
+
+        backend = str(self._station_command_value(snapshot, "control_backend", "") or "").strip()
+        control_ready = self._station_command_value(snapshot, "control_ready", None)
+        if backend.lower() not in {"", "manual"} and control_ready is not None and not self._station_command_bool(control_ready):
+            return f"{backend.upper()} unavailable"
+
+        state = self._station_command_compact_state_text(self._station_command_state_text(snapshot)).strip()
+        if state and state.lower() not in {"clear", "healthy", "on schedule", "unknown"}:
+            return state
+        return "Review status"
+
+    def _station_command_cached_attention_rank(self, snapshot: object, selected_id: int) -> int:
+        """Rank already-classified snapshots using immutable/cached fields only."""
+        ident = self._station_command_snapshot_id(snapshot)
+        state = str(self._station_command_value(snapshot, "overall_state", "") or "").strip().lower()
+        services = self._station_command_value(snapshot, "service_states", {})
+        service_error = isinstance(services, Mapping) and any(
+            isinstance(info, Mapping) and str(info.get("state", "") or "").strip().lower() == "error"
+            for info in services.values()
+        )
+        if (
+            self._station_command_bool(self._station_command_value(snapshot, "ptt_active", False))
+            or self._station_command_bool(self._station_command_value(snapshot, "shared_ptt_blocked", False))
+            or service_error
+            or state in {"error", "failed", "blocked"}
+        ):
+            score = 1000
+        else:
+            score = 700
+        if self._station_command_bool(self._station_command_value(snapshot, "runtime_primary", False)):
+            score += 80
+        if self._station_command_bool(self._station_command_value(snapshot, "runtime_active", False)):
+            score += 40
+        if ident > 0 and ident == int(selected_id or 0):
+            score += 250
+        return score
+
+    def _station_command_attention_summary_entries(
+        self,
+        choices: Sequence[object],
+        selected_id: int,
+        *,
+        limit: int = 3,
+    ) -> list[tuple[object, int, str, str, str]]:
+        """Build a bounded, cache-only attention summary for the control bar."""
+        entries: list[tuple[object, int, str, str, str]] = []
+        for snapshot in self._station_command_unique_attention_snapshots(choices):
+            ident = self._station_command_snapshot_id(snapshot)
+            reason = self._station_command_cached_attention_reason(snapshot)
+            name = self._station_command_snapshot_name(snapshot)
+            entries.append((snapshot, ident, name, reason, reason))
+        entries.sort(
+            key=lambda entry: (
+                -self._station_command_cached_attention_rank(entry[0], selected_id),
+                entry[2].casefold(),
+            )
+        )
+        return entries[: max(1, int(limit or 3))]
+
+    def _show_station_command_attention_menu(
+        self,
+        *,
+        choices: Sequence[object],
+        selected_id: int,
+        anchor: QWidget,
+        theme: Mapping[str, object] | None = None,
+    ) -> None:
+        """Show cached attention by radio without probing endpoints or storage."""
+        affected = self._station_command_unique_attention_snapshots(choices)
+        entries = self._station_command_attention_summary_entries(affected, selected_id)
+        affected_count = len(affected)
+        if not affected_count:
+            return
+        menu_theme = dict(theme or {})
+        menu = QMenu(anchor)
+        menu.setObjectName("stationCommandAttentionMenu")
+        menu.setToolTipsVisible(True)
+        menu.setStyleSheet(
+            "QMenu#stationCommandAttentionMenu {"
+            f"background: {menu_theme.get('surface', '#FFFFFF')}; color: {menu_theme.get('text', '#222222')}; "
+            f"border: 1px solid {menu_theme.get('border', '#D3D7DD')}; padding: 5px;"
+            "}"
+            "QMenu#stationCommandAttentionMenu::item { padding: 5px 22px 5px 10px; }"
+        )
+        noun = "radio" if affected_count == 1 else "radios"
+        verb = "needs" if affected_count == 1 else "need"
+        title = QAction(f"{affected_count} {noun} {verb} attention", menu)
+        title.setEnabled(False)
+        menu.addAction(title)
+        for _snapshot, ident, name, reason, status in entries:
+            action = QAction(f"Review {name} — {reason}", menu)
+            action.setToolTip(f"{name}: {status}. Open Station Health focused on this source.")
+            action.setEnabled(ident > 0)
+            action.triggered.connect(
+                lambda _checked=False, profile_id=ident: self._open_station_health_detail(device_profile_id=profile_id)
+            )
+            menu.addAction(action)
+        remaining = affected_count - len(entries)
+        if remaining > 0:
+            more = QAction(f"+{remaining} more — open Station Health", menu)
+            more.setToolTip("Open Station Health to review every affected radio.")
+            more.triggered.connect(lambda _checked=False: self._open_station_health_detail())
+            menu.addAction(more)
+        menu.addSeparator()
+        open_action = QAction("Open Station Health", menu)
+        open_action.setToolTip("Open Station Health with the complete issue list.")
+        open_action.triggered.connect(lambda _checked=False: self._open_station_health_detail())
+        menu.addAction(open_action)
+        self._station_command_attention_menu = menu
+        try:
+            menu.popup(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+        except Exception:
+            self._open_station_health_detail()
+
     def _add_station_command_health_item(
         self,
         *,
@@ -9433,23 +9631,30 @@ class MainWindow(QMainWindow):
         rail_layout.setContentsMargins(0, 0, 0, 0)
         rail_layout.setSpacing(6)
         total_width = 0
-        attention = [
-            snapshot
-            for snapshot in choices
-            if self._station_command_snapshot_needs_operator_attention(snapshot)
-        ]
+        attention = self._station_command_unique_attention_snapshots(
+            [
+                snapshot
+                for snapshot in choices
+                if self._station_command_snapshot_needs_operator_attention(snapshot)
+            ]
+        )
         if attention:
-            target = max(attention, key=lambda snapshot: self._station_command_focus_score(snapshot, selected_id))
-            target_id = self._station_command_snapshot_id(target)
-            attention_btn = QPushButton(f"Attention {len(attention)}", rail)
+            attention_btn = QPushButton(f"ATTN: {len(attention)}", rail)
             attention_btn.setObjectName("stationCommandAttentionChip")
-            attention_btn.setToolTip("Focus the radio or source that most needs operator attention.")
+            attention_noun = "radio or source" if len(attention) == 1 else "radios or sources"
+            attention_verb = "needs" if len(attention) == 1 else "need"
+            attention_btn.setAccessibleName(f"{len(attention)} {attention_noun} {attention_verb} attention")
+            attention_btn.setToolTip("Review radios or sources that need operator attention.")
             attention_btn.setStyleSheet(button_style("warning", theme))
             attention_btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
-            if target_id > 0:
-                attention_btn.clicked.connect(
-                    lambda _checked=False, profile_id=target_id: self._on_station_command_summary_radio_clicked(profile_id)
+            attention_btn.clicked.connect(
+                lambda _checked=False, snapshots=tuple(attention), focus_id=selected_id, anchor=attention_btn, menu_theme=dict(theme): self._show_station_command_attention_menu(
+                    choices=snapshots,
+                    selected_id=focus_id,
+                    anchor=anchor,
+                    theme=menu_theme,
                 )
+            )
             rail_layout.addWidget(attention_btn)
             total_width += int(attention_btn.sizeHint().width() or 0) + 6
         for mesh_item in self._station_command_saved_mesh_control_items():
@@ -9910,17 +10115,28 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout(rail)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(6)
-        attention = [item for item in choices if self._station_command_snapshot_needs_operator_attention(item)]
+        attention = self._station_command_unique_attention_snapshots(
+            [item for item in choices if self._station_command_snapshot_needs_operator_attention(item)]
+        )
         if attention:
-            target = max(attention, key=lambda item: self._station_command_focus_score(item, selected_id))
-            button = QPushButton(f"! {len(attention)}", rail)
+            compact_attention = density == "condensed"
+            button = QPushButton(
+                f"! {len(attention)}" if compact_attention else f"ATTN: {len(attention)}",
+                rail,
+            )
             button.setObjectName("stationCommandAttentionChip")
-            button.setAccessibleName(f"{len(attention)} sources need attention")
-            button.setToolTip("Focus the source that most needs operator attention.")
+            attention_noun = "radio or source" if len(attention) == 1 else "radios or sources"
+            attention_verb = "needs" if len(attention) == 1 else "need"
+            button.setAccessibleName(f"{len(attention)} {attention_noun} {attention_verb} attention")
+            button.setToolTip("Review radios or sources that need operator attention.")
             button.setStyleSheet(button_style("warning", theme))
-            target_id = self._station_command_snapshot_id(target)
             button.clicked.connect(
-                lambda _checked=False, profile_id=target_id: self._on_station_command_summary_radio_clicked(profile_id)
+                lambda _checked=False, snapshots=tuple(attention), focus_id=selected_id, anchor=button, menu_theme=dict(theme): self._show_station_command_attention_menu(
+                    choices=snapshots,
+                    selected_id=focus_id,
+                    anchor=anchor,
+                    theme=menu_theme,
+                )
             )
             row.addWidget(button)
         for item in self._station_command_saved_mesh_control_items():
