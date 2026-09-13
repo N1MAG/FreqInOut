@@ -324,9 +324,9 @@ def test_compose_rf_modes_use_vertical_panels_and_target_completion() -> None:
 
     assert "viewport_width < (920 if in_workbench else int(self._responsive_compact_width))" in source
     assert "self.compose_body_splitter = body_splitter" in source
-    assert 'compose_sidebar = mode in {"nbems", "spotter", "commstat_rf"} and not compact' in source
+    assert "def _compose_sidebar_enabled" in source
     assert "desired_body = Qt.Horizontal if compose_sidebar else Qt.Vertical" in source
-    assert "desired = Qt.Vertical if (compact or compose_sidebar) else Qt.Horizontal" in source
+    assert "desired = Qt.Vertical" in source
     assert "def _compose_target_completion_values" in source
     assert "def _install_compose_target_completers" in source
     assert 'for widget_name in ("compose_js8_target_edit", "compose_commstat_target_edit")' in source
@@ -424,9 +424,11 @@ def test_nbems_compose_uses_sidebar_and_popout_body_splitter() -> None:
     assert "setup_box.setMinimumWidth(sidebar_w)" in source
     assert "setup_scroll.setMaximumWidth(sidebar_w)" in source
     assert "setup_box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)" in source
-    assert "self.compose_splitter.setOrientation(Qt.Vertical if (compact or compose_sidebar) else Qt.Horizontal)" in source
-    assert "self.compose_body_splitter.setOrientation(Qt.Horizontal if compose_sidebar else Qt.Vertical)" in source
-    assert 'compose_mode in {"nbems", "spotter", "commstat_rf"}' in source
+    assert "self.compose_splitter.setOrientation(Qt.Vertical)" in source
+    assert "desired_body = Qt.Horizontal if compose_sidebar else Qt.Vertical" in source
+    assert "self.compose_body_splitter.orientation() != desired_body" in source
+    assert "self.compose_body_splitter.setOrientation(desired_body)" in source
+    assert 'mode not in {"nbems", "spotter", "commstat_rf"}' in source
     assert 'if mode == "spotter":' in source
     assert 'elif mode == "commstat_rf":' in source
 

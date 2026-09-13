@@ -1,5 +1,13 @@
 # FIO UI Layout Standards
 
+For any new or meaningfully redesigned operator-facing workspace, also apply
+`docs/internal/task_oriented_workspace_design_guideline.md`. It defines the
+required redesign brief, task-oriented archetypes, action and scan hierarchy,
+shared-theme/component contract, responsive scroll ownership, and visual exit
+gate. These standards remain authoritative for accessibility, theme contrast,
+and responsiveness; the redesign guideline makes them part of a repeatable
+screen-design workflow.
+
 ## Minimized Window Usability
 
 Every UI change must be reviewed at reduced window sizes, not only at the
@@ -159,6 +167,12 @@ text and reduced window sizes.
 FIO must remain readable in Light and Dark themes without requiring users to
 find individual broken tabs. Theme safety is a shared UI contract, not a
 per-screen polish task.
+
+The shared-theme/component contract in
+`docs/internal/task_oriented_workspace_design_guideline.md` is mandatory for
+redesign work. If a semantic state or reusable treatment is missing, extend
+`freqinout/gui/theme.py` or the applicable shared component/helper first rather
+than creating a screen-local palette or imitation.
 
 Required behavior:
 

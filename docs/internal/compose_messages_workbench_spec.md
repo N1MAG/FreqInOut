@@ -1,6 +1,6 @@
 # Compose Messages Workbench Spec
 
-Status: CMW-0 through CMW-5 automated implementation complete 2026-09-11.
+Status: CMW-0 through CMW-7 automated implementation complete 2026-09-13.
 Linux production qualification remains an explicit operator gate for real GPG,
 NBEMS, Managed BBS, JS8Call send, and selected-target observation.
 
@@ -224,14 +224,20 @@ Required workflow:
 - Scrolling must be inside the form editor only when needed; the operator must
   not have to hunt for each next field in a tiny pane.
 - Preview shows form name, JS8 payload, MsgAuth state, and send guidance.
-- Save-to-Expect remains available for policy review.
+- `Configure in FIO Spotter` creates or identifies a disabled Expect draft and
+  immediately opens authoritative FIO Spotter policy review.
+- `View` from Expect opens the exact saved response read-only. `Edit working
+  copy` must be selected before form fields or stored content can be changed.
+- `Back to Expect` returns to and reselects the originating response without an
+  implicit save. An explicit existing-entry save preserves policy, access,
+  routing, and automation metadata.
 
 Preferred layout:
 
 - Wide embedded Compose and the full workbench should use two vertical panels:
   a left setup/sidebar panel and a larger right form/message panel.
 - Left panel: compact `Send From` chips, `JS8 Target`, guidance/tune action when
-  needed, `Form Category`, `Spotter Form`, `Save to Expect`, and optional
+  needed, `Form Category`, `Spotter Form`, `Configure in FIO Spotter`, and optional
   `Sign MsgAuth`, key selector, and date-code controls.
 - Right panel: large form field editor. FIOSpotter MCF forms prefer a
   one-column layout when labels/options are long or numbered, such as area
@@ -242,7 +248,7 @@ Preferred layout:
 Acceptance criteria:
 
 - JS8 target, MsgAuth key controls, and form selectors do not overlap or clip.
-- `Save to Expect` is grouped below the setup fields, not inline beside long
+- `Configure in FIO Spotter` is grouped below the setup fields, not inline beside long
   selectors.
 - `Form Category` and `Spotter Form` must remain visible above the form editor;
   the form editor may scroll, but the setup rows may not be hidden behind it.
@@ -322,6 +328,47 @@ Full Compose Workbench:
   helper if the UI is refactored.
 - Provides enough height for the selected mode's natural workflow.
 - Closing the workbench restores the embedded view without losing draft state.
+
+## CMW-6 Responsive Compose Surface Alignment
+
+This slice applies `task_oriented_workspace_design_guideline.md` consistently
+to all four Compose modes while preserving their existing payload, staging,
+authorization, and guarded-send behavior.
+
+- **Primary operator task:** prepare and review the selected mode's content
+  without setup/context controls starving the content editor or preview.
+- **Starting context:** Compose already knows the selected mode, radio, and any
+  Expect/Map handoff; those facts appear once in the summary and setup surface.
+- **Completion outcome:** the operator can reach every required field, exact
+  preview, and primary stage/send action with a clear target and no clipped or
+  one-character-wrapped guidance.
+- **Task sequence:** `mode/context → required setup → content → exact preview →
+  stage/send`.
+- **Archetype:** guided workflow. At wide sizes, a readable bounded setup rail
+  may sit beside the dominant mode-specific content surface. Before either rail
+  or content becomes difficult to scan, the body stacks in the same task order.
+- **Mode priority:** FLMsg/FLAmp gives form/body editing the majority of space;
+  JS8Call keeps target/message/preview compact and direct; FIOSpotter gives the
+  MCF fields the dominant surface; CommStat gives the StatRep/status builder the
+  dominant surface and treats brevity as progressive detail.
+- **Responsive and scroll ownership:** no setup rail may be narrower than its
+  font/content-derived readable minimum. Wide/medium/compact transitions are
+  stable and idempotent. Setup owns bounded local overflow only when necessary;
+  form/status editors own their deliberate data scrolling; page-level
+  horizontal scrolling and adjacent same-axis scroll traps are prohibited.
+- **Shared theme:** all inputs, buttons, selectors, disabled/focus states, and
+  splitter handles use `freqinout/gui/theme.py` and the application stylesheet.
+  Layout corrections may not add screen-local colors or fixed text metrics.
+- **State and performance:** drafts, target state, selected radio/form, and
+  intentional scroll position survive relayout and workbench transitions.
+  Resize, paint, selection, and typing remain I/O-free; geometry work stays
+  coalesced and must not rediscover forms, catalogs, processes, or endpoints.
+- **Exit gate:** each mode passes meaningful wide, medium, and compact geometry
+  checks plus existing staging/send/Expect handoff regressions; long guidance
+  and values remain readable in Normal/Large Text and Light/Dark themes; no
+  clipped control, horizontal page overflow, stale mode widget, geometry loop,
+  or draft loss is introduced. Production Linux visual confirmation remains an
+  operator-assisted gate.
 
 Long-term preferred direction:
 
@@ -428,9 +475,10 @@ Forms:
 - Partial destination success is explicit. The result lists every staged,
   signed/verified, published, skipped, and failed operation and retains the
   draft for correction or retry.
-- Save-to-Expect creates a disabled draft without silently replacing an
-  existing rule or changing its access/auto-reply policy. A collision opens the
-  existing rule for review or requires an explicit replace decision.
+- The FIO Spotter handoff creates a disabled draft without silently replacing
+  an existing rule or changing its access/auto-reply policy. Success and
+  collisions both open the fresh Expect store row for review; no polling is
+  added to Compose or Spotter.
 
 ## Completion Work Packages (CMW)
 
@@ -549,8 +597,20 @@ diff, and offscreen visual checks pass. The 120-edit JS8 payload probe measured
   FLMsg otherwise. Catalog membership is committed as one transaction and
   action results use the request snapshot, not whatever the operator selects
   while work is running.
-- FIOSpotter Save-to-Expect creates a disabled all-radio draft. It refuses to
-  overwrite an existing rule or its access and auto-reply policy.
+- FIOSpotter `Configure in FIO Spotter` creates a disabled all-radio draft. It
+  refuses to overwrite an existing rule or its access and auto-reply policy,
+  then opens that fresh rule in FIO Spotter > Expect.
+- FIOSpotter Compose offers `Start from` with the form catalog and a bounded
+  saved-Expect-response list. Ordinary selection creates an editable working
+  copy and never changes stored policy, automation, or response text. `View`
+  from Expect instead starts read-only with the exact stored payload and exposes
+  explicit `Edit working copy` and `Back to Expect` actions. Static non-form
+  responses are valid saved messages; dynamic FLAMP Q remains request-only.
+- `Send now…` from Expect deep-links to that same review surface. The existing
+  selected-target, radio, RF Guard, busy/PTT, schedule, signing, and duplicate-
+  click gates remain authoritative. Eligible MCForm dates are refreshed once
+  on the outgoing copy before signing; preview and queued payload share that
+  serializer and the stored Expect row remains unchanged.
 - JS8Call, FIOSpotter, and CommStat RF use a guarded background send. The UI
   reports API acceptance as `Queued`, never as confirmed transmission, and
   prevents overlapping send attempts.
@@ -663,7 +723,7 @@ observations of the current implementation, not new product behavior.
   workbench can help only if it gets a purpose-built layout or mode-specific
   panels, not just the embedded layout in a larger window.
 - FIOSpotter's target, MsgAuth, key selector, date-code checkbox, key refresh,
-  form category, spotter form selector, and `Save to Expect` are split across
+  form category, spotter form selector, and FIO Spotter configuration handoff are split across
   shared rows, with the target/auth row kept as one long horizontal strip
   (`message_viewer_tab.py` around lines 5029-5062 and 5253-5287). This matches
   the screenshot where controls barely fit and the form editor starts too low.
@@ -819,3 +879,103 @@ observations of the current implementation, not new product behavior.
   updates only the active draft, and stale endpoint results are ignored.
 - Existing tests for NBEMS staging, JS8 guarded send, FIOSpotter native
   integration, CommStat RF compose, and map-to-compose prefill pass.
+
+## CMW-6 Implementation Record
+
+Completed 2026-09-13. Compose now uses a content-aware setup-rail gate for
+FLMsg/FLAmp, FIOSpotter, and CommStat RF. A rail is used only when both it and
+the dominant work surface retain readable width; medium and compact layouts
+stack setup above the work surface. Form/status fields and exact preview use a
+stable vertical sequence, and the live JS8Call-target explanation receives a
+full-width row with its two actions beneath it. This removes the reported
+single-character wrapping without weakening the distinct one-line radio
+guidance cue and tooltip contract.
+
+All four modes retain their draft and selection through wide, medium, and
+compact relayout. Sidebar sizing follows active font/control size hints, layout
+requests remain coalesced and idempotent, and resize/paint/typing paths perform
+no discovery, persistence, process, device, endpoint, or network work. Compose
+guidance and handoff context now use shared semantic label styling rather than
+screen-local colors.
+
+Work-package ownership:
+
+- `GPT-5` high-reasoning primary (deployment identifier not exposed): CMW-6
+  architecture and redesign brief, contract reconciliation, delegated-diff
+  review and correction, acceptance integration, specifications/work log, and
+  exit gate;
+- `gpt-5.6-luna` (high): bounded all-mode Compose layout implementation,
+  content-aware rail sizing, target-evidence action stacking, shared-theme
+  correction, and focused Compose tests; and
+- `gpt-5.6-luna` (medium): independent responsive geometry, draft-preservation,
+  numeric-control, and cache-only acceptance coverage.
+
+Acceptance evidence: **133 focused Expect/Compose UI tests** and **564 expanded
+Compose, Spotter, Expect, JS8 integration, message-ingest, Message
+Intelligence, projection, and responsive UI tests** pass. Changed Python files
+compile and `git diff --check` passes. No migration, RF transmission, device
+write, external endpoint action, application restart, or production-data
+mutation was performed. Production Linux visual confirmation remains an
+operator-assisted qualification.
+
+## CMW-7 CommStat Field Density And Shell Feedback Stability
+
+This correction is governed jointly by this specification,
+`adaptive_shell_controls_navigation_spec.md`, the multi-rig product/UI
+contract, and the task-oriented workspace guideline.
+
+- **Primary Compose task:** enter and compare every CommStat StatRep condition
+  without clipped values or vertically collapsed selectors.
+- **Starting context:** CommStat RF, the sending radio, and destination are
+  already selected; the status matrix is the primary content surface.
+- **Completion outcome:** all status rows retain font-derived readable height
+  and spacing in Normal/Large Text and wide/compact layouts, while the local
+  CommStat scroll area owns overflow.
+- **Task sequence:** `destination/report identity → optional brevity → condition
+  matrix → exact preview → guarded send`.
+- **Layout/performance boundary:** input heights and the scroll content's
+  natural minimum height derive from shared theme/font helpers. Resize and
+  preview updates may recompute cached geometry but perform no I/O and do not
+  continuously rewrite unchanged constraints.
+- **Shell companion correction:** showing or auto-hiding the bounded action-
+  feedback banner must not compress, clip, or leave stale paint in the Station
+  Control Bar below it. A coalesced layout synchronization restores the bar's
+  current natural minimum after the visibility transition; it performs no
+  station refresh or endpoint work.
+- **Gate:** every CommStat combo is at least its shared font-derived control
+  height; the matrix remains reachable through its local scroll owner; repeated
+  `Settings saved, but…` show/hide cycles leave the Station Control Bar at a
+  stable valid height and repaint state at Linux-shaped 1920×1080 plus compact
+  geometry; existing Compose and shell tests pass.
+
+### CMW-7 Implementation Record
+
+Completed 2026-09-13. The CommStat status matrix no longer relies on its former
+240-pixel content floor. Core fields, optional brevity fields, status labels,
+and all twelve status selectors now publish font/control-derived minimum
+heights. The scroll child publishes the active layout's natural minimum, so
+Normal Text, Large Text, wide, and compact layouts preserve complete controls;
+the existing CommStat scroll area owns any necessary vertical overflow.
+
+The companion shell correction makes the persistent Station Control Bar use
+its natural minimum height and coalesces one geometry synchronization after a
+feedback-banner show or hide. It invalidates stale sibling geometry, reapplies
+the already-cached responsive bar arrangement, and requests repaint without a
+station refresh, endpoint call, database read, or new repeating timer.
+
+Work-package ownership:
+
+- `GPT-5` high-reasoning primary (deployment identifier not exposed): CMW-7
+  architecture, shell concurrency/lifecycle correction, delegated-diff review,
+  regression strengthening, specification/work-log integration, and exit gate;
+- `gpt-5.6-terra` (high): bounded CommStat font-derived geometry correction and
+  wide/compact/Large Text acceptance coverage; and
+- `gpt-5.6-luna` (medium): focused transient-banner/control-bar lifecycle test
+  scaffold, reviewed and strengthened by the primary model.
+
+Acceptance evidence: **11 focused CommStat/shell tests** and **366 expanded
+Compose, Spotter, Settings, and Station-shell tests** pass. Changed Python files
+compile and `git diff --check` passes. No migration, RF transmission, device
+write, endpoint action, application restart, destructive action, or production-
+data mutation was performed. Production Linux visual confirmation remains an
+operator-assisted qualification.

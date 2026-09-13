@@ -321,6 +321,13 @@ a single-row height that clips or hides those controls.
 
 ## Implementation And Acceptance Rules
 
+`task_oriented_workspace_design_guideline.md` is the required execution
+guideline for a new or meaningfully redesigned operator-facing workspace. It
+defines the redesign brief, reusable task archetypes, action and scan hierarchy,
+progressive disclosure, scroll ownership, performance boundaries, mandatory
+shared-theme/component reuse, and visual acceptance matrix. It does not replace
+this product contract or a stricter feature/safety specification.
+
 For each UI slice:
 
 1. State which parts of Where, When, What, and Why the surface supports.

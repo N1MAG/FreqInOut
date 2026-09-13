@@ -40,6 +40,11 @@ from freqinout.core.message_source_projectors import (
     prepare_native_message_bundles,
 )
 from freqinout.core.scheduler_serial_executor import DaemonSerialExecutor
+from freqinout.core.fio_spotter_store import (
+    load_spotter_watch_matcher,
+    record_spotter_watch_candidate_matches,
+)
+from freqinout.core.fio_spotter_watch_engine import SpotterWatchMatcher
 from freqinout.core.sqlite_utils import (
     connect_sqlite_readonly,
     connect_sqlite_runtime_write,
@@ -286,6 +291,8 @@ class MessageProjectionCoordinator:
         self._inflight: Future | None = None
         self._closed = False
         self._cancel = threading.Event()
+        self._watch_matcher = SpotterWatchMatcher(())
+        self._watch_reload_due = 0.0
 
     def submit_once(self, *, reconcile: bool = True) -> Future:
         """Coalesce callers onto one non-UI projection cycle."""
@@ -460,6 +467,10 @@ class MessageProjectionCoordinator:
             deferred += result.deferred_bundles
             max_transaction_ms = max(max_transaction_ms, float(result.max_transaction_ms or 0.0))
             states.append(result.state)
+            if result.committed_message_ids:
+                self._record_watch_matches(
+                    owned_bundles, committed_message_ids=result.committed_message_ids
+                )
             if not result.completed:
                 self._retry(
                     items=[
@@ -516,6 +527,68 @@ class MessageProjectionCoordinator:
             max_transaction_ms=max_transaction_ms,
             state=state,
         )
+
+    def _record_watch_matches(
+        self,
+        bundles: Sequence[ProjectionBundle],
+        *,
+        committed_message_ids: Sequence[str],
+    ) -> None:
+        """Match committed projections from one cached snapshot off the UI thread."""
+        started = time.perf_counter()
+        try:
+            now = time.monotonic()
+            if now >= self._watch_reload_due:
+                self._watch_matcher = load_spotter_watch_matcher(
+                    db_path=self.db_path, enabled_only=True, limit=100
+                )
+                self._watch_reload_due = now + 10.0
+            committed = {str(value) for value in committed_message_ids}
+            matches: dict[str, tuple[int, ...]] = {}
+            for bundle in bundles[:MAX_CYCLE_ITEMS]:
+                message = bundle.message
+                if message.message_id not in committed:
+                    continue
+                candidate = {
+                    "source_family": message.source_family,
+                    "source_kind": message.message_type,
+                    "radio_id": message.radio_id,
+                    "from_call": message.from_call,
+                    "to_call": message.to_call,
+                    "group_name": message.group_name,
+                    "status": message.status,
+                    "severity": message.severity,
+                    "state_code": message.state_code,
+                    "grid": message.grid,
+                    "subject": message.subject,
+                    "summary": message.summary,
+                    "body_preview": message.body_preview,
+                    "search_text": message.search_text,
+                    "topics": tuple(message.topics),
+                }
+                watch_ids = self._watch_matcher.match_candidate(candidate)
+                if watch_ids:
+                    matches[message.message_id] = watch_ids
+            if matches:
+                record_spotter_watch_candidate_matches(matches, db_path=self.db_path)
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            if matches or elapsed_ms >= 10.0:
+                emit_span(
+                    "fio_spotter.watch_match_batch",
+                    elapsed_ms,
+                    meta={"candidates": len(committed), "matched": len(matches)},
+                    level="warning" if elapsed_ms >= 100.0 else "debug",
+                )
+        except Exception as exc:
+            # Watches are advisory. A busy or malformed watch store must never
+            # delay, retry, or roll back the authoritative message projection.
+            self._watch_reload_due = time.monotonic() + 10.0
+            emit_span(
+                "fio_spotter.watch_match_batch",
+                (time.perf_counter() - started) * 1000.0,
+                meta={"state": "deferred", "error": type(exc).__name__},
+                level="debug",
+            )
 
     def _release_claims(self, items: Sequence[DirtyProjectionItem]) -> None:
         """Make unprocessed durable work immediately available after cancel."""

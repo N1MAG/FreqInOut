@@ -143,6 +143,7 @@ from freqinout.gui.message_viewer_tab import (
     SpotterMessage,
     UnifiedMessage,
     VarACMessage,
+    _ComposeCatalogDiscoveryWorker,
     _RowsBuildWorker,
     _js8_relay_route_display,
     _spotter_mcf_display_label,
@@ -2313,7 +2314,16 @@ def test_spotter_form_discovery_prefers_selected_radio_profile_path(tmp_path) ->
     )
     tab._selected_compose_radio_target = lambda: target
 
-    entries = MessageViewerTab._compose_family_entries(tab)
+    payloads = []
+    worker = _ComposeCatalogDiscoveryWorker(
+        generation=1,
+        mode="spotter",
+        settings_snapshot={},
+        spotter_candidates=(str(radio_forms), str(global_forms)),
+    )
+    worker.finished.connect(payloads.append)
+    worker.run()
+    entries = payloads[0]["entries"]
     spotter_entry = next(entry for entry in entries if entry["kind"] == "spotter")
 
     assert [form.form_code for form in spotter_entry["forms"]] == ["F!104"]

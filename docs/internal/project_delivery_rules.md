@@ -33,6 +33,10 @@ Before changing code, tests, configuration, schema, runtime data, or release
 artifacts:
 
 1. Identify the governing specification and current slice or bounded work item.
+   For a new or meaningfully redesigned operator-facing workspace, include
+   `task_oriented_workspace_design_guideline.md` and its completed redesign
+   brief among the governing requirements, including shared-theme/component
+   reuse and visual-state acceptance.
 2. Divide the work into independently reviewable packages.
 3. Tell the user each package's scope and assigned model before coding begins.
 4. State the acceptance tests and exit gate when the governing specification

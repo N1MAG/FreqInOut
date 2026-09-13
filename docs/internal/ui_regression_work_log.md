@@ -4794,3 +4794,402 @@ was also run: 157 tests passed; 10 pre-existing legacy assigned-plan/settings
 contract failures remain outside this change and are unchanged by it. Python
 compilation and `git diff --check` pass. No migration, external endpoint action,
 application restart, or destructive operation was performed.
+
+## 2026-09-12 — FIO Spotter RF summary, Expect ownership, and bulk form dates
+
+Status: implementation complete and automated exit gate passed. Live RF and
+operator workflow confirmation remains production-assisted.
+
+FIO Spotter Activity is now explicitly a bounded local-RF workspace. CommStat
+payloads received by a configured local JS8Call instance remain JS8 source
+records, but render as the `CommStat` form with a compact normalized status and
+only meaningful exceptions. The exact receiving radio, application instance,
+transport, and raw evidence remain available in detail. Internet-only CommStat
+and imported JS8Spotter history are not presented as newly heard Spotter RF
+activity; their real provenance remains available to Messages and the shared
+projection.
+
+Expect administration now owns the complete automatic-response workflow.
+Messages Compose creates or locates a disabled response draft and immediately
+opens the fresh rule in FIO Spotter instead of leaving an invisible write. The
+Forms page distinguishes `Compose and send` from `Make available by E?`, shows a
+concise availability state, and stages new form rules disabled for response and
+access review. Reusable-policy administration and request history are collapsed
+by default to keep the normal operator path small. None of these surfaces adds
+polling, activation-time filesystem scans, or render-path I/O.
+
+The Expect page adds the explicit `Update Expect form dates…` maintenance
+action. It performs one bounded preview and confirmation, computes one datecode
+for the operation, and atomically replaces or appends the trailing datecode on
+eligible static `F!nnn`/`F!nnnA` responses. A response may begin with the form
+key or one valid JS8 callsign/group destination followed by the key. Dynamic Q,
+free-text, signed, mismatched, malformed, and ambiguous responses are skipped.
+The update preserves access, scope, enablement, safety limits, reply history,
+and non-date response content, never transmits, and records management audit for
+each changed rule.
+
+Work packages and models:
+
+- high-reasoning primary GPT-5 model (exact host runtime submodel identifier not
+  exposed): RF provenance and workflow architecture, datecode safety and
+  transaction review, specification integration, review/correction of every
+  delegated diff, and final acceptance gate;
+- `gpt-5.6-terra`, medium reasoning: bounded CommStat projection and focused
+  projector tests;
+- `gpt-5.6-luna`, high reasoning: pure datecode updater, atomic store operation,
+  audit records, and focused store tests;
+- `gpt-5.6-luna`, medium reasoning: focused Activity, Forms, Expect deep-link,
+  bulk-action, and no-op UI tests.
+
+Primary review widened the safe response-prefix rule to support one real JS8
+destination (including custom group punctuation), added immutable import-origin
+evidence, excluded imported history from RF Activity, and updated one obsolete
+form-discovery regression to the existing background-worker architecture.
+
+Acceptance evidence: the final Spotter projection, store, access-policy, FLAMP
+Q, selected-target, JS8 send/runtime/schema, message-ingest, Message
+Intelligence, and lazy UI partition passes **356 tests**. The final Python
+compilation and `git diff --check` gates pass. No schema migration, RF
+transmission, device write, application restart, destructive action, or
+Store-and-Forward implementation is part of this correction. Store and Forward
+remains a separately gated future package in the updated specifications.
+
+## 2026-09-13 — FIO Spotter operator workflow refinement
+
+Status: implementation complete and automated exit gate passed. Live RF and
+production Linux visual confirmation remain operator-assisted.
+
+FIO Spotter now follows the operator's service mental model. Its tabs are
+Activity, Watches, Expect, Access Policies, Forms, and Imports. Expect presents
+one station service switch and one per-response `Auto reply` state; the three
+legacy compatibility flags remain stored but cannot independently broaden
+permission. `Saved only` responses remain available for manual use. Bounded
+selected-response bulk changes validate usable content and resolved access,
+write all compatibility flags together, audit each change, and report skipped
+rows. Access Policies has its own responsive workspace, usage counts, bounded
+references, and in-use deletion protection.
+
+Expect `Send now…` opens the standard Message Compose guarded-send workflow
+with an editable working copy. Compose can also start from the bounded saved
+response list or the form catalog. Static non-form responses are supported as
+saved messages; dynamic FLAMP Q is request-only. Eligible MCForm date fields
+and datecodes are refreshed once on the outgoing copy before signing. The
+stored response is unchanged and preview/queued payload share the same final
+serializer and timestamp.
+
+Activity can stage an unsaved Watch from a meaningful selected row. Where
+available, sender plus normalized topic/status becomes explicit AND criteria.
+The additive watch schema preserves legacy rules, prevents normalized
+duplicates, and enforces 100-enabled/500-total caps inside the transaction.
+Message projection owns runtime evaluation: it reloads a bounded compiled
+snapshot at a paced cadence, performs pure matching on already-prepared
+candidates off the UI thread, and persists one idempotent batch keyed by watch
+and message identity. Watch failures are advisory and cannot fail, retry, or
+roll back message projection.
+
+Work packages and models:
+
+- high-reasoning primary GPT-5 model: specification, legacy safety model,
+  Access Policies/Expect/Activity integration, projection concurrency,
+  additive dedupe schema, review/correction of every delegated diff, related
+  specifications/work log, and final integration gate;
+- `gpt-5.6-terra` (high): Expect visible-state and bounded bulk APIs,
+  validation/audit, policy usage and safe deletion, and focused tests;
+- `gpt-5.6-luna` (high): saved-response Compose, guarded manual send, outgoing
+  date/signing handling, responsive layout behavior, and focused tests;
+- `gpt-5.6-luna` (high): structured watch compiler/store, duplicate and
+  concurrent cap enforcement, cached matcher/batch primitives, and focused
+  tests.
+
+Primary review broadened Compose from MCForm-only saved entries to every static
+Expect response while retaining dynamic-Q exclusion; added an Expect deep-link
+intent; separated policy administration; added compact in-memory response
+filters and capped `Select shown`; connected the cached matcher to the
+background projection completion lane; and made match counting idempotent
+across projection retries.
+
+Acceptance evidence: the primary Spotter, Expect, FLAMP-Q, Compose, Message
+Intelligence, projection, selected-target, runtime, and responsive UI partition
+passes **392 tests**. An adjacent Compose/ingest/projection partition passes
+**142 tests**, for **534 passing tests total**. Python compilation and
+`git diff --check` pass. No destructive migration, RF transmission, device
+write, external endpoint action, application restart, or Store-and-Forward
+implementation was performed.
+
+## 2026-09-13 — FIO Spotter editor-first responsive correction
+
+Status: implementation complete and automated exit gate passed. Production
+Linux visual confirmation remains operator-assisted.
+
+Expect and Access Policies now place their selected-item editors above their
+full-width saved-item tables. Both editors use balanced columns on wide screens
+and stack at compact widths; the page owns vertical overflow and does not gain
+a horizontal scrollbar. The tables retain the remaining height. Resizing,
+filter typing, and chip geometry changes do not perform store, filesystem,
+process, endpoint, or network work.
+
+Watches keeps the useful side-by-side comparison at wide widths while giving
+the table the dominant share. Type, pattern, and match mode are one condition
+row, Enabled is grouped with actions, and the optional AND condition remains
+clear. Compact layouts stack the table and editor, and the editor's size hint
+cannot force the page back above its compact breakpoint.
+
+FIO Spotter Compose now reserves a bounded readable setup width (480 px in the
+embedded wide view and 520 px in the full workbench), keeps the form/preview
+workspace dominant, and stacks at compact widths. `Start from`, category, form,
+and guidance controls wrap or use local setup-pane scrolling instead of being
+clipped. Splitter sizes are only applied when they materially change, avoiding
+geometry feedback churn.
+
+Screenshot follow-up found three gaps in the first automated geometry gate.
+The Expect editor still consumed too much high-DPI height, the Watch action row
+could absorb unused vertical space, and Access Policy lookup/usage text could
+compete inside wrapped form rows. Expect metadata/actions now use single wide
+rows; Watches stacks at 1200 px and below and top-packs at wider sizes; and
+policy evidence now has a dedicated summary row. Spotter Compose also resets
+its local setup scroll to the top only when the operator opens Spotter Compose
+or intentionally changes its saved-response/form context. Preview refresh and
+ordinary editing preserve the current scroll position.
+
+Work packages and models:
+
+- high-reasoning primary GPT-5 model: responsive architecture, integration,
+  delegated-diff review, two-column policy refinement, non-overlapping policy
+  summaries, specification/work-log reconciliation, and final exit gate;
+- `gpt-5.6-terra` (high): Expect and Access Policy editor-above-list foundation
+  plus focused lazy/no-I/O resize regressions;
+- `gpt-5.6-luna` (high): compact Watch editor and payload/geometry regressions;
+- `gpt-5.6-luna` (high): Compose setup-pane sizing, local overflow, geometry
+  coalescing, intentional scroll restoration, and focused tests;
+- `gpt-5.6-luna` (high): read-only screenshot-dimension and large-font geometry
+  audit across Expect, Watches, Access Policies, and Compose.
+
+Acceptance evidence: 11 screenshot-shaped responsive regressions pass at both
+normal and 1.5 high-DPI scale. The expanded primary
+Spotter/Expect/FLAMP-Q/Compose/Message Intelligence/projection/runtime/UI suite
+passes **403 tests**; the adjacent Compose/ingest/projection suite passes **142
+tests**, for **545 passing tests total**. Python compilation and
+`git diff --check` pass. No migration, RF transmission, external endpoint
+action, device write, application restart, or destructive operation was
+performed.
+
+## 2026-09-13 — Project-wide task-oriented workspace design guideline
+
+Status: documentation and governance integration complete. No product code,
+schema, migration, runtime data, or device behavior changed.
+
+Created `task_oriented_workspace_design_guideline.md` as the common execution
+contract for new and meaningfully redesigned operator-facing workspaces. It
+requires a redesign brief before coding, selects a task-appropriate workspace
+archetype, establishes a single scan and action hierarchy, defines responsive
+reading order and scroll ownership, preserves safety through progressive
+disclosure, and makes cache-only render/resize/typing behavior part of the UX
+exit gate. It intentionally does not mandate editor-first layout for every
+screen: compact editors may sit above lists, while scan-heavy views retain a
+dominant table and contextual inspector.
+
+The guideline now makes shared-theme and component reuse mandatory. Redesigned
+screens must consume the central palette, application stylesheet, font-scale,
+control-sizing, combo-fitting, button-role, LED, splitter, focus, table, chip,
+and icon treatments where applicable. Missing semantics are added centrally
+before use; screen-local palettes, hard-coded text-bearing metrics, or cloned
+component styles require a documented and tested exception. Light/Dark,
+Normal/Large Text, selected, disabled, focus, warning, destructive, and high-DPI
+states are part of the required acceptance matrix.
+
+The rule is referenced from `AGENTS.md`, `project_delivery_rules.md`, the
+multi-rig product/UI contract, UI layout standards, the Operational View
+Framework, and the current FIO Spotter workflow specification so future feature
+and redesign work discovers it at both governance and implementation layers.
+
+Work packages and models:
+
+- high-reasoning primary GPT-5 model: authority and precedence, guideline
+  architecture, shared-theme/component contract, governing cross-references,
+  delegated-findings review, final integration review, and exit gate;
+- `gpt-5.6-terra` (high): read-only audit of existing UI contracts, precedence,
+  missing execution rules, and recommended reference points;
+- `gpt-5.6-luna` (high): read-only audit of representative FIO workspaces,
+  reusable donor patterns, problem layouts, and screenshot-shaped acceptance
+  cases.
+
+Acceptance evidence: governing references and required guideline sections were
+verified locally, and `git diff --check` passes. Runtime UI tests were not
+required because this slice changes documentation and project governance only.
+
+## 2026-09-13 — Task-oriented guideline applied to FIO Spotter
+
+Status: implementation complete and automated exit gate passed. Production
+Linux visual confirmation remains operator-assisted.
+
+Applied the project-wide task-oriented workspace guideline to Activity,
+Watches, Expect, Access Policies, Forms, Imports, and FIO Spotter Compose.
+Activity is now a dominant bounded traffic table with a responsive contextual
+inspector and selection-aware routes to Inbox, Map, Operator, Reply, and a
+reviewed Watch draft. Refresh preserves a selected projection when it still
+exists. Watches keeps its table dominant, stacks before the editor becomes
+crowded, represents state as `On`/`Off`, and has one normal enabled-state
+control rather than a checkbox plus a competing toggle action.
+
+Expect and Access Policies preserve the editor-above-list task sequence. Policy
+selection resolves usage from the bounded refresh snapshot rather than issuing
+a selection-time store query. Radio scope uses known FIO names in the normal
+view while retaining legacy identifiers internally. Forms uses the explicit
+sequence `folder → routes → review/use`; selection is cache-only, source-file
+reading occurs only on `Preview selected`, and Compose receives the exact
+selected form intent. Its status column now shares Expect's operator language.
+Imports uses `choose → preview → import` and keeps commit unavailable until the
+current source has a valid preview.
+
+FIO Spotter Compose retains a readable bounded setup pane, a dominant form and
+preview workspace, local overflow, intentional scroll restoration, and guarded
+target/send behavior. Shared `button_style`, `label_style`, combo-fitting,
+font-derived control sizing, splitter treatment, application palette, and
+Light/Dark theme reapplication replace local screen-specific presentation.
+Render, resize, selection, theme, chip layout, and field/filter typing paths
+remain free of filesystem, database, process, endpoint, device, and network I/O.
+
+Work packages and models:
+
+- high-reasoning primary GPT-5 model: redesign brief, architecture, semantic
+  control/status reconciliation, shared-theme/lazy-theme integration, review
+  and correction of all delegated diffs, specifications/work log, and gate;
+- `gpt-5.6-terra` (high): Expect and Access Policies implementation plus
+  focused layout, cached-selection, theme, and radio-label regressions;
+- `gpt-5.6-luna` (high): Activity and Watches implementation plus focused
+  selection, action, hierarchy, theme, and responsive regressions;
+- `gpt-5.6-terra` (high): Forms, Imports, and Spotter Compose implementation
+  plus preview-gate, no-selection-I/O, handoff, and responsive regressions.
+
+Acceptance evidence: **72 focused tests** and **555 expanded integration tests**
+pass. All changed Python modules compile and `git diff --check` passes. No
+migration, RF transmission, device write, external endpoint action,
+application restart, destructive action, or production-data mutation occurred.
+
+## 2026-09-13 — Policy-first Expect and Compose View workflow
+
+Status: implementation complete and automated exit gate passed. Production
+Linux visual and live-RF confirmation remain operator-assisted.
+
+Expect now presents compact text-bearing chips for the station service and
+FLAMP-Q index, one named Access Policy, one `Saved only` / `Auto reply on`
+choice, and collapsed radio/rate-limit Options. New automation requires an
+enabled named policy. Existing active inline-access rules remain compatible and
+unchanged; inactive legacy rules cannot be newly activated without a policy.
+Legacy access is disclosed only on applicable records and may be copied into an
+unsaved named-policy draft for deliberate review and assignment.
+
+Expect now owns MCF response discovery. `New response…` routes MCF creation into
+the shared Compose implementation. `View` opens an exact stored response in a
+read-only Compose state with explicit `Edit working copy` and `Back to Expect`.
+Viewing performs no date refresh or write. Explicit saving of an existing
+working copy preserves policy, access, routing, and automation metadata; new
+MCF entries return as Saved only. Send Now continues through the existing
+guarded JS8 path and refreshes eligible dates only on the outgoing copy.
+
+The shared theme now explicitly styles line, combo, numeric, decimal, date,
+time, and date/time editors—including focused, selected, enabled, disabled,
+suffix, and step-control states—so Dark theme does not lose Max replies or
+Cooldown values. Render, resize, selection, filter/field typing, chip detail,
+and View/Edit transitions remain I/O-free.
+
+Work packages and models:
+
+- high-reasoning primary GPT-5 model: architecture and compatibility boundary,
+  store/API policy gate, read-only View semantics, shared-theme integration,
+  review/correction of every delegated diff, specs/work log, and final gate;
+- `gpt-5.6-terra` (high): policy-first Expect editor, compact service/status
+  chips, progressive Options/legacy disclosure, shared control styles, and
+  focused UI tests;
+- `gpt-5.6-luna` (high): Expect/Compose View and Create handoff, exact stored-
+  payload behavior, Back/Save workflow, metadata preservation, and focused
+  Compose tests; and
+- `gpt-5.6-luna` (high): independent focused acceptance coverage for policy,
+  compatibility, theme, navigation, persistence boundaries, and cache-only UI
+  behavior.
+
+Acceptance evidence: **95 focused tests** and **557 expanded integration tests**
+pass. All changed Python modules compile and `git diff --check` passes. No
+migration, RF transmission, device write, external endpoint action,
+application restart, destructive action, or production-data mutation occurred.
+
+## 2026-09-13 — Expect reply comfort and all-mode Compose alignment
+
+Status: implementation complete and automated exit gate passed. Production
+Linux visual confirmation remains operator-assisted.
+
+The Expect saved-response editor now gives Reply a bounded multiline surface.
+E? Token, named Access Policy, resolved policy summary, and delivery mode form
+one inline wide scan row, wrap 2×2 at medium width, and stack in task order at
+compact/Large Text widths. Responsive transitions preserve editor state,
+release stale scroll-area width, and perform geometry-only work.
+
+Compose now checks font/control-derived readable width before placing the setup
+surface beside the mode-specific work surface. FLMsg/FLAmp, FIOSpotter, and
+CommStat RF stack before either side is starved; JS8Call retains its direct
+workflow. The live JS8Call-target explanation occupies a full-width row with
+`Use Target` and `Refresh Target` beneath it, eliminating the reported vertical
+letter-by-letter rendering. Fields and exact preview use a clear vertical scan
+path, while the separate radio-guidance cue remains one concise line with full
+Why text in its tooltip. Compose muted/information text uses shared theme
+roles. No payload, policy, persistence, staging, signing, RF Guard, busy/PTT,
+or guarded-send behavior changed.
+
+Work packages and models:
+
+- `GPT-5` high-reasoning primary (deployment identifier not exposed): UI
+  architecture, FSW-7/CMW-6 redesign briefs, performance and persistence
+  boundary, review/correction of all delegated diffs, specs/work log, and exit
+  gate;
+- `gpt-5.6-terra` (high): Expect metadata/reply implementation and focused
+  tests;
+- `gpt-5.6-luna` (high): all-mode Compose responsive implementation,
+  shared-theme correction, and focused tests; and
+- `gpt-5.6-luna` (medium): independent responsive geometry,
+  draft-preservation, numeric-control, and cache-only acceptance coverage.
+
+Acceptance evidence: **133 focused Expect/Compose UI tests** and **564 expanded
+Compose, Spotter, Expect, JS8 integration, message-ingest, Message
+Intelligence, projection, and responsive UI tests** pass. Changed Python files
+compile and `git diff --check` passes. No migration, RF transmission, device
+write, external endpoint action, application restart, destructive action, or
+production-data mutation occurred.
+
+## 2026-09-13 — CommStat density and feedback-banner shell stability
+
+Status: implementation complete and automated exit gate passed. Production
+Linux full-screen visual confirmation remains operator-assisted.
+
+The CommStat StatRep content previously advertised a fixed 240-pixel minimum
+even though its six-row, twelve-selector condition matrix needs approximately
+328 pixels at the normal development font. Qt therefore compressed selectors
+below readable height when Compose divided the available vertical space. Core,
+brevity, and status controls now derive their floors from the shared font/control
+helpers, status labels retain a single readable line, and the scroll child
+publishes its active layout minimum. Compact layouts scroll locally instead of
+overlapping or clipping fields.
+
+The transient action-feedback banner also exposed stale Linux sibling geometry:
+after `Settings saved, but…` auto-hid, the fixed-height Station Control Bar could
+retain the compressed allocation and stale paint. The bar now uses its natural
+minimum vertical policy. Banner visibility transitions enqueue one coalesced,
+cache-only geometry flush that republishes the current responsive arrangement,
+activates the existing parent layout, and repaints. It performs no station
+refresh, configuration/database read, endpoint work, or repeating timer loop.
+
+Work packages and models:
+
+- `GPT-5` high-reasoning primary (deployment identifier not exposed): root-cause
+  analysis, CMW-7/shell contract, banner lifecycle implementation, delegated-
+  diff review and test correction, final integration, specs/work log, and gate;
+- `gpt-5.6-terra` (high): CommStat font-derived geometry implementation and
+  wide/compact/Large Text focused test; and
+- `gpt-5.6-luna` (medium): feedback-banner auto-hide/control-bar regression test
+  scaffold, reviewed and strengthened for repeated full-screen, compact, and
+  Large Text transitions by the primary model.
+
+Acceptance evidence: **11 focused tests** and **366 expanded Compose, Spotter,
+Settings, and Station-shell tests** pass. Changed Python files compile and
+`git diff --check` passes. No migration, RF transmission, device write, endpoint
+action, application restart, destructive action, or production-data mutation
+occurred.

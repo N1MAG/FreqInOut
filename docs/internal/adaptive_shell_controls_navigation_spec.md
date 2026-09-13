@@ -131,3 +131,38 @@ an empty destination in advance of implementation.
   and activating either presents one cached summary row per affected source plus
   a complete Station Health route without endpoint, process, or database I/O.
 - No database or configuration schema change is required.
+
+## Action-Feedback Banner Geometry Contract
+
+The transient action-feedback banner sits above the Station Control Bar and may
+report successful, partial, blocked, or failed Settings/radio/scheduler actions.
+It must remain nonmodal and bounded, but its appearance and disappearance may
+not change the meaning or usable geometry of the persistent Where/When surface.
+
+Banner visibility changes therefore schedule one coalesced, cache-only parent
+layout synchronization. The Station Control Bar re-establishes its current
+font/content-derived natural minimum, invalidates stale layout geometry, and
+requests repaint only after the visibility transition. The synchronization does
+not refresh station data, read configuration, contact endpoints, or create a
+feedback timer loop. Repeated event replacement and auto-hide are idempotent.
+
+Acceptance requires a Linux-shaped 1920×1080 test and compact/Large Text
+coverage in which the banner is shown and hidden repeatedly. The command bar
+must retain the same layout mode, a valid height at least its current minimum
+size hint, visible children inside its bounds, and a stable settled geometry.
+
+### Implementation Record — 2026-09-13
+
+Implemented with the Station Control Bar publishing a natural minimum vertical
+size policy and a single-shot, idempotent banner-geometry synchronization. The
+flush invalidates and activates only the existing shell layouts, reapplies the
+cached responsive bar arrangement, and requests repaint; it never refreshes
+station data or performs persistence, process, endpoint, device, or network
+work. Automated coverage exercises the production auto-hide path plus three
+consecutive show/hide cycles at 1920×1080, compact width, and Large Text.
+
+Ownership: `GPT-5` high-reasoning primary designed and implemented the shell
+lifecycle correction and completed integration review; `gpt-5.6-luna`
+(medium) supplied the bounded lifecycle-test scaffold, which the primary model
+reviewed and strengthened. The joint CMW-7 gate is recorded in
+`compose_messages_workbench_spec.md` and the UI regression work log.

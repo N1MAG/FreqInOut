@@ -581,6 +581,7 @@ def _ensure_fio_spotter_tables(conn: sqlite3.Connection) -> None:
             name TEXT NOT NULL,
             watch_kind TEXT NOT NULL,
             pattern TEXT NOT NULL,
+            criteria_json TEXT NOT NULL DEFAULT '{}',
             match_mode TEXT NOT NULL DEFAULT 'contains',
             priority TEXT NOT NULL DEFAULT 'watch',
             source_families_json TEXT NOT NULL DEFAULT '[]',
@@ -605,6 +606,7 @@ def _ensure_fio_spotter_tables(conn: sqlite3.Connection) -> None:
             "name": "TEXT NOT NULL DEFAULT ''",
             "watch_kind": "TEXT NOT NULL DEFAULT 'keyword'",
             "pattern": "TEXT NOT NULL DEFAULT ''",
+            "criteria_json": "TEXT NOT NULL DEFAULT '{}'",
             "match_mode": "TEXT NOT NULL DEFAULT 'contains'",
             "priority": "TEXT NOT NULL DEFAULT 'watch'",
             "source_families_json": "TEXT NOT NULL DEFAULT '[]'",
@@ -628,6 +630,21 @@ def _ensure_fio_spotter_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_fio_spotter_watches_expiry "
         "ON fio_spotter_watches(expires_ts, enabled)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fio_spotter_watch_matches (
+            watch_id INTEGER NOT NULL,
+            message_id TEXT NOT NULL,
+            matched_ts REAL NOT NULL,
+            PRIMARY KEY (watch_id, message_id),
+            FOREIGN KEY (watch_id) REFERENCES fio_spotter_watches(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fio_spotter_watch_matches_recent "
+        "ON fio_spotter_watch_matches(matched_ts DESC, watch_id)"
     )
 
 

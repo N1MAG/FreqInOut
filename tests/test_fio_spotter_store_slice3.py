@@ -146,6 +146,36 @@ def test_activity_query_reuses_projected_assessment_and_provenance(tmp_path: Pat
     assert row["intelligence"]["provenance"] == {"trust": "trusted", "freshness": "recent"}
 
 
+def test_activity_excludes_imported_spotter_history_but_keeps_local_rf(tmp_path: Path) -> None:
+    db = tmp_path / "nets.db"
+    for message_id, source_label in (
+        ("spotter:local", "FIOSpotter · js8-a"),
+        ("spotter:imported", "Imported JS8Spotter · js8-a"),
+    ):
+        upsert_projected_message(
+            db,
+            source=MessageSourceRecord(
+                source_id=message_id,
+                source_family="spotter",
+                source_label=source_label,
+            ),
+            message=MessageProjectionRecord(
+                message_id=message_id,
+                canonical_key=message_id,
+                content_hash=message_id,
+                primary_source_id=message_id,
+                source_family="spotter",
+                source_label=source_label,
+                event_ts=1.0,
+                received_ts=1.0,
+            ),
+        )
+
+    assert [row["message_id"] for row in list_spotter_activity(db_path=db)] == [
+        "spotter:local"
+    ]
+
+
 def test_activity_read_remains_nonblocking_while_ingest_writer_is_active(tmp_path: Path) -> None:
     db = tmp_path / "nets.db"
     source = MessageSourceRecord(source_id="spotter", source_family="spotter")

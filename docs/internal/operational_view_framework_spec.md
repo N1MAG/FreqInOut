@@ -24,6 +24,12 @@ but it must do so with bounded queries, coalesced updates, stale-result guards,
 and non-blocking UI handoff. Rendering more data is not useful if it makes the
 operator wait for the event loop to recover.
 
+New or meaningfully redesigned view work must also apply
+`docs/internal/task_oriented_workspace_design_guideline.md`. The view framework
+defines reusable data/view architecture; that guideline defines the operator
+task sequence, workspace archetype, action hierarchy, shared-theme/component
+reuse, responsive reading order, and visual acceptance gate for its presentation.
+
 Current product defaults:
 
 - Future source priority is `MeshCore`, `Mesh MQTT`, `APRS`, then
@@ -528,8 +534,8 @@ them.
 
 ## Layout Rules
 
-All view templates must follow the shared UI layout standards and these
-additional rules:
+All view templates must follow the shared UI layout standards, the task-oriented
+workspace design guideline, and these additional rules:
 
 - Large text must remain usable without clipped controls.
 - Tables should size around useful rows, not consume empty vertical space.

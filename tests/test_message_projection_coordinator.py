@@ -28,6 +28,7 @@ from freqinout.core.message_projection_queue import (
     release_owner_leases_conn,
 )
 from freqinout.core.message_projection_store import ensure_message_projection_schema
+from freqinout.core.fio_spotter_store import list_spotter_watches, save_spotter_watch
 
 
 def _db(tmp_path: Path) -> Path:
@@ -402,6 +403,41 @@ def test_source_delete_tombstones_existing_projection(tmp_path) -> None:
             ).fetchone()[0:1] == (1,)
         finally:
             conn.close()
+    finally:
+        worker.close()
+
+
+def test_projection_watch_matching_is_background_bounded_and_idempotent(tmp_path) -> None:
+    db_path = _db(tmp_path)
+    watch = save_spotter_watch(
+        {
+            "name": "Selected operator",
+            "watch_kind": "callsign",
+            "pattern": "N0CALL1",
+            "match_mode": "exact",
+            "enabled": True,
+        },
+        db_path=db_path,
+    )
+    _insert_messages(db_path, 1)
+    worker = MessageProjectionCoordinator(db_path)
+    try:
+        result = worker.run_once(reconcile=False)
+        assert result.committed == 1
+        assert list_spotter_watches(db_path=db_path)[0]["match_count"] == 1
+
+        # A changed native row is reprojected, but the same stable message ID
+        # cannot increment the watch a second time.
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("UPDATE js8_messages SET read_ts=1 WHERE id=1")
+            conn.commit()
+        finally:
+            conn.close()
+        replay = worker.run_once(reconcile=False)
+        assert replay.committed == 1
+        row = next(item for item in list_spotter_watches(db_path=db_path) if item["id"] == watch.id)
+        assert row["match_count"] == 1
     finally:
         worker.close()
 

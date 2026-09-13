@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QPushButton,
     QTextEdit,
+    QPlainTextEdit,
     QFileDialog,
     QGroupBox,
     QComboBox,
@@ -321,8 +322,10 @@ from freqinout.core.condition_alerts import CONDITION_ALERT_RULES_SETTING_KEY
 from freqinout.radio_interface.js8_api_client import JS8ApiClientRegistry, JS8ApiEndpoint
 from freqinout.core.js8_expect_store import (
     ExpectEntryExistsError,
+    list_expect_entries,
     list_expect_runtime_audit,
     save_expect_entry,
+    update_mcform_response_datecode,
 )
 from freqinout.core.js8_msg_auth import MsgAuthKey, encode_short_datecode, sign_js8_text, verify_js8_text
 from freqinout.core.js8_msg_auth_store import (
@@ -455,6 +458,7 @@ from freqinout.gui.theme import (
     control_height_for_font,
     fit_child_combo_boxes,
     fit_combo_box_to_contents,
+    label_style,
     resolve_theme,
     single_line_label_height,
     style_splitter_handles,
@@ -3571,6 +3575,18 @@ class MessageViewerTab(QWidget):
         self._compose_mode_drafts: Dict[str, Dict[str, object]] = {}
         self._compose_restoring_mode_draft: bool = False
         self._compose_mode: str = "nbems"
+        # Expect responses are a bounded, activation-scoped source catalog for
+        # Spotter Compose.  The selected row is copied into a local working
+        # response; Compose never edits the Expect store from this surface.
+        self._compose_spotter_expect_entries: List[Dict[str, object]] = []
+        self._compose_spotter_expect_loaded: bool = False
+        self._compose_spotter_expect_active_id: int = 0
+        self._compose_spotter_working_response: str = ""
+        self._compose_spotter_working_response_dirty: bool = False
+        self._compose_spotter_decode_notice: str = ""
+        self._compose_spotter_source_loading: bool = False
+        self._compose_spotter_requested_form_code: str = ""
+        self._compose_expect_view_editing: bool = True
         self._compose_family_entries_cache: List[dict] = [
             {"kind": "standard", "key": "STANDARD", "label": "Standard Blank"}
         ]
@@ -3631,6 +3647,8 @@ class MessageViewerTab(QWidget):
         self._compose_commstat_brevity_catalogs_cache: List[Tuple[str, str, Dict[str, object]]] = []
         self._compose_layout_signature: tuple[object, ...] | None = None
         self._compose_layout_refresh_pending: bool = False
+        self._compose_spotter_scroll_reset_pending: bool = False
+        self._compose_spotter_last_scroll_reset_key: tuple[str, str] | None = None
         self._messages_text_size_guard_signature: tuple[object, ...] | None = None
         self._read_state_map: Dict[tuple, tuple[str, float, int]] = {}
         self._message_rows: List[UnifiedMessage] = []
@@ -5931,10 +5949,17 @@ class MessageViewerTab(QWidget):
             self._apply_inbox_primary_height_guard()
             if hasattr(self, "compose_splitter"):
                 compose_mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
-                compose_sidebar = compose_mode in {"nbems", "spotter", "commstat_rf"} and mode != "compact"
+                compose_sidebar = self._compose_sidebar_enabled(
+                    compose_mode,
+                    int(self.width() or 0),
+                    in_workbench=bool(getattr(self, "_compose_in_workbench", False)),
+                )
                 if hasattr(self, "compose_body_splitter"):
-                    self.compose_body_splitter.setOrientation(Qt.Horizontal if compose_sidebar else Qt.Vertical)
-                self.compose_splitter.setOrientation(Qt.Vertical if (mode == "compact" or compose_sidebar) else Qt.Horizontal)
+                    desired_body = Qt.Horizontal if compose_sidebar else Qt.Vertical
+                    if self.compose_body_splitter.orientation() != desired_body:
+                        self.compose_body_splitter.setOrientation(desired_body)
+                if self.compose_splitter.orientation() != Qt.Vertical:
+                    self.compose_splitter.setOrientation(Qt.Vertical)
                 self._refresh_compose_layout_geometry_if_needed(force=True)
             return
         self._responsive_layout_mode = mode
@@ -5943,10 +5968,17 @@ class MessageViewerTab(QWidget):
         self._apply_inbox_primary_height_guard()
         if hasattr(self, "compose_splitter"):
             compose_mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
-            compose_sidebar = compose_mode in {"nbems", "spotter", "commstat_rf"} and not compact
+            compose_sidebar = self._compose_sidebar_enabled(
+                compose_mode,
+                int(self.width() or 0),
+                in_workbench=bool(getattr(self, "_compose_in_workbench", False)),
+            )
             if hasattr(self, "compose_body_splitter"):
-                self.compose_body_splitter.setOrientation(Qt.Horizontal if compose_sidebar else Qt.Vertical)
-            self.compose_splitter.setOrientation(Qt.Vertical if (compact or compose_sidebar) else Qt.Horizontal)
+                desired_body = Qt.Horizontal if compose_sidebar else Qt.Vertical
+                if self.compose_body_splitter.orientation() != desired_body:
+                    self.compose_body_splitter.setOrientation(desired_body)
+            if self.compose_splitter.orientation() != Qt.Vertical:
+                self.compose_splitter.setOrientation(Qt.Vertical)
             self._refresh_compose_layout_geometry_if_needed(force=True)
 
     def _apply_inbox_primary_height_guard(self) -> None:
@@ -6420,17 +6452,21 @@ class MessageViewerTab(QWidget):
         setup_layout.addWidget(self.compose_radio_row_widget)
 
         self.compose_guidance_row_widget = QWidget()
-        self.compose_guidance_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.compose_guidance_row_widget.setMaximumHeight(control_height_for_font(self.compose_guidance_row_widget, vertical_padding=16, floor=44))
+        self.compose_guidance_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         guidance_row = QHBoxLayout(self.compose_guidance_row_widget)
         guidance_row.setContentsMargins(0, 0, 0, 0)
         guidance_row.setSpacing(8)
         self.compose_guidance_label = QLabel("")
+        # The visible send cue is intentionally short and stable.  Full
+        # rationale remains available through the tooltip; only the live
+        # target evidence below is allowed to wrap naturally.
         self.compose_guidance_label.setWordWrap(False)
         self.compose_guidance_label.setMinimumWidth(0)
         self.compose_guidance_label.setMaximumHeight(single_line_label_height(self.compose_guidance_label))
         self.compose_guidance_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-        self.compose_guidance_label.setStyleSheet("color: #566573; font-weight: 600;")
+        self.compose_guidance_label.setStyleSheet(
+            label_style("muted", resolve_theme(self.settings), weight=600)
+        )
         guidance_row.addWidget(self.compose_guidance_label, 1)
         self.compose_tune_recommended_btn = QPushButton("Tune Recommended")
         self.compose_tune_recommended_btn.setToolTip("Tune the recommended radio through the existing Ops Center and RF Guard path.")
@@ -6449,11 +6485,27 @@ class MessageViewerTab(QWidget):
         self.compose_context_label = QLabel("")
         self.compose_context_label.setWordWrap(False)
         self.compose_context_label.setMaximumHeight(single_line_label_height(self.compose_context_label, vertical_padding=8, floor=28))
-        self.compose_context_label.setStyleSheet("color: #0078A8; font-weight: 700;")
+        self.compose_context_label.setStyleSheet(
+            label_style("info", resolve_theme(self.settings), weight=700)
+        )
         context_row.addWidget(self.compose_context_label, 1)
         self.compose_clear_context_btn = QPushButton("Clear Map Context")
         self.compose_clear_context_btn.clicked.connect(self._clear_compose_intent)
         context_row.addWidget(self.compose_clear_context_btn)
+        self.compose_return_expect_btn = QPushButton("Back to Expect")
+        self.compose_return_expect_btn.setToolTip(
+            "Return to Expect and reselect the saved entry. Compose changes remain a working copy until saved explicitly."
+        )
+        self.compose_return_expect_btn.clicked.connect(self._return_to_expect)
+        self.compose_return_expect_btn.setVisible(False)
+        context_row.addWidget(self.compose_return_expect_btn)
+        self.compose_edit_expect_copy_btn = QPushButton("Edit working copy")
+        self.compose_edit_expect_copy_btn.setToolTip(
+            "Enable the form fields in this local copy. Expect storage remains unchanged until Save changes to Expect is used."
+        )
+        self.compose_edit_expect_copy_btn.clicked.connect(self._begin_editing_expect_copy)
+        self.compose_edit_expect_copy_btn.setVisible(False)
+        context_row.addWidget(self.compose_edit_expect_copy_btn)
         self.compose_context_row_widget.setVisible(False)
         setup_layout.addWidget(self.compose_context_row_widget)
 
@@ -6501,29 +6553,36 @@ class MessageViewerTab(QWidget):
         self.compose_js8_selected_target_row_widget = QWidget()
         self.compose_js8_selected_target_row_widget.setObjectName("composeJs8SelectedTargetRow")
         self.compose_js8_selected_target_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        selected_target_row = QHBoxLayout(self.compose_js8_selected_target_row_widget)
+        # Keep the live target evidence readable even when the setup rail is
+        # narrow.  The label gets the full rail width and the actions occupy a
+        # separate row instead of forcing the evidence into one-character
+        # wrapping beside two fixed-width buttons.
+        selected_target_row = QGridLayout(self.compose_js8_selected_target_row_widget)
         selected_target_row.setContentsMargins(8, 4, 8, 4)
-        selected_target_row.setSpacing(8)
+        selected_target_row.setHorizontalSpacing(8)
+        selected_target_row.setVerticalSpacing(4)
         self.compose_js8_selected_target_label = QLabel()
         self.compose_js8_selected_target_label.setWordWrap(True)
         self.compose_js8_selected_target_label.setMinimumWidth(0)
-        self.compose_js8_selected_target_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Minimum)
+        self.compose_js8_selected_target_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self.compose_js8_selected_target_label.setToolTip(
             "This is live state observed in JS8Call. It is not copied into this draft or sent until you choose Use Target."
         )
-        selected_target_row.addWidget(self.compose_js8_selected_target_label, 1)
+        selected_target_row.addWidget(self.compose_js8_selected_target_label, 0, 0, 1, 2)
         self.compose_js8_selected_target_use_btn = QPushButton("Use Target")
         self.compose_js8_selected_target_use_btn.setToolTip(
             "Copy the target already selected in JS8Call into this compose draft. This does not send a message."
         )
         self.compose_js8_selected_target_use_btn.clicked.connect(self._use_compose_js8_selected_target)
-        selected_target_row.addWidget(self.compose_js8_selected_target_use_btn)
+        selected_target_row.addWidget(self.compose_js8_selected_target_use_btn, 1, 0)
         self.compose_js8_selected_target_refresh_btn = QPushButton("Refresh Target")
         self.compose_js8_selected_target_refresh_btn.setToolTip(
             "Check the currently selected callsign or group in JS8Call for this radio."
         )
         self.compose_js8_selected_target_refresh_btn.clicked.connect(self.request_compose_js8_selected_target_refresh)
-        selected_target_row.addWidget(self.compose_js8_selected_target_refresh_btn)
+        selected_target_row.addWidget(self.compose_js8_selected_target_refresh_btn, 1, 1)
+        selected_target_row.setColumnStretch(0, 0)
+        selected_target_row.setColumnStretch(1, 0)
         self.compose_js8_selected_target_row_widget.setVisible(False)
         setup_layout.addWidget(self.compose_js8_selected_target_row_widget)
 
@@ -6733,25 +6792,71 @@ class MessageViewerTab(QWidget):
         self.compose_commstat_scroll.setWidgetResizable(True)
         self.compose_commstat_scroll.setFrameShape(QFrame.NoFrame)
         self.compose_commstat_scroll.setWidget(self.compose_commstat_row_widget)
+        self._refresh_compose_commstat_content_geometry()
 
         self.compose_expect_row_widget = QWidget()
-        self.compose_expect_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.compose_expect_row_widget.setMaximumHeight(control_height_for_font(self.compose_expect_row_widget, vertical_padding=20, floor=52))
+        # Spotter's help text is intentionally allowed to wrap.  A fixed
+        # single-line row here makes the guidance disappear when the setup
+        # pane is narrowed (especially in the embedded Messages view).
+        self.compose_expect_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         expect_row = QHBoxLayout(self.compose_expect_row_widget)
         expect_row.setContentsMargins(0, 0, 0, 0)
         expect_row.setSpacing(8)
-        self.compose_save_expect_btn = QPushButton("Save to Expect")
-        self.compose_save_expect_btn.setToolTip("Save this FIOSpotter draft as a disabled Expect entry for later policy review before automation is enabled.")
+        self.compose_save_expect_btn = QPushButton("Configure in FIO Spotter")
+        self.compose_save_expect_btn.setToolTip(
+            "Create a disabled response draft, then open FIO Spotter to review access and automation."
+        )
         self.compose_save_expect_btn.clicked.connect(self._save_compose_js8_expect)
         expect_row.addWidget(self.compose_save_expect_btn)
-        self.compose_expect_hint_label = QLabel("Optional: store this draft for Expect review.")
+        self.compose_expect_hint_label = QLabel("FIO Spotter manages who may request this saved response.")
         self.compose_expect_hint_label.setWordWrap(True)
+        self.compose_expect_hint_label.setMinimumWidth(0)
+        self.compose_expect_hint_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Minimum)
         expect_row.addWidget(self.compose_expect_hint_label, 1)
         self.compose_expect_row_widget.setVisible(False)
         setup_layout.addWidget(self.compose_expect_row_widget)
 
+        # Spotter Compose can consume an existing Expect response as a local
+        # saved-message template.  This is intentionally separate from Expect
+        # administration: selecting a row only copies its response text into
+        # the Compose working draft and never changes policy or automation.
+        self.compose_spotter_source_row_widget = QWidget()
+        self.compose_spotter_source_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        source_row = QGridLayout(self.compose_spotter_source_row_widget)
+        source_row.setContentsMargins(0, 0, 0, 0)
+        source_row.setHorizontalSpacing(8)
+        source_row.setVerticalSpacing(4)
+        self.compose_spotter_source_label = QLabel("Start from")
+        source_row.addWidget(self.compose_spotter_source_label, 0, 0)
+        self.compose_spotter_source_combo = QComboBox()
+        self.compose_spotter_source_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.compose_spotter_source_combo.setMinimumWidth(220)
+        self.compose_spotter_source_combo.setMinimumContentsLength(18)
+        self.compose_spotter_source_combo.setToolTip(
+            "Choose Form catalog to start a new response, or copy a saved Expect response into this draft."
+        )
+        self.compose_spotter_source_combo.currentIndexChanged.connect(self._on_compose_spotter_source_changed)
+        source_row.addWidget(self.compose_spotter_source_combo, 0, 1)
+        self.compose_spotter_source_refresh_btn = QPushButton("Refresh")
+        self.compose_spotter_source_refresh_btn.setToolTip(
+            "Reload the bounded saved Expect response list. Compose drafts are not changed unless you select a row."
+        )
+        self.compose_spotter_source_refresh_btn.clicked.connect(self._refresh_compose_spotter_expect_entries_clicked)
+        source_row.addWidget(self.compose_spotter_source_refresh_btn, 0, 2)
+        self.compose_spotter_source_hint = QLabel("Saved responses load as an editable working copy.")
+        self.compose_spotter_source_hint.setWordWrap(True)
+        self.compose_spotter_source_hint.setMinimumWidth(0)
+        self.compose_spotter_source_hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Minimum)
+        self.compose_spotter_source_hint.setStyleSheet(
+            label_style("muted", resolve_theme(self.settings), weight=600)
+        )
+        source_row.addWidget(self.compose_spotter_source_hint, 1, 1, 1, 2)
+        source_row.setColumnStretch(1, 1)
+        self.compose_spotter_source_row_widget.setVisible(False)
+        setup_layout.addWidget(self.compose_spotter_source_row_widget)
+
         self.compose_form_row_widget = QWidget()
-        self.compose_form_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.compose_form_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self.compose_form_row_widget.setMaximumHeight(16777215)
         row1 = QGridLayout(self.compose_form_row_widget)
         row1.setContentsMargins(0, 0, 0, 0)
@@ -6765,6 +6870,8 @@ class MessageViewerTab(QWidget):
         self.compose_operating_group_combo.currentIndexChanged.connect(self._on_compose_operating_group_changed)
         row1.addWidget(self.compose_operating_group_combo, 0, 1)
         self.compose_spotter_category_label = QLabel("Form Category")
+        self.compose_spotter_category_label.setWordWrap(True)
+        self.compose_spotter_category_label.setMinimumWidth(0)
         row1.addWidget(self.compose_spotter_category_label, 0, 0)
         self.compose_spotter_category_combo = QComboBox()
         self.compose_spotter_category_combo.setMinimumWidth(180)
@@ -6779,6 +6886,8 @@ class MessageViewerTab(QWidget):
         self.compose_family_combo.currentIndexChanged.connect(self._on_compose_family_changed)
         row1.addWidget(self.compose_family_combo, 1, 1)
         self.compose_form_label = QLabel("Form")
+        self.compose_form_label.setWordWrap(True)
+        self.compose_form_label.setMinimumWidth(0)
         row1.addWidget(self.compose_form_label, 2, 0)
         self.compose_form_combo = QComboBox()
         self.compose_form_combo.setMinimumWidth(240)
@@ -7133,6 +7242,182 @@ class MessageViewerTab(QWidget):
                 pass
         return QRect(0, 0, 1280, 800)
 
+    @staticmethod
+    def _compose_spotter_sidebar_width(viewport_width: int, *, in_workbench: bool) -> int:
+        """Choose a readable Spotter setup width without starving the main pane."""
+        width = max(1, int(viewport_width or 0))
+        preferred = 520 if in_workbench else 480
+        minimum = 440 if in_workbench else 420
+        # Keep the form editor/preview area dominant even at the smallest
+        # width that still qualifies as a sidebar layout.
+        primary_minimum = 640
+        available = max(minimum, width - primary_minimum)
+        return min(preferred, available)
+
+    def _compose_sidebar_enabled(
+        self,
+        mode: str,
+        viewport_width: int,
+        *,
+        in_workbench: bool,
+    ) -> bool:
+        """Use a side setup rail only when both rail and work surface can read.
+
+        The previous fixed 260px CommStat rail allowed the target cue and its
+        two actions to compete for a few pixels, producing one-character
+        wrapping.  Keep the setup rail readable and promote it above the work
+        surface until the viewport can support both panes.
+        """
+        mode = str(mode or "nbems")
+        width = max(1, int(viewport_width or 0))
+        compact_threshold = 920 if in_workbench else int(self._responsive_compact_width)
+        if width < compact_threshold or mode not in {"nbems", "spotter", "commstat_rf"}:
+            return False
+        rail_minimum = self._compose_sidebar_readable_minimum_width(
+            mode,
+            in_workbench=in_workbench,
+        )
+        # The form/preview surface remains the dominant pane.  Add a small
+        # handle/gutter allowance so the split never relies on child clipping.
+        return width >= rail_minimum + 640 + 24
+
+    def _compose_sidebar_readable_minimum_width(
+        self,
+        mode: str,
+        *,
+        in_workbench: bool,
+    ) -> int:
+        """Calculate a content-derived rail floor for the current font scale."""
+        mode = str(mode or "nbems")
+        base = {
+            "spotter": 440 if in_workbench else 420,
+            "commstat_rf": 440 if in_workbench else 420,
+            "nbems": 430 if in_workbench else 400,
+        }.get(mode, 400)
+        # The JS8 selection cue owns two actions on its second row.  Derive
+        # their required width from the active theme/font rather than assuming
+        # the default-text screenshot's button dimensions.  A scaled font can
+        # therefore promote the setup above the form before clipping occurs.
+        use_btn = getattr(self, "compose_js8_selected_target_use_btn", None)
+        refresh_btn = getattr(self, "compose_js8_selected_target_refresh_btn", None)
+        action_width = 0
+        for button in (use_btn, refresh_btn):
+            try:
+                action_width += int(button.sizeHint().width())
+            except Exception:
+                continue
+        if action_width:
+            try:
+                label_floor = max(
+                    120,
+                    int(self.fontMetrics().horizontalAdvance("Target selected in JS8Call") * 0.55),
+                )
+            except Exception:
+                label_floor = 160
+            action_width += label_floor + 32
+        return max(base, action_width)
+
+    @staticmethod
+    def _set_compose_splitter_sizes_if_needed(splitter: QSplitter, sizes: Sequence[int]) -> None:
+        """Avoid re-applying identical splitter geometry during signal bursts."""
+        requested = [max(0, int(size)) for size in sizes]
+        try:
+            current = splitter.sizes()
+            if len(current) == len(requested) and all(
+                abs(int(current_size) - requested_size) <= 2
+                for current_size, requested_size in zip(current, requested)
+            ):
+                return
+            splitter.setSizes(requested)
+        except Exception:
+            pass
+
+    def _refresh_compose_commstat_content_geometry(self) -> None:
+        """Keep CommStat's scroll child at its content-derived readable height.
+
+        A ``QScrollArea`` with ``widgetResizable`` may shrink its child to the
+        child's minimum height.  CommStat has six status rows, so its former
+        fixed 240px minimum allowed the grid to compress rows below the
+        controls' readable height on Linux.  Derive the controls and scroll
+        child's floor from the active font and layout instead; the scroll area
+        owns any vertical overflow at compact heights.
+        """
+        row = getattr(self, "compose_commstat_row_widget", None)
+        if not isinstance(row, QWidget):
+            return
+        layout = row.layout()
+        if layout is None:
+            return
+
+        controls: List[QWidget] = []
+        for name in (
+            "compose_commstat_kind_combo",
+            "compose_commstat_target_edit",
+            "compose_commstat_grid_edit",
+            "compose_commstat_scope_combo",
+            "compose_commstat_report_id_edit",
+            "compose_commstat_brevity_chk",
+            "compose_commstat_brevity_edit",
+            "compose_commstat_brevity_list_combo",
+            "compose_commstat_brevity_event_combo",
+            "compose_commstat_brevity_status_combo",
+            "compose_commstat_brevity_impact_combo",
+            "compose_commstat_brevity_public_combo",
+            "compose_commstat_brevity_station_combo",
+        ):
+            widget = getattr(self, name, None)
+            if isinstance(widget, QWidget):
+                controls.append(widget)
+        controls.extend(
+            widget
+            for widget in getattr(self, "compose_commstat_status_widgets", {}).values()
+            if isinstance(widget, QWidget)
+        )
+        for control in controls:
+            try:
+                hint_height = max(
+                    28,
+                    int(control.sizeHint().height()),
+                    int(control.minimumSizeHint().height()),
+                )
+                control.setMinimumHeight(
+                    control_height_for_font(
+                        control,
+                        vertical_padding=10,
+                        floor=hint_height,
+                    )
+                )
+            except Exception:
+                continue
+
+        for label in list(getattr(self, "compose_commstat_status_labels", {}).values()):
+            if not isinstance(label, QLabel):
+                continue
+            try:
+                hint_height = max(
+                    24,
+                    int(label.sizeHint().height()),
+                    int(label.minimumSizeHint().height()),
+                )
+                label.setMinimumHeight(
+                    single_line_label_height(
+                        label,
+                        vertical_padding=6,
+                        floor=hint_height,
+                    )
+                )
+            except Exception:
+                continue
+
+        try:
+            layout.activate()
+            row.setMinimumHeight(
+                max(int(layout.minimumSize().height()), int(row.minimumSizeHint().height()))
+            )
+            row.updateGeometry()
+        except Exception:
+            return
+
     def _refresh_compose_layout_geometry(self) -> None:
         splitter = getattr(self, "compose_splitter", None)
         body_splitter = getattr(self, "compose_body_splitter", None)
@@ -7145,29 +7430,42 @@ class MessageViewerTab(QWidget):
         # A full workbench retains the wide sidebar until the available dialog
         # width truly cannot support it.  Embedded Compose follows the normal
         # Messages compact threshold so it promotes the workbench earlier.
-        compact = (
-            viewport_width < (920 if in_workbench else int(self._responsive_compact_width))
+        compact = viewport_width < (920 if in_workbench else int(self._responsive_compact_width))
+        compose_sidebar = self._compose_sidebar_enabled(
+            mode,
+            viewport_width,
+            in_workbench=in_workbench,
         )
-        compose_sidebar = mode in {"nbems", "spotter", "commstat_rf"} and not compact
         if isinstance(body_splitter, QSplitter):
             desired_body = Qt.Horizontal if compose_sidebar else Qt.Vertical
             if body_splitter.orientation() != desired_body:
                 body_splitter.setOrientation(desired_body)
         if isinstance(splitter, QSplitter):
-            desired = Qt.Vertical if (compact or compose_sidebar) else Qt.Horizontal
+            # Keep fields and preview in a readable top-to-bottom sequence.
+            # A horizontal split makes both surfaces too narrow at medium
+            # widths, especially for CommStat's status grid.
+            desired = Qt.Vertical
             if splitter.orientation() != desired:
                 splitter.setOrientation(desired)
         setup_box = getattr(self, "compose_setup_box", None)
         setup_scroll = getattr(self, "compose_setup_scroll", None)
+        self._refresh_compose_commstat_content_geometry()
         if setup_box is not None:
             try:
                 if compose_sidebar:
+                    readable_floor = self._compose_sidebar_readable_minimum_width(
+                        mode,
+                        in_workbench=in_workbench,
+                    )
                     if mode == "spotter":
-                        sidebar_w = 360 if in_workbench else 320
+                        sidebar_w = max(readable_floor, self._compose_spotter_sidebar_width(
+                            viewport_width,
+                            in_workbench=in_workbench,
+                        ))
                     elif mode == "commstat_rf":
-                        sidebar_w = 280 if in_workbench else 260
+                        sidebar_w = readable_floor
                     else:
-                        sidebar_w = 440 if in_workbench else 400
+                        sidebar_w = readable_floor
                     setup_box.setMinimumWidth(sidebar_w)
                     setup_box.setMaximumWidth(16777215)
                     setup_box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
@@ -7183,6 +7481,14 @@ class MessageViewerTab(QWidget):
                         setup_scroll.setMinimumWidth(0)
                         setup_scroll.setMaximumWidth(16777215)
                         setup_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                if setup_scroll is not None:
+                    # A compact setup pane may be narrower than the longest
+                    # selector.  Let that pane scroll its content rather than
+                    # clipping controls or forcing the whole Compose page to
+                    # grow horizontally.  Wide sidebar mode remains flush.
+                    setup_scroll.setHorizontalScrollBarPolicy(
+                        Qt.ScrollBarAlwaysOff if compose_sidebar else Qt.ScrollBarAsNeeded
+                    )
                 layout = setup_box.layout()
                 visible_heights: List[int] = []
                 if layout is not None:
@@ -7223,6 +7529,7 @@ class MessageViewerTab(QWidget):
             "compose_header_row_widget",
             "compose_js8_target_row_widget",
             "compose_js8_selected_target_row_widget",
+            "compose_spotter_source_row_widget",
             "compose_js8_plain_row_widget",
             "compose_js8_plain_scroll",
             "compose_commstat_row_widget",
@@ -7243,36 +7550,61 @@ class MessageViewerTab(QWidget):
                     pass
         if isinstance(splitter, QSplitter) and splitter.orientation() == Qt.Horizontal:
             try:
-                splitter.setSizes([
-                    max(300, int(viewport_width * 0.66)),
-                    max(220, int(viewport_width * 0.30)),
-                ])
+                splitter_width = max(1, int(splitter.width() or viewport_width))
+                self._set_compose_splitter_sizes_if_needed(
+                    splitter,
+                    [
+                        max(300, int(splitter_width * 0.66)),
+                        max(220, int(splitter_width * 0.30)),
+                    ],
+                )
             except Exception:
                 pass
         elif isinstance(splitter, QSplitter):
             try:
                 mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
+                splitter_height = max(1, int(splitter.height() or viewport_height))
                 if mode == "spotter":
-                    splitter.setSizes([max(180, int(viewport_height * 0.58)), max(120, int(viewport_height * 0.28))])
+                    sizes = [max(180, int(splitter_height * 0.58)), max(120, int(splitter_height * 0.28))]
                 elif mode == "commstat_rf":
-                    splitter.setSizes([max(180, int(viewport_height * 0.54)), max(120, int(viewport_height * 0.30))])
+                    sizes = [max(180, int(splitter_height * 0.54)), max(120, int(splitter_height * 0.30))]
                 elif mode == "js8":
-                    splitter.setSizes([max(160, int(viewport_height * 0.48)), max(110, int(viewport_height * 0.24))])
+                    sizes = [max(160, int(splitter_height * 0.48)), max(110, int(splitter_height * 0.24))]
+                else:
+                    sizes = []
+                if sizes:
+                    self._set_compose_splitter_sizes_if_needed(splitter, sizes)
             except Exception:
                 pass
         if isinstance(body_splitter, QSplitter):
             try:
                 if body_splitter.orientation() == Qt.Horizontal:
+                    readable_floor = self._compose_sidebar_readable_minimum_width(
+                        mode,
+                        in_workbench=in_workbench,
+                    )
                     if mode == "spotter":
-                        sidebar_w = 360 if in_workbench else 320
+                        sidebar_w = max(readable_floor, self._compose_spotter_sidebar_width(
+                            viewport_width,
+                            in_workbench=in_workbench,
+                        ))
                     elif mode == "commstat_rf":
-                        sidebar_w = 280 if in_workbench else 260
+                        sidebar_w = readable_floor
                     else:
-                        sidebar_w = 440 if in_workbench else 400
-                    body_splitter.setSizes([sidebar_w, max(320, viewport_width - sidebar_w)])
+                        sidebar_w = readable_floor
+                    self._set_compose_splitter_sizes_if_needed(
+                        body_splitter,
+                        [sidebar_w, max(320, viewport_width - sidebar_w)],
+                    )
                 else:
                     setup_h = int(setup_scroll.height() if setup_scroll is not None else setup_box.height() if setup_box is not None else 160)
-                    body_splitter.setSizes([max(120, min(setup_h, viewport_height // 3)), max(220, int(viewport_height * 0.62))])
+                    self._set_compose_splitter_sizes_if_needed(
+                        body_splitter,
+                        [
+                            max(120, min(setup_h, viewport_height // 3)),
+                            max(220, int(viewport_height * 0.62)),
+                        ],
+                    )
             except Exception:
                 pass
 
@@ -7293,13 +7625,21 @@ class MessageViewerTab(QWidget):
             return
         theme = resolve_theme(self.settings)
         needs_workbench = self._compose_embedded_needs_workbench()
-        btn.setText("Use Full Compose Workbench" if needs_workbench else "Open Full Compose Workbench")
-        btn.setStyleSheet(button_style("primary" if needs_workbench else "secondary", theme))
-        btn.setToolTip(
+        text = "Use Full Compose Workbench" if needs_workbench else "Open Full Compose Workbench"
+        style = button_style("primary" if needs_workbench else "secondary", theme)
+        tooltip = (
             "This screen is cramped; open the full workbench for a usable compose layout."
             if needs_workbench
             else "Open Compose in a larger window with more room for forms, previews, and RF send options."
         )
+        # Resize can fire in bursts. Avoid invalidating button geometry and
+        # style when its semantic state has not changed.
+        if btn.text() != text:
+            btn.setText(text)
+        if btn.styleSheet() != style:
+            btn.setStyleSheet(style)
+        if btn.toolTip() != tooltip:
+            btn.setToolTip(tooltip)
 
     def _refresh_compose_layout_geometry_if_needed(self, *, force: bool = False) -> None:
         mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
@@ -7892,7 +8232,339 @@ class MessageViewerTab(QWidget):
                 self.compose_form_combo.addItem("No MCF forms in this category", None)
         finally:
             self.compose_form_combo.blockSignals(False)
+        requested = str(getattr(self, "_compose_spotter_requested_form_code", "") or "").strip().upper()
+        if requested:
+            self._select_compose_spotter_form_code(requested, forms=forms)
         self._on_compose_form_changed()
+
+    def _select_compose_spotter_form_code(
+        self,
+        form_code: object,
+        *,
+        forms: Sequence[object] | None = None,
+    ) -> bool:
+        """Select a handoff form from already-loaded Compose catalog data."""
+        code = str(form_code or "").strip().upper()
+        if not code or not hasattr(self, "compose_form_combo"):
+            return False
+        catalog = list(forms or [])
+        if not catalog:
+            family_data = self.compose_family_combo.currentData() if hasattr(self, "compose_family_combo") else None
+            if isinstance(family_data, dict) and family_data.get("kind") == "spotter":
+                catalog = list(family_data.get("forms") or [])
+        matched = next(
+            (form for form in catalog if str(getattr(form, "form_code", "") or "").strip().upper() == code),
+            None,
+        )
+        if matched is not None and hasattr(self, "compose_spotter_category_combo"):
+            category = self._spotter_form_category_key(
+                getattr(matched, "form_code", ""), getattr(matched, "title", "")
+            )
+            category_index = self.compose_spotter_category_combo.findData(category)
+            if category_index >= 0 and self.compose_spotter_category_combo.currentIndex() != category_index:
+                self.compose_spotter_category_combo.setCurrentIndex(category_index)
+        for index in range(self.compose_form_combo.count()):
+            data = self.compose_form_combo.itemData(index)
+            if isinstance(data, dict) and str(data.get("code", "") or "").strip().upper() == code:
+                self.compose_form_combo.setCurrentIndex(index)
+                self._compose_spotter_requested_form_code = ""
+                return True
+        return False
+
+    @staticmethod
+    def _compose_spotter_expect_response_parts(response: object, expect_key: object) -> tuple[str, str]:
+        """Return ``(optional target, response without target)`` for a saved row.
+
+        Expect responses are normally target-neutral (the destination is
+        supplied by the requesting station), but older/imported rows may carry
+        a destination prefix.  Keep that prefix out of the response command so
+        the normal Compose target and guarded-send path remain authoritative.
+        """
+        text = " ".join(str(response or "").strip().split())
+        key = str(expect_key or "").strip().upper()
+        if not text or not key:
+            return "", text
+        tokens = text.split()
+        key_index = -1
+        for idx, token in enumerate(tokens[:3]):
+            if token.upper() == key:
+                key_index = idx
+                break
+        if key_index < 0:
+            return "", text
+        target = ""
+        if key_index > 0:
+            candidate = tokens[0].strip().upper()
+            if candidate.startswith("@") or re.fullmatch(r"[A-Z]{1,2}\d[A-Z0-9]{1,5}(?:/[A-Z0-9]{1,4})?", candidate):
+                target = candidate
+        return target, " ".join(tokens[key_index:]).strip()
+
+    @staticmethod
+    def _compose_spotter_saved_values(
+        response: object,
+        expect_key: object,
+        fields: Sequence[ComposeFieldDefinition],
+    ) -> Dict[str, str]:
+        """Best-effort decode of the compact saved MCForm response.
+
+        Compose-created responses concatenate option tokens.  Imported rows
+        may instead use ``XX[value]`` fields.  Decode both forms without
+        claiming that an ambiguous free-text response is losslessly parsed.
+        The original response is retained as the clean working copy until a
+        field is edited, so this fallback never changes the transmitted text.
+        """
+        _target, body = MessageViewerTab._compose_spotter_expect_response_parts(response, expect_key)
+        body_tokens = body.split()
+        if body_tokens and body_tokens[0].upper() == str(expect_key or "").strip().upper():
+            body = " ".join(body_tokens[1:])
+        body = re.sub(r"\s+#[A-Z0-9]{4}$", "", body, flags=re.IGNORECASE).strip()
+        bracket_values = parse_spotter_bracket_fields(body)
+        if bracket_values:
+            values: Dict[str, str] = {}
+            for field in fields:
+                direct = bracket_values.get(str(field.key or "").upper())
+                if direct is not None:
+                    values[field.key] = direct
+                    continue
+                label_key = re.sub(r"[^A-Z0-9]", "", str(field.label or "").upper())
+                for short_key, value in bracket_values.items():
+                    if label_key and (label_key.startswith(short_key) or short_key.startswith(label_key)):
+                        values[field.key] = value
+                        break
+            return values
+
+        tokens = body.split()
+        compact = "".join(tokens)
+        values = {}
+        offset = 0
+        for field in fields:
+            options = sorted(
+                (str(option.value or "") for option in field.options if str(option.value or "")),
+                key=len,
+                reverse=True,
+            )
+            matched = ""
+            for option in options:
+                if compact[offset:].upper().startswith(option.upper()):
+                    matched = compact[offset:offset + len(option)]
+                    break
+            if matched:
+                values[field.key] = matched
+                offset += len(matched)
+        if fields and len(values) < len(fields):
+            remaining = compact[offset:]
+            if len(fields) == 1 and remaining:
+                values.setdefault(fields[0].key, remaining)
+            elif tokens:
+                for idx, field in enumerate(fields):
+                    if field.key in values or idx >= len(tokens):
+                        continue
+                    values[field.key] = tokens[idx]
+        return values
+
+    def _refresh_compose_spotter_expect_entries(self, *, force: bool = False) -> None:
+        """Load at most 200 static Expect rows on activation/explicit refresh."""
+        if self._compose_spotter_expect_loaded and not force:
+            return
+        try:
+            rows = list_expect_entries(enabled_only=False, limit=200)
+        except Exception as exc:
+            log.debug("MessageViewer: failed loading saved Spotter Expect responses: %s", exc)
+            rows = []
+        bounded: List[Dict[str, object]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for raw in rows:
+            if not isinstance(raw, Mapping):
+                continue
+            key = str(raw.get("expect_key", "") or "").strip().upper()
+            response = str(raw.get("response_text", "") or "").strip()
+            # Dynamic Q is request-derived and has no generic manual payload.
+            # All other static Expect responses can serve as saved messages;
+            # MCForms additionally receive send-time date refresh below.
+            if not key or key == "Q" or not response:
+                continue
+            identity = (str(raw.get("id", "") or ""), key, response)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            bounded.append(dict(raw))
+            if len(bounded) >= 200:
+                break
+        self._compose_spotter_expect_entries = bounded
+        self._compose_spotter_expect_loaded = True
+        self._apply_compose_spotter_source_options()
+
+    def _apply_compose_spotter_source_options(self) -> None:
+        combo = getattr(self, "compose_spotter_source_combo", None)
+        if not isinstance(combo, QComboBox):
+            return
+        active_id = int(getattr(self, "_compose_spotter_expect_active_id", 0) or 0)
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem("Form catalog — new response", {"kind": "catalog"})
+            selected = 0
+            for row in self._compose_spotter_expect_entries:
+                key = str(row.get("expect_key", "") or "").strip().upper()
+                summary = " ".join(str(row.get("response_text", "") or "").split())
+                if len(summary) > 56:
+                    summary = summary[:53].rstrip() + "…"
+                label = f"{key} — {summary}" if summary else key
+                combo.addItem(label, {"kind": "saved_expect", "entry": dict(row)})
+                try:
+                    if int(row.get("id", 0) or 0) == active_id:
+                        selected = combo.count() - 1
+                except (TypeError, ValueError):
+                    pass
+            combo.setCurrentIndex(selected)
+        finally:
+            combo.blockSignals(False)
+
+    def _refresh_compose_spotter_expect_entries_clicked(self) -> None:
+        self._refresh_compose_spotter_expect_entries(force=True)
+        self._set_compose_status("Saved Spotter responses refreshed. Select one to copy it into the draft.", role="info")
+        self._update_compose_preview()
+
+    def _clear_compose_spotter_working_response(self) -> None:
+        self._compose_spotter_expect_active_id = 0
+        self._compose_spotter_working_response = ""
+        self._compose_spotter_working_response_dirty = False
+        self._compose_spotter_decode_notice = ""
+        self._compose_expect_view_editing = True
+        apply_view_state = getattr(self, "_apply_compose_expect_view_state", None)
+        if callable(apply_view_state):
+            apply_view_state()
+
+    def _expect_view_is_read_only(self) -> bool:
+        intent = dict(getattr(self, "_compose_intent", {}) or {})
+        return bool(
+            intent.get("expect_view", False)
+            and int(getattr(self, "_compose_spotter_expect_active_id", 0) or 0) > 0
+            and not bool(getattr(self, "_compose_expect_view_editing", True))
+        )
+
+    def _apply_compose_expect_view_state(self) -> None:
+        """Apply the explicit View/Edit boundary without rebuilding the form."""
+        read_only = self._expect_view_is_read_only()
+        for widget in (getattr(self, "_compose_field_widgets", {}) or {}).values():
+            if isinstance(widget, (QLineEdit, QTextEdit, QPlainTextEdit)):
+                widget.setReadOnly(read_only)
+            elif isinstance(widget, QComboBox):
+                widget.setEnabled(not read_only)
+        if hasattr(self, "compose_edit_expect_copy_btn"):
+            self.compose_edit_expect_copy_btn.setVisible(read_only)
+
+    def _begin_editing_expect_copy(self) -> None:
+        """Make an Expect View editable locally; this does not persist it."""
+        self._compose_expect_view_editing = True
+        apply_view_state = getattr(self, "_apply_compose_expect_view_state", None)
+        if callable(apply_view_state):
+            apply_view_state()
+        if hasattr(self, "compose_spotter_source_hint"):
+            self.compose_spotter_source_hint.setText(
+                "Editing a local working copy. Access policy and automation remain unchanged until you explicitly save."
+            )
+        self._set_compose_status(
+            "Working-copy editing enabled. Expect storage has not changed.",
+            role="info",
+        )
+        self._update_compose_preview()
+
+    def _queue_compose_spotter_scroll_reset(self) -> None:
+        """Reset the Spotter setup scroll once after an activation/change.
+
+        The queued turn lets the stacked page and splitter finish laying out
+        before setting the scrollbar value.  A pending flag makes a mode/source
+        cascade (which can rebuild the form) produce one reset, while ordinary
+        preview and typing paths never call this method.
+        """
+        if str(getattr(self, "_compose_mode", "nbems") or "nbems") != "spotter":
+            return
+        if not hasattr(self, "compose_setup_scroll"):
+            return
+        if bool(getattr(self, "_compose_spotter_scroll_reset_pending", False)):
+            return
+        self._compose_spotter_scroll_reset_pending = True
+        QTimer.singleShot(0, self._run_compose_spotter_scroll_reset)
+
+    def _run_compose_spotter_scroll_reset(self) -> None:
+        self._compose_spotter_scroll_reset_pending = False
+        if str(getattr(self, "_compose_mode", "nbems") or "nbems") != "spotter":
+            return
+        scroll = getattr(self, "compose_setup_scroll", None)
+        if scroll is None:
+            return
+        try:
+            scroll.verticalScrollBar().setValue(0)
+        except Exception:
+            pass
+
+    def _on_compose_spotter_source_changed(self, *_args) -> None:
+        combo = getattr(self, "compose_spotter_source_combo", None)
+        data = combo.currentData() if isinstance(combo, QComboBox) else None
+        if not isinstance(data, dict) or data.get("kind") != "saved_expect":
+            self._clear_compose_spotter_working_response()
+            if hasattr(self, "compose_spotter_source_hint"):
+                self.compose_spotter_source_hint.setText("New response from the form catalog.")
+            self._update_compose_preview()
+            self._queue_compose_spotter_scroll_reset()
+            return
+        entry = dict(data.get("entry") or {})
+        expect_key = str(entry.get("expect_key", "") or "").strip().upper()
+        response = str(entry.get("response_text", "") or "").strip()
+        self._compose_spotter_source_loading = True
+        try:
+            self._compose_spotter_expect_active_id = int(entry.get("id", 0) or 0)
+        except (TypeError, ValueError):
+            self._compose_spotter_expect_active_id = 0
+        self._compose_spotter_working_response = response
+        self._compose_spotter_working_response_dirty = False
+        self._compose_spotter_decode_notice = ""
+        view_intent = bool(dict(getattr(self, "_compose_intent", {}) or {}).get("expect_view", False))
+        self._compose_expect_view_editing = not view_intent
+        try:
+            target, _body = self._compose_spotter_expect_response_parts(response, expect_key)
+            if target and hasattr(self, "compose_js8_target_edit"):
+                self.compose_js8_target_edit.setText(target)
+            form_combo = getattr(self, "compose_form_combo", None)
+            selected_index = -1
+            if isinstance(form_combo, QComboBox):
+                for idx in range(form_combo.count()):
+                    item = form_combo.itemData(idx)
+                    if isinstance(item, dict) and str(item.get("code", "") or "").strip().upper() == expect_key:
+                        selected_index = idx
+                        break
+                if selected_index >= 0:
+                    form_combo.setCurrentIndex(selected_index)
+            values = self._compose_spotter_saved_values(response, expect_key, self._compose_field_rows)
+            for key, value in values.items():
+                self._compose_set_widget_value(key, value)
+            if not self._compose_field_rows:
+                self._compose_spotter_decode_notice = (
+                    "The MCF form is not available in the current catalog. "
+                    "The exact saved payload is retained for viewing and sending."
+                )
+            elif len(values) < len(self._compose_field_rows):
+                self._compose_spotter_decode_notice = (
+                    "Some saved fields could not be reconstructed safely. "
+                    "The exact saved payload is retained; editing will create a new form payload."
+                )
+        finally:
+            self._compose_spotter_source_loading = False
+        if hasattr(self, "compose_spotter_source_hint"):
+            hint = (
+                f"Viewing the exact saved {expect_key} response; Expect storage is unchanged."
+                if view_intent else
+                f"Copied {expect_key} as an editable working copy; Expect policy is unchanged."
+            )
+            if self._compose_spotter_decode_notice:
+                hint += f" {self._compose_spotter_decode_notice}"
+            self.compose_spotter_source_hint.setText(hint)
+        apply_view_state = getattr(self, "_apply_compose_expect_view_state", None)
+        if callable(apply_view_state):
+            apply_view_state()
+        self._update_compose_preview()
+        self._queue_compose_spotter_scroll_reset()
 
     def _on_compose_mode_tab_changed(self, index: int) -> None:
         previous_mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
@@ -7907,12 +8579,15 @@ class MessageViewerTab(QWidget):
         try:
             if self._compose_mode == "commstat_rf":
                 self._refresh_compose_commstat_defaults()
+            elif self._compose_mode == "spotter":
+                self._refresh_compose_spotter_expect_entries()
             self._refresh_compose_setup_discovery(force=True)
             self._refresh_compose_forms()
             self._restore_compose_mode_draft(self._compose_mode)
         finally:
             self._compose_restoring_mode_draft = False
         self._update_compose_preview()
+        self._queue_compose_spotter_scroll_reset()
         self._refresh_compose_js8_selected_target_cue()
         self.request_compose_js8_selected_target_refresh()
 
@@ -8009,6 +8684,7 @@ class MessageViewerTab(QWidget):
             draft = {
                 "target": getattr(getattr(self, "compose_js8_target_edit", None), "text", lambda: "")(),
                 "category": self._compose_combo_data(getattr(self, "compose_spotter_category_combo", None)),
+                "expect_active_id": int(getattr(self, "_compose_spotter_expect_active_id", 0) or 0),
                 "sign": bool(getattr(getattr(self, "compose_js8_sign_chk", None), "isChecked", lambda: False)()),
                 "date_code": bool(getattr(getattr(self, "compose_js8_auth_datecode_chk", None), "isChecked", lambda: False)()),
                 "auth_key": self._compose_combo_data(getattr(self, "compose_js8_auth_key_combo", None)),
@@ -8107,6 +8783,18 @@ class MessageViewerTab(QWidget):
                     widget.blockSignals(blocked)
         elif mode == "spotter":
             self._compose_set_line_text(getattr(self, "compose_js8_target_edit", None), draft.get("target"))
+            active_id = int(draft.get("expect_active_id", 0) or 0)
+            source_combo = getattr(self, "compose_spotter_source_combo", None)
+            if isinstance(source_combo, QComboBox) and active_id > 0:
+                for index in range(source_combo.count()):
+                    data = source_combo.itemData(index)
+                    entry = data.get("entry") if isinstance(data, dict) else None
+                    try:
+                        if isinstance(entry, dict) and int(entry.get("id", 0) or 0) == active_id:
+                            source_combo.setCurrentIndex(index)
+                            break
+                    except (TypeError, ValueError):
+                        continue
             self._compose_set_combo_data(getattr(self, "compose_spotter_category_combo", None), draft.get("category"))
             self._on_compose_spotter_category_changed()
             self._restore_compose_form_identity(draft.get("form_identity"))
@@ -8762,6 +9450,33 @@ class MessageViewerTab(QWidget):
     def _on_compose_form_changed(self) -> None:
         if not hasattr(self, "compose_form_combo"):
             return
+        if (
+            str(getattr(self, "_compose_mode", "nbems") or "nbems") == "spotter"
+            and not bool(getattr(self, "_compose_spotter_source_loading", False))
+            and int(getattr(self, "_compose_spotter_expect_active_id", 0) or 0) > 0
+        ):
+            # Picking a different catalog form starts a new draft.  It must not
+            # continue to send the previously selected saved response.
+            data = self.compose_form_combo.currentData()
+            code = str(data.get("code", "") or "").strip().upper() if isinstance(data, dict) else ""
+            active = {}
+            for row in self._compose_spotter_expect_entries:
+                try:
+                    if int(row.get("id", 0) or 0) == int(self._compose_spotter_expect_active_id):
+                        active = row
+                        break
+                except (TypeError, ValueError):
+                    continue
+            active_key = str(active.get("expect_key", "") or "").strip().upper()
+            if code != active_key:
+                self._clear_compose_spotter_working_response()
+                source_combo = getattr(self, "compose_spotter_source_combo", None)
+                if isinstance(source_combo, QComboBox):
+                    source_combo.blockSignals(True)
+                    try:
+                        source_combo.setCurrentIndex(0)
+                    finally:
+                        source_combo.blockSignals(False)
         self._store_compose_form_draft()
         data = self.compose_form_combo.currentData()
         form_identity = self._compose_form_identity(data)
@@ -8824,6 +9539,15 @@ class MessageViewerTab(QWidget):
         self._compose_last_smart_defaults = smart_defaults
         self._compose_active_form_key = form_identity
         self._update_compose_preview()
+        if str(getattr(self, "_compose_mode", "nbems") or "nbems") == "spotter":
+            category = ""
+            category_combo = getattr(self, "compose_spotter_category_combo", None)
+            if isinstance(category_combo, QComboBox):
+                category = str(category_combo.currentData() or category_combo.currentText() or "")
+            reset_key = (str(form_identity or ""), category)
+            if reset_key != getattr(self, "_compose_spotter_last_scroll_reset_key", None):
+                self._compose_spotter_last_scroll_reset_key = reset_key
+                self._queue_compose_spotter_scroll_reset()
 
     @staticmethod
     def _compose_form_identity(data) -> str:
@@ -8985,9 +9709,9 @@ class MessageViewerTab(QWidget):
                     widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
                 else:
                     self._configure_compose_combo_width(widget, floor=160)
-                widget.currentIndexChanged.connect(self._update_compose_preview)
+                widget.currentIndexChanged.connect(self._on_compose_form_field_changed)
                 if widget.isEditable():
-                    widget.editTextChanged.connect(self._update_compose_preview)
+                    widget.editTextChanged.connect(self._on_compose_form_field_changed)
             elif is_long_field:
                 widget = QTextEdit()
                 widget.setMinimumHeight(max(190 if field.key == "MESSAGE" else 150, int(field.rows or 0) * 18))
@@ -8995,13 +9719,13 @@ class MessageViewerTab(QWidget):
                 widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
                 widget.setPlaceholderText(field.placeholder)
                 widget.setPlainText(initial)
-                widget.textChanged.connect(self._update_compose_preview)
+                widget.textChanged.connect(self._on_compose_form_field_changed)
             else:
                 widget = QLineEdit()
                 widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
                 widget.setPlaceholderText(field.placeholder)
                 widget.setText(initial)
-                widget.textChanged.connect(self._update_compose_preview)
+                widget.textChanged.connect(self._on_compose_form_field_changed)
             if not isinstance(widget, QComboBox):
                 field_layout.addWidget(widget)
             else:
@@ -9024,6 +9748,16 @@ class MessageViewerTab(QWidget):
                     grid_col = 0
         layout.setRowStretch(grid_row + 1, 1)
         self.compose_field_scroll.setWidget(container)
+        self._apply_compose_expect_view_state()
+
+    def _on_compose_form_field_changed(self, *_args) -> None:
+        if (
+            str(getattr(self, "_compose_mode", "nbems") or "nbems") == "spotter"
+            and not bool(getattr(self, "_compose_spotter_source_loading", False))
+            and int(getattr(self, "_compose_spotter_expect_active_id", 0) or 0) > 0
+        ):
+            self._compose_spotter_working_response_dirty = True
+        self._update_compose_preview()
 
     def _compose_field_values(self) -> Dict[str, str]:
         values: Dict[str, str] = {}
@@ -9388,35 +10122,107 @@ class MessageViewerTab(QWidget):
                 return {"label": str(data.get("label", "") or "").strip(), "key": key_text}
         return {}
 
-    def _compose_spotter_command(self) -> str:
-        message_text = self._compose_spotter_message_text(sign_for_target=True)
+    def _compose_spotter_command(self, *, refresh_datecode: bool = False) -> str:
+        message_text = self._compose_spotter_message_text(
+            sign_for_target=True,
+            refresh_datecode=refresh_datecode,
+        )
         target = self._compose_rf_target_text(self.compose_js8_target_edit.text()) if hasattr(self, "compose_js8_target_edit") else ""
         return " ".join(part for part in (target, message_text) if part).strip()
 
-    def _compose_spotter_message_text(self, *, sign_for_target: bool = False) -> str:
+    def _compose_spotter_message_text(
+        self,
+        *,
+        sign_for_target: bool = False,
+        refresh_datecode: bool = False,
+    ) -> str:
         form_data = self.compose_form_combo.currentData() if hasattr(self, "compose_form_combo") else None
+        code = ""
         if not isinstance(form_data, dict) or form_data.get("kind") != "spotter_form":
-            return ""
+            if (
+                int(getattr(self, "_compose_spotter_expect_active_id", 0) or 0) > 0
+                and str(getattr(self, "_compose_spotter_working_response", "") or "").strip()
+            ):
+                active_key = ""
+                for row in getattr(self, "_compose_spotter_expect_entries", []) or []:
+                    try:
+                        if int(row.get("id", 0) or 0) == int(self._compose_spotter_expect_active_id):
+                            active_key = str(row.get("expect_key", "") or "").strip().upper()
+                            break
+                    except (TypeError, ValueError):
+                        continue
+                if active_key:
+                    code = active_key
+            if not code:
+                return ""
+        else:
+            code = str(form_data.get("code", "") or "").strip().upper()
         target = self._compose_rf_target_text(self.compose_js8_target_edit.text()) if hasattr(self, "compose_js8_target_edit") else ""
-        code = str(form_data.get("code", "") or "").strip().upper()
-        values = self._compose_field_values()
-        responses = [str(values.get(field.key, "") or "").strip() for field in self._compose_field_rows]
-        response_text = "".join(responses)
-        message_text = " ".join(part for part in (code, response_text) if part).strip()
+        if (
+            int(getattr(self, "_compose_spotter_expect_active_id", 0) or 0) > 0
+            and not bool(getattr(self, "_compose_spotter_working_response_dirty", False))
+            and str(getattr(self, "_compose_spotter_working_response", "") or "").strip()
+        ):
+            _saved_target, message_text = self._compose_spotter_expect_response_parts(
+                self._compose_spotter_working_response,
+                code,
+            )
+        else:
+            values = self._compose_field_values()
+            if refresh_datecode:
+                values = self._compose_spotter_refresh_date_fields(values, self._compose_timestamp_utc)
+            responses = [str(values.get(field.key, "") or "").strip() for field in self._compose_field_rows]
+            response_text = "".join(responses)
+            message_text = " ".join(part for part in (code, response_text) if part).strip()
+        if refresh_datecode:
+            refreshed = update_mcform_response_datecode(
+                message_text,
+                code,
+                moment=self._compose_timestamp_utc,
+            )
+            if refreshed:
+                message_text = refreshed
         if sign_for_target and self._compose_js8_msg_auth_selected():
             selected_key = self._selected_compose_js8_msg_auth_key()
             if selected_key.get("key") and target and self._compose_operator_callsign():
+                trailing_datecode = ""
+                date_match = re.search(r"(?:^|\s)(#[A-Z0-9]{4})$", message_text, flags=re.IGNORECASE)
+                if date_match:
+                    trailing_datecode = date_match.group(1).upper()
+                auth_message = message_text
+                if trailing_datecode:
+                    auth_message = message_text[: date_match.start(1)].rstrip()
                 signed = sign_js8_text(
                     self._compose_operator_callsign(),
                     target,
-                    message_text,
+                    auth_message,
                     selected_key.get("key", ""),
                     include_datecode=bool(
                         hasattr(self, "compose_js8_auth_datecode_chk") and self.compose_js8_auth_datecode_chk.isChecked()
-                    ),
+                    ) and not bool(trailing_datecode),
+                    datecode=trailing_datecode,
                 )
                 message_text = signed.signed_text
         return message_text
+
+    @staticmethod
+    def _compose_spotter_refresh_date_fields(
+        values: Mapping[str, str],
+        moment: datetime.datetime,
+    ) -> Dict[str, str]:
+        """Copy field values and refresh recognized MCForm date fields only.
+
+        This helper never writes to widgets or the Expect store.  It is used
+        for preview/send serialization so the UI draft remains operator-owned
+        while an outgoing message gets a fresh date at final preparation.
+        """
+        updated = {str(key): str(value or "") for key, value in values.items()}
+        date_value = format_compose_zulu(moment)
+        for field_key, value in list(updated.items()):
+            normalized = re.sub(r"[^A-Z0-9]", "", str(field_key or "").upper())
+            if normalized in {"DA", "DATE", "DATEUTC", "DATETIME", "DTG", "TIMESTAMP"}:
+                updated[field_key] = date_value
+        return updated
 
     def _compose_has_valid_form_selection(self) -> bool:
         data = self.compose_form_combo.currentData() if hasattr(self, "compose_form_combo") else None
@@ -9888,10 +10694,46 @@ class MessageViewerTab(QWidget):
 
     def _refresh_compose_context_label(self) -> None:
         intent = dict(getattr(self, "_compose_intent", {}) or {})
-        visible = bool(intent.get("source") == "map" and (intent.get("recipient_callsign") or intent.get("title")))
+        source = str(intent.get("source", "") or "").strip().lower()
+        expect_context = source in {
+            "fio_spotter_expect",
+            "fio_spotter_expect_view",
+            "fio_spotter_expect_create",
+            "fio_spotter_form_expect",
+        }
+        map_context = bool(source == "map" and (intent.get("recipient_callsign") or intent.get("title")))
+        visible = bool(expect_context or map_context)
         if not visible:
             if hasattr(self, "compose_context_row_widget"):
                 self.compose_context_row_widget.setVisible(False)
+            if hasattr(self, "compose_return_expect_btn"):
+                self.compose_return_expect_btn.setVisible(False)
+            return
+        if expect_context:
+            key = str(intent.get("expect_key", "") or "").strip().upper()
+            entry_id = int(intent.get("expect_entry_id", 0) or 0)
+            is_view = bool(intent.get("expect_view", False) and entry_id)
+            if entry_id:
+                detail = f"saved entry {entry_id}"
+            else:
+                detail = "new response"
+            text = f"Opened from Expect: {key or 'MCF form'} · {detail}"
+            if is_view:
+                text += (
+                    " · editing a working copy"
+                    if bool(getattr(self, "_compose_expect_view_editing", True)) else
+                    " · view only"
+                )
+            if hasattr(self, "compose_context_label"):
+                self.compose_context_label.setText(text)
+            if hasattr(self, "compose_clear_context_btn"):
+                self.compose_clear_context_btn.setVisible(False)
+            if hasattr(self, "compose_return_expect_btn"):
+                self.compose_return_expect_btn.setVisible(True)
+            if hasattr(self, "compose_edit_expect_copy_btn"):
+                self.compose_edit_expect_copy_btn.setVisible(self._expect_view_is_read_only())
+            if hasattr(self, "compose_context_row_widget"):
+                self.compose_context_row_widget.setVisible(True)
             return
         target = str(intent.get("recipient_callsign") or intent.get("target") or "").strip().upper()
         source = str(intent.get("source_label") or intent.get("last_heard_source") or "").strip()
@@ -9905,6 +10747,27 @@ class MessageViewerTab(QWidget):
             self.compose_context_label.setText(" | ".join(bits))
         if hasattr(self, "compose_context_row_widget"):
             self.compose_context_row_widget.setVisible(True)
+        if hasattr(self, "compose_clear_context_btn"):
+            self.compose_clear_context_btn.setVisible(True)
+        if hasattr(self, "compose_return_expect_btn"):
+            self.compose_return_expect_btn.setVisible(False)
+        if hasattr(self, "compose_edit_expect_copy_btn"):
+            self.compose_edit_expect_copy_btn.setVisible(False)
+
+    def _return_to_expect(self) -> None:
+        """Return to Expect without persisting the Compose working copy."""
+        intent = dict(getattr(self, "_compose_intent", {}) or {})
+        entry_id = int(intent.get("expect_entry_id", 0) or 0)
+        expect_key = str(intent.get("expect_key", "") or "").strip().upper()
+        host = self.window()
+        callback = getattr(host, "open_fio_spotter_expect", None)
+        if callable(callback):
+            callback(entry_id=entry_id, expect_key=expect_key)
+            return
+        self._set_compose_status(
+            "Return to Expect is unavailable in this window; the working copy remains unsaved.",
+            role="warning",
+        )
 
     def _clear_compose_intent(self) -> None:
         self._compose_intent = {}
@@ -10048,13 +10911,19 @@ class MessageViewerTab(QWidget):
     def prefill_compose_intent(self, intent: Mapping[str, object]) -> None:
         data = compose_intent_from_mapping(intent).as_dict()
         self._compose_intent = data
+        self._compose_expect_view_editing = not bool(data.get("expect_view", False))
         mode = str(data.get("transport") or data.get("mode") or "js8").strip().lower()
+        requested_spotter_form = str(
+            intent.get("spotter_form_code") or data.get("spotter_form_code") or ""
+        ).strip().upper()
+        if mode in {"spotter", "js8spotter", "fiospotter"}:
+            self._compose_spotter_requested_form_code = requested_spotter_form
         if hasattr(self, "compose_mode_selector"):
             row = (
                 3
                 if mode in {"commstat", "commstat_rf"}
                 else 2
-                if mode in {"spotter", "js8spotter"}
+                if mode in {"spotter", "js8spotter", "fiospotter"}
                 else 1
                 if mode in {"js8", "js8call", "message", "traffic"}
                 else 0
@@ -10070,6 +10939,23 @@ class MessageViewerTab(QWidget):
         body = str(data.get("body") or data.get("message") or "").strip()
         if body and hasattr(self, "compose_js8_plain_text_edit"):
             self.compose_js8_plain_text_edit.setPlainText(body)
+        expect_entry_id = int(data.get("expect_entry_id", 0) or 0)
+        if mode in {"spotter", "js8spotter", "fiospotter"} and expect_entry_id > 0:
+            self._refresh_compose_spotter_expect_entries()
+            combo = getattr(self, "compose_spotter_source_combo", None)
+            if isinstance(combo, QComboBox):
+                for index in range(combo.count()):
+                    item = combo.itemData(index)
+                    entry = item.get("entry", {}) if isinstance(item, dict) else {}
+                    if isinstance(entry, dict) and int(entry.get("id", 0) or 0) == expect_entry_id:
+                        if combo.currentIndex() == index:
+                            self._on_compose_spotter_source_changed()
+                        else:
+                            combo.setCurrentIndex(index)
+                        break
+        if requested_spotter_form:
+            self._select_compose_spotter_form_code(requested_spotter_form)
+        self._apply_compose_expect_view_state()
         self._refresh_compose_radio_targets(force=True)
         last_heard = self._compose_last_heard_from_intent()
         if last_heard is not None:
@@ -10681,6 +11567,8 @@ class MessageViewerTab(QWidget):
             QTimer.singleShot(0, lambda: self._refresh_compose_layout_geometry_if_needed(force=True))
             QTimer.singleShot(80, lambda: self._refresh_compose_layout_geometry_if_needed(force=True))
         self._update_compose_preview()
+        if compose_active and str(getattr(self, "_compose_mode", "nbems") or "nbems") == "spotter":
+            self._queue_compose_spotter_scroll_reset()
 
     def _open_messages_help(self) -> None:
         context_key = "messages.compose" if self._messages_mode == "Compose" else "tab.messages"
@@ -11405,6 +12293,14 @@ class MessageViewerTab(QWidget):
                     finally:
                         widget.blockSignals(blocked)
             elif mode == "spotter":
+                self._clear_compose_spotter_working_response()
+                source_combo = getattr(self, "compose_spotter_source_combo", None)
+                if isinstance(source_combo, QComboBox):
+                    source_combo.blockSignals(True)
+                    try:
+                        source_combo.setCurrentIndex(0)
+                    finally:
+                        source_combo.blockSignals(False)
                 self._compose_set_line_text(getattr(self, "compose_js8_target_edit", None), "")
                 self._compose_set_checked(getattr(self, "compose_js8_sign_chk", None), False)
                 self._compose_set_checked(getattr(self, "compose_js8_auth_datecode_chk", None), False)
@@ -11717,7 +12613,13 @@ class MessageViewerTab(QWidget):
         js8_mode = str(getattr(self, "_compose_mode", "nbems") or "nbems") == "js8"
         spotter_mode = str(getattr(self, "_compose_mode", "nbems") or "nbems") == "spotter"
         commstat_mode = str(getattr(self, "_compose_mode", "nbems") or "nbems") == "commstat_rf"
+        spotter_saved_selected = bool(
+            int(getattr(self, "_compose_spotter_expect_active_id", 0) or 0) > 0
+            and str(getattr(self, "_compose_spotter_working_response", "") or "").strip()
+        )
         spotter_selected = spotter_mode and self._compose_template_kind == "spotter"
+        if spotter_saved_selected:
+            spotter_selected = True
         js8_plain_command = self._compose_plain_js8_command() if js8_mode else ""
         commstat_command = ""
         commstat_issue = ""
@@ -11878,9 +12780,36 @@ class MessageViewerTab(QWidget):
                     self.compose_js8_sign_chk.blockSignals(previous_blocked)
         if hasattr(self, "compose_expect_row_widget"):
             self.compose_expect_row_widget.setVisible(spotter_mode)
+        if hasattr(self, "compose_save_expect_btn"):
+            expect_active = bool(int(getattr(self, "_compose_spotter_expect_active_id", 0) or 0))
+            self.compose_save_expect_btn.setText(
+                "Save changes to Expect" if expect_active else "Save to Expect"
+            )
+            self.compose_save_expect_btn.setToolTip(
+                "Persist this working copy to the selected Expect entry. Access policy and automation state are preserved."
+                if expect_active else
+                "Create a disabled, Saved-only Expect response. Review its access policy in Expect before enabling Auto reply."
+            )
+        if hasattr(self, "compose_spotter_source_row_widget"):
+            self.compose_spotter_source_row_widget.setVisible(spotter_mode)
+        if hasattr(self, "compose_spotter_source_refresh_btn"):
+            self.compose_spotter_source_refresh_btn.setVisible(spotter_mode)
+            self.compose_spotter_source_refresh_btn.setStyleSheet(button_style("muted", resolve_theme(self.settings)))
+        if hasattr(self, "compose_spotter_source_hint"):
+            self.compose_spotter_source_hint.setStyleSheet(
+                label_style("muted", resolve_theme(self.settings), weight=600)
+            )
         if hasattr(self, "compose_save_expect_inline_btn"):
             self.compose_save_expect_inline_btn.setVisible(False)
-        spotter_command = self._compose_spotter_command() if spotter_selected else ""
+        # Preview uses the same datecode refresh and serializer as Send Now;
+        # the timestamp is refreshed by the final-send path immediately before
+        # this method runs, so the displayed payload never drifts from the
+        # command handed to the guarded worker.
+        expect_view = bool(
+            dict(getattr(self, "_compose_intent", {}) or {}).get("expect_view", False)
+            and not bool(getattr(self, "_compose_spotter_working_response_dirty", False))
+        )
+        spotter_command = self._compose_spotter_command(refresh_datecode=not expect_view) if spotter_selected else ""
         if hasattr(self, "compose_js8_target_row_widget"):
             self.compose_js8_target_row_widget.setVisible(js8_mode or spotter_mode)
         if hasattr(self, "compose_js8_target_label"):
@@ -12014,19 +12943,33 @@ class MessageViewerTab(QWidget):
             self.compose_send_js8_btn.setEnabled(can_send_js8)
             source_label = self._compose_radio_short_label(profile) if isinstance(profile, dict) else radio_label
             js8_count = len([target for target in self._compose_radio_targets if "JS8Call" in tuple(target.capabilities)])
-            self.compose_send_js8_btn.setText(f"Send Now: {source_label}" if js8_count > 1 and source_label else "Send Now")
+            if spotter_saved_selected:
+                saved_key = "Saved response"
+                for row in getattr(self, "_compose_spotter_expect_entries", []) or []:
+                    try:
+                        if int(row.get("id", 0) or 0) == int(self._compose_spotter_expect_active_id):
+                            saved_key = str(row.get("expect_key", "") or "Saved response").strip().upper()
+                            break
+                    except (TypeError, ValueError):
+                        continue
+                self.compose_send_js8_btn.setText(f"Send Now: {saved_key}")
+            else:
+                self.compose_send_js8_btn.setText(f"Send Now: {source_label}" if js8_count > 1 and source_label else "Send Now")
             if js8_mode:
                 self.compose_send_js8_btn.setToolTip("Send short JS8Call traffic after target-state and radio guidance preflight.")
             elif commstat_mode:
                 self.compose_send_js8_btn.setToolTip("Send short CommStat RF traffic through the selected JS8Call radio.")
             else:
-                self.compose_send_js8_btn.setToolTip("Send the selected FIOSpotter form now through JS8Call after safety preflight.")
+                self.compose_send_js8_btn.setToolTip(
+                    "Send the selected saved response or FIOSpotter form now through JS8Call after safety preflight."
+                )
             self.compose_send_js8_btn.setStyleSheet(button_style("primary" if can_send_js8 else "muted", theme))
         if hasattr(self, "compose_save_expect_btn"):
             self.compose_save_expect_btn.setEnabled(bool(
                 spotter_selected
                 and spotter_command
                 and radio_target is not None
+                and not self._expect_view_is_read_only()
                 and ((not self._compose_js8_msg_auth_selected()) or bool(self._selected_compose_js8_msg_auth_key()))
             ))
             self.compose_save_expect_btn.setStyleSheet(
@@ -12077,7 +13020,11 @@ class MessageViewerTab(QWidget):
         mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
         js8_mode = mode == "js8"
         commstat_mode = mode == "commstat_rf"
-        if not (js8_mode or commstat_mode) and self._compose_template_kind != "spotter":
+        has_saved_spotter = bool(
+            int(getattr(self, "_compose_spotter_expect_active_id", 0) or 0) > 0
+            and str(getattr(self, "_compose_spotter_working_response", "") or "").strip()
+        )
+        if not (js8_mode or commstat_mode) and self._compose_template_kind != "spotter" and not has_saved_spotter:
             self._set_compose_status("Select a FIOSpotter form before sending via JS8Call.", role="warning")
             return
         try:
@@ -12086,7 +13033,7 @@ class MessageViewerTab(QWidget):
                 if js8_mode
                 else self._compose_commstat_rf_text()
                 if commstat_mode
-                else self._compose_spotter_command()
+                else self._compose_spotter_command(refresh_datecode=True)
             )
         except Exception as exc:
             label = "CommStat RF" if commstat_mode else "JS8Call"
@@ -12115,6 +13062,17 @@ class MessageViewerTab(QWidget):
             return
         if not self._compose_confirm_peer_schedule_before_send():
             return
+        if not (js8_mode or commstat_mode):
+            # Refresh only the outgoing copy.  The saved Expect row and the
+            # editable working draft remain unchanged.  Updating the preview
+            # immediately after this snapshot keeps what the operator sees
+            # byte-for-byte aligned with the guarded worker command.
+            self._compose_timestamp_utc = datetime.datetime.now(datetime.timezone.utc)
+            command = self._compose_spotter_command(refresh_datecode=True)
+            if not command:
+                self._set_compose_status("Complete the Spotter response before sending.", role="warning")
+                return
+            self._update_compose_preview()
         endpoint = js8_endpoint_from_radio_profile(radio_target.profile, fallback_settings=self.settings)
         label = "JS8Call" if js8_mode else "CommStat RF" if commstat_mode else "FIOSpotter"
         radio_short_label = self._compose_radio_target_short_label(radio_target) or radio_target.label
@@ -12229,64 +13187,97 @@ class MessageViewerTab(QWidget):
         )
         self._update_compose_preview()
     def _save_compose_js8_expect(self) -> None:
-        if self._compose_template_kind != "spotter":
+        active_id = int(getattr(self, "_compose_spotter_expect_active_id", 0) or 0)
+        if self._compose_template_kind != "spotter" and active_id <= 0:
             self._set_compose_status("Select a FIOSpotter form before saving to Expect.", role="warning")
             return
         message_text = self._compose_spotter_message_text(sign_for_target=False)
         form_data = self.compose_form_combo.currentData() if hasattr(self, "compose_form_combo") else None
-        expect_key = str((form_data or {}).get("code", "") or "").strip().upper() if isinstance(form_data, dict) else ""
+        active_entry: Dict[str, object] = {}
+        for row in getattr(self, "_compose_spotter_expect_entries", []) or []:
+            try:
+                if int(row.get("id", 0) or 0) == active_id:
+                    active_entry = dict(row)
+                    break
+            except (TypeError, ValueError):
+                continue
+        expect_key = (
+            str(active_entry.get("expect_key", "") or "").strip().upper()
+            if active_entry else
+            str((form_data or {}).get("code", "") or "").strip().upper()
+            if isinstance(form_data, dict) else ""
+        )
         if not message_text or not expect_key:
-            self._set_compose_status("Enter a JS8 target and complete the Spotter form before saving to Expect.", role="warning")
-            return
-        if not self._compose_radio_targets_loaded:
-            self._refresh_compose_radio_targets()
-        radio_target = self._selected_compose_radio_target()
-        if radio_target is None:
-            self._set_compose_status("Select a radio before saving to Expect.", role="warning")
+            self._set_compose_status("Complete the Spotter form before saving to Expect.", role="warning")
             return
         include_datecode = bool(
             hasattr(self, "compose_js8_auth_datecode_chk") and self.compose_js8_auth_datecode_chk.isChecked()
         )
         stored_datecode = encode_short_datecode(self._compose_timestamp_utc) if include_datecode else ""
+        if active_entry:
+            # Editing is explicitly opt-in. Preserve the existing access,
+            # policy, routing and auto-reply state; only the response payload
+            # (and optional signing datecode) comes from this working copy.
+            payload = dict(active_entry)
+            payload.update({
+                "expect_key": expect_key,
+                "response_text": message_text,
+                "msg_auth_include_datecode": include_datecode,
+                "msg_auth_datecode": stored_datecode if include_datecode else active_entry.get("msg_auth_datecode", ""),
+                "import_source": "fio-compose-expect-edit",
+            })
+        else:
+            # New Compose-created Expect entries are always disabled/saved-only
+            # until the operator reviews policy and deliberately enables them
+            # in Expect.
+            payload = {
+                "source_radio_id": "",
+                "source_scope": "all",
+                "js8_instance_id": "",
+                "expect_key": expect_key,
+                "response_text": message_text,
+                "msg_auth_sign_enabled": self._compose_js8_msg_auth_selected(),
+                "msg_auth_sign_callsign": self._compose_operator_callsign(),
+                "msg_auth_include_datecode": include_datecode,
+                "msg_auth_datecode": stored_datecode,
+                "allowed_groups": [],
+                "enabled": False,
+                "auto_reply_enabled": False,
+                "unattended_auto_reply_enabled": False,
+                "import_source": "fio-compose-js8spotter",
+                "create_only": True,
+            }
         try:
-            result = save_expect_entry(
-                {
-                    "source_radio_id": "",
-                    "source_scope": "all",
-                    "js8_instance_id": "",
-                    "expect_key": expect_key,
-                    "response_text": message_text,
-                    "msg_auth_sign_enabled": self._compose_js8_msg_auth_selected(),
-                    "msg_auth_sign_callsign": self._compose_operator_callsign(),
-                    "msg_auth_include_datecode": include_datecode,
-                    "msg_auth_datecode": stored_datecode,
-                    "allowed_groups": [self._compose_rf_target_text(self.compose_js8_target_edit.text())]
-                    if hasattr(self, "compose_js8_target_edit")
-                    and self._is_message_group_candidate(
-                        self.compose_js8_target_edit.text(),
-                        configured_groups=self._configured_message_group_names(),
-                    )
-                    else [],
-                    "enabled": False,
-                    "auto_reply_enabled": False,
-                    "unattended_auto_reply_enabled": False,
-                    "import_source": "fio-compose-js8spotter",
-                    "create_only": True,
-                }
-            )
+            result = save_expect_entry(payload)
         except ExpectEntryExistsError as exc:
             self._set_compose_status(
-                f"Expect rule {exc.expect_key} already exists. Open FIO Spotter > Expect to review it; "
+                f"Expect rule {exc.expect_key} already exists. Opening FIO Spotter to review it; "
                 "Compose did not replace its access or auto-reply policy.",
                 role="warning",
             )
+            self._open_saved_expect_rule(entry_id=exc.entry_id, expect_key=exc.expect_key)
             return
         except Exception as exc:
             self._set_compose_status(f"Could not save Expect entry: {exc}", role="warning")
             return
-        action = "Created" if result.created else "Updated"
         self._set_compose_status(
-            f"{action} disabled Expect draft for {result.expect_key}. Review policy before enabling auto-reply.",
+            (
+                f"Created Saved-only Expect draft for {result.expect_key}. Opening it for policy review."
+                if result.created else
+                f"Updated Expect response {result.expect_key}. Its access policy and automation state were preserved."
+            ),
+            role="success",
+        )
+        self._open_saved_expect_rule(entry_id=result.id, expect_key=result.expect_key)
+
+    def _open_saved_expect_rule(self, *, entry_id: int, expect_key: str) -> None:
+        host = self.window()
+        callback = getattr(host, "open_fio_spotter_expect", None)
+        if callable(callback):
+            callback(entry_id=entry_id, expect_key=expect_key)
+            return
+        self._set_compose_status(
+            f"Saved {expect_key}. Open FIO Spotter > Expect to review access before enabling it.",
             role="success",
         )
 

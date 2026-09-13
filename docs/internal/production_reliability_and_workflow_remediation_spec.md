@@ -665,6 +665,146 @@ attention, and Map pins so different screens cannot disagree. Messages remains
 the complete traffic triage surface; FIO Spotter is the administration and
 focused operational browser for Spotter-specific behavior.
 
+#### FIO Spotter RF boundary, summarized intelligence, and form administration
+
+FIO Spotter is intentionally a concise **local RF observation and RF automation
+workspace**. It is not another copy of the complete Messages feed. Activity may
+show traffic that FIO received through a configured local JS8Call instance,
+including a CommStat-shaped report heard through that RF path. An internet-only
+CommStat record, aggregated SitRep, manual record, or imported historical row
+must not enter Spotter Activity merely because it exists in the shared message
+projection. Messages, Map, and broader Message Intelligence may still use that
+evidence with its real provenance.
+
+Source-family labels alone are not proof of local RF reception. Runtime
+Spotter/JS8 rows retain the receiving radio, JS8 instance, ingest origin, and
+source reference. Imported legacy Spotter rows remain visibly imported and are
+not relabeled as newly heard RF. When a shared CommStat artifact has both RF and
+internet evidence, Spotter eligibility is based on immutable local receive
+evidence, not a mutable or merged transport label. Until that provenance is
+available, FIO prefers omission over claiming an internet-only record was heard.
+
+Activity stays summary-first. For a CommStat report heard through JS8Call:
+
+- `Form` reads `CommStat`; protocol subtype and raw syntax remain detail.
+- the compact `Summary` reads `Green`, `Yellow`, `Red`, or `Unknown` plus only
+  meaningful exceptions; it never reuses read/unread state;
+- the primary summary names the status and meaningful exception or scope rather
+  than repeating the encoded CommStat string;
+- `Source` remains a concise human label such as `JS8Call` or the receiving
+  radio, with exact application-instance and transport evidence in detail; and
+- the existing Message Intelligence action/topic vocabulary controls the
+  summary strip and table so Activity, Inbox, Map, and Ops Center do not invent
+  competing interpretations.
+
+The operator-facing default remains small: one bounded recent page, a few
+plain-language filter chips, a compact status summary, and progressive detail.
+Raw wire strings, source keys, projection terms, and redundant status prose do
+not become permanent columns. Activity filtering is in-memory over the loaded
+page and performs no database, filesystem, network, or parsing work during
+filter clicks, selection, paint, theme changes, or resize.
+
+FIO Spotter is the authoritative administration home for saved form responses,
+Expect rules, and caller-access policies. Messages Compose remains the home for
+an operator composing and sending one message. Its Spotter handoff is phrased as
+`Configure automatic response in FIO Spotter`, creates or identifies a disabled
+draft, and opens FIO Spotter > Expect with that draft selected. It does not leave
+the operator with an invisible external write. An already-built Expect page
+uses explicit revision invalidation on activation; it never polls. A duplicate
+handoff selects the existing entry without replacing its policy or response.
+
+Forms provides two clear actions for a selected known form:
+
+- `Compose and Send` hands the form to Messages for a deliberate transmission;
+- `Make Available by E?` opens or creates its Expect draft and keeps the
+  operator in the FIO Spotter policy workflow.
+
+The form catalog remains distinct from routing mappings: availability by E? is
+shown as a concise `Not available`, `Draft`, `Active`, or `Paused` state. Drafts
+remain visible even when disabled or missing a caller policy. The current rule
+editor leads with response and access, while reusable-policy administration and
+request/reply history are collapsed until requested. A later editor redesign
+may use the guided sequence `Response`, `Access`, `Safety`, and `Review &
+Activate`; that larger workflow is not required to make this correction gate
+truthful.
+
+#### Bulk refresh of saved Expect form dates
+
+The Expect page provides one deliberate bulk action named **Update Expect Form Dates**.
+JS8Spotter MCForm responses carry a compact `#XXXX` month/day/time code so a
+recipient can judge when the stored response was refreshed. Rebuilding every
+saved response by hand is unnecessary operator work.
+
+The action follows these rules:
+
+- it previews the number and names/tokens of eligible saved form responses and
+  asks for confirmation before changing them;
+- one current local-time date code is computed for the entire operation, so a
+  bulk refresh cannot straddle different minute codes;
+- only canonical static `F!nnn`/`F!nnnA` rules whose response begins with the
+  same form token, optionally after one valid JS8 destination, are eligible;
+  dynamic `Q`, free-text, signed, mismatched, or ambiguous rules are skipped and
+  counted without modification;
+- a valid trailing MCForm date code is replaced; when an otherwise valid form
+  response has no date code, the current code is appended;
+- when the rule separately uses a persisted MsgAuth date code, that stored date
+  code is refreshed in the same transaction so a later signature covers the
+  same advertised date;
+- caller policies, radio scope, enabled/paused state, unattended permission,
+  reply limits, cooldown, expiry, send/request history, and response content
+  other than the date code remain unchanged;
+- the operation never transmits, never enables a draft, and never clears reply
+  history; and
+- every changed rule receives a management-audit record. The UI reports changed
+  and skipped counts, refreshes the bounded list once after commit, and retains
+  the selected rule when possible.
+
+The core bulk update is one short transaction with deterministic validation and
+no Qt dependency. It must not loop through independent connections or refresh
+the table per row. The UI performs no background polling; a click issues one
+bounded preview read and, after confirmation, one bounded write transaction.
+
+#### Store and Forward direction
+
+SuperSpotter's Store and Forward workflow is valuable and should become a
+familiar FIO Spotter tab, but its core remains a protocol-neutral **Message
+Relay Queue**, not a Spotter-only message silo. This is a separately gated
+package after the Activity and Forms/Expect workflow above pass. Its initial JS8
+adapter uses explicit operator-created, callsign-only held messages; finite
+expiry; durable dedupe and delivery claims; bounded notification retry and
+per-recipient cooldown; visible audit; and the normal endpoint-scoped JS8,
+selected-target, RF Guard, PTT/busy, hold, and schedule protections. Automatic
+`message waiting` notification defaults off. Remote third-party storage and
+group delivery remain out of the first package.
+
+#### FIO Spotter workflow correction exit gate
+
+- A locally received JS8 CommStat report appears in Activity as `CommStat` with
+  the same normalized Green/Yellow/Red/Unknown intelligence used by Messages.
+- Internet-only CommStat and imported historical rows do not masquerade as
+  newly heard RF Activity; provenance remains inspectable.
+- A Compose handoff becomes visible in Expect immediately on navigation and is
+  selected without a restart, polling timer, or policy overwrite.
+- Forms can open both the manual Compose path and the automatic-response policy
+  path with human form identity preserved.
+- Update Expect Form Dates previews and atomically updates every eligible static form
+  using one deterministic date code; invalid/dynamic rules are unchanged and
+  reported as skipped; no transmission or enablement occurs.
+- Activity and Expect pass compact/wide Normal/Large Text and light/dark layout
+  checks without clipped primary actions or page-level horizontal scrolling.
+- Focused projection, Expect store, access-policy, FLAMP Q, selected-target,
+  message-intelligence, and lazy-activation regressions pass; Activity remains a
+  bounded cached query and no new idle timer or render-path I/O is introduced.
+
+The completed follow-on interaction and runtime contract is
+`fio_spotter_operator_workflow_refinement_spec.md`. It supersedes the earlier
+collapsed reusable-policy editor with a dedicated `Access Policies` tab,
+reduces Expect to one visible per-response `Auto reply` state plus one station
+service pause, adds guarded saved-response Compose and Send now, and makes
+Activity-to-Watch matching real through a cached background projection hook.
+Watch match persistence is additive and idempotent by watch/message identity;
+failure remains advisory and cannot hold message ingest or the UI.
+
 All unattended FIO Spotter Expect transmissions use one selected-target safety
 contract. Immediately before preflight, FIO makes a best-effort compatibility
 clear of any stale callsign selected in the receiving JS8Call instance inside

@@ -321,6 +321,8 @@ def test_expect_rule_editor_keeps_optional_policy_default_and_round_trips_truste
 
         assert tab.expect_policy.itemData(0) == 0
         assert tab.expect_policy.currentData() == 0
+        tab.tabs.setCurrentIndex(3)
+        app.processEvents()
         assert tab.policy_manage.currentData() == 0
         assert tab.expect_groups._completion_values == ["@MAGNET", "@MR08"]
         assert tab.expect_trusted_groups._completion_values == ["MAGNET", "MR08"]
@@ -336,6 +338,8 @@ def test_expect_rule_editor_keeps_optional_policy_default_and_round_trips_truste
         policies = spotter_ui.list_expect_allow_policies()
         assert len(policies) == 1
         policy_id = int(policies[0]["id"])
+        tab.tabs.setCurrentIndex(2)
+        app.processEvents()
         assert tab.expect_policy.findData(policy_id) >= 0
 
         tab.expect_policy.setCurrentIndex(tab.expect_policy.findData(policy_id))
@@ -379,10 +383,14 @@ def test_repeated_group_lookup_clears_entry_and_keeps_all_accepted_chips(monkeyp
     )
     tab = FioSpotterTab(settings=_Settings())
     try:
-        tab.tabs.setCurrentIndex(2)
+        # Named Access Policies now own caller/group lookup.  The legacy
+        # Expect inline-access editor is intentionally collapsed and hidden for
+        # new responses, so exercise the same token component in its active
+        # policy-first workspace.
+        tab.tabs.setCurrentIndex(3)
         tab.show()
         app.processEvents()
-        editor = tab.expect_trusted_groups
+        editor = tab.policy_trusted_groups
         assert editor.completer() is editor._token_completer
         assert editor._token_completer.widget() is editor.input
         editor.setFocus()

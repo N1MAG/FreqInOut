@@ -266,6 +266,7 @@ class MainWindow(QMainWindow):
         self._station_command_refresh_pending = False
         self._station_command_refresh_force = False
         self._station_command_layout_pending = False
+        self._action_feedback_geometry_pending = False
         self._settings_saved_refresh_pending = False
         self._help_dialog_settle_until = 0.0
         self._ui_resume_settle_timer = QTimer(self)
@@ -806,6 +807,8 @@ class MainWindow(QMainWindow):
         # Right-side layout (notice bar + stacked content)
         right_container = QWidget()
         right_layout = QVBoxLayout(right_container)
+        self._right_shell_container = right_container
+        self._right_shell_layout = right_layout
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(10)
 
@@ -850,7 +853,10 @@ class MainWindow(QMainWindow):
         self.station_command_bar = QFrame(right_container)
         self.station_command_bar.setObjectName("stationCommandBar")
         self.station_command_bar.setAccessibleName("Station command context")
-        self.station_command_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        # The bar's natural height changes with responsive/card mode.  Minimum
+        # prevents a transient sibling banner from squeezing it below its
+        # current size hint while still allowing the shell to grow as needed.
+        self.station_command_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self.station_command_layout = QGridLayout(self.station_command_bar)
         command_layout = self.station_command_layout
         command_layout.setContentsMargins(10, 8, 10, 8)
@@ -1387,6 +1393,55 @@ class MainWindow(QMainWindow):
             self._action_feedback_clear_timer.stop()
         if hasattr(self, "action_feedback_banner"):
             self.action_feedback_banner.setVisible(False)
+            self._schedule_action_feedback_geometry_sync()
+
+    def _schedule_action_feedback_geometry_sync(self) -> None:
+        """Coalesce shell geometry repair after a feedback visibility change."""
+        if bool(getattr(self, "_action_feedback_geometry_pending", False)):
+            return
+        self._action_feedback_geometry_pending = True
+        QTimer.singleShot(0, self._flush_action_feedback_geometry_sync)
+
+    def _flush_action_feedback_geometry_sync(self) -> None:
+        """Release stale sibling geometry without refreshing station data."""
+        self._action_feedback_geometry_pending = False
+        if bool(getattr(self, "_shutting_down", False)):
+            return
+        banner = getattr(self, "action_feedback_banner", None)
+        bar = getattr(self, "station_command_bar", None)
+        shell = getattr(self, "_right_shell_container", None)
+        shell_layout = getattr(self, "_right_shell_layout", None)
+        banner_update_geometry = getattr(banner, "updateGeometry", None)
+        if callable(banner_update_geometry):
+            banner_update_geometry()
+        if bar is not None:
+            bar_layout_getter = getattr(bar, "layout", None)
+            bar_layout = bar_layout_getter() if callable(bar_layout_getter) else None
+            if bar_layout is not None:
+                bar_layout.invalidate()
+                bar_layout.activate()
+            # The internal layout mode may be unchanged even though Linux has
+            # cached a compressed sibling allocation. Reapply the same cached
+            # widget arrangement so its natural size hint is republished.
+            self._station_command_layout_signature = None
+            apply_layout = getattr(self, "_apply_station_command_bar_layout", None)
+            if callable(apply_layout):
+                apply_layout(force=True)
+            bar_update_geometry = getattr(bar, "updateGeometry", None)
+            if callable(bar_update_geometry):
+                bar_update_geometry()
+        if shell_layout is not None:
+            shell_layout.invalidate()
+            shell_layout.activate()
+        shell_update_geometry = getattr(shell, "updateGeometry", None)
+        if callable(shell_update_geometry):
+            shell_update_geometry()
+        shell_update = getattr(shell, "update", None)
+        if callable(shell_update):
+            shell_update()
+        bar_update = getattr(bar, "update", None)
+        if callable(bar_update):
+            bar_update()
 
     @staticmethod
     def _action_feedback_banner_scopes() -> set[str]:
@@ -1408,6 +1463,7 @@ class MainWindow(QMainWindow):
         self.action_feedback_label.setToolTip(detail or summary)
         self.action_feedback_banner.setStyleSheet(self._action_feedback_banner_style(status))
         self.action_feedback_banner.setVisible(True)
+        self._schedule_action_feedback_geometry_sync()
         timeout_ms = self._action_feedback_display_ms(status)
         if timeout_ms > 0:
             self._action_feedback_clear_timer.start(timeout_ms)
@@ -4407,6 +4463,13 @@ class MainWindow(QMainWindow):
         if idx >= 0:
             self._set_screen(idx)
 
+    def open_fio_spotter_expect(self, *, entry_id: int = 0, expect_key: str = "") -> None:
+        """Open fresh, authoritative Expect administration for one rule."""
+        self.open_fio_spotter()
+        tab = getattr(self, "fio_spotter_tab", None)
+        if tab is not None and hasattr(tab, "open_expect_entry"):
+            tab.open_expect_entry(entry_id=entry_id, expect_key=expect_key)
+
     def open_resources_section(self, section: str | NavigationIntent = "frequency_catalog") -> None:
         """Open an implemented Resources route without exposing unfinished ones."""
         # ``resources.shortwave`` remains a typed contextual route even when a
@@ -5547,6 +5610,7 @@ class MainWindow(QMainWindow):
             self.fldigi_tab,
             self.js8_tab,
             self.message_viewer_tab,
+            self.fio_spotter_tab,
             self.log_tab,
             self.stations_map_tab,
             self.operator_history_tab,
@@ -5996,7 +6060,9 @@ class MainWindow(QMainWindow):
             tab = FioSpotterTab(
                 self,
                 settings=self.settings,
-                open_compose=lambda: self.open_messages_section("compose"),
+                open_compose=lambda intent=None: self.open_messages_section(
+                    "compose", compose_intent=intent
+                ),
                 open_inbox=lambda row: self.open_messages_section(
                     "inbox",
                     query_filter=str(row.get("from_call") or row.get("group_name") or ""),

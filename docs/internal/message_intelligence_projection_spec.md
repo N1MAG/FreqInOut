@@ -52,6 +52,16 @@ Required source fields:
   store-and-forward, trusted/untrusted hints.
 - `enabled`, `last_seen_utc`, `last_ingested_utc`.
 
+For FIO Spotter eligibility, a family or display label is not sufficient RF
+provenance. A record must retain immutable evidence of the local receive path,
+including receiving radio/application instance and ingest origin where
+available. Imported Spotter history is explicitly imported. CommStat artifacts
+may merge RF and internet evidence, so a mutable aggregate `transport_mode` or
+the legacy `CommStat RF` label must not be used alone to claim that FIO heard a
+record locally. Spotter can summarize a CommStat payload carried by a verified
+local JS8 receive row while Messages and Map continue to expose the broader
+multi-transport evidence set.
+
 ## External Reference Keys
 
 Each message may have multiple external references. A reference is unique by

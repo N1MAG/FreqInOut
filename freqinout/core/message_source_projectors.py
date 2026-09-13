@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from freqinout.core.group_utils import normalize_group_name
+from freqinout.core.commstat_sitrep import parse_commstat_message
 from freqinout.core.js8_message_policy import (
     JS8_MESSAGE_POLICY_VERSION,
     canonicalize_js8_payload,
@@ -17,7 +18,7 @@ from freqinout.core.js8_message_policy import (
     directed_js8_payload,
     unique_js8_analysis_text,
 )
-from freqinout.core.message_intelligence import analyze_spotter_text
+from freqinout.core.message_intelligence import analyze_commstat_fields, analyze_spotter_text
 from freqinout.core.message_file_metadata import cached_message_file_row_summary
 from freqinout.core.message_file_scanner import FileRecord, file_path_display, file_path_key
 from freqinout.core.message_projection_store import (
@@ -40,6 +41,8 @@ from freqinout.core.sqlite_utils import connect_sqlite, table_exists
 
 PROJECTOR_VERSION = 3
 FILE_PROJECTOR_VERSION = 4
+JS8_COMMSTAT_CLASSIFICATION_VERSION = 1
+SPOTTER_PROVENANCE_VERSION = 1
 DEFAULT_SOURCE_NATIVE_LIMIT = 5000
 _PROJECTION_WRITE_LOCK = threading.Lock()
 
@@ -446,7 +449,11 @@ def _project_js8_messages(
     fingerprint = ""
     if not targeted:
         fingerprint = _table_fingerprint(conn, "js8_messages", "COUNT(*)", "MAX(COALESCE(id, 0))", "MAX(COALESCE(source_id, 0))", "MAX(COALESCE(utc_ts, 0))", "MAX(COALESCE(read_ts, 0))")
-        fingerprint = content_hash(JS8_MESSAGE_POLICY_VERSION, fingerprint)
+        fingerprint = content_hash(
+            JS8_MESSAGE_POLICY_VERSION,
+            JS8_COMMSTAT_CLASSIFICATION_VERSION,
+            fingerprint,
+        )
         if _checkpoint_matches(conn, checkpoint_id, fingerprint, force=force):
             with conn:
                 return _reconcile_js8_projection_policy(conn, limit=limit)
@@ -502,6 +509,15 @@ def _project_js8_messages(
                 to_call=row["to_call"],
                 source_type="js8",
             )
+            commstat = _analyze_local_js8_commstat(
+                raw_payload=raw_payload,
+                decoded_payload=decoded_payload,
+                from_call=row["from_call"],
+                to_call=row["to_call"],
+                event_utc=_text(row["utc_str"]) or _utc_from_ts(event_ts),
+            )
+            if commstat is not None:
+                intelligence = commstat["intelligence"]
             source = MessageSourceRecord(
                 source_id=source_id,
                 source_family="js8",
@@ -520,6 +536,7 @@ def _project_js8_messages(
                 content_hash=content_hash(
                     PROJECTOR_VERSION,
                     JS8_MESSAGE_POLICY_VERSION,
+                    JS8_COMMSTAT_CLASSIFICATION_VERSION,
                     "js8",
                     external_key,
                     status,
@@ -530,10 +547,10 @@ def _project_js8_messages(
                 source_label=source.source_label,
                 radio_id=source.radio_id,
                 app_instance_id=source.app_instance_id,
-                message_type=_text(row["msg_type"]) or "MSG",
-                display_type="JS8",
-                status=status,
-                severity="info",
+                message_type=commstat["form_name"] if commstat is not None else (_text(row["msg_type"]) or "MSG"),
+                display_type="CommStat" if commstat is not None else "JS8",
+                status=commstat["status"] if commstat is not None else status,
+                severity=_severity_from_status(commstat["status"]) if commstat is not None else "info",
                 read_state=_read_state(status),
                 from_call=_upper(row["from_call"]),
                 to_call=_upper(row["to_call"]),
@@ -544,8 +561,8 @@ def _project_js8_messages(
                 received_ts=event_ts,
                 event_utc=_text(row["utc_str"]) or _utc_from_ts(event_ts),
                 received_utc=_text(row["utc_str"]) or _utc_from_ts(event_ts),
-                subject=intelligence.subject or _subject(body),
-                summary=(intelligence.summary or body)[:240],
+                subject=(commstat["subject"] if commstat is not None else intelligence.subject) or _subject(body),
+                summary=(commstat["summary"] if commstat is not None else intelligence.summary or body)[:240],
                 body_preview=body[:1200],
                 topics=tuple(intelligence.topics) or _topics(body),
                 entities={
@@ -553,7 +570,12 @@ def _project_js8_messages(
                     "to_call": _upper(row["to_call"]),
                     "state": _upper(intelligence.state),
                     "grid": _upper(intelligence.grid),
+                    **(commstat["entities"] if commstat is not None else {}),
                 },
+                actionable=bool(intelligence.actionable) if commstat is not None else False,
+                operator_attention=bool(intelligence.operator_attention) if commstat is not None else False,
+                confidence=float(intelligence.confidence or 0.0) if commstat is not None else 0.0,
+                recommended_action="review" if commstat is not None and commstat["status"] in {"YELLOW", "RED"} else "",
                 inbox_visible=decision.inbox_visible,
                 inbox_suppression_reason="" if decision.inbox_visible else decision.reason,
                 classification_version=decision.classification_version,
@@ -573,7 +595,11 @@ def _project_js8_messages(
                     external_path=_text(row["source_path"]),
                     delete_capability="delete_source",
                     read_capability="mark_read",
-                    metadata={"source_table": "js8_messages", "row_id": _text(row["id"])},
+                    metadata={
+                        "source_table": "js8_messages",
+                        "row_id": _text(row["id"]),
+                        **({"commstat_subtype": commstat["subtype"]} if commstat is not None else {}),
+                    },
                 ),
                 bundle_sink=bundle_sink,
             )
@@ -582,6 +608,123 @@ def _project_js8_messages(
             _set_checkpoint(conn, checkpoint_id, fingerprint, rows)
             projected += _reconcile_js8_projection_policy(conn, limit=limit)
     return projected
+
+
+def _analyze_local_js8_commstat(
+    *,
+    raw_payload: object,
+    decoded_payload: object,
+    from_call: object,
+    to_call: object,
+    event_utc: object,
+) -> dict[str, Any] | None:
+    """Classify a locally received JS8 CommStat message without changing its source.
+
+    This deliberately accepts only the parser's ``js8`` transport result.  A
+    CommStat artifact that arrived through an internet marker remains outside
+    the RF Spotter path, even when it happens to be present in a JS8 table.
+    The helper is pure so projection preparation never reads files, SQLite, or
+    network state while rendering rows.
+    """
+
+    raw_text = _text(raw_payload)
+    decoded_text = _text(decoded_payload)
+    parsed: dict[str, object] | None = None
+    evidence = ""
+    for candidate in dict.fromkeys(value for value in (decoded_text, raw_text) if value):
+        result = parse_commstat_message(
+            candidate,
+            target_hint=to_call,
+            source_value=1,  # Local JS8Call RF ingest path.
+        )
+        if result is not None:
+            parsed = result
+            evidence = candidate
+            break
+    if parsed is None:
+        return None
+
+    metadata = dict(parsed.get("metadata") or {})
+    # Markers such as {&%3} identify internet-delivered CommStat traffic. Do
+    # not turn it into a Spotter/RF CommStat presentation merely because a JS8
+    # source table happened to contain a copy.
+    if _text(metadata.get("transport_mode")).lower() != "js8":
+        return None
+
+    subtype = _text(parsed.get("subtype")) or "COMMSTAT"
+    status_payload = dict(parsed.get("status_payload") or {})
+    status, status_summary = _commstat_status_summary(status_payload)
+    remarks = _text(metadata.get("remarks_text"))
+    title = f"CommStat · {status_summary}"
+    intelligence = analyze_commstat_fields(
+        artifact_kind="STATREP",
+        title=title,
+        body=remarks or evidence,
+        from_call=from_call,
+        target=to_call,
+        report_group=metadata.get("report_group", ""),
+        state=metadata.get("state_code", ""),
+        grid=parsed.get("grid", ""),
+        scope=parsed.get("scope", ""),
+        status=status,
+        subtype=subtype,
+        remarks=remarks,
+        brevity_code=metadata.get("brevity_code", ""),
+        brevity_summary=metadata.get("brevity_summary", ""),
+        transport="js8",
+        reach=metadata.get("reach_mode", ""),
+        source_family="JS8Call RF",
+        event_utc=event_utc,
+    )
+    location = " / ".join(part for part in (_upper(intelligence.state), _upper(intelligence.grid)) if part)
+    summary_parts = ["CommStat", status_summary]
+    if location:
+        summary_parts.append(location)
+    if remarks:
+        summary_parts.append(remarks[:100])
+    raw_evidence = raw_text[:4000]
+    decoded_evidence = decoded_text[:4000]
+    return {
+        "intelligence": intelligence,
+        "subtype": subtype,
+        "form_name": f"CommStat/{subtype}",
+        "status": status,
+        "subject": title,
+        "summary": " | ".join(summary_parts),
+        "entities": {
+            "form_name": f"CommStat/{subtype}",
+            "commstat_subtype": subtype,
+            "commstat_status_summary": status_summary,
+            "commstat_transport": "js8",
+            "commstat_scope": _text(parsed.get("scope")),
+            "commstat_raw_evidence": raw_evidence,
+            "commstat_decoded_evidence": decoded_evidence,
+        },
+    }
+
+
+def _commstat_status_summary(status_payload: Mapping[str, object]) -> tuple[str, str]:
+    """Return a compact overall CommStat status and only meaningful changes."""
+
+    codes = _text(status_payload.get("status"))
+    if not codes:
+        return "INFO", "Status not reported"
+    expanded = "1" * 12 if codes == "+" else codes
+    label_by_code = {"1": "Green", "2": "Yellow", "3": "Red", "4": "Unknown"}
+    overall = label_by_code.get(expanded[:1], "Unknown")
+    labels = (
+        "Overall", "Power", "Water", "Medical", "Communications", "Travel",
+        "Internet", "Fuel", "Food", "Crime", "Civil unrest", "Political",
+    )
+    changes = [
+        f"{labels[index]} {label_by_code.get(code, 'Unknown')}"
+        for index, code in enumerate(expanded[:12])
+        if index and code in {"2", "3"}
+    ]
+    detail = ", ".join(changes[:2])
+    if len(changes) > 2:
+        detail += f" +{len(changes) - 2}"
+    return overall.upper() if overall in {"Green", "Yellow", "Red"} else "INFO", (overall + (f" · {detail}" if detail else ""))
 
 
 def _reconcile_js8_projection_policy(conn: sqlite3.Connection, *, limit: int) -> int:
@@ -639,13 +782,23 @@ def _project_spotter_traffic(conn: sqlite3.Connection, limit: int, force: bool, 
     checkpoint_id = "native:spotter_traffic"
     fingerprint = ""
     if not targeted:
-        fingerprint = _table_fingerprint(conn, "spotter_traffic", "COUNT(*)", "MAX(COALESCE(id, 0))", "MAX(COALESCE(utc_ts, 0))", "MAX(COALESCE(read_ts, 0))")
+        fingerprint = content_hash(
+            SPOTTER_PROVENANCE_VERSION,
+            _table_fingerprint(conn, "spotter_traffic", "COUNT(*)", "MAX(COALESCE(id, 0))", "MAX(COALESCE(utc_ts, 0))", "MAX(COALESCE(read_ts, 0))"),
+        )
         if _checkpoint_matches(conn, checkpoint_id, fingerprint, force=force):
             return 0
-    query = """
+    imported_expression = (
+        "EXISTS (SELECT 1 FROM js8spotter_import_log il "
+        "WHERE il.imported_kind='spotter_traffic' "
+        "AND CAST(il.imported_id AS TEXT)=CAST(spotter_traffic.id AS TEXT))"
+        if table_exists(conn, "js8spotter_import_log")
+        else "0"
+    )
+    query = f"""
         SELECT id, utc_str, utc_ts, from_call, to_call, form_id, spotter_token,
                raw_text, decoded_text, state, read_ts, flag_state, relay_via,
-               source_radio_id, js8_instance_id
+               source_radio_id, js8_instance_id, {imported_expression} AS is_imported
           FROM spotter_traffic
     """
     params: list[object] = []
@@ -667,6 +820,7 @@ def _project_spotter_traffic(conn: sqlite3.Connection, limit: int, force: bool, 
     projected = 0
     with (nullcontext(conn) if targeted else conn):
         for row in rows:
+            is_imported = bool(_int(row["is_imported"]))
             source_key = _text(row["js8_instance_id"]) or _text(row["source_radio_id"]) or "legacy"
             source_id = f"spotter:{source_key}"
             external_key = _text(row["id"])
@@ -688,18 +842,34 @@ def _project_spotter_traffic(conn: sqlite3.Connection, limit: int, force: bool, 
             source = MessageSourceRecord(
                 source_id=source_id,
                 source_family="spotter",
-                source_label=_source_label("FIOSpotter", source_key),
+                source_label=(
+                    _source_label("Imported JS8Spotter", source_key)
+                    if is_imported else _source_label("FIOSpotter", source_key)
+                ),
                 radio_id=_optional_int(row["source_radio_id"]),
                 app_instance_id=_text(row["js8_instance_id"]),
                 capabilities={"read": True, "delete": True, "native_open": True},
-                provenance={"source_table": "spotter_traffic", "source_key": source_key},
+                provenance={
+                    "source_table": "spotter_traffic",
+                    "source_key": source_key,
+                    "ingest_origin": "js8spotter-db-import" if is_imported else "local-js8-receive",
+                    "local_rf_received": not is_imported,
+                },
                 last_seen_utc=_utc_from_ts(event_ts),
                 last_ingested_utc=_utc_now(),
             )
             projection = MessageProjectionRecord(
                 message_id=message_id,
                 canonical_key=f"{source_id}:spotter_message:{external_key}",
-                content_hash=content_hash(PROJECTOR_VERSION, "spotter", external_key, status, body),
+                content_hash=content_hash(
+                    PROJECTOR_VERSION,
+                    SPOTTER_PROVENANCE_VERSION,
+                    "spotter",
+                    external_key,
+                    is_imported,
+                    status,
+                    body,
+                ),
                 primary_source_id=source_id,
                 source_family="spotter",
                 source_label=source.source_label,
@@ -728,6 +898,8 @@ def _project_spotter_traffic(conn: sqlite3.Connection, limit: int, force: bool, 
                     "spotter_token": _text(row["spotter_token"]),
                     "state": _upper(intelligence.state),
                     "grid": _upper(intelligence.grid),
+                    "ingest_origin": "js8spotter-db-import" if is_imported else "local-js8-receive",
+                    "local_rf_received": not is_imported,
                 },
                 retention_class="normal",
                 search_text=_search_text(row["from_call"], row["to_call"], msg_type, body),

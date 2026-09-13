@@ -19,6 +19,13 @@
 
 - Before planning, reviewing, or implementing multi-rig UI work, read
   `docs/internal/multirig_product_ui_contract.md`.
+- Before planning, reviewing, or implementing a new or meaningfully redesigned
+  operator-facing workspace, also read and apply
+  `docs/internal/task_oriented_workspace_design_guideline.md`. It operationalizes
+  the product contract through a required redesign brief, task archetypes,
+  action/scan hierarchy, progressive disclosure, scroll ownership, performance
+  boundaries, mandatory shared-theme/component reuse, and screenshot-shaped
+  acceptance checks.
 - Treat that contract as the concise product-level authority for the relationship
   between the Station Control Bar and each tab workspace. If an older UI spec or
   implementation detail conflicts with it, stop and surface the conflict rather

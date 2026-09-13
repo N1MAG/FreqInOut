@@ -6,7 +6,11 @@ from freqinout.core.commstat_artifacts import ensure_commstat_artifact_tables
 from freqinout.core.db_initializer import _ensure_sitrep_fusion_tables
 from freqinout.core.message_projection_store import ensure_message_projection_schema
 from freqinout.core.message_file_scanner import FileRecord
-from freqinout.core.message_source_projectors import project_native_file_records, project_native_message_sources
+from freqinout.core.message_source_projectors import (
+    _analyze_local_js8_commstat,
+    project_native_file_records,
+    project_native_message_sources,
+)
 from freqinout.core.varac_ingest import ensure_varac_local_tables
 
 
@@ -205,6 +209,145 @@ def test_source_native_projectors_skip_unchanged_sources_by_checkpoint(tmp_path)
 
     assert project_native_message_sources(db_path, sources=("js8",), force=False)["js8"] == 1
     assert project_native_message_sources(db_path, sources=("js8",), force=False)["js8"] == 0
+
+
+def test_local_js8_commstat_is_summarized_without_changing_rf_source(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    conn = _connect(db_path)
+    try:
+        ensure_message_projection_schema(conn)
+        _ensure_js8(conn)
+        conn.executemany(
+            """
+            INSERT INTO js8_messages
+                (id, from_call, to_call, msg_type, utc_str, utc_ts, raw_text, decoded_text,
+                 state, source_key, source_id, source_radio_id, js8_instance_id, source_path)
+            VALUES (?, 'N1MAG', '@MAGNET', 'MSG', '2026-09-02 10:00:00', 1788352800,
+                    ?, '', 'UNREAD', 'radio-a', ?, '7', 'js8-a', '/tmp/js8.db')
+            """,
+            (
+                (1, "N1MAG: MAGNET ,EM12JV,1,A03,121111111111,Power intermittent,{&%}", 101),
+                # The internet marker must not receive the RF CommStat treatment.
+                (2, "N1MAG: MAGNET ,EM12JV,1,A04,+,Internet mirror,{&%3}", 102),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert project_native_message_sources(db_path, sources=("js8",), force=True) == {"js8": 2}
+    conn = _connect(db_path)
+    try:
+        local = conn.execute(
+            """
+            SELECT source_family, radio_id, app_instance_id, message_type, display_type,
+                   status, severity, subject, summary, entities_json
+              FROM message_projection
+             WHERE primary_source_id='js8:radio-a' AND message_id IN (
+                 SELECT message_id FROM message_external_refs WHERE external_key='101'
+             )
+            """
+        ).fetchone()
+        mirrored = conn.execute(
+            """
+            SELECT message_type, display_type, entities_json
+              FROM message_projection
+             WHERE message_id IN (
+                 SELECT message_id FROM message_external_refs WHERE external_key='102'
+             )
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert dict(local) | {"entities_json": ""} == {
+        "source_family": "js8",
+        "radio_id": 7,
+        "app_instance_id": "js8-a",
+        "message_type": "CommStat/COMMSTAT_12",
+        "display_type": "CommStat",
+        "status": "GREEN",
+        "severity": "info",
+        "subject": "CommStat · Green · Power Yellow",
+        "summary": "CommStat | Green · Power Yellow | EM12JV | Power intermittent",
+        "entities_json": "",
+    }
+    assert '"commstat_raw_evidence"' in local["entities_json"]
+    assert mirrored["message_type"] == "MSG"
+    assert mirrored["display_type"] == "JS8"
+    assert "commstat_subtype" not in mirrored["entities_json"]
+
+
+def test_local_js8_commstat_helper_has_compact_status_and_rejects_internet_marker() -> None:
+    classified = _analyze_local_js8_commstat(
+        raw_payload="N1MAG: MAGNET ,EM12JV,1,A03,123111111111,Power and water issue,{&%}",
+        decoded_payload="",
+        from_call="N1MAG",
+        to_call="@MAGNET",
+        event_utc="2026-09-02 10:00:00",
+    )
+
+    assert classified is not None
+    assert classified["form_name"] == "CommStat/COMMSTAT_12"
+    assert classified["status"] == "GREEN"
+    assert classified["summary"] == "CommStat | Green · Power Yellow, Water Red | EM12JV | Power and water issue"
+    assert classified["entities"]["commstat_transport"] == "js8"
+    assert _analyze_local_js8_commstat(
+        raw_payload="N1MAG: MAGNET ,EM12JV,1,A04,+,Internet mirror,{&%3}",
+        decoded_payload="",
+        from_call="N1MAG",
+        to_call="@MAGNET",
+        event_utc="2026-09-02 10:00:00",
+    ) is None
+
+
+def test_spotter_projector_marks_imported_history_without_claiming_local_rf(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    conn = _connect(db_path)
+    try:
+        ensure_message_projection_schema(conn)
+        _ensure_spotter(conn)
+        conn.execute(
+            """
+            CREATE TABLE js8spotter_import_log (
+                source_db TEXT, source_table TEXT, source_id TEXT,
+                source_fingerprint TEXT, imported_kind TEXT,
+                imported_id TEXT, imported_ts REAL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO spotter_traffic
+                (id, utc_str, utc_ts, from_call, to_call, form_id, raw_text,
+                 decoded_text, state, source_radio_id, js8_instance_id)
+            VALUES (9, '2026-09-02 10:00:00', 1788352800, 'N1AAA', '@MR08',
+                    '304', 'F!304 OK', 'F!304 OK', 'UNREAD', '7', 'js8-a')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO js8spotter_import_log
+                (source_db, source_table, source_id, source_fingerprint,
+                 imported_kind, imported_id, imported_ts)
+            VALUES ('/tmp/import.db', 'forms', '9', 'hash', 'spotter_traffic', '9', 1)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert project_native_message_sources(db_path, sources=("spotter",), force=True) == {"spotter": 1}
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT source_label, entities_json FROM message_projection WHERE source_family='spotter'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["source_label"].startswith("Imported JS8Spotter")
+    assert '"ingest_origin":"js8spotter-db-import"' in row["entities_json"]
+    assert '"local_rf_received":false' in row["entities_json"]
 
 
 def test_native_file_records_project_artifacts_and_skip_by_checkpoint(tmp_path) -> None:

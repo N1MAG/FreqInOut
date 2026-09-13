@@ -13,8 +13,10 @@ Slice 3 implementation and its automated exit gate completed 2026-09-07. The
 remaining items in this document are future refinements unless the production
 remediation specification explicitly assigns them to a later slice.
 
-The first-class service uses five browser tabs: `Activity`, `Watches`, `Expect`,
-`Forms`, and `Imports`. This preserves the recognizable SuperSpotter concepts of
+The first-class service uses six implemented browser tabs: `Activity`,
+`Watches`, `Expect`, `Access Policies`, `Forms`, and `Imports`; a separately gated `Store & Forward`
+tab is planned on top of the protocol-neutral Message Relay Queue. This preserves
+the recognizable SuperSpotter concepts of
 matched activity, searches/watches, Expect rules and reply history, MCForms,
 roster/location context, map handoffs, and migration tools while giving each
 task a bounded, responsive FIO-native surface.
@@ -254,10 +256,11 @@ Implementation status:
 
 ### Store-And-Forward Status
 
-Store-and-forward ideas from SuperSpotter are useful, but are explicitly
-deferred. JS8Call query-message workflows already allow another operator to ask
-whether FIO is holding traffic for them, so FIO does not need RF advertisement
-behavior in this phase.
+Store-and-forward ideas from SuperSpotter are approved product direction but
+remain a separately gated package after the FIO Spotter Activity and
+Forms/Expect corrections pass. JS8Call query-message workflows already allow
+another operator to ask whether FIO is holding traffic for them, so automatic RF
+advertisement is not required for the first implementation and defaults off.
 
 Future consideration should treat store-and-forward as a protocol-neutral
 `Message Relay Queue`, not as a Spotter-only feature. It may later cover JS8,
@@ -274,6 +277,14 @@ Guardrails for later design:
 - visible audit trail
 - signing/trust display when available
 - operator-readable "why this message is being held" detail
+
+The first adapter is JS8 and the operator may encounter it from the FIO Spotter
+workspace, but storage and lifecycle are protocol-neutral. Initial scope is
+explicit operator-created, callsign-only held messages with finite expiry,
+bounded retries/cooldown, durable dedupe and delivery claims, and endpoint-
+scoped JS8/RF Guard/selected-target safety. Group delivery and remote third-
+party storage are deferred until their trust and loop-prevention contracts are
+defined.
 
 ### Condition Alert Rules
 

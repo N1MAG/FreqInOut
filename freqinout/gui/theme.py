@@ -337,6 +337,25 @@ def button_style(role: str, theme: Dict[str, str]) -> str:
     )
 
 
+def label_style(role: str, theme: Dict[str, str], *, weight: int = 400) -> str:
+    """Return a small semantic label treatment from the shared palette.
+
+    Labels often carry quiet workflow context, but they must still follow the
+    active Light/Dark palette.  Keeping this here prevents each workspace from
+    inventing a near-identical muted or informational text color.
+    """
+    key = (role or "muted").strip().lower()
+    color_key = {
+        "muted": "text_muted",
+        "info": "info",
+        "success": "success",
+        "warning": "warning",
+        "danger": "danger",
+        "text": "text",
+    }.get(key, "text_muted")
+    return f"color: {theme[color_key]}; font-weight: {max(100, int(weight))};"
+
+
 def normalize_band(band: str) -> str:
     txt = (band or "").strip().lower().replace(" ", "")
     if txt.endswith("m"):
@@ -610,13 +629,18 @@ def app_stylesheet(theme: Dict[str, str]) -> str:
         "QLabel {"
         f" color: {theme['text']};"
         "}"
-        "QLineEdit, QTextEdit, QPlainTextEdit, QListWidget, QTableWidget, QComboBox {"
+        "QLineEdit, QTextEdit, QPlainTextEdit, QListWidget, QTableWidget, QComboBox, QSpinBox, QDoubleSpinBox, QDateEdit, QTimeEdit, QDateTimeEdit {"
         f" background-color: {theme['surface']};"
         f" color: {theme['text']};"
         f" border: 1px solid {theme['border']};"
         " border-radius: 4px; padding: 2px 4px;"
+        f" selection-background-color: {theme['accent']};"
+        f" selection-color: {_best_contrast_text(theme['accent'], ('#FFFFFF', '#111111', theme['text']))};"
         "}"
-        "QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled, QListWidget:disabled, QTableWidget:disabled, QComboBox:disabled {"
+        "QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QListWidget:focus, QTableWidget:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QDateEdit:focus, QTimeEdit:focus, QDateTimeEdit:focus {"
+        f" border: 1px solid {theme['focus']};"
+        "}"
+        "QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled, QListWidget:disabled, QTableWidget:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled, QDateEdit:disabled, QTimeEdit:disabled, QDateTimeEdit:disabled {"
         f" background-color: {theme['surface_alt']};"
         f" color: {theme['text_muted']};"
         f" border: 1px solid {theme['border']};"
@@ -723,6 +747,10 @@ def app_stylesheet(theme: Dict[str, str]) -> str:
         "QComboBox QAbstractItemView::indicator:checked {"
         f" background-color: {theme['accent']};"
         f" border: 1px solid {theme['accent']};"
+        "}"
+        "QSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::up-button, QDoubleSpinBox::down-button, QDateEdit::up-button, QDateEdit::down-button, QTimeEdit::up-button, QTimeEdit::down-button, QDateTimeEdit::up-button, QDateTimeEdit::down-button {"
+        f" background-color: {theme['surface_alt']};"
+        f" border-left: 1px solid {theme['border']};"
         "}"
         "QToolTip {"
         f" background-color: {theme['surface_alt']};"

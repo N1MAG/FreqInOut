@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import time
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.db_initializer import _ensure_js8_expect_tables
 from freqinout.core.group_utils import normalize_group_name
+from freqinout.core.js8_msg_auth import DATECODE_RE, encode_short_datecode
 from freqinout.core.operator_identity import (
     canonical_callsign,
     resolve_operator_identity,
@@ -61,6 +64,44 @@ class ExpectEntryUpdateResult:
 
 
 @dataclass(frozen=True)
+class ExpectAutoReplyStateResult:
+    """Result of an explicit visible Expect auto-reply state change.
+
+    ``auto_reply_enabled`` is the visible state. The retained legacy flags
+    are always written together by this API, so callers cannot accidentally
+    leave a rule in a partly-approved unattended state.
+    """
+
+    id: int
+    auto_reply_enabled: bool
+    state: str
+
+
+@dataclass(frozen=True)
+class ExpectAutoReplyBulkResult:
+    """Bounded selected-entry auto-reply operation result."""
+
+    requested_ids: tuple[int, ...] = ()
+    updated_ids: tuple[int, ...] = ()
+    skipped: tuple[tuple[int, str], ...] = ()
+
+    @property
+    def updated_count(self) -> int:
+        return len(self.updated_ids)
+
+    @property
+    def skipped_ids(self) -> tuple[int, ...]:
+        return tuple(item[0] for item in self.skipped)
+
+    @property
+    def skipped_count(self) -> int:
+        return len(self.skipped)
+
+
+EXPECT_AUTO_REPLY_BULK_MAX_IDS = 100
+
+
+@dataclass(frozen=True)
 class ExpectEvaluationResult:
     decision: str
     reason: str
@@ -88,6 +129,113 @@ class ExpectRequestClaimResult:
     reason: str
     event_key: str
     attempts: int = 0
+
+
+@dataclass(frozen=True)
+class ExpectDatecodeRefreshResult:
+    """Summary of a no-transmit bulk MCForm datecode refresh."""
+
+    updated_ids: tuple[int, ...] = ()
+    skipped_ids: tuple[int, ...] = ()
+
+    @property
+    def updated_count(self) -> int:
+        return len(self.updated_ids)
+
+    @property
+    def skipped_count(self) -> int:
+        return len(self.skipped_ids)
+
+    def __getitem__(self, key: str) -> object:
+        """Allow lightweight dict-style use by UI callers and integrations."""
+        values = {
+            "updated_ids": list(self.updated_ids),
+            "skipped_ids": list(self.skipped_ids),
+            "updated_count": self.updated_count,
+            "skipped_count": self.skipped_count,
+        }
+        return values[key]
+
+
+# MCForms use F! followed by exactly three digits and, for a small set of
+# forms, one letter suffix (for example F!702A).  Keep this stricter than the
+# general form-token search so Q/dynamic and malformed rules are untouched.
+_MCFORM_EXPECT_KEY_RE = re.compile(r"^F![0-9]{3}[A-Z]?$", re.IGNORECASE)
+_MCFORM_DATECODE_TOKEN_RE = re.compile(r"(?<!\S)#[A-Z0-9]{4}(?!\S)", re.IGNORECASE)
+_JS8_RESPONSE_TARGET_RE = re.compile(r"^@?[A-Z0-9/_-]{2,32}$", re.IGNORECASE)
+
+
+def _canonical_mcform_expect_key(value: object) -> str:
+    key = str(value or "").strip().upper()
+    return key if _MCFORM_EXPECT_KEY_RE.fullmatch(key) else ""
+
+
+def _resolve_refresh_datecode(
+    *, moment: Optional[datetime] = None, datecode: object = ""
+) -> str:
+    supplied = str(datecode or "").strip().upper()
+    if supplied:
+        return supplied if DATECODE_RE.fullmatch(supplied) else ""
+    return encode_short_datecode(moment)
+
+
+def update_mcform_response_datecode(
+    response_text: object,
+    expect_key: object,
+    datecode: object = "",
+    *,
+    moment: Optional[datetime] = None,
+) -> Optional[str]:
+    """Return an updated MCForm response, or ``None`` when it is unsafe.
+
+    The exact canonical Expect form key must be the first token, or the second
+    token after one valid JS8 destination.  A single datecode is replaced only
+    when it is the final token; otherwise a datecode is appended.  Multiple
+    datecodes, signed payloads, dynamic Q rules, non-form keys, and mismatched
+    responses are deliberately skipped.
+    """
+    key = _canonical_mcform_expect_key(expect_key)
+    if not key:
+        return None
+    stamp = _resolve_refresh_datecode(moment=moment, datecode=datecode)
+    if not stamp:
+        return None
+    text = str(response_text or "").strip()
+    if not text:
+        return None
+    tokens = text.split()
+    if not tokens:
+        return None
+    has_form_prefix = tokens[0].upper() == key
+    has_targeted_form_prefix = (
+        len(tokens) >= 2
+        and bool(_JS8_RESPONSE_TARGET_RE.fullmatch(tokens[0]))
+        and tokens[1].upper() == key
+    )
+    if not has_form_prefix and not has_targeted_form_prefix:
+        return None
+    if any(token.upper() == "*DE*" for token in tokens):
+        return None
+    matches = list(_MCFORM_DATECODE_TOKEN_RE.finditer(text))
+    if len(matches) > 1:
+        return None
+    if matches:
+        match = matches[0]
+        if match.end() != len(text):
+            return None
+        return f"{text[:match.start()].rstrip()} {stamp}".strip()
+    # A hash token at the end is datecode-shaped but invalid (wrong length or
+    # punctuation). Treat it as unsafe rather than appending a second code.
+    if text.split()[-1].startswith("#"):
+        return None
+    return f"{text} {stamp}".strip()
+
+
+# Descriptive aliases keep this pure helper discoverable to callers that use
+# either the MCForm or Expect terminology.
+refresh_mcform_response_datecode = update_mcform_response_datecode
+refresh_expect_response_datecode = update_mcform_response_datecode
+refresh_mcform_datecode_in_response = update_mcform_response_datecode
 
 
 def claim_expect_request(
@@ -264,6 +412,97 @@ def _json_load_list(value: object) -> list[str]:
     if not isinstance(parsed, list):
         return []
     return [str(item or "").strip().upper() for item in parsed if str(item or "").strip()]
+
+
+def _expect_auto_reply_is_effective(row: Mapping[str, Any]) -> bool:
+    """Translate the retained legacy flags into the single visible state.
+
+    A pre-existing partly configured rule must never appear enabled merely
+    because one legacy checkbox happened to be set.
+    """
+    return bool(
+        row.get("enabled", False)
+        and row.get("auto_reply_enabled", False)
+        and row.get("unattended_auto_reply_enabled", False)
+    )
+
+
+def _entry_has_access(entry: Mapping[str, Any]) -> bool:
+    calls = {_norm_call(item) for item in entry.get("allowed_callsigns", [])}
+    groups = {_norm_group(item) for item in entry.get("allowed_groups", [])}
+    trusted_groups = {
+        normalize_group_name(item)
+        for item in entry.get("trusted_operator_groups", [])
+        if normalize_group_name(item)
+    }
+    return bool(
+        "*" in calls
+        or any(item for item in calls if item)
+        or any(item for item in groups if item)
+        or bool(entry.get("allow_any", False))
+        or bool(entry.get("allow_trusted_operators", False))
+        or trusted_groups
+    )
+
+
+def _entry_has_usable_response(entry: Mapping[str, Any]) -> bool:
+    # Dynamic FLAMP Q creates its response from the indexed transfer state.
+    # It deliberately has no saved static payload, unlike an ordinary Expect
+    # response, so it remains an explicit narrowly-scoped exception.
+    if str(entry.get("expect_key", "") or "").strip().upper() == "Q":
+        return True
+    return bool(str(entry.get("response_text", "") or "").strip())
+
+
+def _expect_auto_reply_validation_error(
+    entry: Mapping[str, Any], policy: Optional[Mapping[str, Any]] = None
+) -> str:
+    """Return the safety reason preventing auto reply, or an empty string."""
+    if not _entry_has_usable_response(entry):
+        return "Auto reply requires a usable response."
+    policy_id = int(entry.get("allow_policy_id", 0) or 0)
+    if policy_id:
+        if policy is None:
+            return "The selected access policy no longer exists."
+        if not bool(policy.get("enabled", False)):
+            return "The selected access policy is disabled."
+        if _entry_has_access(policy) or _entry_has_access(entry):
+            return ""
+        return "Auto reply requires a nonempty entry or access-policy rule."
+    if not _entry_has_access(entry):
+        return "Auto reply requires a nonempty entry or access-policy rule."
+    return ""
+
+
+def _row_mapping(row: Any) -> dict[str, Any]:
+    if hasattr(row, "keys"):
+        return {key: row[key] for key in row.keys()}
+    try:
+        return dict(row or {})
+    except (TypeError, ValueError):
+        return {}
+
+
+def _selected_expect_entry_ids(entry_ids: Iterable[int]) -> list[int]:
+    if entry_ids is None:
+        raise ValueError("Select at least one Expect entry.")
+    if isinstance(entry_ids, (str, bytes)):
+        entry_ids = (entry_ids,)  # type: ignore[assignment]
+    ids: list[int] = []
+    for value in entry_ids:
+        try:
+            entry_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if entry_id > 0 and entry_id not in ids:
+            ids.append(entry_id)
+    if not ids:
+        raise ValueError("Select at least one Expect entry.")
+    if len(ids) > EXPECT_AUTO_REPLY_BULK_MAX_IDS:
+        raise ValueError(
+            f"Select at most {EXPECT_AUTO_REPLY_BULK_MAX_IDS} Expect entries at one time."
+        )
+    return ids
 
 
 def _norm_call(value: object) -> str:
@@ -495,7 +734,7 @@ def save_expect_allow_policy(
     if not name:
         raise ValueError("name is required")
     now = time.time()
-    conn = connect_sqlite(path)
+    conn = connect_sqlite(path, row_factory=sqlite3.Row)
     try:
         _ensure_js8_expect_tables(conn)
         explicit_id = int(values.get("id", 0) or 0)
@@ -556,6 +795,16 @@ def save_expect_allow_policy(
             )
             row_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
             created = True
+        _record_expect_management_audit(
+            conn,
+            entry_id=0,
+            action="policy-created" if created else "policy-updated",
+            values={
+                **payload,
+                "expect_key": f"POLICY:{name}",
+                "policy_id": row_id,
+            },
+        )
         conn.commit()
     finally:
         conn.close()
@@ -567,6 +816,7 @@ def list_expect_allow_policies(
     db_path: Optional[Path] = None,
     enabled_only: bool = False,
     policy_ids: Optional[Iterable[int]] = None,
+    include_usage: bool = False,
 ) -> list[dict[str, Any]]:
     path = Path(db_path) if db_path is not None else default_expect_db_path()
     if not path.exists():
@@ -594,11 +844,17 @@ def list_expect_allow_policies(
             clauses.append(f"id IN ({','.join('?' for _ in ids)})")
             params.extend(ids)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        usage_select = (
+            ", (SELECT COUNT(1) FROM js8_expect_entries e "
+            "WHERE e.allow_policy_id=js8_expect_allow_policies.id) AS usage_count"
+            if include_usage and table_exists(conn, "js8_expect_entries")
+            else ""
+        )
         rows = conn.execute(
             f"""
             SELECT id, name, allowed_callsigns_json, allowed_groups_json,
                    allow_trusted_operators, trusted_operator_groups_json, blocked_callsigns_json,
-                   source_scope, source_radio_ids_json, enabled, import_source, notes
+                   source_scope, source_radio_ids_json, enabled, import_source, notes{usage_select}
             FROM js8_expect_allow_policies
             {where}
             ORDER BY name ASC, id ASC
@@ -626,26 +882,122 @@ def list_expect_allow_policies(
                 "import_source": row[10],
                 "notes": row[11],
             }
+            if include_usage:
+                raw["usage_count"] = row[12]
         raw["allowed_callsigns"] = _json_load_list(raw.get("allowed_callsigns_json"))
         raw["allowed_groups"] = _json_load_list(raw.get("allowed_groups_json"))
         raw["trusted_operator_groups"] = _json_load_list(raw.get("trusted_operator_groups_json"))
         raw["blocked_callsigns"] = _json_load_list(raw.get("blocked_callsigns_json"))
         raw["source_radio_ids"] = _json_load_list(raw.get("source_radio_ids_json"))
+        if include_usage:
+            raw["usage_count"] = int(raw.get("usage_count", 0) or 0)
         out.append(raw)
     return out
 
 
 def delete_expect_allow_policy(policy_id: int, *, db_path: Optional[Path] = None) -> bool:
     path = Path(db_path) if db_path is not None else default_expect_db_path()
-    conn = connect_sqlite(path)
+    conn = connect_sqlite(path, row_factory=sqlite3.Row)
     try:
         _ensure_js8_expect_tables(conn)
-        conn.execute("UPDATE js8_expect_entries SET allow_policy_id=NULL WHERE allow_policy_id=?", (int(policy_id),))
+        policy_id = int(policy_id)
+        usage_count = int(
+            conn.execute(
+                "SELECT COUNT(1) FROM js8_expect_entries WHERE allow_policy_id=?", (policy_id,)
+            ).fetchone()[0]
+            or 0
+        )
+        if usage_count:
+            raise ValueError(
+                f"Cannot delete access policy while {usage_count} Expect entr"
+                f"{'y is' if usage_count == 1 else 'ies are'} using it. Reassign them first."
+            )
+        policy_row = conn.execute(
+            "SELECT name, enabled, import_source FROM js8_expect_allow_policies WHERE id=?",
+            (policy_id,),
+        ).fetchone()
         cur = conn.execute("DELETE FROM js8_expect_allow_policies WHERE id=?", (int(policy_id),))
+        if int(cur.rowcount or 0) > 0 and policy_row is not None:
+            values = _row_mapping(policy_row)
+            if not values:
+                values = {
+                    "name": policy_row[0],
+                    "enabled": policy_row[1],
+                    "import_source": policy_row[2],
+                }
+            values.update({"expect_key": f"POLICY:{values.get('name', '')}", "policy_id": policy_id})
+            _record_expect_management_audit(
+                conn, entry_id=0, action="policy-deleted", values=values
+            )
         conn.commit()
         return int(cur.rowcount or 0) > 0
     finally:
         conn.close()
+
+
+def get_expect_allow_policy_usage(
+    policy_id: int,
+    *,
+    db_path: Optional[Path] = None,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """Return bounded references that must be reassigned before deletion."""
+    try:
+        canonical_id = int(policy_id)
+    except (TypeError, ValueError):
+        raise ValueError("A valid access policy id is required.") from None
+    if canonical_id <= 0:
+        raise ValueError("A valid access policy id is required.")
+    path = Path(db_path) if db_path is not None else default_expect_db_path()
+    result: dict[str, Any] = {
+        "policy_id": canonical_id,
+        "usage_count": 0,
+        "entries": [],
+        "truncated": False,
+    }
+    if not path.exists():
+        return result
+    row_limit = max(1, min(500, int(limit or 100)))
+    conn = connect_sqlite_readonly(path, row_factory=sqlite3.Row)
+    try:
+        if not table_exists(conn, "js8_expect_entries"):
+            return result
+        result["usage_count"] = int(
+            conn.execute(
+                "SELECT COUNT(1) FROM js8_expect_entries WHERE allow_policy_id=?",
+                (canonical_id,),
+            ).fetchone()[0]
+            or 0
+        )
+        rows = conn.execute(
+            """
+            SELECT id, expect_key, source_radio_id, source_scope, js8_instance_id,
+                   enabled, auto_reply_enabled, unattended_auto_reply_enabled
+              FROM js8_expect_entries
+             WHERE allow_policy_id=?
+             ORDER BY expect_key ASC, id ASC
+             LIMIT ?
+            """,
+            (canonical_id, row_limit),
+        ).fetchall()
+    finally:
+        conn.close()
+    entries: list[dict[str, Any]] = []
+    for row in rows:
+        raw = _row_mapping(row)
+        if not raw:
+            raw = {
+                "id": row[0], "expect_key": row[1], "source_radio_id": row[2],
+                "source_scope": row[3], "js8_instance_id": row[4], "enabled": row[5],
+                "auto_reply_enabled": row[6], "unattended_auto_reply_enabled": row[7],
+            }
+        raw["auto_reply_state"] = (
+            "auto-reply-on" if _expect_auto_reply_is_effective(raw) else "saved-only"
+        )
+        entries.append(raw)
+    result["entries"] = entries
+    result["truncated"] = int(result["usage_count"]) > len(entries)
+    return result
 
 
 def list_expect_entries(
@@ -653,6 +1005,7 @@ def list_expect_entries(
     db_path: Optional[Path] = None,
     enabled_only: bool = False,
     expect_key: str = "",
+    limit: Optional[int] = None,
 ) -> list[dict[str, Any]]:
     path = Path(db_path) if db_path is not None else default_expect_db_path()
     if not path.exists():
@@ -670,6 +1023,11 @@ def list_expect_entries(
             clauses.append("e.expect_key=?")
             params.append(canonical_key)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        limit_clause = ""
+        if limit is not None:
+            row_limit = max(1, min(5000, int(limit or 1)))
+            limit_clause = "LIMIT ?"
+            params.append(row_limit)
         rows = conn.execute(
             f"""
             SELECT e.id, e.source_radio_id, e.source_scope, e.js8_instance_id, e.allow_policy_id,
@@ -684,6 +1042,7 @@ def list_expect_entries(
             LEFT JOIN js8_expect_allow_policies p ON p.id=e.allow_policy_id
             {where}
             ORDER BY COALESCE(e.enabled, 0) DESC, e.expect_key ASC, e.id ASC
+            {limit_clause}
             """,
             tuple(params),
         ).fetchall()
@@ -728,6 +1087,12 @@ def list_expect_entries(
         raw["allowed_groups"] = _json_load_list(raw.get("allowed_groups_json"))
         raw["trusted_operator_groups"] = _json_load_list(raw.get("trusted_operator_groups_json"))
         raw["blocked_callsigns"] = _json_load_list(raw.get("blocked_callsigns_json"))
+        raw["auto_reply_state"] = (
+            "auto-reply-on" if _expect_auto_reply_is_effective(raw) else "saved-only"
+        )
+        # This indicates that the saved payload can be selected for a manual
+        # send; it intentionally does not depend on access-policy eligibility.
+        raw["manual_send_available"] = _entry_has_usable_response(raw)
         out.append(raw)
     return out
 
@@ -739,16 +1104,11 @@ def update_expect_entry_controls(
     db_path: Optional[Path] = None,
 ) -> ExpectEntryUpdateResult:
     path = Path(db_path) if db_path is not None else default_expect_db_path()
-    conn = connect_sqlite(path)
+    conn = connect_sqlite(path, row_factory=sqlite3.Row)
     try:
         _ensure_js8_expect_tables(conn)
         row = conn.execute(
-            """
-            SELECT id, expect_key, source_radio_id, source_scope, js8_instance_id, import_source,
-                   allow_trusted_operators, trusted_operator_groups_json
-            FROM js8_expect_entries
-            WHERE id=?
-            """,
+            "SELECT * FROM js8_expect_entries WHERE id=?",
             (int(entry_id),),
         ).fetchone()
         if row is None:
@@ -756,16 +1116,7 @@ def update_expect_entry_controls(
         if hasattr(row, "keys"):
             audit_base = {key: row[key] for key in row.keys()}
         else:
-            audit_base = {
-                "id": row[0],
-                "expect_key": row[1],
-                "source_radio_id": row[2],
-                "source_scope": row[3],
-                "js8_instance_id": row[4],
-                "import_source": row[5],
-                "allow_trusted_operators": row[6],
-                "trusted_operator_groups_json": row[7],
-            }
+            audit_base = _row_mapping(row)
         enabled = 1 if bool(values.get("enabled", False)) else 0
         auto_reply = 1 if bool(values.get("auto_reply_enabled", False)) else 0
         unattended = 1 if bool(values.get("unattended_auto_reply_enabled", False)) else 0
@@ -780,6 +1131,27 @@ def update_expect_entry_controls(
             if "trusted_operator_groups" in values
             else str(audit_base.get("trusted_operator_groups_json") or "[]")
         )
+        candidate = dict(audit_base)
+        candidate.update(
+            {
+                "allow_policy_id": allow_policy_id,
+                "allowed_callsigns_json": _json_list(values.get("allowed_callsigns")),
+                "allowed_groups_json": _json_list(values.get("allowed_groups")),
+                "allow_any": 1 if bool(values.get("allow_any", False) or "*" in _json_load_list(_json_list(values.get("allowed_callsigns")))) else 0,
+                "allow_trusted_operators": allow_trusted_operators,
+                "trusted_operator_groups_json": trusted_operator_groups_json,
+                "enabled": enabled,
+                "auto_reply_enabled": auto_reply,
+                "unattended_auto_reply_enabled": unattended,
+            }
+        )
+        if _expect_auto_reply_is_effective(candidate):
+            error = _expect_auto_reply_validation_error(
+                _expect_row_access_values(candidate),
+                _expect_auto_reply_policy(conn, int(allow_policy_id or 0)),
+            )
+            if error:
+                raise ValueError(error)
         conn.execute(
             """
             UPDATE js8_expect_entries
@@ -815,6 +1187,211 @@ def update_expect_entry_controls(
     finally:
         conn.close()
     return ExpectEntryUpdateResult(id=int(entry_id), enabled=bool(enabled), auto_reply_enabled=bool(auto_reply))
+
+
+def _expect_row_access_values(row: Mapping[str, Any]) -> dict[str, Any]:
+    values = dict(row)
+    for name in (
+        "allowed_callsigns",
+        "allowed_groups",
+        "trusted_operator_groups",
+        "blocked_callsigns",
+    ):
+        values[name] = _json_load_list(values.get(f"{name}_json"))
+    return values
+
+
+def _expect_auto_reply_policy(conn, policy_id: int) -> Optional[dict[str, Any]]:
+    if policy_id <= 0:
+        return None
+    row = conn.execute(
+        """
+        SELECT id, name, allowed_callsigns_json, allowed_groups_json,
+               allow_trusted_operators, trusted_operator_groups_json,
+               blocked_callsigns_json, enabled
+          FROM js8_expect_allow_policies
+         WHERE id=?
+        """,
+        (policy_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return _expect_row_access_values(_row_mapping(row))
+
+
+def _write_expect_auto_reply_state(
+    conn,
+    *,
+    row: Mapping[str, Any],
+    enable: bool,
+    require_named_policy: bool = False,
+) -> tuple[bool, str]:
+    """Write the three legacy flags as one visible state inside a transaction."""
+    entry = _expect_row_access_values(row)
+    entry_id = int(entry.get("id", 0) or 0)
+    if entry_id <= 0:
+        raise ValueError("expect entry not found")
+    current = _expect_auto_reply_is_effective(entry)
+    if enable and current:
+        # Existing active legacy entries remain valid compatibility records.
+        # Re-applying the visible state must not rewrite or disable them.
+        return False, "Already in the requested state."
+    if enable:
+        policy = _expect_auto_reply_policy(conn, int(entry.get("allow_policy_id", 0) or 0))
+        if require_named_policy and policy is None:
+            return False, "Choose an enabled named access policy before turning on Auto reply."
+        error = _expect_auto_reply_validation_error(entry, policy)
+        if error:
+            return False, error
+    # Saved only deliberately retains the rule as enabled: matching requests
+    # remain available for an operator's manual review/send workflow.
+    target = bool(enable)
+    saved_already = (
+        bool(entry.get("enabled", False))
+        and not bool(entry.get("auto_reply_enabled", False))
+        and not bool(entry.get("unattended_auto_reply_enabled", False))
+    )
+    if not target and saved_already:
+        return False, "Already in the requested state."
+    conn.execute(
+        """
+        UPDATE js8_expect_entries
+           SET enabled=1, auto_reply_enabled=?, unattended_auto_reply_enabled=?, updated_ts=?
+         WHERE id=?
+        """,
+        (1 if target else 0, 1 if target else 0, time.time(), entry_id),
+    )
+    audit_values = dict(entry)
+    audit_values.update(
+        {
+            "enabled": 1,
+            "auto_reply_enabled": 1 if target else 0,
+            "unattended_auto_reply_enabled": 1 if target else 0,
+            "visible_auto_reply_state": "auto-reply-on" if target else "saved-only",
+        }
+    )
+    _record_expect_management_audit(
+        conn,
+        entry_id=entry_id,
+        action="auto-reply-enabled" if target else "saved-only",
+        values=audit_values,
+    )
+    return True, ""
+
+
+def set_expect_entry_auto_reply_state(
+    entry_id: int,
+    enabled: bool,
+    *,
+    db_path: Optional[Path] = None,
+    require_named_policy: bool = False,
+) -> ExpectAutoReplyStateResult:
+    """Atomically set one entry to visible ``Auto reply`` or ``Saved only``.
+
+    Enabling is rejected unless the response and resolved access are usable.
+    Disabling never discards the entry or its response.
+    """
+    try:
+        canonical_id = int(entry_id)
+    except (TypeError, ValueError):
+        raise ValueError("A valid Expect entry id is required.") from None
+    if canonical_id <= 0:
+        raise ValueError("A valid Expect entry id is required.")
+    path = Path(db_path) if db_path is not None else default_expect_db_path()
+    conn = connect_sqlite_runtime_write(
+        path, timeout=5.0, row_factory=sqlite3.Row, busy_timeout_ms=5000
+    )
+    try:
+        _ensure_js8_expect_tables(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM js8_expect_entries WHERE id=?", (canonical_id,)).fetchone()
+        if row is None:
+            raise ValueError("expect entry not found")
+        changed, reason = _write_expect_auto_reply_state(
+            conn,
+            row=_row_mapping(row),
+            enable=bool(enabled),
+            require_named_policy=bool(require_named_policy),
+        )
+        if bool(enabled) and not changed and reason != "Already in the requested state.":
+            raise ValueError(reason)
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+    return ExpectAutoReplyStateResult(
+        id=canonical_id,
+        auto_reply_enabled=bool(enabled),
+        state="auto-reply-on" if enabled else "saved-only",
+    )
+
+
+def bulk_set_expect_entry_auto_reply_state(
+    entry_ids: Iterable[int],
+    enabled: bool,
+    *,
+    db_path: Optional[Path] = None,
+    require_named_policy: bool = False,
+) -> ExpectAutoReplyBulkResult:
+    """Change a bounded explicit selection in one short transaction.
+
+    Invalid or ineligible entries are retained unchanged and reported. This is
+    intentionally not a global operation: the caller must provide selected
+    ids, limiting accidental automation changes and SQLite lock duration.
+    """
+    selected_ids = _selected_expect_entry_ids(entry_ids)
+    path = Path(db_path) if db_path is not None else default_expect_db_path()
+    conn = connect_sqlite_runtime_write(
+        path, timeout=5.0, row_factory=sqlite3.Row, busy_timeout_ms=5000
+    )
+    updated: list[int] = []
+    skipped: list[tuple[int, str]] = []
+    try:
+        _ensure_js8_expect_tables(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        marks = ",".join("?" for _ in selected_ids)
+        rows = conn.execute(
+            f"SELECT * FROM js8_expect_entries WHERE id IN ({marks})", tuple(selected_ids)
+        ).fetchall()
+        by_id = {int(row["id"]): _row_mapping(row) for row in rows}
+        for entry_id in selected_ids:
+            row = by_id.get(entry_id)
+            if row is None:
+                skipped.append((entry_id, "Expect entry was not found."))
+                continue
+            changed, reason = _write_expect_auto_reply_state(
+                conn,
+                row=row,
+                enable=bool(enabled),
+                require_named_policy=bool(require_named_policy),
+            )
+            if changed:
+                updated.append(entry_id)
+            else:
+                skipped.append((entry_id, reason))
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+    return ExpectAutoReplyBulkResult(
+        requested_ids=tuple(selected_ids), updated_ids=tuple(updated), skipped=tuple(skipped)
+    )
+
+
+# Short aliases make the operation straightforward for GUI presenters while
+# keeping the result type and behavior explicit for integrations.
+set_expect_entry_auto_reply = set_expect_entry_auto_reply_state
+bulk_set_expect_entry_auto_reply = bulk_set_expect_entry_auto_reply_state
 
 
 def delete_expect_entry(entry_id: int, *, db_path: Optional[Path] = None) -> bool:
@@ -869,7 +1446,7 @@ def save_expect_entry(
     auto_reply = 1 if bool(entry.get("auto_reply_enabled", False)) else 0
     unattended = 1 if bool(entry.get("unattended_auto_reply_enabled", False)) else 0
 
-    conn = connect_sqlite(path)
+    conn = connect_sqlite(path, row_factory=sqlite3.Row)
     try:
         _ensure_js8_expect_tables(conn)
         row = conn.execute(
@@ -913,6 +1490,13 @@ def save_expect_entry(
             "import_source": str(entry.get("import_source", "") or "fio-compose").strip(),
             "updated_ts": now,
         }
+        if _expect_auto_reply_is_effective(values):
+            error = _expect_auto_reply_validation_error(
+                _expect_row_access_values(values),
+                _expect_auto_reply_policy(conn, int(values.get("allow_policy_id", 0) or 0)),
+            )
+            if error:
+                raise ValueError(error)
         if row:
             row_id = int(row[0])
             assignments = ", ".join(f"{key}=?" for key in values.keys())
@@ -945,6 +1529,137 @@ def save_expect_entry(
         enabled=bool(enabled),
         auto_reply_enabled=bool(auto_reply),
     )
+
+
+def bulk_refresh_expect_datecodes(
+    *,
+    db_path: Optional[Path] = None,
+    entry_ids: Optional[Iterable[int]] = None,
+    moment: Optional[datetime] = None,
+    datecode: object = "",
+) -> ExpectDatecodeRefreshResult:
+    """Refresh eligible MCForm dates in one short, atomic local transaction.
+
+    This operation only updates the stored MCForm response, the optional fixed
+    MsgAuth datecode, and ``updated_ts``.  It never sends traffic.  Dynamic Q,
+    malformed/non-form, mismatched, and ambiguous responses are reported as
+    skipped and retain every column unchanged.
+    """
+    path = Path(db_path) if db_path is not None else default_expect_db_path()
+    if not path.exists():
+        return ExpectDatecodeRefreshResult()
+    stamp = _resolve_refresh_datecode(moment=moment, datecode=datecode)
+    if not stamp:
+        return ExpectDatecodeRefreshResult()
+    requested_ids: Optional[list[int]] = None
+    if entry_ids is not None:
+        requested_ids = []
+        for value in entry_ids:
+            try:
+                item = int(value)
+            except (TypeError, ValueError):
+                continue
+            if item > 0 and item not in requested_ids:
+                requested_ids.append(item)
+        if not requested_ids:
+            return ExpectDatecodeRefreshResult()
+
+    conn = connect_sqlite_runtime_write(
+        path, timeout=5.0, row_factory=sqlite3.Row, busy_timeout_ms=5000
+    )
+    updated: list[int] = []
+    skipped: list[int] = []
+    try:
+        # Do not initialize or migrate anything from this UI action.  Startup
+        # owns schema creation, while a missing table is a safe no-op.
+        if not table_exists(conn, "js8_expect_entries"):
+            return ExpectDatecodeRefreshResult()
+        conn.execute("BEGIN IMMEDIATE")
+        if requested_ids is None:
+            rows = conn.execute(
+                """
+                SELECT id, expect_key, response_text, msg_auth_include_datecode,
+                       msg_auth_datecode, source_radio_id, source_scope,
+                       js8_instance_id, enabled, auto_reply_enabled, import_source
+                FROM js8_expect_entries
+                ORDER BY id ASC
+                """
+            ).fetchall()
+        else:
+            marks = ",".join("?" for _ in requested_ids)
+            rows = conn.execute(
+                f"""
+                SELECT id, expect_key, response_text, msg_auth_include_datecode,
+                       msg_auth_datecode, source_radio_id, source_scope,
+                       js8_instance_id, enabled, auto_reply_enabled, import_source
+                FROM js8_expect_entries
+                WHERE id IN ({marks})
+                ORDER BY id ASC
+                """,
+                tuple(requested_ids),
+            ).fetchall()
+        now = time.time()
+        for row in rows:
+            entry_id = int(row["id"] or 0)
+            old_response = str(row["response_text"] or "").strip()
+            new_response = update_mcform_response_datecode(
+                old_response, row["expect_key"], stamp
+            )
+            if new_response is None:
+                skipped.append(entry_id)
+                continue
+            old_auth_datecode = str(row["msg_auth_datecode"] or "").strip().upper()
+            new_auth_datecode = (
+                stamp if bool(row["msg_auth_include_datecode"]) else old_auth_datecode
+            )
+            if new_response == old_response and new_auth_datecode == old_auth_datecode:
+                skipped.append(entry_id)
+                continue
+            conn.execute(
+                """
+                UPDATE js8_expect_entries
+                   SET response_text=?, msg_auth_datecode=?, updated_ts=?
+                 WHERE id=?
+                """,
+                (new_response, new_auth_datecode, now, entry_id),
+            )
+            _record_expect_management_audit(
+                conn,
+                entry_id=entry_id,
+                action="bulk-date-refreshed",
+                values={
+                    "expect_key": row["expect_key"],
+                    "source_radio_id": row["source_radio_id"],
+                    "source_scope": row["source_scope"],
+                    "js8_instance_id": row["js8_instance_id"],
+                    "enabled": row["enabled"],
+                    "auto_reply_enabled": row["auto_reply_enabled"],
+                    "import_source": row["import_source"],
+                    "response_text": new_response,
+                    "previous_response_text": old_response,
+                    "msg_auth_datecode": new_auth_datecode,
+                    "previous_msg_auth_datecode": old_auth_datecode,
+                    "datecode": stamp,
+                },
+            )
+            updated.append(entry_id)
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+    return ExpectDatecodeRefreshResult(tuple(updated), tuple(skipped))
+
+
+# Keep the action name available to the Spotter presenter without coupling the
+# store to Qt or to a particular button label.
+update_expect_datecodes = bulk_refresh_expect_datecodes
+bulk_update_expect_datecodes = bulk_refresh_expect_datecodes
+bulk_refresh_mcform_datecodes = bulk_refresh_expect_datecodes
 
 
 def list_expect_management_audit(

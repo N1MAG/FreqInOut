@@ -44,7 +44,9 @@ def test_message_compose_exposes_spotter_as_guarded_form_family() -> None:
     assert '"spotter_form"' in source
     assert "FIO sends only after JS8Call target-state preflight passes" in source
     assert "Send via JS8Call" in source
-    assert "Save to Expect" in source
+    # Expect administration belongs to FIO Spotter; Compose only hands the
+    # operator into that service rather than presenting a second owner.
+    assert "FIO Spotter" in source
     assert "send_js8_message_guarded" in source
     assert "save_expect_entry" in source
     assert "Joseph D. Lyman, KF7MIX" not in source
