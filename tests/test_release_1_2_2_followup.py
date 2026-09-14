@@ -1497,77 +1497,48 @@ def test_varac_status_clears_waiting_state_after_qso_summary():
     assert status["waiting_for_frequency"] is False
 
 
-def test_map_html_uses_bottom_docked_inline_legend_rows():
-    dummy = SimpleNamespace(
-        settings=_MemorySettings(),
-        _now_reachable_enabled=True,
-        show_grids=False,
-        show_grid_labels=False,
-        show_regions=False,
-        show_states=False,
-        show_cities=False,
-        _resolve_prop_band_colors=lambda: {"20M": "#43A047", "40M": "#1E88E5"},
-    )
+def test_native_map_uses_bottom_docked_inline_legend_rows():
+    qml = (
+        Path(__file__).resolve().parents[1]
+        / "freqinout/gui/qml/native_map_renderer.qml"
+    ).read_text(encoding="utf-8")
 
-    html = StationsMapTab._build_leaflet_html(
-        dummy,
-        markers=[],
-        links=[],
-        max_zoom=18,
-        leaflet_js="leaflet.js",
-        leaflet_css="leaflet.css",
-        geojson_urls=[],
-        cities_geojson=None,
-        city_min_pop=0,
-        show_city_labels=False,
-        initial_view=None,
-        prop_overlay_enabled=True,
-        prop_region_scores=None,
-        prop_state_scores=None,
-    )
-
-    assert 'id="legendDock"' in html
-    assert 'id="legendBox"' in html
-    assert "const legend = L.control" not in html
-    assert "function updateLegend()" in html
-    assert "legend-rows" in html
-    assert "legend-label" in html
-    assert "legend-sep" in html
-    assert "Link SNR:" in html
-    assert "SitRep Status:" in html
-    assert "Peer Sched Now:" in html
-    assert "Best Band Now:" in html
-    assert 'color:\\"' not in html
+    legend_start = qml.index("id: legendPanel")
+    legend_body = qml[legend_start:]
+    assert "anchors.bottom: parent.bottom" in legend_body
+    assert "anchors.horizontalCenter: parent.horizontalCenter" in legend_body
+    assert "id: legendRow" in legend_body
+    assert "model: mapBridge.legend" in legend_body
+    assert qml.index("id: summaryPanel") < legend_start
+    assert "anchors.right: parent.right" in qml[qml.index("id: summaryPanel"):legend_start]
 
 
-def test_map_detail_button_action_overrides_payload_action():
-    dummy = SimpleNamespace(
-        settings=_MemorySettings(),
-        _now_reachable_enabled=False,
-        show_grids=False,
-        show_grid_labels=False,
-        show_regions=False,
-        show_states=False,
-        show_cities=False,
-        _resolve_prop_band_colors=lambda: {},
-    )
+def test_native_map_detail_action_cannot_be_overridden_by_item_payload():
+    from freqinout.gui.native_map_renderer import NativeMapRenderer
 
-    html = StationsMapTab._build_leaflet_html(
-        dummy,
-        markers=[],
-        links=[],
-        max_zoom=18,
-        leaflet_js="leaflet.js",
-        leaflet_css="leaflet.css",
-        geojson_urls=[],
-        cities_geojson=None,
-        city_min_pop=0,
-        show_city_labels=False,
-        initial_view=None,
-    )
-
-    assert "Object.assign({}, payload || {}, {action: action})" in html
-    assert "Object.assign({action: action}, payload || {})" not in html
+    _app()
+    renderer = NativeMapRenderer()
+    actions = []
+    renderer.action_requested.connect(actions.append)
+    try:
+        renderer.apply_projection(
+            {
+                "markers": [
+                    {
+                        "id": "station-a",
+                        "callsign": "STATION-A",
+                        "lat": 39.7,
+                        "lon": -104.9,
+                        "action": "payload-action",
+                    }
+                ]
+            }
+        )
+        renderer.bridge.select_marker(renderer.bridge.markers[0])
+        assert actions[0]["action"] == "select_marker"
+        assert actions[0]["payload"]["action"] == "payload-action"
+    finally:
+        renderer.shutdown()
 
 
 def test_map_controls_keep_action_buttons_readable(monkeypatch, tmp_path):

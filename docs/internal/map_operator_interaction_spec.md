@@ -605,37 +605,32 @@ Lifecycle rules:
 ### Cross-platform first-activation and window-placement stability
 
 Map activation must preserve the operator's top-level FIO window geometry,
-window state, and assigned monitor. Constructing, warming, showing, hiding,
-loading, or resizing the embedded map must never call top-level move, resize,
-normalize, maximize, or screen-placement operations.
+window state, assigned monitor, and current main workspace. Constructing,
+showing, hiding, loading, or resizing the Map must never call top-level move,
+resize, normalize, maximize, or screen-placement operations on the main window.
 
-- On Windows, WebEngine helper startup may use the established hidden
-  `QWebEngineView` warm-up before first Map navigation. macOS and Linux do not
-  prewarm by default. Platform-specific warm-up must not be generalized without
-  passing a real native qualification gate on every affected platform.
-- The real WebEngine view is created only inside the already-laid-out Map
-  canvas. Cold activation may show one stable loading state and one transition
-  to the map; adjacent FIO pages must never become visible during lazy-page
-  replacement.
-- First Map activation follows the established direct lifecycle: make the Map
-  workspace current, lazily create one `QWebEngineView` in its permanent Map
-  stack, navigate that view directly, and select it when `loadFinished`
-  succeeds. Responsive reflow remains coalesced and idempotent, but it must not
-  gate navigation or presentation through a timer-driven geometry state machine.
-- The WebEngine view is always constructed in its permanent stack parent with
-  ordinary expanding layout ownership. Cold navigation uses
-  `QWebEngineView.setUrl()` or `setHtml()` directly; FIO must not load a detached
-  page and later call `QWebEngineView.setPage()`, reparent a loaded page, install
-  an opaque reveal overlay, or wait on a geometry/quiescence/presentation gate.
-  Those mechanisms failed native macOS and Linux qualification and are rejected.
-- `loadFinished(True)` immediately selects the persistent WebEngine stack page
-  and begins the existing bounded first-payload readiness probe. A failed load
-  immediately returns to the shared-theme loading/error page with calm recovery
-  guidance. The status strip must never report Ready while a separate opaque
-  surface can still hide the map.
-- First-surface diagnostics may record the final canvas, WebEngine and read-only
-  top-level geometry plus state, full-screen/maximized flags and assigned screen.
-  Diagnostics may observe geometry but must never delay presentation or alter it.
+The native Qt Location architecture below supersedes every earlier WebEngine,
+Leaflet, browser warm-up, HTML reload, JavaScript bridge, online tile-provider,
+and embedded-Map lifecycle rule in this document. Those earlier rules remain
+only as historical failure analysis and must not be used as implementation
+guidance. The previous Map's overlay language and operator workflows remain the
+behavioral reference; only its rendering substrate is replaced.
+
+- First Map activation constructs one `QQuickWidget` with a Qt Location `Map`
+  in the persistent pop-out's permanent hidden content stack, then shows the
+  already-complete top-level hierarchy. No native child surface is attached,
+  swapped, or reparented after the window becomes visible.
+- The native renderer has ignored size-policy hints, a zero minimum size, and
+  no authority over top-level placement. Cold activation may show one stable
+  loading state and one transition to ready; no adjacent main-window page may
+  become visible.
+- A missing QML module, Qt Location item-overlay plugin, or bundled basemap
+  asset produces a calm in-window unavailable state with retry/support
+  guidance. It does not select an online provider, create another window,
+  resize either top level, or enter a retry loop.
+- First-surface diagnostics may record renderer and read-only top-level geometry,
+  state, full-screen/maximized flags, screen identity, QML status, and provider
+  errors. Diagnostics may observe presentation but never delay or alter it.
 - Hidden primary pages and hidden Message modes do not contribute geometry
   hints to the current workspace. The main shell ignores even the active
   page's transient minimum-size hint: each page owns internal overflow while
@@ -644,16 +639,15 @@ normalize, maximize, or screen-placement operations.
   and splitter writes are idempotent and occur only when their resolved layout
   state changes; resize, paint, and layout settlement perform no data refresh or
   external I/O.
-- Map resize/repaint must not reload HTML, refresh map data, repeatedly invoke
-  JavaScript, or introduce a second presentation lifecycle.
+- Map resize/repaint must not refresh source data, reconstruct QML, navigate a
+  browser, or introduce a second presentation lifecycle.
 - Deferred activation and first-visible layout callbacks are navigation-
   generation fenced. A superseded hidden tab cannot resize, refresh, or replace
   the current page.
-- A transient `ApplicationInactive` emitted while WebEngine attaches its first
-  native surface is grace-period fenced. If FIO becomes active again within the
-  bounded grace period, child tabs are not paused/resumed and Map is not rendered
-  a second time. Sustained inactivity still pauses noncritical work; explicit
-  hidden/suspended application states pause immediately.
+- Application focus changes do not recreate the renderer, rebuild projections,
+  or change either window's geometry. Sustained inactivity still pauses
+  noncritical work; explicit hidden/suspended application states pause
+  immediately.
 - Re-entering an initialized, unchanged Map reuses the live page. Navigation or
   application-focus changes alone do not mark Map data dirty, request a render,
   or expand/collapse the status strip. Real source updates received while Map
@@ -669,24 +663,190 @@ flash/reposition sequence, monitor jump, top-level growth, adjacent-page
 exposure, status-strip height jump, or minimize/restore repair step is
 acceptable.
 
-### Approved next slice — persistent Map window
+### Persistent native nonmodal Map window
 
-After the direct embedded-loading recovery build passes its exit gate, Map will
-move to one persistent, nonmodal top-level window so operators can use it while
-working elsewhere in FIO. The Map widget and WebEngine view must be constructed
-in that final window from the outset and must never be reparented between the
-main stack and the Map window. Clicking Map opens or raises the existing window;
-closing it hides rather than destroys it. FIO owns one instance, closes it during
-application shutdown, and keeps hidden-window refresh work bounded.
+Map uses one persistent, nonmodal top-level window so operators can use it while
+working elsewhere in FIO. Its rendering surface is native Qt Quick/Qt Location;
+there is no embedded or pop-out browser implementation. The coordinate surface
+uses the provider-free `itemsoverlay` backend. It must not contain or initialize
+an OSM/Mapbox/other online provider, URL, tile loader, API-key path, or network
+fallback.
 
-The Map window will persist normal geometry, maximized state, and screen identity
-with validation against currently connected displays. First use opens at a
-bounded normal size on the main FIO screen; it does not automatically enter
-full-screen or always-on-top mode. Subsequent opens honor the operator's valid
-saved placement. Showing, hiding, loading, resizing, or restoring the Map window
-must never move, resize, normalize, activate, or change the screen/full-screen
-state of the main FIO window. The main workspace exposes a concise open/bring-to-
-front status and no second embedded WebEngine surface.
+The Map is fully usable offline. Bundled, worker-loaded US, Canadian, and
+Mexican vector outlines form a noninteractive basemap below every operational
+layer and are governed by a separate cap so an operational polygon limit cannot
+clip geographic context. Panning and mouse-wheel, touchpad, pinch, and visible
+button zoom operate directly on the existing scene. A minimum 32-pixel target
+and the visible label both select a pin. Marker, path, and polygon actions cross
+the QML/Python boundary by stable ID only; Python resolves the current immutable
+snapshot and never converts a nested live QML delegate object.
+
+Redesign brief:
+
+- **Primary operator task:** Open or bring forward the live Map while continuing
+  work in another FIO workspace.
+- **Starting context:** The operator selects Map directly or follows a Map action
+  carrying group, topic, callsign, source, state, grid, or report context.
+- **Completion outcome:** One reusable Map window is visible with the requested
+  context, while the main FIO window remains unchanged and usable.
+- **Task sequence:** Select Map or a contextual Map action → view the stable Map
+  window → work in either window → close the Map title bar to hide it → select
+  Map again to restore the same window and state.
+- **Primary action:** The main navigation `Map` action opens the window on first
+  use and brings the existing window forward thereafter.
+- **Essential state and Why:** The Map's existing compact status and support
+  surfaces explain loading, ready, stale, and unavailable states. The Map
+  navigation tooltip states whether the window will open or come forward.
+- **Secondary and advanced work:** Existing Map controls, layers, filters,
+  selected-detail inspector, support detail, and contextual handoffs remain
+  inside the Map window without duplicating the Station Control Bar.
+- **Workspace archetype:** A dominant Map work surface with contextual
+  inspector. The main navigation item is a direct window action, not a second
+  main-stack workspace.
+- **Responsive behavior:** The existing Map/detail responsive contract applies
+  at wide, medium, and compact window sizes. The Map owns its overflow and never
+  changes the main window's size hints or scroll ownership.
+- **Shared theme and components:** The pop-out uses the application stylesheet,
+  shared Map controls, shared status treatments, font-derived control geometry,
+  and no screen-local palette or text-bearing fixed height.
+- **Performance boundary:** Construction is lazy and occurs once. Show, hide,
+  move, resize, theme, and navigation paths perform no source, endpoint, or
+  device I/O. Placement writes are coalesced and change-detected. Hidden source
+  changes remain dirty and produce at most one bounded refresh on the next show;
+  clean re-entry reuses the live scene without projection rebuild.
+  A projection that completes after the window is hidden retains only its newest
+  payload and performs no hidden native-scene apply. Reopen applies it once
+  when it is still current; a newer hidden source change supersedes it with one
+  coalesced refresh.
+
+The Map pop-out installs one permanent central content stack before its first
+show. Its loading page and Map page are children of that same stack for the
+entire window lifetime; the top-level central widget is never replaced after
+the window becomes visible. The stack and native renderer report neutral size
+hints so QML or the map renderer cannot ask the window manager to resize or
+reposition the pop-out. The `QQuickWidget` is constructed in that final hidden
+container before the first `show()` and is never reparented or replaced.
+Clicking Map opens or raises the existing window; closing it hides rather than
+destroys it. FIO owns one instance, closes it during application shutdown, and
+keeps hidden-window refresh work bounded. Main-stack selection remains on the
+operator's current workspace so navigation never implies that a hidden embedded
+Map page is active.
+
+The Map window persists its normal rectangle, maximized state, and screen
+identity with validation against currently connected displays. Screen matching
+prefers stable hardware serial identity when the platform exposes it, then the
+screen name and prior available geometry, so monitor reorder/rename does not
+strand the window. Full-screen,
+minimized, and always-on-top state are never restored automatically. First use,
+malformed placement, or a disconnected saved screen opens a bounded normal
+rectangle centered on the main FIO screen. A valid saved rectangle is clamped
+inside that screen's available geometry. Movement and resize only update an
+in-memory candidate; a coalesced timer and hide/shutdown boundaries perform a
+change-detected settings write.
+
+Showing, hiding, loading, resizing, restoring, or destroying the Map window must
+never move, resize, normalize, activate, or change the screen/full-screen state
+of the main FIO window. The direct Map navigation action exposes concise
+open/bring-forward state through its tooltip and accessible description; no
+second Map surface exists. Contextual Map actions retain
+their pending filter/focus intent until the singleton Map content is ready, and
+stale callbacks cannot create another window or surface.
+
+Projection snapshots are plain bounded values built away from the GUI thread.
+Markers, paths, polygons, grids, city labels, propagation fills, direction
+indicators, legend, and Regional Intel summary each have explicit renderer caps.
+The established station, weather, alert, infrastructure, path, grid, label,
+propagation, Regional Intel, and selection semantics must remain recognizable;
+moving to the native canvas is not authority to simplify or replace overlays.
+Only the newest generation may update QML. Selection returns through typed Qt
+signals; page titles, URLs, and JavaScript are not action transports. Theme
+colors come from the shared FIO theme bridge rather than screen-local literals.
+
+### Native layer and live-theme parity
+
+The native renderer preserves the operator meaning of the proven Leaflet
+layers while replacing only the unstable browser surface:
+
+- `Regions` is an independent FEMA R01–R10 overlay, not a thicker States
+  outline. Region colors and one legible R01–R10 label remain visible when the
+  States layer is off. State geometry remains the bounded hit target and its
+  selection payload includes both state and FEMA-region identity.
+- `States` shows state/province boundaries and one abbreviation per state when
+  enabled. Regional Intelligence may replace state fill with its operational
+  gray/blue/yellow/orange/red level, but it must not erase area identity.
+- `Paths` uses the established five SNR bands (strong green through poor red).
+  When Propagation and Regions are both enabled, FEMA colors remain
+  authoritative and the best propagation band annotates each region label;
+  propagation must not silently replace the selected Regions layer.
+- Weather, Alerts, Infrastructure, station status, SitRep, Regional
+  Intelligence, Maidenhead grid, propagation, city, and path collections stay
+  independently bounded and data-driven. The legend lists only active layers
+  or status/SNR categories represented by the current snapshot and remains
+  explicitly bounded.
+- City labels are ordered deterministically by population and name, then
+  decluttered in the retained QML scene using a bounded spatial grid after a
+  calm viewport debounce. Nearby labels cannot overlap at a given zoom, and
+  suppressed labels return as zoom creates room without a database read or new
+  projection.
+- A light/dark change is one visual transaction. MainWindow resolves one fresh
+  shared-theme snapshot and passes it to the persistent Map window, QML bridge,
+  Map chrome, and all selected-detail `QTextBrowser` documents. Theme changes
+  perform no source I/O, projection, QML rebuild, geometry change, or window
+  activation. Retained selection HTML is regenerated from its cached value
+  payload so foreground and backing surface cannot belong to different themes.
+
+Frozen packages must include the FIO QML source, Qt Location/Positioning/Quick
+QML modules, the provider-free item-overlay/positioning components, and runtime
+search roots. Presence of other Qt plugins in a frozen distribution does not
+authorize their use by the Map.
+Missing deployment components must be reported as unavailable rather than
+falling back to WebEngine.
+
+### Operator legend, filter row, and first coherent paint
+
+The ordinary station view uses the established station-pin key, independent of
+application theme: green means `Functioning`, yellow means
+`Partially Functioning`, red means `Not Functioning`, and light blue means
+`Unknown / No Report`. The inline legend identifies `State boundaries`,
+`Cities`, and `Stations` when those contexts are active. In the default view,
+one first-position `Stations` group keeps `SitRep Status:` and all four
+font-natural pin meanings together as it wraps. Path views retain the complete
+five-bin SNR key as their primary legend. Entries remain bounded and wrap inside
+the Map canvas rather than widening the pop-out.
+
+The principal controls read `View`, `Topic`, `Group`, `Age`. At a normal wide
+desktop width they share one row in that order; measured font/content widths
+reduce the layout to two and then one column. Hidden mode-specific controls do
+not reserve grid cells. Search and the two clearing actions remain immediately
+below this row. Changing mode, theme, font, or window size only coalesces a
+cache-only geometry pass and never refreshes Map data.
+
+The Age chooser is sized before display and constrained to the available
+geometry of the button's screen. It opens below when space permits and above
+otherwise, with both axes clamped so every quick choice and the custom-days
+action remain reachable.
+
+On first open, QML readiness and content readiness are separate. The retained
+loading surface remains visible until the newest complete projection has
+replaced every bridge collection. Only then is the already-final-parented native
+surface revealed. This handoff never constructs, reparents, activates, resizes,
+or moves either top-level window and performs no database, filesystem, endpoint,
+tile, or network I/O.
+
+Acceptance requires singleton window/Map/`QQuickWidget` identity; close-to-hide and
+reuse; final-parent ownership; permanent central-container identity and stable
+top-level geometry, normal geometry, size hint, and minimum-size hint across the
+hidden construction and first show; main-window geometry/state/screen invariance;
+valid placement/maximized round-trip; safe fallback for malformed or disconnected
+placement; bounded first-use geometry; clean one-time shutdown; context handoff;
+clean warm re-entry without refresh; one coalesced refresh after hidden data
+changes; bounded advanced-layer parity; QML/plugin packaging; shared-theme and
+font-derived layout checks; provider-free operation with networking disabled;
+no API-key/tile/provider text or request; complete bundled-basemap delivery;
+wheel/button/pinch zoom; drag pan; and exactly one typed action from a real
+visible marker click; and native qualification
+on macOS, Linux, and Windows at normal, maximized/full-screen main-window states
+and on a secondary monitor where available.
 
 - Regional Intel summary list excludes green rows by default.
 - Green evidence can still lower concern or support trend internally.
@@ -802,3 +962,32 @@ next actions without making the map render path heavier.
 - Side-panel enrichment is lazy, cached briefly by callsign and age, and
   bounded. Traffic, Regional Intel, and Paths rendering must not wait for these
   station detail queries.
+
+## Returning to the Main FIO Workspace
+
+Map is a persistent peer window and may remain maximized while the operator
+works in FIO. Its primary toolbar must therefore keep a visible `Show FIO`
+action available without requiring the operator to minimize Map or use an
+operating-system window chooser.
+
+- `Show FIO` presents the existing main window; it never creates a replacement
+  window, closes Map, or changes either window's geometry.
+- If the main window is minimized, presentation removes only the minimized
+  state. An existing maximized or full-screen state is preserved.
+- The selected-detail `Inbox` and `Compose Message` actions complete their
+  navigation and context handoff first, then present the main window so the
+  destination is immediately visible.
+- Returning to FIO is a cache-only UI action. It performs no Map refresh,
+  projection, renderer rebuild, source read, settings write, or network work.
+- Toolbar and selected-detail handoffs queue the presentation through the
+  existing Qt meta-object event queue. They must not change top-level focus
+  re-entrantly from the originating button signal or allocate/connect a
+  one-shot timer during that signal.
+- Foreground activation is a best-effort request to the platform window
+  manager. Failure to grant focus must not undo completed navigation or damage
+  either persistent window.
+- Acceptance covers action visibility, keyboard/accessibility naming, route-
+  before-focus ordering, queued-not-re-entrant dispatch, retained Map
+  visibility, and absence of move, resize, close, or window-recreation calls.
+  Native foreground behavior remains a packaged macOS, Linux, and Windows
+  qualification item.

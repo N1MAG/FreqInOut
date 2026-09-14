@@ -10697,8 +10697,8 @@ class SettingsTab(QWidget):
         self._refresh_settings_section_combo()
         self._refresh_settings_nav_scroll_size()
 
-    def _refresh_settings_nav_button_styles(self) -> None:
-        theme = resolve_theme(self.settings)
+    def _refresh_settings_nav_button_styles(self, theme: Optional[Mapping[str, str]] = None) -> None:
+        theme = dict(theme) if isinstance(theme, Mapping) and theme else resolve_theme(self.settings)
         current_widget = self.sections_stack.currentWidget() if hasattr(self, "sections_stack") else None
         for group, btn in self._section_nav_buttons.items():
             if btn is None:
@@ -10907,10 +10907,10 @@ class SettingsTab(QWidget):
 
         return {"bg": transparent, "border": transparent, "fg": text_color, "bold": False}
 
-    def _apply_sections_nav_style(self) -> None:
+    def _apply_sections_nav_style(self, theme: Optional[Mapping[str, str]] = None) -> None:
         if not hasattr(self, "sections_nav_list"):
             return
-        theme = resolve_theme(self.settings)
+        theme = dict(theme) if isinstance(theme, Mapping) and theme else resolve_theme(self.settings)
         self.sections_nav_list.setStyleSheet(
             "QListWidget {"
             f" background: {theme.get('surface_alt', theme.get('surface', '#f2f2f2'))};"
@@ -11312,10 +11312,10 @@ class SettingsTab(QWidget):
         item.setData(Qt.BackgroundRole, None)
         item.setData(Qt.ForegroundRole, None)
 
-    def _refresh_section_nav_health(self) -> None:
+    def _refresh_section_nav_health(self, theme: Optional[Mapping[str, str]] = None) -> None:
         if not hasattr(self, "sections_nav_list"):
             return
-        theme = resolve_theme(self.settings)
+        theme = dict(theme) if isinstance(theme, Mapping) and theme else resolve_theme(self.settings)
         snapshot = self._build_section_health_snapshot()
         for group, meta in self._section_meta.items():
             nav_item = self._section_nav_items.get(group)
@@ -11338,7 +11338,7 @@ class SettingsTab(QWidget):
             )
             if header_btn:
                 header_btn.setStyleSheet(self._section_header_style(state, theme))
-        self._apply_sections_nav_style()
+        self._apply_sections_nav_style(theme)
         self._update_sections_nav_size()
         self._refresh_settings_task_buttons(snapshot)
 
@@ -29110,62 +29110,101 @@ class SettingsTab(QWidget):
         except Exception:
             return {}
 
-    def apply_theme(self):
-        try:
-            theme = resolve_theme(self.settings)
-            if self.loading_label:
+    def apply_theme(self, theme: Optional[Mapping[str, str]] = None):
+        theme = dict(theme) if isinstance(theme, Mapping) and theme else resolve_theme(self.settings)
+
+        def _attempt(label: str, action) -> None:
+            try:
+                action()
+            except Exception:
+                # A stale runtime/status widget must not prevent the remaining
+                # locally styled controls from receiving the new palette.
+                log.debug("Settings theme refresh failed for %s", label, exc_info=True)
+
+        # Navigation owns explicit button styles, so refresh it before any
+        # optional runtime painter that may be unavailable during startup.
+        if hasattr(self, "sections_nav_list"):
+            _attempt("section navigation", lambda: self._apply_sections_nav_style(theme))
+            _attempt("section navigation buttons", lambda: self._refresh_settings_nav_button_styles(theme))
+            _attempt("section health", lambda: self._refresh_section_nav_health(theme))
+
+        loading_label = getattr(self, "loading_label", None)
+        if loading_label is not None:
+            def _style_loading_label() -> None:
                 bg = theme.get("surface_alt", theme.get("surface", "#f2f2f2"))
                 fg = theme.get("accent", theme.get("text", "#222"))
                 border = theme.get("border", "#ccc")
-                self.loading_label.setStyleSheet(
+                loading_label.setStyleSheet(
                     f"padding: 2px 6px; border-radius: 4px; background: {bg}; color: {fg}; border: 1px solid {border};"
                 )
-                self.loading_label.setVisible(False)
+                loading_label.setVisible(False)
+
+            _attempt("loading status", _style_loading_label)
+
+        def _paint_runtime_status() -> None:
             snapshot = dict(getattr(self, "_last_running_status_snapshot", {}) or {})
             if not snapshot:
                 snapshot = self._status_service.software_status_snapshot()
             self._paint_running_status_snapshot(snapshot, theme)
-            self._update_launch_selected_state()
-            self._update_device_profile_action_buttons()
-            self._update_op_group_action_buttons()
-            self._update_local_net_action_buttons()
-            self._set_save_button_state("info" if self._settings_dirty else "success")
-            if hasattr(self, "open_logs_btn"):
-                self.open_logs_btn.setStyleSheet(button_style("primary", theme))
-            if hasattr(self, "open_log_folder_btn"):
-                self.open_log_folder_btn.setStyleSheet(button_style("secondary", theme))
-            if hasattr(self, "export_diag_btn"):
-                self.export_diag_btn.setStyleSheet(button_style("secondary", theme))
-            if hasattr(self, "enable_timed_debug_btn"):
-                self.enable_timed_debug_btn.setStyleSheet(button_style("warning", theme))
-            if hasattr(self, "logging_warning_label"):
-                self.logging_warning_label.setStyleSheet(f"color: {theme.get('text_muted', theme.get('text', '#666'))};")
-            if hasattr(self, "logging_group"):
-                self.logging_group.setStyleSheet(
+
+        _attempt("software status", _paint_runtime_status)
+        for label, action in (
+            ("launch actions", self._update_launch_selected_state),
+            ("radio profile actions", self._update_device_profile_action_buttons),
+            ("HF group actions", self._update_op_group_action_buttons),
+            ("local group actions", self._update_local_net_action_buttons),
+            ("save action", lambda: self._set_save_button_state("info" if getattr(self, "_settings_dirty", False) else "success")),
+        ):
+            _attempt(label, action)
+
+        for attr, role in (
+            ("open_logs_btn", "primary"),
+            ("open_log_folder_btn", "secondary"),
+            ("export_diag_btn", "secondary"),
+            ("enable_timed_debug_btn", "warning"),
+        ):
+            button = getattr(self, attr, None)
+            if button is not None:
+                _attempt(attr, lambda target=button, style_role=role: target.setStyleSheet(button_style(style_role, theme)))
+        warning_label = getattr(self, "logging_warning_label", None)
+        if warning_label is not None:
+            _attempt(
+                "logging warning",
+                lambda: warning_label.setStyleSheet(
+                    f"color: {theme.get('text_muted', theme.get('text', '#666'))};"
+                ),
+            )
+        logging_group = getattr(self, "logging_group", None)
+        if logging_group is not None:
+            _attempt(
+                "logging panel",
+                lambda: logging_group.setStyleSheet(
                     "QWidget#settingsLoggingPanel {"
                     f" background: {theme.get('surface', '#ffffff')};"
                     f" border: 1px solid {theme.get('border', '#cccccc')};"
                     " border-radius: 6px;"
                     "}"
-                )
-            if hasattr(self, "sections_nav_list"):
-                self._apply_sections_nav_style()
-                self._refresh_section_nav_health()
-            if hasattr(self, "mesh_channel_admin"):
-                self._refresh_mesh_channel_table()
-            if hasattr(self, "software_administration_workspace"):
-                self.software_administration_workspace.apply_theme(theme)
-            for btn in getattr(self, "_context_help_buttons", []):
-                try:
-                    btn.setStyleSheet(button_style("secondary", theme))
-                except Exception:
-                    continue
-            self._refresh_contextual_autofill_buttons()
-            self._update_enforcement_visibility()
-            self._update_logging_actions_layout()
-            self._apply_accessibility_width_guards()
-        except Exception:
-            pass
+                ),
+            )
+        if hasattr(self, "mesh_channel_admin"):
+            _attempt("mesh table", self._refresh_mesh_channel_table)
+        if hasattr(self, "software_administration_workspace"):
+            _attempt(
+                "software administration",
+                lambda: self.software_administration_workspace.apply_theme(theme),
+            )
+        for index, button in enumerate(getattr(self, "_context_help_buttons", [])):
+            _attempt(
+                f"context help {index}",
+                lambda target=button: target.setStyleSheet(button_style("secondary", theme)),
+            )
+        for label, action in (
+            ("contextual autofill", self._refresh_contextual_autofill_buttons),
+            ("enforcement visibility", self._update_enforcement_visibility),
+            ("logging layout", self._update_logging_actions_layout),
+            ("accessibility widths", self._apply_accessibility_width_guards),
+        ):
+            _attempt(label, action)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

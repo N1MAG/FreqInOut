@@ -5776,3 +5776,345 @@ testing branch for native Linux/macOS qualification. No migration, runtime
 configuration/data write, RF/device command, or application restart occurred.
 The approved persistent nonmodal Map-window design remains the next slice and
 will not begin until this recovery build's native gate is confirmed.
+
+### P1 redesign — persistent nonmodal Map window
+
+The approved second step replaces embedded Map navigation with one reusable,
+nonmodal Map window. Selecting Map now leaves the current main workspace,
+top-level geometry, state, and screen unchanged; it opens the window on first
+use and raises the same instance thereafter. The Map widget and its one
+WebEngine view are constructed lazily in their final parent and are never
+reparented. Closing the title bar hides the window for warm reuse; application
+shutdown stops Map work and destroys the owned surface exactly once. Existing
+Map-to-Messages, Compose, SOP, scheduler, plan-context, and background-ingest
+handoffs resolve through an explicit main-application host rather than the Map
+window.
+
+Normal rectangle, maximized state, and display identity persist through a
+600 ms change-detected write boundary. Restore validates the current display,
+prefers hardware serial identity when available, falls back through screen name
+and prior available geometry, clamps valid rectangles, and uses a bounded
+main-screen rectangle for malformed or disconnected placement. Full-screen,
+minimized, and always-on-top state are not restored. Loading and retry feedback
+live inside the Map window, so opening Map does not create or resize the main
+status bar. The prior hidden WebEngine warmup was removed because it would be a
+second native surface owned by the main window.
+
+Hidden work is bounded: closing before first paint cancels queued construction;
+clean warm re-entry performs no refresh; real hidden source changes coalesce to
+one refresh; and an in-flight projection that completes while hidden stores only
+the newest payload without calling WebEngine. Reopen applies that payload once
+when current, while a newer hidden source change supersedes it with one current
+projection.
+
+Work packages and models: the `gpt-5.6-sol` high-reasoning primary owned window
+and lifecycle architecture, concurrency, placement persistence, production
+integration, delegated-diff review, specifications and the final gate;
+`gpt-5.6-luna` (high) audited existing window/persistence and Map host-routing
+patterns; `gpt-5.6-terra` (high) implemented the bounded placement, singleton,
+reuse, shutdown and main-window-invariance test package; and `gpt-5.6-luna`
+(high) independently reviewed the completed UX/lifecycle slice and identified
+the hidden projection completion race. The primary reviewed the Terra diff,
+corrected its offscreen maximize assertion to test FIO's validated geometry
+contract, added clean/dirty re-entry and hidden in-flight coverage, and closed
+all actionable independent-review findings.
+
+Acceptance evidence: **415 Map/first-render/current-page/startup/Phase 7 shell
+tests**, **82 high-use Messages/Compose/Spotter/Map tests**, **44 shared-theme,
+font-derived geometry, lifecycle and design-control tests**, and **135 multi-rig
+shell tests** pass. Changed Python files compile and `git diff --check` passes.
+The automated exit gate is complete. Native macOS, Linux and Windows
+normal/maximized/full-screen-main and secondary-monitor qualification remains
+operator-assisted. No migration, production configuration/data write,
+RF/device command, application restart, commit, or push occurred.
+
+### P1 first-show refinement — permanent Map central surface
+
+Native macOS qualification found one remaining first-launch-only disturbance:
+the pop-out painted its loading widget as the `QMainWindow` central widget, then
+replaced that central widget as the cold Map/WebEngine surface attached. That
+handoff changed top-level layout hints at the same moment the platform created
+the native child surface, making the window appear to be torn down before the
+Map rendered.
+
+The Map pop-out now installs one stable stacked central surface during window
+construction. Loading and Map pages live inside it, Map construction uses that
+container as its final parent, and first-use readiness changes only the current
+page. The stable container reports neutral size hints, and the regression gate
+requires central-widget identity, top-level geometry, restorable normal
+geometry, size hint, and minimum-size hint to remain unchanged through queued
+first show and simulated native attachment. Show/hide lifecycle is also owned
+by the pop-out so a retained Map cannot remain logically visible after its
+window is hidden. The cold WebEngine child now has ignored size policy, zero
+minimum size, and no focus eligibility until its document is ready, closing the
+remaining first-attachment size and focus paths identified by the independent
+macOS audit.
+
+Work packages and models: the `gpt-5.6-sol` high-reasoning primary owns the
+failed native-gate diagnosis, lifecycle architecture, production integration,
+specification and final acceptance; `gpt-5.6-terra` (high) isolated the central
+replacement seam and added the focused first-show regression; and
+`gpt-5.6-luna` (high) independently audited macOS Qt ownership and first-paint
+behavior. The primary reviewed the delegated test diff before changing
+production code.
+
+Acceptance evidence: the integrated Map/first-render/current-page/startup/
+Phase 7 shell gate passes **416 tests**; the focused high-use
+Messages/Compose/Spotter/Map gate passes **45 tests**; the shared-theme,
+font-derived geometry and responsiveness gate passes **40 tests**; and the
+multi-rig shell gate passes **135 tests** in five clean, process-isolated
+shards. Changed production Python files compile and `git diff --check` passes.
+The automated gate is complete. Native macOS first-open qualification remains
+operator-assisted because the reported disturbance is a Cocoa/WebEngine
+compositor behavior; warm reopen, Linux, Windows, maximized/full-screen-main,
+and secondary-monitor cases remain in the native acceptance matrix. No
+migration, runtime configuration/data write, RF/device command, application
+restart, commit, or push occurred.
+
+### P1 architecture replacement — native Qt Location Map
+
+Native macOS and Linux qualification proved that moving Chromium/WebEngine into
+a separate window did not remove its destructive first-native-surface behavior:
+the operating system could still flash, swipe, reposition, or reconstruct the
+top-level window before the first Leaflet paint. Further timing, overlay,
+prewarm, detached-page, reveal, and geometry-state-machine changes were rejected
+because they attempted to manage a browser compositor rather than remove the
+unstable boundary.
+
+The Map rendering foundation is now one native `QQuickWidget` and Qt Location
+provider-free `itemsoverlay` Map. Bundled North American vector geography is
+drawn locally below the operational overlays; no tile, API key, online provider,
+or network request is part of the Map runtime. The widget is created once in the
+persistent pop-out's final hidden content stack before the first `show()`. No
+WebEngine import, HTML/Leaflet build, browser navigation, JavaScript payload,
+page-title action bridge, post-show native-child attachment, or renderer
+reparenting remains in the active Map path. Failure to load QML or item-overlay support is
+shown calmly in the existing Map window and cannot start a retry or geometry
+loop.
+
+The existing Map intelligence is projected into typed native collections for
+stations, paths, direction indicators, polygons, Maidenhead grid lines and
+labels, city labels, weather/alert/infrastructure markers, propagation fills,
+legend, and Regional Intel summary. Expensive static geometry is simplified and
+cached on the projection worker, and every collection has an explicit cap before
+it reaches QML. Generation fencing preserves newest-wins behavior; a completion
+while hidden retains only the latest snapshot, while resize, repaint, theme,
+focus, show, and hide perform no source I/O or projection rebuild. Map selection
+uses direct Qt signals and shared-theme semantic roles.
+
+Frozen-build support now explicitly collects the FIO QML source, Qt
+Location/Positioning/Quick QML modules, item-overlay and positioning components, and
+a runtime hook that preserves their bundled search roots. Source packaging also
+includes QML and the runtime hook. Deployment guidance now describes the native
+Qt Location dependency rather than QtWebEngine.
+
+Work packages and models: the `gpt-5.6-sol` high-reasoning primary owned the
+architecture decision, lifecycle and concurrency boundaries, production
+integration, packaging, specification updates, delegated-diff review, and final
+acceptance; `gpt-5.6-terra` (medium) implemented the bounded renderer/QML
+surface; `gpt-5.6-terra` (high) modernized focused lifecycle, geometry, parity,
+and packaging tests; and `gpt-5.6-luna` (high) performed the read-only legacy
+parity and packaging audit. The primary reviewed every delegated change and
+retained unrelated workspace files.
+
+Slice exit gates: the native foundation passed **51 tests** before core parity
+began; core parity then passed **248 tests** before advanced parity/packaging
+began. The final native Map/first-render/current-page/geometry gate passes
+**255 tests**; the affected multi-rig shell gate passes **85 tests**; focused
+Messages/Compose and Spotter gates pass **53** and **73 tests**; and the shared
+theme, font-derived geometry, control-bar, Software layout, and hidden-projection
+gate passes **61 tests**. Changed Python files and the frozen-runtime hook
+compile, the PyInstaller spec parses, and `git diff --check` passes. PyInstaller
+is not installed in this development environment, so a frozen executable was
+not built locally; packaged macOS/Linux/Windows qualification remains an
+explicit release gate. No migration, production configuration/data write,
+RF/device command, application restart, commit, or push occurred.
+
+### P1 offline Map and prior-overlay parity correction
+
+Operator qualification rejected the online-provider result: the native Map
+displayed an API-key requirement, did not provide the expected zoom behavior,
+and its pins did not reliably reach the detail action. The immutable contract is
+now explicit: Map geography and interaction remain fully usable offline, with
+no tile download, API key, provider initialization, or network fallback. The
+prior Leaflet overlay language is the behavioral reference; only the unstable
+browser rendering substrate is replaced.
+
+The Qt Location surface now uses provider-free `itemsoverlay`. A cached worker
+projection supplies 207 bundled US, Canadian, and Mexican vector rings beneath
+the operational layers. The basemap uses its own 220-polygon renderer cap, so
+the 180-item operational-polygon limit no longer clips Mexican geography.
+Projection application remains a pure in-memory GUI-thread swap.
+
+The prior overlay affordances are retained on the native scene: semantic
+station/weather/alert/infrastructure markers; station status and QSY cues;
+callsign labels inside the pin target; single-action wide path targets; hover
+and accessibility guidance; a bottom-docked inline legend with a separate
+Regional summary; saved-view/zoom controls; and debounced, viewport-bounded
+2/4/6-character Maidenhead grids. Mouse wheel, touchpad, pinch, visible-button
+zoom, and drag pan change only the existing scene. Marker, path, and polygon
+selection crosses QML by stable ID; Python resolves the current snapshot after
+the pointer callback, preventing recursive QVariant conversion. The bridge is
+owned by the `QQuickWidget`, which keeps it alive through QML teardown and
+prevents null-context shutdown-log storms.
+
+Work packages and models: the `gpt-5.6-sol` high-reasoning primary owned the
+offline architecture, concurrency and lifecycle boundaries, cap separation,
+delegated-diff review, production integration, specifications, legacy-test
+migration, and final gate; `gpt-5.6-luna` (high) audited assets, repository
+history, provider behavior, interaction failures, and prior overlay parity;
+`gpt-5.6-terra` (medium) implemented the bounded provider-free renderer and QML
+parity surface; and `gpt-5.6-terra` (high) implemented the focused offline and
+real-QQuick interaction tests and stabilized their cold-delegate readiness.
+
+Exit evidence: the focused native/offline/pop-out gate passes **52 tests**. The
+offline contract passes **12 tests in each of 10 fresh processes (120/120)**,
+including a real visible pin click that emits exactly one action. The
+process-isolated Map, first-render, current-page, startup, layout, multi-rig,
+release-follow-up, and font-derived UI matrix passes **418 tests in 16 clean
+shards**. A monolithic macOS run passed once, then reproduced the suite's known
+cumulative native-Qt teardown segfault while constructing a later QQuick
+fixture; functional qualification therefore remains process-isolated. Changed
+production Python files compile and `git diff --check` passes. Packaged
+macOS/Linux/Windows first-open,
+offline, zoom/pan, and pin qualification remains an operator-assisted release
+gate. No migration, production configuration/data write, RF/device command,
+application restart, commit, or push occurred.
+
+### P1 native Map layer and theme parity correction
+
+Operator screenshots confirmed four gaps after the native replacement: Regions
+did not visibly express FEMA R01–R10, the selected-station panel could retain
+light document colors on a dark surface, a runtime theme switch could leave the
+Map and Settings navigation on different palettes, and permanent city labels
+could overlap. A read-only comparison with the prior Leaflet surface also found
+lost five-band SNR path colors, state labels, and concise SitRep/Regional color
+meaning.
+
+The bounded worker projection now supplies true FEMA-colored state geometry,
+R01–R10 labels, state abbreviations, preserved regional
+gray/blue/yellow/orange/red levels, SitRep summary/status keys, and a legend
+derived only from the current snapshot. Paths retain the original five SNR
+bands. When Propagation and Regions are combined, FEMA colors remain visible
+and propagation annotates region labels. City candidates remain capped at 400,
+ordered deterministically, and are decluttered in O(n) QML work after a 120 ms
+viewport debounce so zoom can restore labels without data I/O.
+
+MainWindow is the runtime palette authority. It reloads settings once, passes
+one theme snapshot into the persistent Map window and Settings, and the Map
+forwards it to its retained QML bridge and rich-text selection panes without a
+projection, rebuild, or geometry operation. Existing selection documents are
+rebuilt from their cached payload. Settings theme painting is failure-isolated
+so an optional runtime status failure cannot leave its navigation in the old
+theme. The shared stylesheet now includes `QTextBrowser`.
+
+Work packages and models:
+
+- `gpt-5.6-sol` (high), primary: slice architecture, theme ownership,
+  concurrency/performance boundary, delegated-diff review, Propagation/Regions
+  integration correction, specifications, acceptance, and final review;
+- `gpt-5.6-luna` (high): read-only native-versus-Leaflet layer parity audit;
+- `gpt-5.6-terra` (high): read-only shared-theme/cache audit;
+- `gpt-5.6-terra` (high): focused red regression package;
+- `gpt-5.6-terra` (high): bounded projection, renderer, and QML layer mechanics.
+
+The implementation gate passed **62 focused Map/theme tests** before this
+documentation/acceptance slice began. The final process-isolated Map,
+first-render, current-page, startup, multi-rig, release-follow-up, font, and
+theme matrix passes **411 tests in 16 clean processes**; the additional shared
+theme/design-control matrix passes **77 tests in six clean processes**. The
+offline/native interaction contract also passes **12 tests in each of 10 fresh
+processes (120/120)**. Python compilation and `git diff --check` pass. The
+primary reviewed every delegated change and preserved unrelated workspace
+artifacts. No migration, production configuration/data write, network/tile
+dependency, RF/device command, application restart, commit, or push occurred.
+
+### Native Map operator legend, filter row, and coherent first paint
+
+Operator screenshots established three remaining defects after the native Map
+parity correction: the default legend did not explain station-pin status, the
+principal filters were split across rows because hidden controls retained grid
+positions, and the Age chooser could open beyond the active screen. The report
+also identified a brief empty-scene flash before the first station projection.
+
+The production SitRep pin language is restored as a bounded, textual legend:
+`Functioning`, `Partially Functioning`, `Not Functioning`, and
+`Unknown / No Report`, using the same fixed data colors as the station fills.
+State boundaries, active city labels, and station identity remain explicit;
+the first-position station-status group wraps internally without separating its
+heading or truncating the status labels, and the inline QML legend changes no
+top-level geometry. View, Topic,
+Group, and Age now occupy the first responsive row in that order. Only visible
+mode-specific fields participate in layout, and mode visibility changes request
+one coalesced cache-only reflow. The Age popup is pre-sized and clamped to the
+button's screen, including right and bottom edges.
+
+The native surface no longer becomes visible merely because QML loaded. The
+existing calm loading page remains current until one complete worker projection
+has synchronously populated all bridge collections; the retained QQuickWidget is
+then revealed for its first paint. No window operation, renderer rebuild, source
+I/O, or refresh was added to this handoff.
+
+Work packages and models: `gpt-5.6-sol` (high), primary, owned lifecycle and
+responsive-layout architecture, implementation, delegated-diff review,
+integration, documentation, and the exit gate; `gpt-5.6-luna` (high) performed
+the read-only legend/layout/first-render audit; `gpt-5.6-terra` (high) added the
+focused red regression package. The primary reviewed and refined the delegated
+test expectations so `Stations` and `SitRep Status:` remain explicit rather
+than silently replacing layer identity with color swatches. Luna's independent
+post-implementation review identified Large Text truncation and group-separation
+risk in the first flat Flow implementation; the primary replaced it with one
+first-position station group whose natural-width status items wrap together.
+
+Acceptance evidence: the focused legend/layout/popup/first-paint and related
+Map baseline passes **54 tests** in five clean processes. The final
+process-isolated Map, lifecycle, first-render, startup, theme, and font matrix
+passes **290 tests in 13 clean processes**. The offline/native interaction
+contract also passes **12 tests in each of 10 fresh processes (120/120)**.
+Changed Python modules compile and `git diff --check` passes. Packaged macOS,
+Linux, and Windows visual qualification remains operator-assisted. No migration,
+runtime data write, network/tile dependency, RF/device command, application
+restart, commit, or push occurred.
+
+### Map-to-FIO foreground navigation
+
+A maximized Map could obscure the main navigation and required the operator to
+use operating-system window controls to return to FIO. The Map toolbar now
+keeps `Show FIO` visible, and selected-detail Inbox/Compose actions navigate to
+their destination before raising and activating the existing main window.
+Activation uses the explicit application host already owned by the persistent
+Map tab. It clears only a minimized state and performs no geometry, Map
+lifecycle, projection, data, or persistence work. Platform refusal to grant
+focus is failure-isolated after navigation completes.
+
+Work packages and models: `gpt-5.6-sol` (high), primary, owned the activation
+contract, implementation, integration, specification, and exit review;
+`gpt-5.6-luna` (high) performed a read-only Map-toolbar and station-route audit;
+`gpt-5.6-terra` (high) supplied focused route-order and geometry-preservation
+regressions. Acceptance passes **303 tests in 11 clean processes**, including
+direct normal, maximized, full-screen, and minimized main-window state checks;
+changed Python files compile and `git diff --check` passes. Packaged macOS,
+Linux, and Windows foreground behavior remains an operator-assisted release
+gate. No migration, runtime data write, network/tile dependency, RF/device
+command, application restart, commit, or push occurred.
+
+#### P1 follow-up: direct `Show FIO` hang
+
+Live sampling of the reported frozen macOS process showed the main thread
+blocked in `QObject::connectImpl` while a `QTimer.singleShot` callback was being
+registered during nested Qt event delivery. The process was sleeping at low
+CPU, confirming a UI-thread deadlock rather than Map rendering or data work.
+Inbox navigation had avoided the precise timing, while the direct toolbar
+action synchronously changed top-level activation from inside the
+`QPushButton.clicked` dispatch.
+
+All Map-to-main handoffs now enqueue the registered `present_main_window` slot
+with `QMetaObject.invokeMethod(..., Qt.QueuedConnection)`. This reaches the next
+event-loop turn without allocating or connecting a transient timer. The
+redundant direct `QWindow.requestActivate()` call was also removed; the retained
+widget-level raise/activate sequence is sufficient after a user gesture and
+generates less platform state churn. A focused regression proves that a real Qt
+host is not presented until after the originating dispatch returns. The full
+post-correction Map, lifecycle, first-render, theme, font, startup, and
+multi-rig matrix passes the same **303 tests in 11 clean processes**; changed
+Python files compile and `git diff --check` passes.

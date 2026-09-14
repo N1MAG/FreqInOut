@@ -209,7 +209,12 @@ Uninstall helper:
 bash uninstall_FreqInOut_linux.sh --dir "$HOME/FreqInOut"
 ```
 
-For QtWebEngine map support on Debian/Ubuntu:
+The separate Map window uses native Qt Quick and Qt Location as a provider-free
+coordinate canvas. FIO supplies its bundled North American vector geography and
+all operational overlays locally: the Map does not download tiles, request an
+API key, or require Internet access. Packaged builds include the required QML
+and positioning components. For Qt Location window-system integration on
+Debian/Ubuntu:
 
 ```bash
 sudo apt-get install libxcb-cursor0 libxcb-xinerama0

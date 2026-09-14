@@ -3,6 +3,16 @@
 ## [2.0.0]
 - Added: Multi-rig testing release with profile-scoped radio runtime configuration, launch control, health monitoring, and JS8/Fast Light path handling.
 - Added: Map intelligence now includes Regional Intel heat-map behavior, focused path rendering, station/report action panels, CommStat reported-for/reported-by handling, and map-to-Messages handoff.
+- Changed: Map now opens in one reusable nonmodal window so operators can keep it visible while working elsewhere in FIO; its validated normal placement and maximized state persist without changing the main window, and closing Map hides it for fast reuse.
+- Added: Map now provides a persistent `Show FIO` action, and station-detail Inbox/Compose actions bring the existing main window forward after navigation without closing, moving, or resizing Map.
+- Changed: Replaced the Chromium/WebEngine/Leaflet Map surface with one native Qt Quick and Qt Location renderer. The renderer is built in its final hidden parent before the Map window is shown, uses bounded worker-built overlays, and updates the existing surface without browser navigation or JavaScript handoffs.
+- Changed: The native Map now uses a provider-free offline coordinate canvas with bundled US, Canadian, and Mexican vector geography; it never requests map tiles, an API key, or network access.
+- Fixed: First Map launch no longer creates a browser native surface after the window is visible, eliminating the known flash, swipe, monitor jump, and window reconstruction path on macOS, Linux, and Windows.
+- Fixed: Native Map wheel/button/pinch zoom, drag panning, marker selection, and polygon detail actions now preserve the established Map interaction model without transporting recursive QML objects into Python.
+- Fixed: Native Map FEMA Regions, state labels, five-band SNR path colors, SitRep/Regional status colors, and data-aware legend now retain the proven layer meanings; crowded city labels are deterministically suppressed until zoom provides room.
+- Fixed: The native Map now shows the production SitRep station-pin key, keeps View/Topic/Group/Age together when space permits, constrains the Age chooser to its active screen, and reveals the native scene only after its first complete projection.
+- Fixed: `Show FIO` and Map station-detail handoffs now queue main-window presentation outside the originating Qt button signal, preventing the macOS/PySide re-entrant signal-connection deadlock observed from the direct toolbar action.
+- Fixed: Switching Light and Dark themes now updates the open Map canvas, selected-station detail, Map chrome, and Settings navigation from one shared palette without moving a window or rebuilding Map data.
 - Fixed: Message and map topic filtering no longer treats status labels such as `Power: Not Reported` as real topic evidence while preserving real reports such as outages or contaminated water.
 - Changed: Launch Control now presents configured supported apps and custom tools through one operator-facing software surface with Monitor Health, Launch at Startup, Start/Stop, and Status behavior.
 - Changed: Station Health and readiness guidance now better reflect multi-radio operating environments and the difference between monitored apps and manually managed tools.

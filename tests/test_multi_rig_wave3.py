@@ -803,7 +803,6 @@ def _make_window(monkeypatch, tmp_path, active_profile, active_policy):
     monkeypatch.setattr(main_window_mod.MainWindow, "_update_log_indicator", lambda self, *args: None)
     monkeypatch.setattr(main_window_mod.MainWindow, "_apply_callsign_to_tab_titles", lambda self: None)
     monkeypatch.setattr(main_window_mod.MainWindow, "on_hold_state_changed", lambda self, force_reload=False: None)
-    monkeypatch.setattr(main_window_mod.MainWindow, "_prewarm_webengine", lambda self: None)
     monkeypatch.setattr(main_window_mod.MainWindow, "_start_lazy_prewarm", lambda self: None)
 
     window = main_window_mod.MainWindow()

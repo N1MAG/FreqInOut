@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QPixmap, QIcon, QFontMetrics, QAction, QShortcut, QKeySequence
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QMetaObject, QSize, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import QMetaObject, QSize, Qt, QThread, QTimer, Signal, Slot
 from pathlib import Path
 
 from freqinout.core.logger import log
@@ -134,6 +134,7 @@ from freqinout.gui.stations_map_tab import (
     LOWER48_STATES,
     STATE_CENTERS,
 )
+from freqinout.gui.map_window import PersistentMapWindow
 from freqinout.gui.message_viewer_tab import MessageViewerTab
 from freqinout.gui.peer_sched_tab import PeerSchedTab
 from freqinout.gui.context_help_dialog import ContextHelpDialog
@@ -278,10 +279,10 @@ class MainWindow(QMainWindow):
         self._ui_resume_settle_timer.timeout.connect(self._on_ui_resume_settled)
         self._ui_inactive_settle_timer = QTimer(self)
         self._ui_inactive_settle_timer.setSingleShot(True)
-        # WebEngine can briefly make the application inactive while its first
-        # native surface/process is attached.  Sustained backgrounding still
-        # pauses work, but a cold Map launch must not trigger pause/resume and a
-        # second render cycle.
+        # Window-manager focus transfers (including opening the nonmodal Map)
+        # may briefly make the application inactive. Sustained backgrounding
+        # still pauses work, but a short transfer must not trigger a second
+        # refresh cycle.
         self._ui_inactive_settle_timer.setInterval(1500)
         self._ui_inactive_settle_timer.timeout.connect(self._on_ui_inactive_settled)
 
@@ -427,6 +428,7 @@ class MainWindow(QMainWindow):
         self.freq_planner_tab = None
         self.message_viewer_tab = None
         self.stations_map_tab: StationsMapTab | None = None
+        self.map_window: PersistentMapWindow | None = None
         self._pending_map_focus: tuple[str, dict[str, str]] | None = None
         self._map_prop_target_syncing = False
 
@@ -449,7 +451,6 @@ class MainWindow(QMainWindow):
             "HF Operators": self._create_operator_history_tab,
             "Local Operators": self._create_local_operator_tab,
             "Local Reports": self._create_local_report_history_tab,
-            "Map": self._create_stations_map_tab,
             "Peer Schedules": self._create_peer_sched_tab,
             "Help": self._create_help_tab,
         }
@@ -814,7 +815,7 @@ class MainWindow(QMainWindow):
         # Stacked content
         # Hidden primary pages must not inflate the active page or the native
         # window. This is especially important when a tall deferred Compose or
-        # WebEngine-backed Map page is constructed for the first time.
+        # another content-heavy page is constructed for the first time.
         self.stack = CurrentPageStack()
         for _label, widget in self._screens:
             self.stack.addWidget(widget)
@@ -1030,7 +1031,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(right_container, stretch=1)
         # The shell, not the active page's transient native size hint, owns the
         # top-level window geometry. Layout stretch still gives the current page
-        # all available space; Ignored prevents a cold WebEngine Map page from
+        # all available space; Ignored prevents transient child hints from
         # resizing or repositioning the application window during activation.
         self.stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
 
@@ -1055,23 +1056,12 @@ class MainWindow(QMainWindow):
         self._lazy_prewarm_labels = ["Messages", "FreqPlanner"]
         self._lazy_prewarm_index = 0
         self._startup_deferred_prewarm_enabled = self._should_prewarm_deferred_screens_at_startup()
-        self._webengine_warmup_widget = None
-        self._webengine_warmup_done = False
-        self._pending_map_switch_index: int | None = None
         self._runtime_client_signature: tuple[object, ...] | None = None
         self._station_command_last_refresh_monotonic = 0.0
 
         startup_policy = self._primary_runtime_policy()
         startup_suppressed = self._suppressed_screens_for_runtime(self._active_runtime_profile, startup_policy)
         self._lazy_prewarm_labels = self._runtime_lazy_prewarm_labels(startup_suppressed)
-        self._startup_webengine_prewarm_enabled = ("Map" not in startup_suppressed) and self._should_prewarm_webengine_at_startup()
-        if self._startup_webengine_prewarm_enabled:
-            # Kick WebEngine warmup during init so first Map activation is not the
-            # first WebEngine surface/process startup path seen by users.
-            self._prewarm_webengine()
-        else:
-            log.info("MainWindow: startup WebEngine prewarm disabled (platform default/settings)")
-
         # Default selection
         if self.nav_buttons:
             self.nav_buttons[0].setChecked(True)
@@ -1774,12 +1764,21 @@ class MainWindow(QMainWindow):
         self._ui_timers_paused_for_inactive = False
 
     def _set_child_app_active(self, active: bool) -> None:
+        seen: set[int] = set()
         for label, widget in getattr(self, "_screens", []):
+            seen.add(id(widget))
             try:
                 if hasattr(widget, "set_app_active"):
                     widget.set_app_active(bool(active))
             except Exception as e:
                 log.debug("UI_LIFECYCLE|child_state_failed label=%s err=%s", label, e)
+        map_tab = getattr(self, "stations_map_tab", None)
+        if map_tab is not None and id(map_tab) not in seen:
+            try:
+                if hasattr(map_tab, "set_app_active"):
+                    map_tab.set_app_active(bool(active))
+            except Exception as e:
+                log.debug("UI_LIFECYCLE|child_state_failed label=MapWindow err=%s", e)
 
     def _flush_visible_ui_refresh(self, reason: str = "resume") -> None:
         if not self._ui_refresh_allowed():
@@ -2413,10 +2412,13 @@ class MainWindow(QMainWindow):
 
     def _update_map_filters_visibility(self, index: int) -> None:
         """
-        Keep map visibility/lifecycle in sync with the active tab.
-        Sidebar layout remains stable while map-specific controls live inside Map.
+        Keep the persistent Map lifecycle independent from main-stack selection.
+
+        The index is retained for the shared screen-switch call site; Map work is
+        active only while its own top-level window is actually available.
         """
-        is_map = 0 <= index < len(self._screens) and self._screens[index][0] == "Map"
+        window = getattr(self, "map_window", None)
+        is_map = bool(window is not None and window.is_available_for_work())
         try:
             if self.stations_map_tab is not None and hasattr(self.stations_map_tab, "set_map_visible"):
                 self.stations_map_tab.set_map_visible(is_map)
@@ -3409,6 +3411,12 @@ class MainWindow(QMainWindow):
         self._shutting_down = True
         self._mesh_runtime_restart_pending = False
         self._close_transient_shutdown_ui()
+        map_window = getattr(self, "map_window", None)
+        if map_window is not None:
+            try:
+                map_window.shutdown()
+            except Exception as e:
+                log.debug("MainWindow shutdown: Map window stop failed: %s", e)
         self._register_qt_shutdown_threads()
         stop_errors = self._shutdown_registry.request_stop_all()
         if stop_errors:
@@ -3452,11 +3460,6 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
-            if self.stack.currentWidget() is self.stations_map_tab:
-                self.stack.setCurrentWidget(self.settings_tab)
-        except Exception:
-            pass
-        try:
             if hasattr(self, "scheduler"):
                 self.scheduler.stop()
         except Exception as e:
@@ -3486,12 +3489,6 @@ class MainWindow(QMainWindow):
         try:
             if self.log_tab is not None and hasattr(self.log_tab, "set_tab_active"):
                 self.log_tab.set_tab_active(False)
-        except Exception:
-            pass
-        try:
-            if self._webengine_warmup_widget is not None:
-                self._webengine_warmup_widget.deleteLater()
-                self._webengine_warmup_widget = None
         except Exception:
             pass
         try:
@@ -4817,6 +4814,28 @@ class MainWindow(QMainWindow):
         self._set_screen(idx)
         QTimer.singleShot(0, self._apply_messages_nav_context)
 
+    @Slot()
+    def present_main_window(self) -> None:
+        """Bring the existing FIO workspace forward without changing its placement.
+
+        Map is a persistent peer window, so returning to FIO must activate this
+        window in place rather than reconstructing it or forcing a normal/maximized
+        transition.  Clearing only a minimized state preserves the operator's
+        chosen normal, maximized, or full-screen presentation.
+        """
+        try:
+            if self.isMinimized():
+                state = self.windowState() & ~Qt.WindowMinimized
+                self.setWindowState(state)
+            if not self.isVisible():
+                self.show()
+            self.raise_()
+            self.activateWindow()
+        except Exception as exc:
+            # Window activation is a best-effort platform request. Navigation
+            # remains complete even if a compositor declines foreground focus.
+            log.debug("MainWindow: failed bringing FIO workspace to front: %s", exc)
+
     def _apply_pending_map_focus(self) -> None:
         pending = getattr(self, "_pending_map_focus", None)
         tab = getattr(self, "stations_map_tab", None)
@@ -5666,7 +5685,6 @@ class MainWindow(QMainWindow):
             self.message_viewer_tab,
             self.fio_spotter_tab,
             self.log_tab,
-            self.stations_map_tab,
             self.operator_history_tab,
             self.local_operator_tab,
             self.local_report_history_tab,
@@ -5682,9 +5700,23 @@ class MainWindow(QMainWindow):
                 continue
             if hasattr(widget, "apply_theme"):
                 try:
-                    widget.apply_theme()
+                    if widget is self.settings_tab:
+                        widget.apply_theme(theme)
+                    else:
+                        widget.apply_theme()
                 except Exception:
                     pass
+        map_window = getattr(self, "map_window", None)
+        if isinstance(map_window, PersistentMapWindow):
+            try:
+                map_window.apply_theme(theme)
+            except Exception:
+                log.debug("MainWindow: failed forwarding theme to Map window", exc_info=True)
+        elif self.stations_map_tab is not None:
+            try:
+                self.stations_map_tab.apply_theme(theme)
+            except Exception:
+                log.debug("MainWindow: failed applying theme to Map workspace", exc_info=True)
         self._update_ncs_nav_button_styles()
         self._update_nav_layout_metrics()
         self._refresh_condition_level_panel()
@@ -5715,24 +5747,6 @@ class MainWindow(QMainWindow):
         if raw == "":
             return default
         return raw in {"1", "true", "yes", "on"}
-
-    @staticmethod
-    def _platform_needs_webengine_prewarm() -> bool:
-        """Return whether first-use WebEngine startup can disturb window focus."""
-        return sys.platform.startswith("win")
-
-    def _should_prewarm_webengine_at_startup(self) -> bool:
-        """
-        Default to startup WebEngine prewarm on Windows, where the hidden
-        startup path measurably improves first Map activation. Other platforms
-        stay opt-in unless explicitly overridden in settings.
-        """
-        default_enabled = self._platform_needs_webengine_prewarm()
-        try:
-            raw = self.settings.get("map_webengine_startup_prewarm", None)
-        except Exception:
-            raw = None
-        return self._truthy_flag(raw, default_enabled)
 
     def _should_prewarm_deferred_screens_at_startup(self) -> bool:
         """Keep deferred screens deferred unless an operator explicitly opts in."""
@@ -5777,104 +5791,6 @@ class MainWindow(QMainWindow):
                 btn.setChecked(True)
         except Exception:
             pass
-
-    def _queue_map_switch_after_webengine_warmup(self, index: int) -> bool:
-        """
-        On Windows, keep the current tab visible for the one-time WebEngine
-        warmup so the first Map navigation does not visibly coincide with the
-        helper-process startup path.
-        """
-        if not self._platform_needs_webengine_prewarm():
-            return False
-        if self._shutting_down or self._webengine_warmup_done:
-            return False
-        self._pending_map_switch_index = index
-        # Map button click may check itself before we actually switch pages.
-        self._restore_nav_selection_to_active_tab()
-        if self._webengine_warmup_widget is None:
-            self._prewarm_webengine()
-            if self._webengine_warmup_done:
-                self._pending_map_switch_index = None
-                return False
-            if self._webengine_warmup_widget is None:
-                # Warmup unavailable (e.g., Qt WebEngine missing): proceed directly.
-                self._pending_map_switch_index = None
-                return False
-            log.info("MainWindow: deferring first Map switch until WebEngine warmup completes")
-        return True
-
-    def _complete_pending_map_switch_after_webengine_warmup(self) -> None:
-        if self._shutting_down:
-            self._pending_map_switch_index = None
-            return
-        if not self._webengine_warmup_done:
-            return
-        idx = self._pending_map_switch_index
-        if idx is None:
-            return
-        self._pending_map_switch_index = None
-        try:
-            if hasattr(self, "stations_map_tab") and self.stations_map_tab is not None:
-                if hasattr(self.stations_map_tab, "prepare_webview_for_first_show"):
-                    self.stations_map_tab.prepare_webview_for_first_show()
-        except Exception as e:
-            log.debug("MainWindow: hidden Map webview precreate failed: %s", e)
-        QTimer.singleShot(0, lambda i=idx: self._set_screen(i))
-
-    def _prewarm_webengine(self) -> None:
-        """
-        Warm up Qt WebEngine process/components and native view startup early so
-        first Map activation avoids the one-time close/reopen-style visual glitch
-        on some Windows systems.
-        """
-        if self._shutting_down:
-            return
-        if self._webengine_warmup_done:
-            return
-        if self._webengine_warmup_widget is not None:
-            return
-        try:
-            from PySide6.QtWebEngineWidgets import QWebEngineView
-        except Exception:
-            return
-        try:
-            web = QWebEngineView(self)
-            web.resize(4, 4)
-            self._webengine_warmup_widget = web
-            try:
-                # Force an offscreen show once so WebEngine native surface/process
-                # startup does not occur during first visible Map activation.
-                web.setAttribute(Qt.WA_DontShowOnScreen, True)
-            except Exception:
-                pass
-
-            def _cleanup() -> None:
-                try:
-                    if self._webengine_warmup_widget is web:
-                        self._webengine_warmup_widget = None
-                    self._webengine_warmup_done = True
-                    try:
-                        web.hide()
-                    except Exception:
-                        pass
-                    web.deleteLater()
-                    QTimer.singleShot(0, self._complete_pending_map_switch_after_webengine_warmup)
-                except Exception:
-                    pass
-
-            try:
-                web.loadFinished.connect(lambda _ok: _cleanup())
-            except Exception:
-                pass
-            try:
-                web.show()
-            except Exception:
-                pass
-            web.setUrl(QUrl("about:blank"))
-            QTimer.singleShot(3000, _cleanup)
-        except Exception as e:
-            log.debug("MainWindow: WebEngine warmup (hidden-view) skipped: %s", e)
-            self._webengine_warmup_widget = None
 
     def _prewarm_next_lazy_tab(self) -> None:
         if self._shutting_down:
@@ -6231,16 +6147,106 @@ class MainWindow(QMainWindow):
             self.help_tab = HelpTab(self)
             return self.help_tab
 
-    def _create_stations_map_tab(self) -> QWidget:
+    def _create_stations_map_tab(self, parent: QWidget) -> QWidget:
         with perf_span(
             "main_window.create_stations_map_tab",
             settings=self.settings,
             min_ms=5.0,
         ):
-            self.stations_map_tab = StationsMapTab(self, plan_context_service=self.plan_context_service)
+            self.stations_map_tab = StationsMapTab(
+                parent,
+                plan_context_service=self.plan_context_service,
+                application_host=self,
+            )
             QTimer.singleShot(0, self._sync_map_filters_from_tab)
-            QTimer.singleShot(0, self._apply_pending_map_focus)
             return self.stations_map_tab
+
+    def _ensure_map_window(self) -> PersistentMapWindow:
+        existing = getattr(self, "map_window", None)
+        if isinstance(existing, PersistentMapWindow):
+            return existing
+        window = PersistentMapWindow(
+            self,
+            self.settings,
+            self._create_stations_map_tab,
+        )
+        window.content_ready.connect(self._on_map_window_content_ready)
+        window.content_failed.connect(self._on_map_window_content_failed)
+        window.work_visibility_changed.connect(self._on_map_window_work_visibility_changed)
+        window.destroyed.connect(self._on_map_window_destroyed)
+        self.map_window = window
+        window.apply_theme(resolve_theme(self.settings))
+        self._update_map_navigation_state(False)
+        return window
+
+    def _open_map_window(self) -> None:
+        if self._shutting_down or self._screen_is_runtime_suppressed("Map"):
+            return
+        try:
+            window = self._ensure_map_window()
+            window.present()
+            self._update_map_navigation_state(window.is_available_for_work())
+        except Exception as exc:
+            log.exception("MainWindow: failed to open persistent Map window")
+            self._update_map_navigation_state(False, error=str(exc))
+
+    def _on_map_window_content_ready(self, tab: object) -> None:
+        if self._shutting_down:
+            return
+        if isinstance(tab, StationsMapTab):
+            self.stations_map_tab = tab
+        try:
+            if hasattr(tab, "set_app_active"):
+                tab.set_app_active(self._ui_refresh_allowed())
+            if hasattr(tab, "set_map_visible"):
+                window = getattr(self, "map_window", None)
+                tab.set_map_visible(bool(window is not None and window.is_available_for_work()))
+        except Exception:
+            log.debug("MainWindow: failed publishing Map window lifecycle", exc_info=True)
+        self._apply_pending_map_focus()
+        window = getattr(self, "map_window", None)
+        self._update_map_navigation_state(bool(window is not None and window.is_available_for_work()))
+
+    def _on_map_window_content_failed(self, error: str) -> None:
+        if self._shutting_down:
+            return
+        self._update_map_navigation_state(False, error=str(error or ""))
+
+    def _on_map_window_work_visibility_changed(self, visible: bool) -> None:
+        tab = getattr(self, "stations_map_tab", None)
+        if tab is not None and hasattr(tab, "set_map_visible"):
+            try:
+                tab.set_map_visible(bool(visible))
+            except Exception:
+                log.debug("MainWindow: failed updating Map work visibility", exc_info=True)
+        if not self._shutting_down:
+            self._update_map_navigation_state(bool(visible))
+
+    def _on_map_window_destroyed(self, _obj: object | None = None) -> None:
+        self.map_window = None
+        self.stations_map_tab = None
+        if not self._shutting_down:
+            self._update_map_navigation_state(False)
+
+    def _update_map_navigation_state(self, visible: bool, *, error: str = "") -> None:
+        if error:
+            tooltip = "Map unavailable — click to retry opening it in a separate window."
+        elif visible:
+            tooltip = "Map open — click to bring the separate Map window to front."
+        else:
+            tooltip = "Open Map in a separate window and keep working in FIO."
+        for spec, button in zip(getattr(self, "_nav_specs", ()), getattr(self, "nav_buttons", ())):
+            if tuple(spec) == ("Map", "Map"):
+                button.setToolTip(tooltip)
+                button.setAccessibleName("Map")
+                button.setAccessibleDescription(tooltip)
+        for button in getattr(self, "nav_compact_buttons", ()):
+            try:
+                if str(button.accessibleName() or "") == "Map":
+                    button.setToolTip(tooltip)
+                    button.setAccessibleDescription(tooltip)
+            except Exception:
+                continue
 
     def _ensure_lazy_tab_loaded(self, label: str, index: int) -> None:
         with perf_span(
@@ -6881,6 +6887,10 @@ class MainWindow(QMainWindow):
         self._suppressed_screen_labels = self._suppressed_screens_for_runtime(profile, policy)
         for label in ("Map", "Messages", "FreqPlanner", "NCS-FLDigi/SSB", "NCS-JS8", "NCS-Local"):
             self._set_nav_visibility_for_screen(label, label not in self._suppressed_screen_labels)
+        if "Map" in self._suppressed_screen_labels:
+            map_window = getattr(self, "map_window", None)
+            if map_window is not None:
+                map_window.hide()
         self._launch_startup_suppressed = not self._runtime_launch_enabled(profile, policy)
         try:
             if hasattr(self.launch_orchestrator, "set_runtime_launch_enabled"):
@@ -6936,11 +6946,6 @@ class MainWindow(QMainWindow):
                             self.background_ingest.start()
                     else:
                         self.background_ingest.start()
-                except Exception:
-                    pass
-            if (not self._webengine_warmup_done) and ("Map" not in self._suppressed_screen_labels) and self._should_prewarm_webengine_at_startup():
-                try:
-                    self._prewarm_webengine()
                 except Exception:
                     pass
             if bool(getattr(self, "_startup_deferred_prewarm_enabled", False)):
@@ -12980,9 +12985,9 @@ class MainWindow(QMainWindow):
             return
         palette = theme or resolve_theme(self.settings)
         border = palette.get("border", "#D0D7DE")
-        panel = palette.get("panel", palette.get("background", "#FFFFFF"))
+        panel = palette.get("surface", palette.get("bg", "#FFFFFF"))
         text = palette.get("text", "#202124")
-        muted = palette.get("muted", "#5F6368")
+        muted = palette.get("text_muted", "#5F6368")
         self.ledge_clock_widget.setStyleSheet(
             f"""
             QFrame#mainLedgeClock {{
@@ -13015,17 +13020,10 @@ class MainWindow(QMainWindow):
                     if fallback_index != index:
                         self._set_screen(fallback_index)
                     return
-                if label == "Map" and time.time() < float(getattr(self, "_help_dialog_settle_until", 0.0) or 0.0):
-                    remaining_ms = int(
-                        max(50.0, (float(self._help_dialog_settle_until) - time.time()) * 1000.0)
-                    )
-                    self._show_tab_loading_notice("Preparing Map...")
-                    log.info("UI_LIFECYCLE|map_switch_deferred reason=help_settle ms=%s", remaining_ms)
-                    QTimer.singleShot(remaining_ms, lambda idx=index: self._set_screen(idx))
-                    return
-                if label != "Map" and self._pending_map_switch_index is not None:
-                    self._pending_map_switch_index = None
-                if label == "Map" and self._queue_map_switch_after_webengine_warmup(index):
+                if label == "Map":
+                    self._open_map_window()
+                    self._restore_nav_selection_to_active_tab()
+                    self._sync_compact_navigation_selection(self._current_screen_label())
                     return
                 try:
                     if label == "Settings":
@@ -13108,14 +13106,13 @@ class MainWindow(QMainWindow):
                         )
                 except Exception:
                     pass
-                if label != "Map":
-                    QTimer.singleShot(
-                        0,
-                        lambda expected=index, epoch=navigation_epoch: self._settle_active_screen_layout(
-                            expected,
-                            epoch,
-                        ),
-                    )
+                QTimer.singleShot(
+                    0,
+                    lambda expected=index, epoch=navigation_epoch: self._settle_active_screen_layout(
+                        expected,
+                        epoch,
+                    ),
+                )
 
     def _on_ncs_net_status_changed(self, kind: str, active: bool) -> None:
         kind_key = (kind or "").strip().upper()

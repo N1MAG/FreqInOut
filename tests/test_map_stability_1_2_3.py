@@ -73,16 +73,7 @@ def _bare_tab() -> StationsMapTab:
     tab._map_loading_label = None
     tab._map_selected_paths_btn = None
     tab.settings = {}
-    tab.web = object()
     return tab
-
-
-class _FakePage:
-    def __init__(self) -> None:
-        self.scripts: list[str] = []
-
-    def runJavaScript(self, script: str) -> None:
-        self.scripts.append(script)
 
 
 def test_map_topic_text_matcher_ignores_not_reported_status_lines() -> None:
@@ -177,14 +168,6 @@ def test_mesh_nodes_view_enables_reference_city_labels_without_global_toggle() -
         observation_focus_enabled=True,
         observation_focus_mode="all_reports",
     ) == (False, 100000)
-
-
-class _FakeWeb:
-    def __init__(self) -> None:
-        self.page_obj = _FakePage()
-
-    def page(self) -> _FakePage:
-        return self.page_obj
 
 
 class _FakeLabel:
@@ -606,15 +589,16 @@ def test_selected_station_paths_toggle_restores_previous_report_context() -> Non
 
 def test_map_selected_center_falls_back_to_station_coordinates() -> None:
     tab = _bare_tab()
-    web = _FakeWeb()
-    tab.web = web
+    centers: list[tuple[float, float, int]] = []
+    tab._native_map_renderer = SimpleNamespace(
+        center_on=lambda lat, lon, zoom=6: centers.append((float(lat), float(lon), int(zoom)))
+    )
     tab._map_selected_payload = {"type": "station", "title": "K7ETC"}
     tab.stations = [StationPoint(callsign="K7ETC", grid="DM38ST", lat=38.5, lon=-112.5)]
 
     StationsMapTab._center_map_selected_detail(tab)
 
-    assert web.page_obj.scripts
-    assert "centerMapOn(38.500000, -112.500000, 6)" in web.page_obj.scripts[0]
+    assert centers == [(38.5, -112.5, 6)]
 
 
 def test_map_selected_detail_center_button_uses_station_coordinate_fallback() -> None:
@@ -1045,39 +1029,35 @@ def test_map_selected_messages_html_explains_context_filters() -> None:
 def test_map_operator_language_uses_status_not_severity() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
 
-    assert 'detailRowPayload(\'Status\', event.severity)' in source
     assert "f\"Status: {str(bucket.get('severity')" in source
-    assert 'detailRowPayload(\'Severity\', event.severity)' not in source
     assert "f\"Severity: {str(bucket.get('severity')" not in source
     assert "Severity:" not in source
 
 
 def test_regional_intel_summary_hides_green_rows_by_default() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
-    assert "function regionalActionableRollupsByScore" in source
-    assert "function regionalRollupIsActionable" in source
-    assert ".filter(regionalRollupIsActionable)" in source
-    assert "const states = regionalActionableRollupsByScore('state', 5);" in source
-    assert "const regions = regionalActionableRollupsByScore('region', 3);" in source
+    assert "def _regional_intelligence_payload" in source
+    assert "regional_intelligence_payload" in source
+    # Rollup severity selection belongs to the intelligence model, while the
+    # native renderer consumes the bounded rollup payload without reproducing
+    # the old browser-side filtering policy.
+    assert "top_states = sorted(state_rollups" in source
+    assert '"No active regional concerns from current evidence."' in source
 
 
 def test_regional_intel_visible_boundaries_ignore_green_rollups_by_default() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
-    assert "function regionalGreenStateStyle()" in source
-    assert "if (!regionalRollupIsActionable(rollup))" in source
-    assert "return regionalGreenStateStyle();" in source
-    assert "if (regionalRollupIsActionable(rollup))" in source
-    assert "if (!regionalRollupIsActionable(rollup))" in source
+    regional_block = source[source.index("def _regional_intelligence_payload") : source.index("def _regional_intelligence_density_events")]
+    assert '"level"' in regional_block
+    assert '"top_topics"' in regional_block
+    assert '"evidence"' in regional_block
 
 
 def test_regional_intel_summary_caps_with_overflow_counts() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
 
-    assert "function regionalActionableOverflowCount" in source
-    assert "more states in current filters" in source
-    assert "more FEMA regions in current filters" in source
-    assert "States Needing Review" in source
-    assert "FEMA Regions Needing Review" in source
+    assert "regional_intelligence" in source
+    assert "_map_marker_count" in source
 
 
 def test_map_filter_bar_does_not_render_redundant_view_status_label() -> None:
@@ -1104,7 +1084,7 @@ def test_map_selected_detail_splitter_uses_responsive_helper() -> None:
 
 def test_station_status_is_not_a_standalone_map_mode() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
-    render_block = source[source.index("def _render_map") : source.index("def _push_map_payload")]
+    render_block = source[source.index("def _render_map") : source.index("def _on_show_cities_changed")]
 
     assert '("Station Status", "sitrep")' not in source
     assert 'QPushButton("Station Status")' not in source
@@ -1115,7 +1095,7 @@ def test_station_status_is_not_a_standalone_map_mode() -> None:
 
 def test_station_status_no_longer_has_toggle_plumbing() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
-    render_block = source[source.index("def _render_map") : source.index("def _push_map_payload")]
+    render_block = source[source.index("def _render_map") : source.index("def _on_show_cities_changed")]
 
     assert "if self._links_active() and not sitrep_mode:" in render_block
     assert "if sitrep_mode or not station_enrichment_needed:\n            varac_stats = {}" in render_block
@@ -1141,16 +1121,10 @@ def test_selected_station_show_paths_converts_to_paths_context() -> None:
 
 def test_station_status_summary_is_compact_and_legend_omits_unknown() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
-    summary_block = source[source.index("function buildSitrepSummaryHtml") : source.index("const sitrepSummaryPanel")]
-    legend_block = source[source.index("function buildLegendHtml") : source.index("function updateLegend")]
+    status_block = source[source.index("def _map_selected_status_html") : source.index("def _peer_schedule_hint_for_callsign")]
 
-    assert "SitRep State Summary" not in summary_block
-    assert "<b>Station Status</b>" in summary_block
-    assert "stations with known status" in summary_block
-    assert "No current state rollups" not in summary_block
-    assert "const stationStatusItems = [" in legend_block
-    assert "Station Status:" in legend_block
-    assert "Unknown / No Report" in legend_block
+    assert 'heading = "Station Status"' in status_block
+    assert "Unknown" in status_block
 
 
 def test_display_preferences_recover_when_all_drawable_layers_were_saved_off() -> None:
@@ -2634,17 +2608,6 @@ def test_map_status_uses_planning_pin_noun_in_pin_focus() -> None:
     assert tab._map_support_help_btn.visible is False
 
 
-def test_schedule_render_during_page_load_defers_until_load_finishes() -> None:
-    tab = _bare_tab()
-    tab._map_initialized = True
-    tab._map_page_loading = True
-
-    tab._schedule_render()
-
-    assert tab._map_dirty is True
-    assert tab._render_requested_during_load is True
-
-
 def test_maybe_start_map_ingest_waits_for_successful_first_load() -> None:
     tab = _bare_tab()
     tab._deferred_initial_ingest_pending = True
@@ -2832,9 +2795,9 @@ def test_regional_intelligence_summary_panel_defaults_collapsed_with_toggle() ->
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
 
     assert "self._regional_summary_collapsed: bool = True" in source
-    assert "window.regionalSummaryCollapsed" in source
-    assert "data-regional-summary-toggle" in source
-    assert "regional-summary-panel.collapsed .regional-summary-body" in source
+    handler = source[source.index("def _handle_map_detail_action") : source.index("# ------------- Map rendering")]
+    assert 'action == "regional_summary_collapsed"' in handler
+    assert "self._regional_summary_collapsed" in handler
 
 
 def test_regional_intelligence_summary_collapsed_action_updates_python_state() -> None:
@@ -2965,88 +2928,33 @@ def test_regional_intelligence_detail_explains_source_mix_and_next_action() -> N
     assert "Internet feed references evacuation zone" in detail
 
 
-def test_leaflet_html_includes_regional_intelligence_heatmap_hooks() -> None:
-    tab = _bare_tab()
-    html = StationsMapTab._build_leaflet_html(
-        tab,
-        markers=[],
-        links=[],
-        max_zoom=18,
-        leaflet_js="leaflet.js",
-        leaflet_css="leaflet.css",
-        geojson_urls=["states.geojson"],
-        cities_geojson=None,
-        city_min_pop=0,
-        show_city_labels=False,
-        regional_intelligence={
+def test_native_projection_retains_regional_intelligence_and_shared_theme_ownership() -> None:
+    """Regional context crosses the renderer boundary as data, not generated HTML."""
+    received: list[dict[str, object]] = []
+    host = SimpleNamespace(
+        _native_map_renderer=SimpleNamespace(apply_projection=lambda payload: received.append(dict(payload))),
+        _map_visible=True,
+        _app_active=True,
+        _is_shutting_down=False,
+        _pending_map_payload=None,
+        _last_map_payload_sig=None,
+    )
+    payload = {
+        "markers": [],
+        "links": [],
+        "regional_intelligence": {
             "enabled": True,
-            "sensitivity": "active",
             "topic_filter": "Fire",
-            "states": {
-                "CA": {"area_id": "CA", "label": "CA", "level": "orange", "top_topics": []},
-                "TX": {"area_id": "TX", "label": "TX", "level": "yellow", "top_topics": []},
-            },
-            "regions": {},
+            "states": {"CA": {"label": "CA", "level": "orange"}},
         },
-    )
+    }
 
-    assert "window.regionalIntelligenceEnabled" in html
-    assert "function regionalStateStyle" in html
-    assert "regionalStateStyle(stateAbbr)" in html
-    assert "regionalSourceMixText" in html
-    assert "popupPane" in html
-    assert "tooltipPane" in html
-    assert "buildRegionalIntelSummaryHtml" in html
-    assert "regional-summary-panel" in html
-    assert "regionalFindRollup" in html
-    assert "regionalNationalRollup" in html
-    assert "mapMode" in html
-    assert "function regionalActionableRollupsByScore" in html
-    assert "regional-summary-heading-button" in html
-    assert "reports from ${rollup.reporter_count || 0} stations" in html
-    assert "stateAbbr.length !== 2" in html
-    assert "Regional Concern:" in html
-    assert "mode === 'regional'" in html
-    assert "mode === 'sitrep'" in html
-    assert "L.DomEvent.stop(e)" in html
-    assert "CA" in html
-    assert "TX" in html
+    StationsMapTab._apply_native_map_projection(host, payload)
 
-
-def test_leaflet_operational_marker_palette_comes_from_shared_theme() -> None:
-    """Domain severity/source colors adapt with the shared map theme."""
-    tab = _bare_tab()
-    light_html = StationsMapTab._build_leaflet_html(
-        tab,
-        markers=[],
-        links=[],
-        max_zoom=18,
-        leaflet_js="leaflet.js",
-        leaflet_css="leaflet.css",
-        geojson_urls=[],
-        cities_geojson=None,
-        city_min_pop=0,
-        show_city_labels=False,
-    )
-    assert "#C62828" in light_html  # shared light-theme danger role
-    assert "#B71C1C" not in light_html  # legacy hardcoded severe marker
-    assert "#E3F2FD" not in light_html  # legacy hardcoded weather fill
-
-    tab.settings = {"ui_theme": "dark"}
-    dark_html = StationsMapTab._build_leaflet_html(
-        tab,
-        markers=[],
-        links=[],
-        max_zoom=18,
-        leaflet_js="leaflet.js",
-        leaflet_css="leaflet.css",
-        geojson_urls=[],
-        cities_geojson=None,
-        city_min_pop=0,
-        show_city_labels=False,
-    )
-    assert "#E05252" in dark_html  # shared dark-theme danger role
-    assert "#B71C1C" not in dark_html
+    assert received == [payload]
+    renderer_source = Path("freqinout/gui/native_map_renderer.py").read_text(encoding="utf-8")
+    assert "active_app_theme" in renderer_source
+    assert "QPalette" not in renderer_source
 
 
 def test_rf_planning_preserves_time_and_topic_filters() -> None:
@@ -3205,24 +3113,13 @@ def test_map_control_strip_uses_operator_first_sections() -> None:
     assert "} links." in source
     assert "self._map_retry_btn.setVisible(show_support_actions)" in source
     assert 'self._map_runtime_state in {"loading", "warming"}' in source
-    assert 'id="legendToggle"' in source
-    assert 'legendDock" class="collapsed"' in source
-    assert "function openSelectedDetail" in source
-    assert "function emitMapAction" in source
-    assert "function stationDetailPayload" in source
-    assert "function reportDetailPayload" in source
-    assert "function compactStationTooltip" in source
-    assert "function detailActionButton" not in source
-    assert "function buildStationDetail" not in source
-    assert "function buildReportDetail" not in source
-    assert "groups: event.groups || []" in source
-    assert "topics: event.topics || []" in source
-    assert "detailRowPayload('Groups'" in source
-    assert "detailRowPayload('Topics'" in source
-    assert "detailRowPayload('MCF'" in source
-    assert "detailRowPayload('Status'" in source
-    assert "detailRowPayload('Area'" in source
-    assert "detailRowPayload('Location'" in source
+    assert "def _on_native_map_action" in source
+    assert "def _show_map_selected_detail" in source
+    assert "action_signal.connect(self._on_native_map_action)" in source
+    assert 'payload = action_payload.get("payload", action_payload.get("marker"))' in source
+    assert 'payload = action_payload.get("payload", action_payload.get("path"))' in source
+    assert "payload.get(\"groups\")" in source
+    assert "payload.get(\"topics\")" in source
     assert "QTextBrowser" in source
     assert "def _show_map_selected_detail" in source
     assert "def _map_selected_detail_html" in source
@@ -3238,9 +3135,7 @@ def test_map_control_strip_uses_operator_first_sections() -> None:
     assert "open_messages_section(" in source
     assert "focus_traffic_context" in Path("freqinout/gui/sop_tab.py").read_text(encoding="utf-8")
     assert "def _handle_map_detail_action" in source
-    assert "web.titleChanged.connect(self._on_map_page_title_changed)" in source
-    assert "body._nonce =" in source
-    assert "'select_detail'" in source
+    assert 'if action == "select_detail":' in source
     assert '"action": "filter_group"' in source
     assert '"action": "filter_topic"' in source
     assert "messages_btn.clicked.connect(self._open_map_selected_messages)" in source
@@ -3249,11 +3144,8 @@ def test_map_control_strip_uses_operator_first_sections() -> None:
     assert "if action == \"open_messages\":" in source
     assert "if action == \"review_sop\":" in source
     assert "source_family" in source
-    assert "openSelectedDetail(payload)" in source
-    assert "openSelectedDetail(buildStationDetail" not in source
-    assert "openSelectedDetail(buildReportDetail" not in source
-    assert "circle.bindTooltip(tipText" in source
-    assert "showDetail(tipText)" not in source
+    assert "QWebEngine" not in source
+    assert "runJavaScript" not in source
 
 
 def test_planning_pins_focus_is_not_received_traffic_focus() -> None:
@@ -3627,20 +3519,12 @@ def test_js8_link_loader_returns_tuple_on_database_path_failures() -> None:
 
 def test_map_selected_detail_clicks_use_single_native_panel() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
-    open_block = source[source.index("function openSelectedDetail") : source.index("function detailRowPayload")]
-    station_payload_block = source[source.index("function stationDetailPayload") : source.index("function compactStationTooltip")]
+    action_block = source[source.index("def _on_native_map_action") : source.index("def _apply_native_map_projection")]
 
-    assert "emitMapAction('select_detail'" in open_block
-    assert "markerMeaningByStatus" in station_payload_block
-    assert "detailRowPayload('Marker', markerMeaning)" in station_payload_block
-    assert "detailRowPayload('FEMA Region', m.fema_region)" in station_payload_block
-    assert "detailRowPayload('Groups', groups.join(', '))" in station_payload_block
-    assert "detailRowPayload('JS8 SNR', js8SnrBits)" in station_payload_block
-    assert "detailRowPayload('VarAC Heard', varacBits)" in station_payload_block
-    assert "selectedDetailPanel.addTo(map)" not in source
-    assert "selected-detail-panel empty" not in source
-    assert "showSelectedDetail" not in source
-    assert "sidePanelEligible" not in source
+    assert 'action == "select_marker"' in action_block
+    assert 'action == "select_path"' in action_block
+    assert "show_detail(dict(payload))" in action_block
+    assert "def _build_map_selected_detail_panel" in source
 
 
 def test_map_station_action_buttons_use_operator_language() -> None:
@@ -3947,39 +3831,6 @@ def test_clear_map_layers_preserves_regional_intel_view() -> None:
     assert tab._observation_focus_mode == "regional_intelligence"
     assert tab.show_station_markers is False
     assert reasons == ["clear_map_layers"]
-
-
-def test_map_load_finished_flushes_deferred_render_request() -> None:
-    tab = _bare_tab()
-    tab._map_page_loading = True
-    tab._render_requested_during_load = True
-    tab._map_visible = True
-    scheduled: list[str] = []
-    requested: list[dict[str, object]] = []
-    tab._schedule_render = lambda: scheduled.append("render")
-    tab._request_map_refresh = lambda **kwargs: requested.append(kwargs)
-
-    tab._on_map_load_finished(True)
-
-    assert tab._map_page_loading is False
-    assert tab._map_initialized is True
-    assert tab._map_load_ok is True
-    assert tab._render_requested_during_load is False
-    assert scheduled == []
-    assert requested == [{"level": "medium", "reason": "post_load", "preserve_view": True}]
-
-
-def test_push_map_payload_queues_while_page_loading() -> None:
-    tab = _bare_tab()
-    tab._map_page_loading = True
-    tab._map_initialized = False
-
-    tab._push_map_payload([{"callsign": "N0CALL"}], [{"origin": "A", "destination": "B"}], auto_fit=True)
-
-    assert tab._pending_map_payload is not None
-    assert tab._pending_map_payload["markers"][0]["callsign"] == "N0CALL"
-    assert tab._pending_map_payload["links"][0]["origin"] == "A"
-    assert tab._pending_map_payload["auto_fit"] is True
 
 
 def test_map_auto_fit_only_triggers_for_changed_focused_results() -> None:
@@ -5025,15 +4876,28 @@ def test_map_operational_event_primary_topic_uses_active_filter(monkeypatch) -> 
     assert events[0]["icon"] == "fire"
 
 
-def test_map_html_legend_and_operational_markers_distinguish_report_sources() -> None:
-    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+def test_native_projection_preserves_operational_source_metadata() -> None:
+    received: list[dict[str, object]] = []
+    host = SimpleNamespace(
+        _native_map_renderer=SimpleNamespace(apply_projection=lambda payload: received.append(dict(payload))),
+        _map_visible=True,
+        _app_active=True,
+        _is_shutting_down=False,
+        _pending_map_payload=None,
+        _last_map_payload_sig=None,
+    )
+    payload = {
+        "markers": [
+            {"id": "hf", "lat": 39.7, "lon": -104.9, "source_kind": "hf"},
+            {"id": "local", "lat": 40.0, "lon": -105.0, "source_kind": "local"},
+            {"id": "pin", "lat": 39.0, "lon": -104.0, "source_kind": "pin"},
+        ],
+        "links": [],
+    }
 
-    assert "Report Source:" in source
-    assert "op-source-hf" in source
-    assert "op-source-local" in source
-    assert "op-source-pin" in source
-    assert "op-source-mixed" in source
-    assert "event.source_kind" in source
+    StationsMapTab._apply_native_map_projection(host, payload)
+
+    assert received[0]["markers"] == payload["markers"]
 
 
 def test_map_topic_controls_use_message_intelligence_taxonomy() -> None:
@@ -5045,44 +4909,34 @@ def test_map_topic_controls_use_message_intelligence_taxonomy() -> None:
     assert "Logistics" in TOPIC_TAXONOMY
 
 
-def test_map_link_renderer_preserves_direction_and_quality_visuals() -> None:
+def test_native_projection_preserves_link_direction_and_quality_metadata() -> None:
+    received: list[dict[str, object]] = []
+    host = SimpleNamespace(
+        _native_map_renderer=SimpleNamespace(apply_projection=lambda payload: received.append(dict(payload))),
+        _map_visible=True,
+        _app_active=True,
+        _is_shutting_down=False,
+        _pending_map_payload=None,
+        _last_map_payload_sig=None,
+    )
+    payload = {
+        "markers": [],
+        "links": [{"origin": "A", "destination": "B", "snr": -7, "direction": "outbound"}],
+        "link_direction_markers": True,
+    }
+
+    StationsMapTab._apply_native_map_projection(host, payload)
+
+    assert received[0]["links"] == payload["links"]
+    assert received[0]["link_direction_markers"] is True
+
+
+def test_regional_intelligence_detail_payload_remains_operator_readable() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
 
-    assert "def _map_link_direction_markers_enabled" in source
-    assert "link_direction_markers" in source
-    assert "let linkDirectionMarkers" in source
-    assert "function formatSnr" in source
-    assert "function linkBearingDeg" in source
-    assert "const showDirectionMarkers = !!linkDirectionMarkers" in source
-    assert "const arrowRotation = bearing - 90;" in source
-    assert "fio-link-arrow" in source
-    assert "rotate(${{arrowRotation}}deg)" in source
-    assert "&#10148;" in source
-    assert "origin" in source
-    assert "destination" in source
-    assert "\\u2192" in source
-    assert "const snr = formatSnr(l.snr);" in source
-    assert "SNR ${{snr}}" in source
-    assert "list.length <= 80" in source
-
-
-def test_regional_intelligence_detail_payload_is_operator_readable() -> None:
-    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
-
-    assert "function regionalAgeWindowLabel" in source
-    assert "function regionalAgeText" in source
     assert '"recency_seconds": int(max_age_sec or 0)' in source
-    assert "age_window: regionalAgeWindowLabel()" in source
-    assert "detailRowPayload('Status'" in source
-    assert "detailRowPayload('Window', regionalAgeWindowLabel())" in source
-    assert "detailRowPayload('Why', regionalTopicSummary(rollup)" in source
-    assert "detailRowPayload('Sources', regionalSourceMixText(rollup))" in source
-    assert "Open Messages to review matching non-green reports" in source
-    assert "function refreshRegionalBoundaryInteractions" in source
-    assert "refreshRegionalBoundaryInteractions();" in source
-    assert "const latestRollup = regionalStateRollup(stateAbbr);" in source
-    assert "detailRowPayload('Score'" not in source
-    assert "detailRowPayload('Signal Context'" not in source
+    assert "def _open_map_selected_messages" in source
+    assert "regional_intelligence" in source
 
 
 def test_map_event_recency_guard_drops_unknown_and_old_traffic() -> None:
@@ -5111,28 +4965,16 @@ def test_map_link_direction_markers_are_topology_scoped() -> None:
     assert 'link_mode in {"station", "relay_target"}' in method_body
 
 
-def test_map_center_action_uses_leaflet_center_helper() -> None:
+def test_map_center_action_uses_native_center_bridge() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
     method_start = source.index("def _center_map_selected_detail")
     method_body = source[method_start : source.index("def _map_selected_station_callsign", method_start)]
 
-    assert "window.centerMapOn" in source
     assert "def _map_payload_latlon" in source
     assert "maidenhead_to_latlon(token)" in source
-    assert "Number.isFinite(targetLat)" in source
-    assert "return true;" in source
-    assert "runJavaScript" in method_body
-    assert "setView" in method_body
-
-
-def test_map_leaflet_template_escapes_status_color_objects() -> None:
-    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
-
-    assert "const markerMeaningByStatus = {{" in source
-    assert "const markerFillByStatus = {{" in source
-    assert "const markerStrokeByStatus = {{" in source
-    assert "green: 'Green: latest status is functioning'" in source
-    assert "const markerMeaningByStatus = {\n" not in source
+    assert "_native_map_renderer" in method_body
+    assert ".center_on(" in method_body
+    assert "runJavaScript" not in method_body
 
 
 def test_map_since_filter_uses_chip_menu_with_extended_windows() -> None:
@@ -5234,22 +5076,21 @@ def test_long_map_age_window_has_explicit_loading_feedback() -> None:
     assert "aggregating older traffic" in text
 
 
-def test_map_loading_feedback_is_set_before_heavy_render_and_preserved_for_web_load() -> None:
+def test_map_loading_feedback_is_set_before_heavy_native_projection() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
 
     assert "def _show_map_refresh_pending_feedback" in source
     request_block = source[source.index("def _request_map_refresh") : source.index("def _flush_requested_map_refresh")]
     perform_block = source[source.index("def _perform_map_refresh") : source.index("def _map_loading_detail_text")]
-    load_block = source[source.index("def _load_web_map_file") : source.index("def _ensure_web_view")]
 
     assert "_show_map_refresh_pending_feedback" in request_block
     assert "QCoreApplication.processEvents()" not in perform_block
-    assert "detail or self._map_runtime_detail or \"Loading the map surface.\"" in load_block
+    assert "_apply_native_map_projection" in source
 
 
 def test_map_render_skips_station_enrichment_for_traffic_and_regional_views() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
-    render_block = source[source.index("def _render_map") : source.index("def _push_map_payload")]
+    render_block = source[source.index("def _render_map") : source.index("def _on_show_cities_changed")]
 
     assert "station_enrichment_needed = bool(" in render_block
     assert "not regional_intelligence_mode" in render_block
@@ -5328,8 +5169,6 @@ def test_map_topic_icon_mapping_covers_message_taxonomy() -> None:
     assert "def _map_topic_icon" in source
     assert "def _map_event_topic_and_icon" in source
     assert "primary_topic, event_icon = self._map_event_topic_and_icon" in source
-    assert "if (kind === 'fire')" in source
-    assert "M12 10v6" in source
     for topic in (
         '"weather": "storm"',
         '"fire": "fire"',
@@ -5347,38 +5186,18 @@ def test_map_topic_icon_mapping_covers_message_taxonomy() -> None:
         '"general intel": "warning"',
     ):
         assert topic in source
-    for icon in (
-        "fire",
-        "medical",
-        "power",
-        "water",
-        "fuel",
-        "food",
-        "transport",
-        "comms",
-        "security",
-        "shelter",
-        "logistics",
-        "utility",
-        "storm",
-        "general",
-    ):
-        assert f"op-kind-{icon}" in source
+    # Icon choice is carried as bounded marker metadata to the native scene;
+    # browser-only CSS marker classes are intentionally absent.
+    assert "op-kind-" not in source
 
 
-def test_map_detail_payload_cleans_html_tooltip_fallback() -> None:
+def test_map_detail_payload_cleans_display_text_without_browser_tooltip_dependency() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
 
-    assert "function cleanMapDetailText(value)" in source
-    assert "function normalizeMapSourceLabel(value)" in source
-    assert "const cleaned = cleanMapDetailText(value);" in source
-    assert "summary: cleanMapDetailText(event.summary || event.tooltip || title)" in source
-    assert "map.closePopup();" in source
-    assert "document.querySelectorAll('.leaflet-popup')" in source
-    assert "return 'Multiple Sources';" in source
-    assert "return 'Planning Pin';" in source
-    assert ".replace(/&lt;/g, '<')" in source
-    assert ".replace(/<br\\\\s*\\\\/?>/gi, '\\\\n')" in source
+    assert "def _map_detail_clean_text" in source
+    assert "def _map_payload_rows" in source
+    assert "def _map_selected_source_label" in source
+    assert "document.querySelectorAll('.leaflet-popup')" not in source
 
 
 def test_map_report_focus_overrides_advanced_station_scope() -> None:
@@ -5626,36 +5445,19 @@ def test_map_to_messages_context_uses_real_filters_before_search_fallback() -> N
     assert "non-green/status evidence only" in source
 
 
-def test_map_leaflet_template_includes_operator_zoom_presets() -> None:
+def test_native_renderer_exposes_operator_center_contract() -> None:
+    source = Path("freqinout/gui/native_map_renderer.py").read_text(encoding="utf-8")
+
+    assert "def center_on(" in source
+    assert "view_changed.emit()" in source
+
+
+def test_city_population_layer_remains_optional_in_the_map_projection_model() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
-
-    assert "zoom-chip" in source
-    assert "window.fitMapResults" in source
-    assert "window.zoomPreset" in source
-    assert 'data-zoom-preset="fit">Fit Results' in source
-    assert 'data-zoom-preset="station">Station' in source
-    assert 'data-zoom-preset="region">Region' in source
-    assert 'data-zoom-preset="north-america">North America' in source
-    assert "markers = payload.markers; renderMarkers(markers);" in source
-    assert "links = payload.links; renderLinks(links);" in source
-    assert "if (payload.auto_fit)" in source
-    assert "window.fitMapResults();" in source
-
-
-def test_city_population_layer_is_optional_and_zoom_aware() -> None:
-    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
-    city_start = source.index("const cityLayer = L.layerGroup();")
-    city_block = source[city_start : source.index("dark_map_filter", city_start)]
 
     assert "self.show_cities = False" in source
-    assert "let showCities" in city_block
-    assert "let minPop" in city_block
-    assert "function cityPopulationThreshold" in city_block
-    assert "return Math.max(minPop, 1000)" in city_block
-    assert "pop >= threshold" in city_block
-    assert "if (map.getZoom() >= 5)" in city_block
-    assert "map.removeLayer(cityLayer)" in city_block
-    assert "place-label" in city_block
+    assert "city_min_pop" in source
+    assert "show_city_labels" in source
 
 
 def test_mesh_nodes_city_labels_bypass_global_city_toggle() -> None:
@@ -5663,14 +5465,16 @@ def test_mesh_nodes_city_labels_bypass_global_city_toggle() -> None:
     render_start = source.index("def _render_map")
     config_start = source.index("config_sig = (", render_start)
     config_block = source[config_start : source.index("force_reload =", config_start)]
-    payload_start = source.index("self._push_map_payload(", render_start)
-    payload_block = source[payload_start : payload_start + 900]
+    payload_start = source.index("native_payload: Dict[str, object] = {", render_start)
+    payload_block = source[payload_start : source.index('"auto_fit": bool(auto_fit)', payload_start)]
 
-    assert "show_cities=bool(self.show_cities)" in source
-    assert "show_city_labels=bool(effective_show_city_labels)" in source
-    assert "city_min_pop=int(effective_city_pop_min)" in source
-    assert "setCityConfig({" in source
-    assert "show_city_labels=bool(effective_show_city_labels)" in payload_block
+    # Focused mesh-node mode may enable its bounded reference-city labels even
+    # when the general Cities toggle is off, so the projection uses the
+    # effective label decision for both native city visibility properties.
+    assert '"show_cities": bool(effective_show_city_labels)' in source
+    assert '"show_city_labels": bool(effective_show_city_labels)' in source
+    assert '"city_min_pop": int(effective_city_pop_min)' in source
+    assert '"show_city_labels": bool(effective_show_city_labels)' in payload_block
     assert "observation_focus_mode == \"mesh_nodes\"" not in config_block
 
 
@@ -5687,7 +5491,7 @@ def test_map_refresh_does_not_pump_nested_ui_events() -> None:
 
 def test_map_render_does_not_reload_settings_on_ui_thread() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
-    render_block = source[source.index("def _render_map") : source.index("def _push_map_payload")]
+    render_block = source[source.index("def _render_map") : source.index("def _apply_native_map_projection")]
 
     assert ".settings.reload(" not in render_block
 
@@ -5700,16 +5504,10 @@ def test_shared_splitter_style_does_not_put_resize_tooltips_on_map() -> None:
     assert "Drag this divider to resize the panels." not in style_block
 
 
-def test_live_map_layers_use_reconcile_instead_of_full_clear_redraw() -> None:
-    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
-    shell_start = source.index("const stationsLayer = L.layerGroup().addTo(map);")
-    shell_end = source.index("window.updateMapData = function(payload)", shell_start)
-    shell_block = source[shell_start:shell_end]
+def test_live_native_map_updates_replace_one_projection_snapshot_without_rebuild() -> None:
+    source = Path("freqinout/gui/native_map_renderer.py").read_text(encoding="utf-8")
 
-    assert "function reconcileLayer" in shell_block
-    for name in ("renderMarkers", "renderLinks", "renderWeatherEvents", "renderOperationalEvents"):
-        start = shell_block.index(f"function {name}")
-        next_function = shell_block.find("\n    function ", start + 1)
-        block = shell_block[start : next_function if next_function > start else len(shell_block)]
-        assert "reconcileLayer(" in block
-        assert ".clearLayers()" not in block
+    assert "def apply_projection" in source
+    assert "self._bridge.set_projection" in source
+    assert "QQuickWidget" in source
+    assert "QWebEngine" not in source

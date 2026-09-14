@@ -253,7 +253,9 @@ def test_main_window_owns_plan_context_service_for_lazy_freqplanner() -> None:
     assert "DailyScheduleTab(self, plan_context_service=self.plan_context_service)" in source
     assert "NetScheduleTab(self, plan_context_service=self.plan_context_service)" in source
     assert "ControlFreqTab(" in source
-    assert "StationsMapTab(self, plan_context_service=self.plan_context_service)" in source
+    assert "self.stations_map_tab = StationsMapTab(" in source
+    assert "plan_context_service=self.plan_context_service" in source
+    assert "application_host=self" in source
     assert "FreqPlannerTab(self, plan_context_service=self.plan_context_service)" in source
     assert "MessageViewerTab(self, plan_context_service=self.plan_context_service)" in source
     assert 'if "plan_context_service" not in str(exc):' not in source
@@ -399,7 +401,8 @@ def test_map_uses_shared_plan_context_label_without_map_behavior_changes() -> No
     assert "create_service=self.plan_context_service is not None" in source
     assert "self.plan_context_label.refresh_context(refresh=True)" in source
     assert "Map uses the current radio and Frequency Plan context" in source
-    assert "updateMapData" in source
+    assert "build_native_overlay_projection" in source
+    assert "_apply_native_map_projection" in source
 
 
 def test_multi_radio_store_round_trips_schedule_assignment_for_radio(monkeypatch, tmp_path) -> None:

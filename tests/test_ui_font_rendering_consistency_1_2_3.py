@@ -75,11 +75,11 @@ def test_large_text_height_audit_tool_is_available() -> None:
     assert "suspicious small text-control height call" in text
 
 
-def test_map_legend_uses_ui_text_scale() -> None:
-    text = _read("freqinout/gui/stations_map_tab.py")
-    assert "resolve_ui_text_scale" in text
-    assert "label_font_px = max(10.0, 10.0 * float(ui_text_scale))" in text
-    assert "legend_font_px = max(12.0, 12.0 * float(ui_text_scale))" in text
+def test_native_map_labels_and_legend_use_the_application_font() -> None:
+    text = _read("freqinout/gui/qml/native_map_renderer.qml")
+    assert text.count("font: Qt.application.font") >= 5
+    assert "mapBridge.theme.text" in text
+    assert 'root.themeColor(modelData.color_role || "text_muted")' in text
 
 
 def test_startup_applies_saved_text_size_before_main_window() -> None:

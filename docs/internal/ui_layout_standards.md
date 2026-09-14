@@ -250,6 +250,21 @@ Required behavior:
 - `QTabWidget`/`QTabBar` controls should normally rely on the global app
   stylesheet. If a local override is necessary, it must explicitly cover normal,
   selected, hover, and disabled states for both themes.
+- A runtime theme change is an atomic application-level publication. The main
+  window resolves one fresh palette and passes that immutable snapshot to
+  persistent pop-outs and locally styled workspaces. A child must not resolve a
+  second cached settings instance during that transaction or publish an older
+  palette back into the widget tree.
+- Rich-text/read-only detail surfaces such as `QTextBrowser` must set both
+  foreground and background from shared tokens. If their document embeds theme
+  colors, rebuild the document from retained value data when the theme changes;
+  changing only the widget palette is insufficient.
+- Theme application must be failure-isolated. One optional status painter or
+  unavailable lazy child cannot abort navigation, table, form, or pop-out
+  restyling and leave a mixed light/dark frame.
+- Theme handlers may repaint existing controls but must not perform source or
+  device I/O, rebuild a QML/Web view, change splitter/window geometry, or force
+  activation. Tests must cover the already-open state as well as first creation.
 
 Acceptance check for future UI slices:
 
@@ -257,6 +272,9 @@ Acceptance check for future UI slices:
   disabled actions, nested tab widgets, and settings tables.
 - Add a focused regression test when a change introduces local stylesheet rules
   for tab bars, table items, semantic table rows, or dark-theme-specific colors.
+- For persistent secondary windows, switch Light→Dark and Dark→Light while the
+  window and a populated detail panel are visible. Verify all chrome, canvas,
+  rich text, disabled controls, and selections use the same palette immediately.
 
 ## UI Responsiveness Contract
 
@@ -298,13 +316,21 @@ Mandatory rules:
   review, or route-to-source actions, should reuse the latest matching worker
   snapshot before rebuilding. If the snapshot is stale, show progress and build
   a fresh worker result instead of blocking the event loop.
-- Map views must coalesce redraws and avoid full WebEngine reloads for simple
-  layer, filter, or selection changes. High-volume layers such as Mesh, APRS,
-  and future MQTT sources must use stable layer updates and bounded projection
-  work.
+- Map views must coalesce redraws and update the existing native Qt Location
+  scene for simple layer, filter, selection, resize, or theme changes. They
+  must not navigate a browser, inject JavaScript, or reconstruct the QML scene.
+  The scene is an offline, provider-free coordinate canvas: bundled geography
+  and established operational overlays must remain usable with networking
+  disabled, without tile downloads or API keys. Map pins and their labels must
+  expose font-aware, non-overlapping targets of at least 32 pixels; paths need a
+  forgiving interaction stroke independent of their visible stroke. Zoom and
+  pan must update only the existing scene and must never resize or reposition a
+  top-level window.
+  High-volume layers such as Mesh, APRS, and future MQTT sources must use
+  stable typed layer updates and bounded projection work.
 - Source health is not map data. Health-only changes, including MeshCore BLE
   reconnecting, away, or disabled states, may update chips and status labels but
-  must not force map projection or WebEngine redraws.
+  must not force map projection or a native scene redraw.
 - Local/device sources must publish a `SourceConnectionSnapshot` lifecycle
   (`connected`, `reconnecting`, `away`, `disabled`, or `config_error`) instead
   of making each view infer meaning from a boolean connection flag. Retained
@@ -340,15 +366,20 @@ Implementation gates:
 
 Current remediation gates from the responsiveness audit:
 
-1. Map rendering keeps a stable shell. Routine marker, path, city, mesh,
-   traffic, and topic changes update the existing WebEngine page through a
-   payload push. Full HTML/page reload is reserved for base-map or structural
-   configuration changes. Asynchronous JavaScript payloads carry a generation
-   guard so stale map updates cannot overwrite a newer view. macOS and Windows
-   start the page-only WebEngine prewarm before first Map navigation; warm Map
-   re-entry never manufactures a refresh. Routine busy feedback stays in a
-   font-derived fixed-height strip so lifecycle status cannot shift the native
-   map viewport.
+1. Map rendering keeps a stable native shell. Map navigation opens one
+   reusable, nonmodal top-level Map window and leaves the main workspace
+   geometry, window state, screen, and active page unchanged. The Map content
+   stack and its one `QQuickWidget`/Qt Location surface are constructed once in
+   their final hidden parent before the first top-level show. No WebEngine,
+   Leaflet, browser warm-up, JavaScript transport, or post-show native-child
+   attachment is permitted. Closing Map hides it, reopening raises the same
+   window, and final application shutdown destroys it exactly once. Routine
+   marker, path, polygon, grid, city, traffic, propagation, weather, and
+   Regional Intel changes update typed properties on the existing QML scene.
+   Worker-built snapshots are generation-fenced and capped before GUI apply so
+   stale or oversized work cannot displace the current view. Warm Map re-entry
+   never manufactures a refresh. Routine busy feedback stays in a font-derived
+   fixed-height strip so lifecycle status cannot shift the native map viewport.
 2. Message Inbox and Message Compose build file, database, and mesh projections
    from immutable snapshots. Results are applied only when their request or
    generation id is current; older results are discarded without clearing the

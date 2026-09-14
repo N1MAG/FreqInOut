@@ -11,7 +11,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from types import MethodType, SimpleNamespace
-from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -42,39 +41,14 @@ def test_main_shell_and_messages_mode_use_active_page_stacks() -> None:
     assert "self.messages_mode_stack = CurrentPageStack()" in messages_source
 
 
-def test_windows_webengine_warmup_uses_the_proven_offscreen_child_view() -> None:
-    """Windows keeps the established hidden-view warmup without touching shell geometry."""
+def test_main_shell_does_not_create_a_hidden_webengine_warmup_surface() -> None:
+    """The persistent Map window is the only owner of a WebEngine surface."""
 
     source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
-    block = source[
-        source.index("    def _prewarm_webengine") : source.index("    def _prewarm_next_lazy_tab")
-    ]
 
-    assert "from PySide6.QtWebEngineWidgets import QWebEngineView" in block
-    assert "Qt.WA_DontShowOnScreen" in block
-    assert "web.resize(4, 4)" in block
-    assert "web.show()" in block
-    for mutation in ("showMaximized(", "showFullScreen(", "setWindowState(", ".move("):
-        assert mutation not in block
-
-
-def test_webengine_prewarm_defaults_on_for_windows_only() -> None:
-    host = SimpleNamespace(
-        settings={},
-        _platform_needs_webengine_prewarm=MainWindow._platform_needs_webengine_prewarm,
-        _truthy_flag=MainWindow._truthy_flag,
-    )
-
-    with patch("freqinout.gui.main_window.sys.platform", "darwin"):
-        assert MainWindow._should_prewarm_webengine_at_startup(host) is False
-    with patch("freqinout.gui.main_window.sys.platform", "win32"):
-        assert MainWindow._should_prewarm_webengine_at_startup(host) is True
-    with patch("freqinout.gui.main_window.sys.platform", "linux"):
-        assert MainWindow._should_prewarm_webengine_at_startup(host) is False
-
-    host.settings["map_webengine_startup_prewarm"] = False
-    with patch("freqinout.gui.main_window.sys.platform", "darwin"):
-        assert MainWindow._should_prewarm_webengine_at_startup(host) is False
+    assert "QWebEngineView" not in source
+    assert "_prewarm_webengine" not in source
+    assert "map_webengine_startup_prewarm" not in source
 
 
 def test_current_page_stack_ignores_hidden_compose_sized_hint() -> None:
@@ -199,9 +173,7 @@ def test_first_visible_activation_is_queued_after_lazy_page_becomes_current() ->
         _active_tab_index=None,
         _navigation_epoch=0,
         _screen_is_runtime_suppressed=lambda _label: False,
-        _pending_map_switch_index=None,
         _help_dialog_settle_until=0.0,
-        _queue_map_switch_after_webengine_warmup=lambda _index: False,
         _nav_screen_index_map={},
         _suppress_initial_nav_group_auto_expand=True,
         _expand_nav_group_for_screen=lambda _label: None,

@@ -209,7 +209,6 @@ def test_shell_defers_non_initial_workspaces_without_deferring_ops_or_settings()
         "HF Operators",
         "Local Operators",
         "Local Reports",
-        "Map",
         "Peer Schedules",
         "Help",
         "HF Schedule",
@@ -220,3 +219,7 @@ def test_shell_defers_non_initial_workspaces_without_deferring_ops_or_settings()
     ):
         assert f'("{label}", self._placeholder_widget("{label}"))' in source
         assert f'"{label}": self._create_' in source
+    assert '("Map", self._placeholder_widget("Map"))' in source
+    assert '"Map": self._create_' not in source
+    assert 'if label == "Map":' in source
+    assert "self._open_map_window()" in source

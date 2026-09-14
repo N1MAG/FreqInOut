@@ -34,3 +34,6 @@ dev = [
 
 [tool.setuptools.packages.find]
 include = ["freqinout*"]
+
+[tool.setuptools.package-data]
+freqinout = ["gui/qml/*.qml"]

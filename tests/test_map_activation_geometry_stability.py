@@ -8,7 +8,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QVBoxLayout,
@@ -76,62 +77,21 @@ class _Button:
         pass
 
 
-class _MapPage:
-    def __init__(self) -> None:
-        self.scripts: list[str] = []
+class _FakeNativeMapRenderer(QWidget):
+    """Small native surface stand-in used for ownership and geometry tests."""
 
-    def runJavaScript(self, script: str, callback) -> None:  # noqa: N802 - Qt-compatible name
-        self.scripts.append(script)
-        callback(True)
-
-
-class _FakeWebEngineView(QWidget):
-    """Small QWidget substitute that preserves WebEngine's lifecycle signals."""
-
-    loadFinished = Signal(bool)
-    titleChanged = Signal(str)
+    action_requested = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._page = _MapPage()
-        self.set_page_calls: list[object] = []
-        self.urls: list[object] = []
-        self.html: list[str] = []
+        self.projections: list[dict[str, object]] = []
+        self.visibility: list[bool] = []
 
-    def page(self):
-        return self._page
+    def apply_projection(self, payload: dict[str, object]) -> None:
+        self.projections.append(dict(payload))
 
-    def setPage(self, page) -> None:  # noqa: N802 - Qt-compatible name
-        self.set_page_calls.append(page)
-        self._page = page
-
-    def setUrl(self, url) -> None:  # noqa: N802 - Qt-compatible name
-        self.urls.append(url)
-
-    def setHtml(self, html: str) -> None:  # noqa: N802 - Qt-compatible name
-        self.html.append(html)
-
-
-def _map_load_host(stack: QStackedWidget, web: QWidget) -> SimpleNamespace:
-    return SimpleNamespace(
-        _map_page_loading=True,
-        _map_initialized=False,
-        _map_load_ok=False,
-        _map_js_ready_retry_count=0,
-        _map_stack=stack,
-        _map_loading_label=None,
-        web=web,
-        _map_visible=True,
-        _map_dirty=False,
-        _render_requested_during_load=False,
-        _render_requested_during_load_level=0,
-        _pending_map_payload=None,
-        _emit_map_event=lambda *_args, **_kwargs: None,
-        _set_map_runtime_state=lambda *_args, **_kwargs: None,
-        _map_ready_detail_text=lambda: "ready",
-        _schedule_leaflet_viewport_settle=lambda: None,
-        _maybe_start_map_ingest=lambda: False,
-    )
+    def set_map_visible(self, visible: bool) -> None:
+        self.visibility.append(bool(visible))
 
 
 def _filter_reflow_host() -> tuple[SimpleNamespace, _CountingGrid, QFrame]:
@@ -219,103 +179,49 @@ def test_map_drawer_reflow_does_not_rewrite_splitter_for_unchanged_state() -> No
     assert splitter.size_writes == [[0, 1200]]
 
 
-def test_map_load_finished_promotes_direct_webview_without_overlay_handoff() -> None:
-    """A successful direct-view load immediately owns the visible stack page."""
-    app = _app()
-    window = QMainWindow()
-    stack = QStackedWidget(window)
-    loading = QWidget(stack)
-    web = _FakeWebEngineView(stack)
-    stack.addWidget(loading)
-    stack.addWidget(web)
-    window.setCentralWidget(stack)
-    window.resize(900, 560)
-    stack.setCurrentWidget(loading)
-    window.show()
-    app.processEvents()
-
-    host = _map_load_host(stack, web)
-
-    StationsMapTab._on_map_load_finished(host, True)
-    app.processEvents()
-
-    assert host._map_load_ok is True
-    assert stack.currentWidget() is web
-    assert web.isVisible()
-
-    window.close()
-    window.deleteLater()
-    app.processEvents()
-
-
-def test_map_navigation_targets_visible_webview_directly_without_detached_page(
+def test_native_map_surface_is_constructed_once_in_the_existing_map_stack(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
-    """Cold file navigation must use the one WebEngineView owned by the stack."""
-    app = _app()
-    monkeypatch.setattr(stations_map_module, "QWebEngineView", _FakeWebEngineView)
-    window = QMainWindow()
-    stack = QStackedWidget(window)
-    loading = QWidget(stack)
+    """The Map owns one Qt Quick child rather than a browser loading handoff."""
+    _app()
+    monkeypatch.setattr(stations_map_module, "NativeMapRenderer", _FakeNativeMapRenderer)
+    stack = QStackedWidget()
+    loading = QLabel("Preparing native map", stack)
     stack.addWidget(loading)
-    window.setCentralWidget(stack)
-    window.resize(900, 560)
-    window.show()
-    app.processEvents()
-
     host = SimpleNamespace(
         _map_stack=stack,
-        web=None,
-        _map_loading_label=None,
-        _map_runtime_detail="Loading map...",
-        _map_page_loading=False,
-        _map_load_ok=False,
-        _set_map_runtime_state=lambda *_args, **_kwargs: None,
-        _emit_map_event=lambda *_args, **_kwargs: None,
-        _enter_map_degraded=lambda *_args, **_kwargs: None,
-        _on_map_load_finished=lambda _ok: None,
-        _on_map_page_title_changed=lambda _title: None,
+        _map_loading_label=loading,
+        _native_map_renderer=None,
+        _map_visible=True,
+        _app_active=True,
+        _is_shutting_down=False,
+        _on_native_map_action=lambda _payload: None,
     )
 
-    assert StationsMapTab._ensure_web_view(host) is True
-    web = host.web
-    assert web is not None
-    assert web.parentWidget() is stack
-    assert web.page() is not None
-    assert web.set_page_calls == []
+    first = StationsMapTab._ensure_native_map_renderer(host)
+    second = StationsMapTab._ensure_native_map_renderer(host)
 
-    map_file = tmp_path / "map.html"
-    map_file.write_text("<html></html>", encoding="utf-8")
-    assert StationsMapTab._load_web_map_file(host, map_file) is True
-
-    assert host.web is web
-    assert len(web.urls) == 1
-    assert web.html == []
-    assert web.set_page_calls == []
-
-    window.close()
-    window.deleteLater()
-    app.processEvents()
+    assert first is second is host._native_map_renderer
+    assert first.parentWidget() is stack
+    assert stack.currentWidget() is first
+    assert first.sizePolicy().horizontalPolicy() is QSizePolicy.Ignored
+    assert first.sizePolicy().verticalPolicy() is QSizePolicy.Ignored
+    stack.deleteLater()
+    _app().processEvents()
 
 
-def test_map_lifecycle_source_has_direct_navigation_and_no_detached_page_path() -> None:
+def test_map_lifecycle_source_has_one_native_surface_and_no_browser_map_path() -> None:
     source = (
         Path(__file__).resolve().parents[1] / "freqinout/gui/stations_map_tab.py"
     ).read_text(encoding="utf-8")
 
-    assert "self.web.setUrl(url)" in source
-    assert "self.web.setHtml(html)" in source
-    assert "_map_loading_overlay" not in source
-    assert "_map_detached_page" not in source
-    assert "_map_navigation_target" not in source
-
-    direct_load_source = source.split("    def _load_web_map_file", 1)[1].split(
-        "    def _on_map_page_title_changed", 1
-    )[0]
-    assert "setPage(" not in direct_load_source
-    assert "QWebEnginePage" not in direct_load_source
-    ensure_source = direct_load_source.split("    def _ensure_web_view", 1)[1]
+    assert "from freqinout.gui.native_map_renderer import NativeMapRenderer" in source
+    assert "QWebEngine" not in source
+    assert "runJavaScript" not in source
+    assert "_ensure_webengine_imported" not in source
+    assert "def _ensure_native_map_renderer" in source
+    ensure_start = source.index("def _ensure_native_map_renderer")
+    ensure_source = source[ensure_start : source.index("def _on_native_map_action", ensure_start)]
     for mutation in (
         "setGeometry(",
         ".resize(",
@@ -342,61 +248,23 @@ def _window_state_snapshot(window: QMainWindow) -> tuple:
     )
 
 
-def test_warm_map_reload_reuses_existing_visible_web_surface() -> None:
-    """A warm reload must reuse the current view without a blanking handoff."""
-    app = _app()
-    window = QMainWindow()
-    stack = QStackedWidget(window)
-    loading = QWidget(stack)
-    web = _FakeWebEngineView(stack)
-    stack.addWidget(loading)
-    stack.addWidget(web)
-    window.setCentralWidget(stack)
-    window.resize(900, 560)
-    stack.setCurrentWidget(web)
-    window.show()
-    app.processEvents()
-
-    events: list[str] = []
+def test_warm_native_map_update_reuses_existing_visible_surface() -> None:
+    """Projection updates retain one visible native surface without a blank handoff."""
+    renderer = _FakeNativeMapRenderer()
     host = SimpleNamespace(
-        _map_stack=stack,
-        web=web,
-        _map_page_loading=True,
-        _map_initialized=False,
-        _map_load_ok=False,
-        _map_js_ready_retry_count=0,
-        _map_runtime_detail="Loading map...",
+        _native_map_renderer=renderer,
         _map_visible=True,
         _app_active=True,
         _is_shutting_down=False,
         _pending_map_payload=None,
-        _map_dirty=False,
-        _render_requested_during_load=False,
-        _render_requested_during_load_level=0,
-        _emit_map_event=lambda event, **_kwargs: events.append(str(event)),
-        _set_map_runtime_state=lambda *_args, **_kwargs: None,
-        _enter_map_degraded=lambda *_args, **_kwargs: None,
-        _map_ready_detail_text=lambda: "ready",
-        _schedule_leaflet_viewport_settle=lambda: None,
-        _maybe_start_map_ingest=lambda: False,
+        _last_map_payload_sig=None,
     )
 
-    before_view = host.web
-    assert web.isVisible()
-    StationsMapTab._load_map_html_into_webview(host, "<html>reload</html>")
-    StationsMapTab._on_map_load_finished(host, True)
-    app.processEvents()
+    StationsMapTab._apply_native_map_projection(host, {"markers": [], "links": []})
+    StationsMapTab._apply_native_map_projection(host, {"markers": [{"id": "one", "lat": 39.7, "lon": -104.9}], "links": []})
 
-    assert host.web is before_view
-    assert stack.currentWidget() is web
-    assert web.isVisible()
-    assert web.html == ["<html>reload</html>"]
-    assert host._map_load_ok is True
-    assert events == ["page_load_started", "page_load_finished"]
-
-    window.close()
-    window.deleteLater()
-    app.processEvents()
+    assert host._native_map_renderer is renderer
+    assert len(renderer.projections) == 2
 
 
 @pytest.mark.parametrize(
@@ -409,7 +277,7 @@ def test_first_map_native_surface_preserves_window_geometry_state_and_screen(
 ) -> None:
     """Creating the lazy native child must not move or normalize the shell."""
     app = _app()
-    monkeypatch.setattr(stations_map_module, "QWebEngineView", _FakeWebEngineView)
+    monkeypatch.setattr(stations_map_module, "NativeMapRenderer", _FakeNativeMapRenderer)
     window = QMainWindow()
     stack = QStackedWidget(window)
     loading = QWidget(stack)
@@ -418,10 +286,12 @@ def test_first_map_native_surface_preserves_window_geometry_state_and_screen(
     window.resize(900, 560)
     host = SimpleNamespace(
         _map_stack=stack,
-        web=None,
         _map_loading_label=None,
-        _on_map_load_finished=lambda _ok: None,
-        _on_map_page_title_changed=lambda _title: None,
+        _native_map_renderer=None,
+        _map_visible=True,
+        _app_active=True,
+        _is_shutting_down=False,
+        _on_native_map_action=lambda _payload: None,
     )
 
     window.setGeometry(37, 59, 900, 560)
@@ -440,17 +310,16 @@ def test_first_map_native_surface_preserves_window_geometry_state_and_screen(
     before_screen = window.screen()
     assert before_screen is not None
 
-    assert StationsMapTab._ensure_web_view(host) is True
+    assert StationsMapTab._ensure_native_map_renderer(host) is host._native_map_renderer
     app.processEvents()
 
     assert window.geometry() == before_geometry
     assert window.windowState() == before_state
     assert window.screen() is before_screen
-    assert host.web is not None
-    assert host.web.parentWidget() is host._map_stack
-    assert host.web.geometry().width() > 1
-    assert host.web.geometry().height() > 1
-    assert host.web.set_page_calls == []
+    assert host._native_map_renderer is not None
+    assert host._native_map_renderer.parentWidget() is host._map_stack
+    assert host._native_map_renderer.geometry().width() > 1
+    assert host._native_map_renderer.geometry().height() > 1
 
     window.close()
     window.deleteLater()

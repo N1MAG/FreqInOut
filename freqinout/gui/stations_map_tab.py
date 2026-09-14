@@ -3,10 +3,7 @@ from __future__ import annotations
 import datetime
 import html
 import json
-import shutil
 import sqlite3
-import urllib.parse
-import urllib.request
 import re
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -17,9 +14,10 @@ import time
 import logging
 import sys
 import queue
+import weakref
 from collections import deque
 
-from PySide6.QtCore import QObject, QUrl, Qt, QTimer, QCoreApplication, QSize, Signal
+from PySide6.QtCore import QObject, QPoint, Qt, QTimer, QCoreApplication, QMetaObject, QSize, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -51,15 +49,8 @@ from PySide6.QtWidgets import (
 )
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.view_contracts import compose_intent_from_mapping, map_context_from_mapping
-
-_WEBENGINE_IMPORT_ERROR = None
-try:
-    from PySide6.QtWebEngineWidgets import QWebEngineView
-    from PySide6.QtWebEngineCore import QWebEnginePage
-except Exception as exc:  # pragma: no cover - optional dependency
-    QWebEngineView = None
-    QWebEnginePage = None
-    _WEBENGINE_IMPORT_ERROR = exc
+from freqinout.gui.native_map_renderer import NativeMapRenderer
+from freqinout.gui.native_map_projection import build_native_overlay_projection
 
 JS8NET_PATH = Path(__file__).resolve().parents[2] / "third_party" / "js8net" / "js8net-main"
 if JS8NET_PATH.exists():
@@ -109,30 +100,12 @@ from freqinout.gui.plan_context_label import PlanContextLabel
 from freqinout.gui.theme import (
     contrast_text_for_background,
     resolve_theme,
-    resolve_ui_text_scale,
     BAND_COLORS_DARK,
     BAND_COLORS_LIGHT,
     button_style,
     style_splitter_handles,
 )
 from freqinout.utils.timezones import get_timezone
-
-
-def _ensure_webengine_imported() -> bool:
-    global QWebEngineView, QWebEnginePage, _WEBENGINE_IMPORT_ERROR
-    if QWebEngineView is not None:
-        return True
-    try:
-        from PySide6.QtWebEngineWidgets import QWebEngineView as _QWebEngineView
-        from PySide6.QtWebEngineCore import QWebEnginePage as _QWebEnginePage
-    except Exception as exc:  # pragma: no cover - optional dependency
-        _WEBENGINE_IMPORT_ERROR = exc
-        log.warning("Qt WebEngine import failed: %s", exc, exc_info=True)
-        return False
-    QWebEngineView = _QWebEngineView
-    QWebEnginePage = _QWebEnginePage
-    _WEBENGINE_IMPORT_ERROR = None
-    return True
 
 
 USA_STATES = [
@@ -708,23 +681,21 @@ def maidenhead_grid4_bounds(grid: str) -> Optional[tuple[float, float, float, fl
 class StationsMapTab(QWidget):
     """
     Displays JS8Call-heard stations on an OSM-based map with a Maidenhead overlay.
-    USA/Canada stations are shown; map tiles are streamed from OSM (requires network).
+    Stations and operational overlays render on FIO's provider-free offline map.
     """
 
-    def __init__(self, parent=None, *, plan_context_service: Optional[PlanContextService] = None):
+    def __init__(
+        self,
+        parent=None,
+        *,
+        plan_context_service: Optional[PlanContextService] = None,
+        application_host: object | None = None,
+    ):
         super().__init__(parent)
         self.plan_context_service = plan_context_service
+        self._application_host_ref = weakref.ref(application_host) if application_host is not None else None
         self.show_callsigns = False
         self.stations: List[StationPoint] = []
-        self._map_file: Optional[Path] = None
-        self._map_cache_dir = get_config_dir() / "cache"
-        self._managed_map_file = self._map_cache_dir / "stations_map_view.html"
-        self._asset_dir = Path(__file__).resolve().parents[2] / "config" / "leaflet"
-        self._geojson_path = self._asset_dir / "us_states.geojson"
-        self._geojson_canada = self._asset_dir / "canada_provinces.geojson"
-        self._geojson_mexico = self._asset_dir / "mexico_states.geojson"
-        self._cities_geojson = self._asset_dir / "cities_na_1k.geojson"
-
         self.show_callsigns = False
         self.show_cities = False
         self.show_states = False
@@ -792,11 +763,19 @@ class StationsMapTab(QWidget):
         self._last_map_auto_fit_sig: Optional[tuple] = None
         self._mesh_nodes_auto_fit_pending: bool = False
 
-        # Settings handle so SettingsTab import works; JS8 indexer may be added later
-        try:
-            self.settings = SettingsManager()
-        except Exception:
-            self.settings = None
+        # Share the application owner's settings snapshot when this workspace
+        # is hosted by MainWindow.  A second SettingsManager caches its own
+        # copy and can otherwise re-apply a stale palette immediately after a
+        # live Light/Dark switch.  Standalone tests/tools retain the local
+        # fallback.
+        shared_settings = getattr(application_host, "settings", None)
+        if shared_settings is not None:
+            self.settings = shared_settings
+        else:
+            try:
+                self.settings = SettingsManager()
+            except Exception:
+                self.settings = None
 
         self._last_js8_load_ts: float = 0.0
         self._last_exit_ts: float = 0.0
@@ -822,7 +801,7 @@ class StationsMapTab(QWidget):
         self._background_ingest_controller = None
         self._js8_net_started = False
         self._map_initialized = False
-        self._pending_map_payload: Optional[Dict[str, List[Dict]]] = None
+        self._pending_map_payload: Optional[Dict[str, object]] = None
         self._last_map_payload_sig: Optional[str] = None
         self._map_payload_generation: int = 0
         self._map_payload_executor: ThreadPoolExecutor | None = None
@@ -872,6 +851,7 @@ class StationsMapTab(QWidget):
         self.prop_target_value_combo: Optional[QComboBox] = None
         self._prop_target_syncing: bool = False
         self._map_stack: Optional[QStackedWidget] = None
+        self._native_map_renderer: Optional[NativeMapRenderer] = None
         self._map_loading_label: Optional[QLabel] = None
         self._map_canvas_splitter: Optional[QSplitter] = None
         self._map_selected_panel: Optional[QFrame] = None
@@ -891,6 +871,7 @@ class StationsMapTab(QWidget):
         self._map_selected_sop_btn: Optional[QPushButton] = None
         self._map_selected_payload: Dict[str, object] = {}
         self._regional_summary_collapsed: bool = True
+        self._show_fio_button: Optional[QPushButton] = None
         self._controls_button: Optional[QPushButton] = None
         self._controls_drawer_open: bool = False
         self._controls_drawer_threshold: int = 1280
@@ -1281,6 +1262,52 @@ class StationsMapTab(QWidget):
         self._map_last_error = str(error or "").strip()
         self._update_map_support_card()
 
+    def _application_window(self) -> object:
+        ref = getattr(self, "_application_host_ref", None)
+        if callable(ref):
+            try:
+                host = ref()
+            except Exception:
+                host = None
+            if host is not None:
+                return host
+        return self.window()
+
+    def _bring_application_window_forward(self) -> None:
+        """Present the existing main FIO window without touching Map geometry."""
+        host_ref = getattr(self, "_application_host_ref", None)
+        if not callable(host_ref):
+            return
+        try:
+            main_window = host_ref()
+        except Exception:
+            main_window = None
+        if main_window is None:
+            return
+        presenter = getattr(main_window, "present_main_window", None)
+        if callable(presenter):
+            # Never change top-level focus re-entrantly from a QPushButton
+            # signal. On macOS/PySide that can synchronously enter application
+            # lifecycle callbacks while Qt is still dispatching the click and
+            # deadlock in a nested signal connection. A queued meta-call uses
+            # the next event-loop turn without allocating or connecting a
+            # transient QTimer.
+            if isinstance(main_window, QObject):
+                try:
+                    if QMetaObject.invokeMethod(main_window, "present_main_window", Qt.QueuedConnection):
+                        return
+                except Exception:
+                    log.debug("StationsMap: queued FIO presentation failed", exc_info=True)
+            presenter()
+            return
+        # Compatibility for lightweight hosts and tests. Real MainWindow owns
+        # the stronger platform-aware activation contract above.
+        try:
+            main_window.raise_()
+            main_window.activateWindow()
+        except Exception as exc:
+            log.debug("StationsMap: failed bringing FIO workspace to front: %s", exc)
+
     def _request_map_refresh(self, *, level: str = "medium", reason: str = "", preserve_view: object = True) -> None:
         if getattr(self, "_is_shutting_down", False):
             return
@@ -1339,7 +1366,7 @@ class StationsMapTab(QWidget):
                 pass
 
     def _flush_requested_map_refresh(self) -> None:
-        if self._is_shutting_down:
+        if getattr(self, "_is_shutting_down", False):
             return
         rank = max(int(self._pending_refresh_level or 0), 2 if self._map_dirty else 0)
         reason = self._pending_refresh_reason or "coalesced"
@@ -1439,8 +1466,8 @@ class StationsMapTab(QWidget):
             f"Visible: {'Yes' if self._map_visible else 'No'}",
             f"Markers: {int(self._map_marker_count)}",
             f"Links: {int(self._map_link_count)}",
-            f"Page Loading: {'Yes' if self._map_page_loading else 'No'}",
-            f"WebEngine Ready: {'Yes' if self._map_initialized else 'No'}",
+            f"Renderer Loading: {'Yes' if self._map_page_loading else 'No'}",
+            f"Native Renderer Ready: {'Yes' if self._map_initialized else 'No'}",
         ]
         sections = [
             (
@@ -1471,9 +1498,8 @@ class StationsMapTab(QWidget):
         if card is None:
             return
         ready = self._map_runtime_state == "ready"
-        # Once a usable map is on screen, background refresh feedback must stay
-        # in the compact strip. Expanding and collapsing this card shifts the
-        # native WebEngine viewport and presents as a screen swipe.
+        # Once a usable map is on screen, background refresh feedback stays in
+        # the compact strip so the native viewport never shifts during updates.
         routine_busy = bool(
             self._map_runtime_state in {"loading", "warming"}
             and getattr(self, "_map_initialized", False)
@@ -1589,6 +1615,9 @@ class StationsMapTab(QWidget):
 
     def set_map_visible(self, is_visible: bool) -> None:
         is_visible = bool(is_visible)
+        renderer = getattr(self, "_native_map_renderer", None)
+        if renderer is not None:
+            renderer.set_map_visible(is_visible and self._app_active)
         if self._map_visible == is_visible:
             return
         self._map_visible = is_visible
@@ -1606,16 +1635,20 @@ class StationsMapTab(QWidget):
             self._maybe_start_map_ingest()
         elif self._map_visible and self._js8_timer is not None and self._ingest_started and not self._js8_timer.isActive():
             self._js8_timer.start()
-        if self._map_visible:
-            self._set_map_runtime_state("warming", "Preparing the map view and refreshing station data.")
-            self._emit_map_event("activation_started")
-            self._map_dirty = True
-            QTimer.singleShot(0, self._on_map_visible_deferred)
+        if self._map_initialized and self._map_load_ok and not self._map_dirty and not self._pending_refresh_level:
+            self._set_map_runtime_state("ready", self._map_ready_detail_text())
+            self._emit_map_event("activation_ready")
+            return
+        self._set_map_runtime_state("warming", "Preparing the map view and refreshing station data.")
+        self._emit_map_event("activation_started")
+        QTimer.singleShot(0, self._on_map_visible_deferred)
 
     def set_app_active(self, active: bool) -> None:
         self._app_active = bool(active)
+        renderer = getattr(self, "_native_map_renderer", None)
+        if renderer is not None:
+            renderer.set_map_visible(self._app_active and self._map_visible)
         if not self._app_active:
-            self._map_dirty = True
             if self._js8_timer is not None:
                 self._js8_timer.stop()
             self._emit_map_event("ui_paused_inactive")
@@ -1623,6 +1656,10 @@ class StationsMapTab(QWidget):
         if self._map_visible and not self._is_shutting_down:
             if self._js8_timer is not None and self._ingest_started and not self._js8_timer.isActive():
                 self._js8_timer.start()
+            if self._map_initialized and self._map_load_ok and not self._map_dirty and not self._pending_refresh_level:
+                self._set_map_runtime_state("ready", self._map_ready_detail_text())
+                self._emit_map_event("ui_resumed_ready")
+                return
             self._set_map_runtime_state("warming", "Resuming map view.")
             self._emit_map_event("ui_resumed")
             QTimer.singleShot(0, self._on_map_visible_deferred)
@@ -1763,8 +1800,7 @@ class StationsMapTab(QWidget):
             return 0
 
     def _request_background_ingest(self, *kinds: str) -> bool:
-        parent = self.parent()
-        controller = getattr(parent, "background_ingest", None)
+        controller = getattr(self._application_window(), "background_ingest", None)
         if controller is None:
             return False
         try:
@@ -1791,7 +1827,7 @@ class StationsMapTab(QWidget):
             log.debug("StationsMap: background ingest signal connect failed: %s", exc)
 
     def _on_background_ingest_finished(self, job_name: str) -> None:
-        if self._is_shutting_down:
+        if getattr(self, "_is_shutting_down", False):
             return
         if str(job_name or "").strip().lower() in {"js8_links", "varac"}:
             self._schedule_render()
@@ -1800,7 +1836,7 @@ class StationsMapTab(QWidget):
         """
         Background ingest and refresh map. Used on timer and manual refresh.
         """
-        if self._is_shutting_down:
+        if getattr(self, "_is_shutting_down", False):
             return
         if not self._app_active:
             self._map_dirty = True
@@ -2038,8 +2074,28 @@ class StationsMapTab(QWidget):
             custom_row.addWidget(custom_btn)
             layout.addLayout(custom_row)
         self._map_since_popover = popover
-        pos = button.mapToGlobal(button.rect().bottomLeft())
-        popover.move(pos)
+        # Qt.Popup placement varies by window manager. Size the complete
+        # chooser first, then constrain it to the trigger's active screen.
+        popover.ensurePolished()
+        popover.adjustSize()
+        popup_size = popover.size().expandedTo(popover.sizeHint())
+        screen = button.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            below = button.mapToGlobal(button.rect().bottomLeft())
+            above = button.mapToGlobal(button.rect().topLeft()) - QPoint(0, popup_size.height())
+            max_x = available.right() - popup_size.width() + 1
+            max_y = available.bottom() - popup_size.height() + 1
+            x = min(max(below.x(), available.left()), max(available.left(), max_x))
+            preferred_y = (
+                below.y()
+                if below.y() + popup_size.height() <= available.bottom() + 1
+                else above.y()
+            )
+            y = min(max(preferred_y, available.top()), max(available.top(), max_y))
+            popover.move(QPoint(x, y))
+        else:
+            popover.move(button.mapToGlobal(button.rect().bottomLeft()))
         popover.show()
 
     def _set_map_recency_from_label(self, label: str) -> None:
@@ -2090,55 +2146,13 @@ class StationsMapTab(QWidget):
                 self._js8_rx_registered = False
         except Exception:
             pass
-        try:
-            if self.web is not None:
-                try:
-                    self.web.stop()
-                except Exception:
-                    pass
-                try:
-                    self.web.loadFinished.disconnect(self._on_map_load_finished)
-                except Exception:
-                    pass
-                try:
-                    self.web.hide()
-                except Exception:
-                    pass
-                try:
-                    self.web.setParent(None)
-                except Exception:
-                    pass
-                try:
-                    self.web.setUrl(QUrl("about:blank"))
-                except Exception:
-                    pass
-                try:
-                    page = self.web.page()
-                    if page is not None:
-                        try:
-                            if QWebEnginePage is not None:
-                                self.web.setPage(QWebEnginePage(self.web))
-                        except Exception:
-                            pass
-                        try:
-                            page.setParent(None)
-                        except Exception:
-                            pass
-                        page.deleteLater()
-                except Exception:
-                    pass
-                try:
-                    self.web.deleteLater()
-                except Exception:
-                    pass
-                self.web = None
-        except Exception:
-            pass
-        try:
-            if self._managed_map_file.exists():
-                self._managed_map_file.unlink()
-        except Exception:
-            pass
+        renderer = getattr(self, "_native_map_renderer", None)
+        self._native_map_renderer = None
+        if renderer is not None:
+            try:
+                renderer.shutdown()
+            except Exception:
+                pass
         try:
             executor = getattr(self, "_map_payload_executor", None)
             self._map_payload_executor = None
@@ -2186,12 +2200,24 @@ class StationsMapTab(QWidget):
                     self.settings.reload()
             except Exception:
                 pass
+        override = getattr(self, "_active_theme_override", None)
+        if isinstance(override, Mapping) and override:
+            return dict(override)
         return resolve_theme(self.settings)
 
-    def apply_theme(self) -> None:
+    def apply_theme(self, theme: Optional[Mapping[str, str]] = None) -> None:
+        if isinstance(theme, Mapping) and theme:
+            self._active_theme_override = dict(theme)
+        else:
+            self._active_theme_override = resolve_theme(self.settings)
         theme = self._theme_snapshot()
+        renderer = getattr(self, "_native_map_renderer", None)
+        if renderer is not None:
+            renderer.apply_theme(theme)
         if self._controls_button is not None:
             self._controls_button.setStyleSheet(button_style("muted", theme))
+        if self._show_fio_button is not None:
+            self._show_fio_button.setStyleSheet(button_style("primary", theme))
         if getattr(self, "_help_button", None) is not None:
             self._help_button.setStyleSheet(button_style("secondary", theme))
         if getattr(self, "_paths_help_button", None) is not None:
@@ -2224,6 +2250,34 @@ class StationsMapTab(QWidget):
             # Keep theme updates resilient if propagation data is unavailable.
             self._update_prop_badge("National", "", 0.0, theme=theme)
         self._update_map_support_card()
+        browser_style = (
+            "QTextBrowser {"
+            f" background-color: {theme['surface']};"
+            f" color: {theme['text']};"
+            f" border: 1px solid {theme['border']};"
+            " border-radius: 4px;"
+            "}"
+        )
+        for browser in (
+            getattr(self, "_map_selected_body", None),
+            getattr(self, "_map_selected_status_body", None),
+            getattr(self, "_map_selected_paths_body", None),
+            getattr(self, "_map_selected_messages_body", None),
+        ):
+            if browser is not None:
+                try:
+                    browser.setStyleSheet(browser_style)
+                except Exception:
+                    pass
+        selected_payload = getattr(self, "_map_selected_payload", None)
+        if isinstance(selected_payload, Mapping) and selected_payload:
+            # The documents embed shared-theme colors.  Rebuild all four tabs
+            # from the retained value snapshot so foreground and backing
+            # QTextBrowser palette always change as one visual transaction.
+            try:
+                self._show_map_selected_detail(dict(selected_payload))
+            except Exception:
+                log.debug("StationsMap: failed refreshing selected detail theme", exc_info=True)
 
     def _open_context_help(self, context_key: str) -> None:
         host = resolve_help_host(self)
@@ -2255,6 +2309,12 @@ class StationsMapTab(QWidget):
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
         top_row.setSpacing(6)
+        self._show_fio_button = QPushButton("Show FIO")
+        self._show_fio_button.setToolTip("Bring the main FIO window to the front without closing Map.")
+        self._show_fio_button.setAccessibleName("Show main FIO window")
+        self._show_fio_button.setVisible(True)
+        self._show_fio_button.clicked.connect(self._bring_application_window_forward)
+        top_row.addWidget(self._show_fio_button, alignment=Qt.AlignLeft)
         self._controls_button = QPushButton("Advanced Map Tools")
         self._controls_button.setToolTip("Show optional layer, path, propagation, city, and planning-pin controls.")
         self._controls_button.setVisible(True)
@@ -2307,7 +2367,7 @@ class StationsMapTab(QWidget):
         layout.addWidget(self._map_support_card)
 
         splitter = QSplitter(Qt.Horizontal, self)
-        style_splitter_handles(splitter, resolve_theme(self.settings), width=14)
+        style_splitter_handles(splitter, self._theme_snapshot(), width=14)
         self._main_splitter = splitter
         layout.addWidget(splitter, stretch=1)
 
@@ -2492,7 +2552,7 @@ class StationsMapTab(QWidget):
 
         self.prop_badge = QLabel("Best Band: --")
         self.prop_badge.setWordWrap(True)
-        theme = resolve_theme(self.settings)
+        theme = self._theme_snapshot()
         self.prop_badge.setStyleSheet(
             f"font-weight: bold; color: {theme.get('info', theme.get('accent', '#1E88E5'))};"
         )
@@ -2710,6 +2770,7 @@ class StationsMapTab(QWidget):
             maximum_width: int = 0,
         ) -> QWidget:
             field = QWidget(filter_bar)
+            field.setProperty("mapFilterRole", label_text)
             field_layout = QHBoxLayout(field)
             field_layout.setContentsMargins(0, 0, 0, 0)
             field_layout.setSpacing(6)
@@ -2798,12 +2859,15 @@ class StationsMapTab(QWidget):
         filter_grid.setContentsMargins(0, 0, 0, 0)
         filter_grid.setHorizontalSpacing(10)
         filter_grid.setVerticalSpacing(6)
+        # Keep the four principal questions in reading order. Mode-specific
+        # controls follow them and are omitted entirely by the responsive
+        # reflow while hidden, so they cannot reserve invisible grid cells.
         self._map_filter_fields = (
             filter_field("View", self._map_mode_combo, 210, 280),
-            self._map_traffic_subtype_field,
+            filter_field("Topic", self._map_topic_filter_combo, 185, 260),
             filter_field("Group", self.group_filter_combo, 170, 230),
             filter_field("Age", self._map_since_button, 118, 150),
-            filter_field("Topic", self._map_topic_filter_combo, 185, 260),
+            self._map_traffic_subtype_field,
             self._map_intel_sensitivity_field,
             self._map_path_scope_field,
         )
@@ -2812,35 +2876,16 @@ class StationsMapTab(QWidget):
         map_layout.addWidget(filter_bar)
 
         self._map_canvas_splitter = QSplitter(Qt.Horizontal, map_container)
-        style_splitter_handles(self._map_canvas_splitter, resolve_theme(self.settings), width=12)
+        style_splitter_handles(self._map_canvas_splitter, self._theme_snapshot(), width=12)
         map_layout.addWidget(self._map_canvas_splitter, stretch=1)
 
-        if _ensure_webengine_imported():
-            self._map_stack = QStackedWidget(self._map_canvas_splitter)
-            # The browser's dynamic content hint must never redistribute the
-            # surrounding Map workspace or the top-level window. The splitter
-            # owns this viewport's size.
-            self._map_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
-            self._map_stack.setMinimumSize(0, 0)
-            loading_widget = QWidget(self._map_stack)
-            loading_layout = QVBoxLayout(loading_widget)
-            loading_layout.setContentsMargins(0, 0, 0, 0)
-            loading_layout.addStretch()
-            self._map_loading_label = QLabel("Loading map...")
-            self._map_loading_label.setAlignment(Qt.AlignCenter)
-            loading_layout.addWidget(self._map_loading_label)
-            loading_layout.addStretch()
-            self._map_stack.addWidget(loading_widget)
-            # Defer WebEngine view construction until first Map activation so
-            # Windows startup does not pay the visible helper-window cost.
-            self.web = None
-            self._map_stack.setCurrentIndex(0)
-            self._map_canvas_splitter.addWidget(self._map_stack)
-        else:
-            self.web = None
-            self._map_stack = None
-            self._map_loading_label = None
-            self._map_canvas_splitter.addWidget(QLabel("Qt WebEngine is not available. Map preview disabled."))
+        # The production Map renderer is an ordinary Qt Quick widget backed by
+        # Qt Location. It lives in this final splitter parent for its complete
+        # lifetime and never starts Chromium or attaches a browser surface.
+        self._map_stack = None
+        self._map_loading_label = None
+        self._native_map_renderer = None
+        self._ensure_native_map_renderer()
 
         self._build_map_selected_detail_panel(self._map_canvas_splitter)
         self._map_canvas_splitter.setStretchFactor(0, 1)
@@ -3878,7 +3923,7 @@ class StationsMapTab(QWidget):
         return values[0] if values else ""
 
     def _map_detail_shell_html(self, heading: str, rows: List[tuple[str, object]], *, note: str = "") -> str:
-        theme = resolve_theme(self.settings)
+        theme = self._theme_snapshot()
         detail_text = theme["text"]
         detail_muted = theme["text_muted"]
         detail_info = theme["info"]
@@ -4214,7 +4259,7 @@ class StationsMapTab(QWidget):
             multiline=True,
         )
 
-        theme = resolve_theme(self.settings)
+        theme = self._theme_snapshot()
         detail_text = theme["text"]
         detail_muted = theme["text_muted"]
         detail_info = theme["info"]
@@ -4436,18 +4481,11 @@ class StationsMapTab(QWidget):
     def _center_map_selected_detail(self) -> None:
         payload = dict(getattr(self, "_map_selected_payload", {}) or {})
         lat, lon = self._map_selected_latlon(payload)
-        if (lat == 0.0 and lon == 0.0) or getattr(self, "web", None) is None:
+        renderer = getattr(self, "_native_map_renderer", None)
+        if (lat == 0.0 and lon == 0.0) or renderer is None:
             return
         try:
-            js = (
-                "if (window._leafletMap) { window._leafletMap.invalidateSize(true); }"
-                "if (window.centerMapOn) {"
-                f"window.centerMapOn({lat:.6f}, {lon:.6f}, 6);"
-                "} else if (window._leafletMap) {"
-                f"window._leafletMap.setView([{lat:.6f}, {lon:.6f}], Math.max(window._leafletMap.getZoom(), 6));"
-                "}"
-            )
-            self.web.page().runJavaScript(js)
+            renderer.center_on(lat, lon, zoom=6)
         except Exception:
             pass
 
@@ -5082,7 +5120,7 @@ class StationsMapTab(QWidget):
         callsign = self._map_selected_action_callsign()
         if not callsign or self._map_selected_station_is_self(callsign):
             return
-        main_window = self.window()
+        main_window = self._application_window()
         if main_window is None or not hasattr(main_window, "open_messages_section"):
             return
         try:
@@ -5090,6 +5128,7 @@ class StationsMapTab(QWidget):
         except Exception as exc:
             log.debug("StationsMap: failed opening Compose from selected station: %s", exc)
             return
+        self._bring_application_window_forward()
 
         def _prefill_spotter_target() -> None:
             tab = getattr(main_window, "message_viewer_tab", None)
@@ -5405,7 +5444,7 @@ class StationsMapTab(QWidget):
 
     def _open_map_selected_messages(self) -> None:
         payload = dict(getattr(self, "_map_selected_payload", {}) or {})
-        main_window = self.window()
+        main_window = self._application_window()
         if main_window is None:
             return
         context = self._map_selected_message_context(payload)
@@ -5430,12 +5469,15 @@ class StationsMapTab(QWidget):
                     grid_filter=str(context.get("grid_filter") or ""),
                     fema_region_filter=str(context.get("fema_region_filter") or ""),
                 )
+            else:
+                return
+            self._bring_application_window_forward()
         except Exception as exc:
             log.debug("StationsMap: failed opening Messages from selection: %s", exc)
 
     def _open_map_selected_sop(self) -> None:
         payload = dict(getattr(self, "_map_selected_payload", {}) or {})
-        main_window = self.window()
+        main_window = self._application_window()
         if main_window is None:
             return
         try:
@@ -5589,11 +5631,33 @@ class StationsMapTab(QWidget):
         """
         grid = getattr(self, "_map_filter_grid", None)
         fields = tuple(getattr(self, "_map_filter_fields", ()) or ())
+        role_order = {
+            "view": 0,
+            "topic": 1,
+            "group": 2,
+            "age": 3,
+            "type": 4,
+            "sensitivity": 5,
+            "paths": 6,
+        }
+
+        def field_order(item: tuple[int, QWidget]) -> tuple[int, int]:
+            index, field = item
+            role = str(field.property("mapFilterRole") or field.objectName() or "").strip().lower()
+            return role_order.get(role, len(role_order) + index), index
+
+        visible_fields = tuple(
+            field
+            for _index, field in sorted(
+                ((index, field) for index, field in enumerate(fields) if not field.isHidden()),
+                key=field_order,
+            )
+        )
         search = getattr(self, "_map_search_field", None)
         clear = getattr(self, "_map_clear_filters_button", None)
         clear_layers = getattr(self, "_map_clear_layers_button", None)
         reachable = getattr(self, "_now_reachable_label", None)
-        if grid is None or not fields or search is None or clear is None or clear_layers is None:
+        if grid is None or not visible_fields or search is None or clear is None or clear_layers is None:
             return
         bar = getattr(self, "_map_filter_bar", None)
         available = int(bar.width() if bar is not None else self.width())
@@ -5607,7 +5671,7 @@ class StationsMapTab(QWidget):
                 int(field.minimumSizeHint().width() or 0),
                 int(field.sizeHint().width() or 0),
             )
-            for field in fields
+            for field in visible_fields
         )
         field_width = max(
             field_width,
@@ -5618,10 +5682,12 @@ class StationsMapTab(QWidget):
         columns = 4 if available >= (field_width * 4) + (spacing * 3) else (
             2 if available >= (field_width * 2) + spacing else 1
         )
+        layout_signature = (columns, tuple(id(field) for field in visible_fields))
         previous_columns = getattr(self, "_map_filter_columns", None)
-        if columns == previous_columns:
+        if layout_signature == getattr(self, "_map_filter_layout_signature", None):
             return
         self._map_filter_columns = columns
+        self._map_filter_layout_signature = layout_signature
         while grid.count():
             grid.takeAt(0)
         if previous_columns is not None:
@@ -5629,9 +5695,9 @@ class StationsMapTab(QWidget):
                 grid.setColumnStretch(column, 0)
         for column in range(columns):
             grid.setColumnStretch(column, 1)
-        for index, field in enumerate(fields):
+        for index, field in enumerate(visible_fields):
             grid.addWidget(field, index // columns, index % columns)
-        action_row = (len(fields) + columns - 1) // columns
+        action_row = (len(visible_fields) + columns - 1) // columns
         if columns == 1:
             grid.addWidget(search, action_row, 0)
             grid.addWidget(clear, action_row + 1, 0)
@@ -5707,9 +5773,8 @@ class StationsMapTab(QWidget):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        # Splitter and grid writes can cause another resize, especially around a
-        # native QWebEngineView.  Coalesce a resize storm into one idempotent
-        # geometry pass after Qt has delivered the final viewport.
+        # Splitter and grid writes can cause another resize while the native
+        # scene settles. Coalesce the storm into one idempotent geometry pass.
         self._schedule_map_geometry_reflow()
 
     def _sync_city_pop_enabled(self) -> None:
@@ -6418,7 +6483,7 @@ class StationsMapTab(QWidget):
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         active_freqs = self._load_my_active_schedule_freqs(now_utc)
         try:
-            sched_freq = current_scheduler_freq(self.window())
+            sched_freq = current_scheduler_freq(self._application_window())
             sched_freq_mhz = self._parse_frequency_mhz(sched_freq)
             if sched_freq_mhz is not None:
                 active_freqs.add(round(sched_freq_mhz, 6))
@@ -6603,6 +6668,8 @@ class StationsMapTab(QWidget):
         intelligence_section = getattr(self, "_map_intelligence_layers_section", None)
         if intelligence_section is not None:
             intelligence_section.setVisible(key not in {"regional"})
+        if getattr(self, "_map_filter_grid", None) is not None:
+            self._schedule_map_geometry_reflow()
 
     def _sync_map_mode_combo(self, mode_key: str) -> None:
         combo = getattr(self, "_map_mode_combo", None)
@@ -13190,7 +13257,7 @@ class StationsMapTab(QWidget):
         return "low"
 
     def _resolve_prop_band_colors(self) -> Dict[str, str]:
-        theme = resolve_theme(self.settings)
+        theme = self._theme_snapshot()
         is_dark = theme.get("bg") == "#0F1216"
         palette = BAND_COLORS_DARK if is_dark else BAND_COLORS_LIGHT
         colors: Dict[str, str] = {k.upper(): v for k, v in palette.items()}
@@ -13242,7 +13309,7 @@ class StationsMapTab(QWidget):
         if theme is None:
             theme = self._theme_snapshot()
         self._last_prop_badge_values = (target_label, best_band, best_score)
-        scheduled = self._freq_to_band(current_scheduler_freq(self.window()))
+        scheduled = self._freq_to_band(current_scheduler_freq(self._application_window()))
         level = self._score_level(best_score)
         display_label = (target_label or "National").strip()
         if not best_band:
@@ -13264,99 +13331,145 @@ class StationsMapTab(QWidget):
             )
         self.prop_badge.setText(text)
 
-    def _write_map_html(self, html: str) -> Optional[Path]:
+    def _ensure_native_map_renderer(self) -> NativeMapRenderer | None:
+        """Return the singleton native renderer in its final viewport parent."""
+        if getattr(self, "_is_shutting_down", False):
+            return None
+        existing = getattr(self, "_native_map_renderer", None)
+        if existing is not None:
+            return existing
+        parent = getattr(self, "_map_stack", None) or getattr(self, "_map_canvas_splitter", None) or self
         try:
-            self._map_cache_dir.mkdir(parents=True, exist_ok=True)
-            self._managed_map_file.write_text(html, encoding="utf-8")
-            return self._managed_map_file
-        except Exception as e:
-            log.error("StationsMap: failed writing map html: %s", e)
+            renderer = NativeMapRenderer(parent)
+            renderer.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+            renderer.setMinimumSize(0, 0)
+            ready_signal = getattr(renderer, "ready", None)
+            if ready_signal is not None:
+                ready_signal.connect(self._on_native_map_ready)
+            unavailable_signal = getattr(renderer, "unavailable", None)
+            if unavailable_signal is not None:
+                unavailable_signal.connect(self._on_native_map_unavailable)
+            action_signal = getattr(renderer, "action_requested", None)
+            if action_signal is not None:
+                action_signal.connect(self._on_native_map_action)
+            view_signal = getattr(renderer, "view_state_changed", None)
+            if view_signal is not None:
+                view_signal.connect(self._on_native_map_view_state_changed)
+            stack = getattr(self, "_map_stack", None)
+            if stack is not None:
+                stack.addWidget(renderer)
+                stack.setCurrentWidget(renderer)
+            else:
+                splitter = getattr(self, "_map_canvas_splitter", None)
+                if splitter is not None:
+                    splitter.addWidget(renderer)
+            self._native_map_renderer = renderer
+            renderer.set_map_visible(
+                bool(getattr(self, "_map_visible", False) and getattr(self, "_app_active", True))
+            )
+            available = getattr(renderer, "is_available", None)
+            if callable(available) and not available():
+                status_text = getattr(renderer, "status_text", None)
+                self._on_native_map_unavailable(status_text() if callable(status_text) else "")
+            return renderer
+        except Exception as exc:
+            log.exception("StationsMap: failed creating native Qt Location renderer")
+            enter_degraded = getattr(self, "_enter_map_degraded", None)
+            if callable(enter_degraded):
+                enter_degraded(
+                    "Native Map is unavailable. Review the Qt Location installation and retry without restarting FIO.",
+                    reason="native_renderer_create",
+                    exc=exc,
+                )
             return None
 
-    def _load_web_map_file(self, path: Path, *, detail: str = "") -> bool:
-        if self.web is None:
-            return False
-        try:
-            url = QUrl.fromLocalFile(str(path))
-            # Cache-bust while reusing the same local file path to avoid temp-file growth.
-            url.setQuery(f"v={int(time.time() * 1000)}")
-            self._map_page_loading = True
-            self._map_load_ok = False
-            self._set_map_runtime_state("loading", detail or self._map_runtime_detail or "Loading the map surface.")
-            self._emit_map_event("page_load_started", source="file")
-            self.web.setUrl(url)
-            return True
-        except Exception as e:
-            log.error("StationsMap: failed loading map html in webview: %s", e)
-            self._map_page_loading = False
-            self._enter_map_degraded("Map file load failed before the preview was ready.", reason="file_load", exc=e)
-            return False
-
-    def _load_map_html_into_webview(self, html: str, path: Optional[Path] = None, *, detail: str = "") -> bool:
-        if self.web is None:
-            return False
-        if path is not None and self._load_web_map_file(path, detail=detail):
-            return True
-        try:
-            self._map_page_loading = True
-            self._map_load_ok = False
-            self._set_map_runtime_state("loading", detail or self._map_runtime_detail or "Loading the map surface.")
-            self._emit_map_event("page_load_started", source="inline")
-            self.web.setHtml(html)
-            return True
-        except Exception as e:
-            log.error("StationsMap: failed loading inline map html in webview: %s", e)
-            self._map_page_loading = False
-            self._enter_map_degraded("Inline map preview load failed before the preview was ready.", reason="inline_load", exc=e)
-            return False
-
-    def _ensure_web_view(self) -> bool:
-        """
-        Lazily create the WebEngine view so startup avoids eager WebEngine native
-        view/process initialization. The tab shell and loading placeholder are
-        created during __init__.
-        """
-        if self.web is not None:
-            return True
-        if self._map_stack is None:
-            return False
-        if not _ensure_webengine_imported() or QWebEngineView is None:
-            return False
-        try:
-            web = QWebEngineView(self._map_stack)
-            web.loadFinished.connect(self._on_map_load_finished)
-            web.titleChanged.connect(self._on_map_page_title_changed)
-            self.web = web
-            self._map_stack.addWidget(web)
-            return True
-        except Exception as e:
-            log.error("StationsMap: failed creating WebEngine view lazily: %s", e)
-            self.web = None
-            if self._map_loading_label is not None:
-                self._map_loading_label.setText("Map preview unavailable.")
-            return False
-
-    def _on_map_page_title_changed(self, title: str) -> None:
-        prefix = "fio-map-action:"
-        title_text = str(title or "")
-        if not title_text.startswith(prefix):
+    def _on_native_map_ready(self) -> None:
+        if getattr(self, "_is_shutting_down", False):
             return
-        payload: Dict[str, object] = {}
-        try:
-            raw = urllib.parse.unquote(title_text[len(prefix) :])
-            parsed = json.loads(raw) if raw else {}
-            if isinstance(parsed, dict):
-                payload = parsed
-        except Exception as e:
-            log.debug("StationsMap: ignored malformed map action title %r: %s", title_text, e)
-        finally:
-            try:
-                if self.web is not None:
-                    self.web.page().runJavaScript("document.title = 'Stations Map';")
-            except Exception:
-                pass
-        if payload:
-            self._handle_map_detail_action(payload)
+        self._map_page_loading = False
+        self._map_load_ok = True
+        StationsMapTab._apply_pending_native_map_projection(self)
+        if getattr(self, "_map_visible", False) and getattr(self, "_app_active", True):
+            maybe_start = getattr(self, "_maybe_start_map_ingest", None)
+            if callable(maybe_start):
+                maybe_start()
+
+    def _on_native_map_unavailable(self, detail: str = "") -> None:
+        if getattr(self, "_is_shutting_down", False):
+            return
+        self._map_load_ok = False
+        enter_degraded = getattr(self, "_enter_map_degraded", None)
+        if callable(enter_degraded):
+            enter_degraded(
+                "Native Map is unavailable. Configuration and other workspaces remain usable.",
+                reason="native_renderer_unavailable",
+                exc=RuntimeError(str(detail or "Qt Location renderer unavailable")),
+            )
+
+    def _on_native_map_view_state_changed(self, view: object) -> None:
+        if isinstance(view, Mapping):
+            parsed = StationsMapTab._parse_view_state(self, dict(view))
+            self._last_map_view = parsed
+
+    def _on_native_map_action(self, action_payload: object) -> None:
+        if not isinstance(action_payload, Mapping):
+            return
+        action = str(action_payload.get("action") or "").strip().lower()
+        if action == "select_marker":
+            payload = action_payload.get("payload", action_payload.get("marker"))
+        elif action == "select_path":
+            payload = action_payload.get("payload", action_payload.get("path"))
+        elif action in {"select_polygon", "select_label"}:
+            item_key = "polygon" if action == "select_polygon" else "label"
+            payload = action_payload.get("payload", action_payload.get(item_key))
+        else:
+            handler = getattr(self, "_handle_map_detail_action", None)
+            if callable(handler):
+                handler(dict(action_payload))
+            return
+        if isinstance(payload, Mapping):
+            show_detail = getattr(self, "_show_map_selected_detail", None)
+            if callable(show_detail):
+                show_detail(dict(payload))
+
+    def _apply_native_map_projection(self, payload: Mapping[str, object] | None) -> bool:
+        projection = dict(payload or {})
+        if getattr(self, "_is_shutting_down", False):
+            return False
+        if not getattr(self, "_map_visible", False) or not getattr(self, "_app_active", True):
+            self._pending_map_payload = projection
+            return False
+        renderer = getattr(self, "_native_map_renderer", None)
+        if renderer is None:
+            renderer = StationsMapTab._ensure_native_map_renderer(self)
+        available = getattr(renderer, "is_available", None) if renderer is not None else None
+        if renderer is None or (callable(available) and not available()):
+            self._pending_map_payload = projection
+            return False
+        renderer.apply_projection(projection)
+        self._pending_map_payload = None
+        self._map_initialized = True
+        self._map_load_ok = True
+        return True
+
+    def _apply_pending_native_map_projection(self) -> bool:
+        payload = getattr(self, "_pending_map_payload", None)
+        if not isinstance(payload, Mapping):
+            return False
+        self._pending_map_payload = None
+        if (
+            not bool(payload.get("_native_projection_enriched"))
+            and getattr(self, "_map_visible", False)
+            and getattr(self, "_app_active", True)
+        ):
+            # Hidden work retains the raw value snapshot without reading static
+            # geometry. Re-entry resumes that bounded worker stage before QML.
+            self._queue_native_map_projection(dict(payload))
+            return False
+        if StationsMapTab._apply_native_map_projection(self, payload):
+            return True
+        self._pending_map_payload = dict(payload)
+        return False
 
     def _handle_map_detail_action(self, payload: Dict[str, object]) -> None:
         action = str(payload.get("action") or "").strip().lower()
@@ -13393,18 +13506,6 @@ class StationsMapTab(QWidget):
                 return
             self._clear_report_query_caches()
             self._request_map_refresh(level="medium", reason="selected_detail_topic")
-
-    def prepare_webview_for_first_show(self) -> bool:
-        """
-        Create the map webview only when the tab is visible and the app is
-        active. This avoids hidden-tab WebEngine churn during wake/sleep and
-        help-dialog teardown, while keeping the normal first visible load.
-        """
-        if not self._app_active or not self._map_visible:
-            self._map_dirty = True
-            self._emit_map_event("webview_prepare_deferred", reason="inactive_or_hidden")
-            return False
-        return self._ensure_web_view()
 
     # ------------- Map rendering ------------- #
     def _render_map(self, preserve_view: bool = True):
@@ -13453,29 +13554,31 @@ class StationsMapTab(QWidget):
             self._effective_map_observation_focus_enabled()
             and self._effective_map_observation_focus_mode() == "regional_intelligence"
         )
-        if not self.stations and not report_view_without_roster and not regional_view_without_roster:
+        propagation_view_without_roster = bool(self.prop_overlay_enabled)
+        if (
+            not self.stations
+            and not report_view_without_roster
+            and not regional_view_without_roster
+            and not propagation_view_without_roster
+        ):
             self._map_marker_count = 0
             self._map_link_count = 0
             self._map_link_status_detail = "No station data available for paths."
-            html = "<html><body><h3>No station data to display.</h3></body></html>"
-            if self.web is not None:
-                self._map_initialized = False
-                if self._map_stack is not None:
-                    self._map_stack.setCurrentIndex(0)
-                if self._map_loading_label is not None:
-                    self._map_loading_label.setText("Preparing map...")
-                path = self._write_map_html(html)
-                if path is not None:
-                    self._map_file = path
-                    self._load_map_html_into_webview(html, path)
-                else:
-                    self._load_map_html_into_webview(html)
-            else:
-                path = self._write_map_html(html)
-                if path is not None:
-                    self._map_file = path
-                    log.info("StationsMap: map written to %s (open in browser).", path)
-            self._last_map_view = view_state or self._last_map_view or {"lat": 45, "lon": -97, "zoom": 3}
+            effective_view = view_state or self._last_map_view or {"lat": 45, "lon": -97, "zoom": 3}
+            self._queue_native_map_projection(
+                {
+                    "map_mode": self._current_map_mode_key(),
+                    "markers": [],
+                    "links": [],
+                    "view": effective_view,
+                    "show_states": bool(self.show_states),
+                    "show_regions": bool(self.show_regions),
+                    "show_grids": bool(self.show_grids),
+                    "show_grid_labels": bool(self.show_grid_labels),
+                    "city_labels": [],
+                }
+            )
+            self._last_map_view = effective_view
             return
 
         def _fmt_ts(ts_val):
@@ -13627,7 +13730,7 @@ class StationsMapTab(QWidget):
             force_reload = True
         elif (
             not force_reload
-            and self.web is not None
+            and self._native_map_renderer is not None
             and self._map_initialized
             and bool(self._last_map_payload_sig)
             and map_input_sig == self._last_map_render_input_sig
@@ -14242,208 +14345,56 @@ class StationsMapTab(QWidget):
             infrastructure_events=infrastructure_events,
         )
 
-        if self.web is not None and self._map_initialized and self._map_file and not force_reload:
-            self._push_map_payload(
-                display_markers,
-                display_links,
-                weather_events=weather_events,
-                alert_events=alert_events,
-                infrastructure_events=infrastructure_events,
-                link_direction_markers=link_direction_markers,
-                sitrep_state_summary=sitrep_state_summary,
-                sitrep_summary_group=sitrep_summary_group,
-                regional_intelligence=regional_intelligence_payload,
-                show_cities=bool(self.show_cities),
-                show_city_labels=bool(effective_show_city_labels),
-                city_min_pop=int(effective_city_pop_min),
-                auto_fit=auto_fit,
-            )
-            self._last_map_view = view_state or self._last_map_view or {"lat": 45, "lon": -97, "zoom": 3}
-            return
-
-        leaflet_js, leaflet_css = self._ensure_leaflet_assets()
-        geojson_us = self._ensure_geojson(
-            self._geojson_path,
-            "https://raw.githubusercontent.com/PublicaMundi/MappingAPI/master/data/geojson/us-states.json",
-        )
-        geojson_ca = self._ensure_geojson(
-            self._geojson_canada,
-            "https://raw.githubusercontent.com/codeforamerica/click_that_hood/master/public/data/canada.geojson",
-        )
-        geojson_mx = self._ensure_geojson(
-            self._geojson_mexico,
-            "https://raw.githubusercontent.com/codeforamerica/click_that_hood/master/public/data/mexico.geojson",
-        )
-        fema_geojson = self._ensure_fema_geojson()
-        cities_geojson = self._ensure_cities_geojson()
-        geojson_urls = [u for u in (geojson_us, geojson_ca, geojson_mx, fema_geojson) if u]
-        # For webview reloads, keep bootstrap HTML lightweight and push live data
-        # after loadFinished to avoid serializing the same payload twice.
-        bootstrap_markers = display_markers if self.web is None else []
-        bootstrap_links = display_links if self.web is None else []
-        bootstrap_weather_events = weather_events if self.web is None else []
-        bootstrap_alert_events = alert_events if self.web is None else []
-        bootstrap_infrastructure_events = infrastructure_events if self.web is None else []
-        html = self._build_leaflet_html(
-            bootstrap_markers,
-            links=bootstrap_links,
-            weather_events=bootstrap_weather_events,
-            alert_events=bootstrap_alert_events,
-            infrastructure_events=bootstrap_infrastructure_events,
-            max_zoom=12,
-            leaflet_js=leaflet_js,
-            leaflet_css=leaflet_css,
-            geojson_urls=geojson_urls,
-            cities_geojson=cities_geojson,
-            city_min_pop=effective_city_pop_min,
-            show_city_labels=effective_show_city_labels,
-            initial_view=view_state or self._last_map_view,
-            prop_overlay_enabled=self.prop_overlay_enabled,
-            prop_region_scores=prop_region_scores,
-            prop_state_scores=prop_state_scores,
-            link_direction_markers=link_direction_markers,
-            sitrep_state_summary=sitrep_state_summary,
-            sitrep_summary_group=sitrep_summary_group,
-            regional_intelligence=regional_intelligence_payload,
-            auto_fit=auto_fit,
-        )
-
-        if self.web is not None:
-            self._last_map_config = config_sig
-            had_visible_map = bool(self._map_initialized and self._map_load_ok)
-            self._map_initialized = False
-            if self._map_stack is not None:
-                # Keep the existing map visible for config/layer reloads to avoid
-                # a disruptive blank/loading flash between updates.
-                if had_visible_map:
-                    self._map_stack.setCurrentIndex(1)
-                else:
-                    self._map_stack.setCurrentIndex(0)
-                    if self._map_loading_label is not None:
-                        self._map_loading_label.setText("Loading map...")
-            # New page context: force first payload push even if content hash matches
-            # the prior page's payload.
-            self._last_map_payload_sig = None
-            self._last_map_render_input_sig = None
-            self._map_payload_generation += 1
-            self._pending_map_payload = {
-                "markers": display_markers,
-                "links": display_links,
-                "weather_events": weather_events,
-                "alert_events": alert_events,
-                "infrastructure_events": infrastructure_events,
-                "link_direction_markers": link_direction_markers,
-                "now_reachable_enabled": bool(self._now_reachable_enabled),
-                "sitrep_state_summary": sitrep_state_summary,
-                "sitrep_summary_group": sitrep_summary_group,
-                "regional_intelligence": regional_intelligence_payload,
-                "show_cities": bool(self.show_cities),
-                "show_city_labels": bool(effective_show_city_labels),
-                "city_min_pop": int(effective_city_pop_min),
-                "auto_fit": auto_fit,
-            }
-            path = self._write_map_html(html)
-            if path is not None:
-                self._map_file = path
-                self._load_map_html_into_webview(html, path)
-            else:
-                self._load_map_html_into_webview(html)
-        else:
-            path = self._write_map_html(html)
-            if path is not None:
-                self._map_file = path
-                log.info("StationsMap: map written to %s (open in browser).", path)
-        self._last_map_view = view_state or self._last_map_view or {"lat": 45, "lon": -97, "zoom": 3}
-
-    def _on_map_load_finished(self, ok: bool) -> None:
-        self._map_page_loading = False
-        self._map_initialized = bool(ok)
-        self._map_load_ok = bool(ok)
-        self._map_js_ready_retry_count = 0
-        self._emit_map_event("page_load_finished", ok=bool(ok))
-        if self._map_stack is not None:
-            if ok:
-                self._map_stack.setCurrentIndex(1)
-            else:
-                self._map_stack.setCurrentIndex(0)
-                if self._map_loading_label is not None:
-                    self._map_loading_label.setText("Map failed to load.")
-        if not ok:
-            self._enter_map_degraded("Map preview did not load successfully. You can retry without restarting FIO.", reason="load_finished")
-        else:
-            self._set_map_runtime_state(
-                "ready",
-                self._map_ready_detail_text(),
-            )
-        if not ok or self.web is None:
-            return
+        native_payload: Dict[str, object] = {
+            "map_mode": self._current_map_mode_key(),
+            "markers": display_markers,
+            "links": display_links,
+            "weather_events": weather_events,
+            "alert_events": alert_events,
+            "infrastructure_events": infrastructure_events,
+            "link_direction_markers": link_direction_markers,
+            "now_reachable_enabled": bool(self._now_reachable_enabled),
+            "sitrep_state_summary": sitrep_state_summary,
+            "sitrep_summary_group": sitrep_summary_group,
+            "regional_intelligence": regional_intelligence_payload,
+            "prop_region_scores": prop_region_scores,
+            "prop_state_scores": prop_state_scores,
+            "prop_overlay_enabled": bool(self.prop_overlay_enabled),
+            "prop_band_colors": self._resolve_prop_band_colors() if self.prop_overlay_enabled else {},
+            "show_states": bool(self.show_states),
+            "show_regions": bool(self.show_regions),
+            "show_grids": bool(self.show_grids),
+            "show_grid_labels": bool(self.show_grid_labels),
+            "show_cities": bool(effective_show_city_labels),
+            "show_city_labels": bool(effective_show_city_labels),
+            "city_min_pop": int(effective_city_pop_min),
+            "city_labels": [
+                {
+                    "id": f"city:{name}:{lat:.4f}:{lon:.4f}",
+                    "kind": "city",
+                    "label": name,
+                    "lat": lat,
+                    "lon": lon,
+                    "population": population,
+                    "min_zoom": 4.0 if population >= 500_000 else 5.0,
+                }
+                for name, lat, lon, population in CITIES
+                if effective_show_city_labels and population >= int(effective_city_pop_min)
+            ][:250],
+            "auto_fit": bool(auto_fit),
+        }
+        if not auto_fit:
+            native_payload["view"] = view_state or self._last_map_view or {"lat": 45, "lon": -97, "zoom": 3}
+        self._last_map_config = config_sig
+        self._queue_native_map_projection(native_payload)
+        renderer = getattr(self, "_native_map_renderer", None)
+        if renderer is not None:
+            try:
+                self._last_map_view = renderer.view_state()
+            except Exception:
+                self._last_map_view = view_state or self._last_map_view or {"lat": 45, "lon": -97, "zoom": 3}
         self._maybe_start_map_ingest()
-        if self._pending_map_payload:
-            # WebEngine loadFinished can fire before the embedded Leaflet
-            # bootstrap has exposed updateMapData. Probe readiness and retry
-            # briefly instead of dropping the first real payload.
-            self._push_pending_map_payload_when_ready()
-        if getattr(self, "_map_visible", False) and (
-            getattr(self, "_map_dirty", False) or getattr(self, "_render_requested_during_load", False)
-        ):
-            self._render_requested_during_load = False
-            self._map_dirty = False
-            queued_level = self._refresh_level_name(
-                max(int(getattr(self, "_render_requested_during_load_level", 0) or 0), 2)
-            )
-            self._render_requested_during_load_level = 0
-            self._request_map_refresh(level=queued_level, reason="post_load", preserve_view=True)
-
-    def _push_pending_map_payload_when_ready(self) -> None:
-        if self.web is None or not self._pending_map_payload:
-            return
-
-        def _after_probe(result) -> None:
-            ready = bool(result)
-            if ready:
-                payload = self._pending_map_payload or {}
-                self._pending_map_payload = None
-                self._map_js_ready_retry_count = 0
-                # Ensure payload is applied to the freshly loaded page, even when
-                # marker/link data is identical to the previous render.
-                self._last_map_payload_sig = None
-                self._push_map_payload(
-                    payload.get("markers", []),
-                    payload.get("links", []),
-                    weather_events=payload.get("weather_events", []),
-                    alert_events=payload.get("alert_events", []),
-                    infrastructure_events=payload.get("infrastructure_events", []),
-                    link_direction_markers=payload.get("link_direction_markers"),
-                    now_reachable_enabled=payload.get("now_reachable_enabled"),
-                    sitrep_state_summary=payload.get("sitrep_state_summary", []),
-                    sitrep_summary_group=payload.get("sitrep_summary_group", ""),
-                    regional_intelligence=payload.get("regional_intelligence", {}),
-                    show_cities=bool(payload.get("show_cities")),
-                    show_city_labels=bool(payload.get("show_city_labels")),
-                    city_min_pop=int(payload.get("city_min_pop") or 0),
-                    auto_fit=bool(payload.get("auto_fit")),
-                )
-                return
-            self._map_js_ready_retry_count += 1
-            if self._map_js_ready_retry_count <= 10:
-                QTimer.singleShot(120, self._push_pending_map_payload_when_ready)
-                return
-            self._enter_map_degraded(
-                "Map page loaded, but the embedded map script did not become ready.",
-                reason="js_not_ready",
-            )
-
-        try:
-            self.web.page().runJavaScript(
-                "Boolean(window._mapReady && window.updateMapData && window._leafletMap)",
-                _after_probe,
-            )
-        except Exception as exc:
-            self._enter_map_degraded(
-                "Map page loaded, but FIO could not verify the embedded map script.",
-                reason="js_ready_probe",
-                exc=exc,
-            )
+        return
 
     def _on_map_visible_deferred(self) -> None:
         if not self._map_visible or self._is_shutting_down:
@@ -14453,19 +14404,28 @@ class StationsMapTab(QWidget):
             self._set_map_runtime_state("warming", "Preparing the map view.")
             return
         self._ensure_initial_data_loaded()
-        if not self._ensure_web_view():
-            self._enter_map_degraded("Qt WebEngine is not available for the embedded map preview.", reason="webengine_missing")
+        if self._ensure_native_map_renderer() is None:
+            self._enter_map_degraded(
+                "Qt Location is not available for the native Map.",
+                reason="native_renderer_missing",
+            )
             return
-        if self._map_page_loading:
+        if getattr(self, "_map_page_loading", False):
             return
         if not self._map_initialized:
-            # First visible render: build/load the map HTML before waiting on loadFinished.
-            # Clear dirty before first render to avoid an immediate duplicate render in
-            # _on_map_load_finished(). Any real updates during load will set dirty again.
+            # The first visible render builds one retained native projection.
+            # Clear dirty first so a source update during construction can
+            # schedule exactly one newer generation.
             self._map_dirty = False
             self._request_map_refresh(level="full", reason="visible_init", preserve_view=True)
             return
+        if self._pending_map_payload and not self._map_dirty and not self._pending_refresh_level:
+            self._apply_pending_native_map_projection()
+            return
         if self._map_dirty:
+            # A completed in-flight payload predates source changes recorded
+            # while hidden. Discard it and build one current projection.
+            self._pending_map_payload = None
             self._map_dirty = False
             self._request_map_refresh(level="medium", reason="visible_dirty", preserve_view=True)
             return
@@ -14535,11 +14495,6 @@ class StationsMapTab(QWidget):
         city_min_pop: Optional[int] = None,
         auto_fit: bool = False,
     ) -> None:
-        if getattr(self, "web", None) is None:
-            return
-        if not getattr(self, "_map_visible", False) or not getattr(self, "_app_active", True):
-            self._map_dirty = True
-            return
         link_direction_flag = (
             bool(self._map_link_direction_markers_enabled())
             if link_direction_markers is None
@@ -14549,29 +14504,6 @@ class StationsMapTab(QWidget):
         show_cities_flag = bool(self.show_cities) if show_cities is None else bool(show_cities)
         show_city_labels_flag = bool(show_city_labels) if show_city_labels is not None else show_cities_flag
         city_min_pop_value = int(city_min_pop or 0)
-        if getattr(self, "_map_page_loading", False) or not getattr(self, "_map_initialized", False):
-            self._pending_map_payload = {
-                "map_mode": map_mode,
-                "markers": list(markers),
-                "links": list(links),
-                "weather_events": list(weather_events or []),
-                "alert_events": list(alert_events or []),
-                "infrastructure_events": list(infrastructure_events or []),
-                "link_direction_markers": link_direction_flag,
-                "now_reachable_enabled": (
-                    bool(self._now_reachable_enabled)
-                    if now_reachable_enabled is None
-                    else bool(now_reachable_enabled)
-                ),
-                "sitrep_state_summary": list(sitrep_state_summary or []),
-                "sitrep_summary_group": str(sitrep_summary_group or ""),
-                "regional_intelligence": dict(regional_intelligence or {}),
-                "show_cities": show_cities_flag,
-                "show_city_labels": show_city_labels_flag,
-                "city_min_pop": city_min_pop_value,
-                "auto_fit": bool(auto_fit),
-            }
-            return
         now_reachable_flag = (
             bool(self._now_reachable_enabled)
             if now_reachable_enabled is None
@@ -14594,6 +14526,15 @@ class StationsMapTab(QWidget):
             "city_min_pop": city_min_pop_value,
             "auto_fit": bool(auto_fit),
         }
+        self._queue_native_map_projection(pending_payload)
+
+    def _queue_native_map_projection(self, pending_payload: Dict[str, object]) -> None:
+        """Serialize one newest-wins projection away from the GUI thread."""
+        if getattr(self, "_is_shutting_down", False):
+            return
+        if not getattr(self, "_map_visible", False) or not getattr(self, "_app_active", True):
+            self._pending_map_payload = dict(pending_payload)
+            return
         self._map_payload_generation += 1
         payload_generation = int(self._map_payload_generation)
         future = self._map_projection_worker().submit(
@@ -14617,12 +14558,13 @@ class StationsMapTab(QWidget):
             # Contract boundary: retained markers, observations, nodes, and
             # routes are serialized away from the UI thread. Live connection
             # health should update labels/chips and not rebuild this payload.
-            payload = json.dumps(pending_payload)
+            enriched_payload = build_native_overlay_projection(pending_payload)
+            payload = json.dumps(enriched_payload)
             return _MapProjectionSnapshotResult(
                 generation=generation,
                 payload=payload,
                 signature=str(hash(payload)),
-                pending_payload=dict(pending_payload),
+                pending_payload=enriched_payload,
             )
         except Exception as exc:
             payload = (
@@ -14665,62 +14607,39 @@ class StationsMapTab(QWidget):
         if getattr(self, "_is_shutting_down", False):
             return
         payload_generation = int(result.generation)
+        emit_event = getattr(self, "_emit_map_event", None)
         if payload_generation != getattr(self, "_map_payload_generation", 0):
-            self._emit_map_event("payload_update_stale", generation=payload_generation)
+            if callable(emit_event):
+                # Keep the established telemetry call explicit at the stale
+                # generation fence so responsiveness audits can verify that a
+                # discarded worker result remains observable.
+                self._emit_map_event("payload_update_stale", generation=payload_generation)
             return
         payload = result.payload
         sig = result.signature or str(hash(payload))
-        if sig == self._last_map_payload_sig:
+        if sig == getattr(self, "_last_map_payload_sig", None):
             return
         pending_payload = dict(result.pending_payload)
-        js = (
-            "(function() {"
-            "try {"
-            "if (!window._mapReady || !window.updateMapData) return 'not_ready';"
-            f"window.updateMapData({payload});"
-            "return 'ok';"
-            "} catch (e) {"
-            "return 'error:' + (e && e.message ? e.message : String(e));"
-            "}"
-            "})();"
-        )
-
-        def _after_update(result) -> None:
-            if getattr(self, "_is_shutting_down", False):
-                return
-            if payload_generation != getattr(self, "_map_payload_generation", 0):
-                self._emit_map_event("payload_update_stale", generation=payload_generation)
-                return
-            outcome = str(result or "").strip()
-            if outcome == "ok":
-                self._last_map_payload_sig = sig
-                return
-            self._last_map_payload_sig = None
-            if outcome == "not_ready":
-                self._pending_map_payload = pending_payload
-                self._push_pending_map_payload_when_ready()
-                return
-            self._enter_map_degraded(
-                "Map data could not be applied to the embedded map view.",
-                reason="js_update",
-                exc=RuntimeError(outcome or "unknown JavaScript map update error"),
-            )
-
-        try:
-            self.web.page().runJavaScript(js, _after_update)
-        except Exception as exc:
-            self._last_map_payload_sig = None
+        if not getattr(self, "_map_visible", False) or not getattr(self, "_app_active", True):
+            # Keep only the newest completed projection. A later source update
+            # marks the map dirty and wins over this snapshot on reopen.
             self._pending_map_payload = pending_payload
-            self._enter_map_degraded(
-                "Map data could not be sent to the embedded map view.",
-                reason="js_update_dispatch",
-                exc=exc,
-            )
+            if callable(emit_event):
+                emit_event("payload_update_deferred_hidden", generation=payload_generation)
+            return
+        if StationsMapTab._apply_native_map_projection(self, pending_payload):
+            self._last_map_payload_sig = sig
+            set_state = getattr(self, "_set_map_runtime_state", None)
+            ready_detail = getattr(self, "_map_ready_detail_text", None)
+            if callable(set_state):
+                set_state("ready", ready_detail() if callable(ready_detail) else "Map is ready.")
+            maybe_start = getattr(self, "_maybe_start_map_ingest", None)
+            if callable(maybe_start):
+                maybe_start()
 
     def _parse_view_state(self, js_result) -> Dict[str, float]:
         """
-        Convert JS callback output into a view state dict.
-        Accepts JSON string or dict-like values.
+        Normalize renderer view state from a mapping or serialized mapping.
         """
         if isinstance(js_result, dict):
             lat = js_result.get("lat")
@@ -14738,1961 +14657,6 @@ class StationsMapTab(QWidget):
             return self._last_map_view or {"lat": 45, "lon": -97, "zoom": 3}
         return {"lat": float(lat), "lon": float(lon), "zoom": float(zoom)}
 
-    def _build_leaflet_html(
-        self,
-        markers: List[Dict],
-        links: List[Dict],
-        max_zoom: int,
-        leaflet_js: str,
-        leaflet_css: str,
-        geojson_urls: List[str],
-        cities_geojson: Optional[str],
-        city_min_pop: int,
-        show_city_labels: bool,
-        weather_events: Optional[List[Dict[str, object]]] = None,
-        alert_events: Optional[List[Dict[str, object]]] = None,
-        infrastructure_events: Optional[List[Dict[str, object]]] = None,
-        initial_view: Optional[Dict[str, float]] = None,
-        prop_overlay_enabled: bool = False,
-        prop_region_scores: Optional[Dict[str, Dict]] = None,
-        prop_state_scores: Optional[Dict[str, Dict]] = None,
-        link_direction_markers: bool = False,
-        sitrep_state_summary: Optional[List[Dict[str, object]]] = None,
-        sitrep_summary_group: str = "",
-        regional_intelligence: Optional[Dict[str, object]] = None,
-        auto_fit: bool = False,
-    ) -> str:
-        theme = resolve_theme(self.settings)
-        try:
-            ui_theme = str(self.settings.get("ui_theme", "") or "").strip().lower()
-        except Exception:
-            ui_theme = ""
-        is_dark = theme.get("bg") == "#0F1216" or ui_theme == "dark"
-        ui_text_scale = resolve_ui_text_scale(self.settings)
-        grid_color = "#5F6B7A" if is_dark else "#666"
-        grid_opacity = "0.3" if is_dark else "0.3"
-        now_reachable_enabled = str(bool(getattr(self, "_now_reachable_enabled", False))).lower()
-        link_direction_markers_enabled = str(bool(link_direction_markers)).lower()
-        markers_json = json.dumps(markers)
-        links_json = json.dumps(links)
-        weather_events_json = json.dumps(weather_events or [])
-        alert_events_json = json.dumps(alert_events or [])
-        infrastructure_events_json = json.dumps(infrastructure_events or [])
-        sitrep_state_summary_json = json.dumps(sitrep_state_summary or [])
-        sitrep_summary_group_json = json.dumps(str(sitrep_summary_group or "").strip().upper())
-        regional_intelligence_json = json.dumps(regional_intelligence or {})
-        current_map_mode = getattr(self, "_current_map_mode_key", None)
-        map_mode = current_map_mode() if callable(current_map_mode) else "all"
-        map_mode_json = json.dumps(str(map_mode or "all"))
-        auto_fit_json = str(bool(auto_fit)).lower()
-        init_lat = initial_view.get("lat") if initial_view else 45
-        init_lon = initial_view.get("lon") if initial_view else -97
-        init_zoom = initial_view.get("zoom") if initial_view else 3
-        tile_layer = "L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18, maxNativeZoom: 18, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);"
-        grid_layer = (
-            """
-const gridLayer = L.layerGroup();
-const gridLabelLayer = L.layerGroup();
-let gridUpdating = false;
-let gridUpdateTimer = null;
-function maidenFromLatLon(lat, lon, level) {
-      // level: 2,4,6 chars
-      let adjLon = lon + 180.0;
-      let adjLat = lat + 90.0;
-      let fieldLon = Math.floor(adjLon / 20);
-      let fieldLat = Math.floor(adjLat / 10);
-      let out = String.fromCharCode(65 + fieldLon) + String.fromCharCode(65 + fieldLat);
-      if (level >= 4) {
-        let squareLon = Math.floor((adjLon % 20) / 2);
-        let squareLat = Math.floor((adjLat % 10) / 1);
-        out += squareLon.toString() + squareLat.toString();
-      }
-      if (level >= 6) {
-        let subsLon = Math.floor(((adjLon % 2) / 2) * 24);
-        let subsLat = Math.floor(((adjLat % 1) / 1) * 24);
-        out += String.fromCharCode(65 + subsLon) + String.fromCharCode(65 + subsLat);
-      }
-      return out;
-    }
-function addGrid(res, maxCells) {
-  const stepLon = res;
-  const stepLat = res/2;
-  const bounds = map.getBounds();
-  const west = Math.max(-180, bounds.getWest() - stepLon);
-  const east = Math.min(180, bounds.getEast() + stepLon);
-  const south = Math.max(-90, bounds.getSouth() - stepLat);
-  const north = Math.min(90, bounds.getNorth() + stepLat);
-  let lonCount = Math.ceil((east - west) / stepLon);
-  let latCount = Math.ceil((north - south) / stepLat);
-  if (lonCount * latCount > maxCells) return false;
-  for (let lon = Math.floor(west / stepLon) * stepLon; lon <= east; lon += stepLon) {
-    gridLayer.addLayer(L.polyline([[ south, lon ], [ north, lon ]], {color:'{grid_color}', weight:0.5, opacity:{grid_opacity}}));
-  }
-  for (let lat = Math.floor(south / stepLat) * stepLat; lat <= north; lat += stepLat) {
-    gridLayer.addLayer(L.polyline([[ lat, west ], [ lat, east ]], {color:'{grid_color}', weight:0.5, opacity:{grid_opacity}}));
-  }
-  return true;
-}
-function scheduleGridUpdate() {
-  if (gridUpdateTimer) {
-    clearTimeout(gridUpdateTimer);
-  }
-  gridUpdateTimer = setTimeout(updateGrid, 80);
-}
-function updateGrid() {
-  if (gridUpdating) return;
-  gridUpdating = true;
-  gridLayer.clearLayers();
-  const z = map.getZoom();
-  const bounds = map.getBounds();
-  const size = map.getSize();
-  const maxCells = Math.max(1200, Math.floor((size.x * size.y) / 900));
-  const maxLabels = Math.max(400, Math.floor((size.x * size.y) / 2000));
-  // Maidenhead grid sizes: 2-char ~20x10 deg, 4-char ~2x1 deg, 6-char ~5x2.5 arcmin (~0.0833x0.0417 deg)
-  if (""" + str(self.show_grids).lower() + """) {
-    let resVal = 0;
-    let level = 0;
-    if (z < 5) {
-      resVal = 20; level = 2;
-    } else if (z < 9) {
-      resVal = 2; level = 4;
-    } else {
-      resVal = 0.083333; level = 6;
-    }
-    if (resVal > 0 && addGrid(resVal, maxCells)) {
-      gridLayer.addTo(map);
-    } else {
-      map.removeLayer(gridLayer);
-    }
-    if (""" + str(self.show_grid_labels).lower() + """) {
-      const showLabels = (level === 2 && z >= 4) || (level === 4 && z >= 6) || (level === 6 && z >= 10);
-      if (showLabels) {
-        addGridLabels(resVal, level, bounds, maxLabels);
-      } else {
-        map.removeLayer(gridLabelLayer);
-      }
-    } else {
-      map.removeLayer(gridLabelLayer);
-    }
-  } else {
-    map.removeLayer(gridLayer);
-    map.removeLayer(gridLabelLayer);
-  }
-  gridUpdating = false;
-}
-
-function addGridLabels(res, level, bounds, maxLabels) {
-  gridLabelLayer.clearLayers();
-  if (res <= 0) return;
-      const stepLon = res;
-      const stepLat = res/2;
-      const west = Math.max(-180, bounds.getWest() - stepLon);
-      const east = Math.min(180, bounds.getEast() + stepLon);
-  const south = Math.max(-90, bounds.getSouth() - stepLat);
-  const north = Math.min(90, bounds.getNorth() + stepLat);
-  let count = 0;
-  for (let lat = Math.floor(south / stepLat) * stepLat + stepLat/2; lat < north; lat += stepLat) {
-    for (let lon = Math.floor(west / stepLon) * stepLon + stepLon/2; lon < east; lon += stepLon) {
-      const label = maidenFromLatLon(lat, lon, level);
-      const icon = L.divIcon({className:'label-text no-border', html: label});
-      gridLabelLayer.addLayer(L.marker([lat, lon], {icon}));
-      count++;
-      if (count > maxLabels) break;
-    }
-    if (count > maxLabels) break;
-  }
-  map.addLayer(gridLabelLayer);
-}
-
-    map.on('zoomend', scheduleGridUpdate);
-    map.on('moveend', scheduleGridUpdate);
-    updateGrid();
-            """
-            if self.show_grids
-            else ""
-        )
-        if grid_layer:
-            # Replace style placeholders without converting the full JS block
-            # into an f-string (which would require escaping many braces).
-            grid_layer = (
-                grid_layer.replace("{grid_color}", str(grid_color))
-                .replace("{grid_opacity}", str(grid_opacity))
-            )
-        road_fetch = ""
-        prop_region_best: Dict[str, Dict] = {}
-        if prop_region_scores:
-            for region_id, data in prop_region_scores.items():
-                bands = (data or {}).get("bands", {})
-                if not bands:
-                    continue
-                best_band, best_score = max(bands.items(), key=lambda kv: kv[1])
-                level = "low"
-                if best_score >= 70:
-                    level = "high"
-                elif best_score >= 45:
-                    level = "med"
-                prop_region_best[region_id] = {
-                    "band": best_band,
-                    "score": round(float(best_score), 1),
-                    "level": level,
-                }
-        prop_state_best: Dict[str, Dict] = {}
-        if prop_state_scores:
-            for state_abbr, data in prop_state_scores.items():
-                bands = (data or {}).get("bands", {})
-                if not bands:
-                    continue
-                best_band, best_score = max(bands.items(), key=lambda kv: kv[1])
-                level = "low"
-                if best_score >= 70:
-                    level = "high"
-                elif best_score >= 45:
-                    level = "med"
-                prop_state_best[state_abbr] = {
-                    "band": best_band,
-                    "score": round(float(best_score), 1),
-                    "level": level,
-                }
-        prop_colors = self._resolve_prop_band_colors()
-        label_color = theme.get("text", "#E6E8EE" if is_dark else "#1C1F21")
-        state_label_color = theme.get("text_muted", "#A3ACB8" if is_dark else "#5B6570")
-        region_label_color = theme.get("info", theme.get("accent", "#B8C7FF" if is_dark else "#1E88E5"))
-        callsign_label_color = theme.get("text", label_color)
-        region_band_label_color = theme.get("text", label_color)
-        label_halo = (
-            "0 1px 2px rgba(0,0,0,0.88), 0 0 3px rgba(0,0,0,0.72)"
-            if is_dark
-            else "0 1px 2px rgba(255,255,255,0.92), 0 0 3px rgba(255,255,255,0.82)"
-        )
-        to_rgba = getattr(self, "_hex_to_rgba", StationsMapTab._hex_to_rgba)
-        callsign_chip_bg = to_rgba(theme.get("surface", "#171B21" if is_dark else "#F0F2F4"), 0.78 if is_dark else 0.84)
-        callsign_chip_border = to_rgba(theme.get("border", "#2A313A" if is_dark else "#D3D7DD"), 0.88 if is_dark else 0.80)
-        tooltip_bg = "#1A1F26" if is_dark else "#fff"
-        tooltip_text = "#E6E8EE" if is_dark else "#000"
-        tooltip_border = "#3A4452" if is_dark else "#444"
-        legend_bg = "rgba(26,31,38,0.92)" if is_dark else "rgba(255,255,255,0.92)"
-        legend_text = "#C6CBD4" if is_dark else "#000"
-        # Operational marker colors are semantic (severity, source and layer),
-        # but their palette still belongs to the active shared theme.  Keep the
-        # distinctions while deriving fills/outlines from the shared roles so
-        # Dark and Large-text map HTML does not carry a second hardcoded theme.
-        marker_text = theme["text"]
-        marker_muted = theme["text_muted"]
-        marker_surface = theme["surface_alt"]
-        marker_info = theme["info"]
-        marker_success = theme["success"]
-        marker_warning = theme["warning"]
-        marker_danger = theme["danger"]
-        marker_accent = theme["accent"]
-        marker_inverse = contrast_text_for_background(marker_text, theme)
-        marker_shadow = to_rgba(marker_text, 0.35)
-        marker_surface_faint = to_rgba(marker_surface, 0.85)
-        marker_info_faint = to_rgba(marker_info, 0.16)
-        marker_success_faint = to_rgba(marker_success, 0.16)
-        marker_warning_faint = to_rgba(marker_warning, 0.18)
-        marker_danger_faint = to_rgba(marker_danger, 0.18)
-        marker_accent_faint = to_rgba(marker_accent, 0.24)
-        marker_surface_transparent = to_rgba(marker_surface, 0.74)
-        marker_text_shadow = to_rgba(marker_text, 0.18)
-        marker_hover = to_rgba(marker_text, 0.12)
-        marker_hover_strong = to_rgba(marker_text, 0.14)
-        marker_count_font_px = max(10.0, 10.0 * float(ui_text_scale))
-        state_border = "#8A93A6" if is_dark else "#666"
-        state_border_opacity = "0.7" if is_dark else "0.5"
-        region_fill_opacity = "0.05" if is_dark else "0.08"
-        geojson_fetches = "\n".join(
-            [
-                f"""
-    fetch('{u}')
-      .then(r => r.json())
-      .then(data => {{
-        const regionCenters = {{}};
-        L.geoJSON(data, {{
-          style: function() {{
-            const props = arguments[0].properties || {{}};
-            const fullName = (props.STATE_NAME || props.name || props.state || '').toUpperCase();
-            let stateAbbr = (props.state_abbrev || props.state || '').toUpperCase();
-            if (stateAbbr && stateAbbr.length !== 2 && window.STATE_ABBR_FROM_NAME && window.STATE_ABBR_FROM_NAME[stateAbbr]) {{
-              stateAbbr = window.STATE_ABBR_FROM_NAME[stateAbbr];
-            }}
-            if (!stateAbbr && fullName && window.STATE_ABBR_FROM_NAME && window.STATE_ABBR_FROM_NAME[fullName]) {{
-              stateAbbr = window.STATE_ABBR_FROM_NAME[fullName];
-            }}
-            let reg = props.fema_region;
-            if (!reg && stateAbbr && window.FEMA_LOOKUP_ABBR && window.FEMA_LOOKUP_ABBR[stateAbbr]) {{
-              reg = window.FEMA_LOOKUP_ABBR[stateAbbr];
-            }}
-            if (!reg && fullName && window.FEMA_LOOKUP_NAME && window.FEMA_LOOKUP_NAME[fullName]) {{
-              reg = window.FEMA_LOOKUP_NAME[fullName];
-            }}
-            if (window.regionalIntelligenceEnabled) {{
-              const regionalStyle = regionalStateStyle(stateAbbr);
-              if (regionalStyle) return regionalStyle;
-            }}
-            if (window.propOverlayEnabled && !{str(self.show_regions).lower()}) {{
-              const st = stateAbbr || '';
-              const stEntry = st && window.propStateScores[st];
-              if (stEntry) {{
-                const bandColor = window.propBandColors[stEntry.band] || '#6D4C41';
-                const opacity = stEntry.level === 'high' ? 0.28 : (stEntry.level === 'med' ? 0.2 : 0.12);
-                return {{color: bandColor, weight: 1, opacity: 0.9, fillOpacity: opacity, fillColor: bandColor}};
-              }}
-            }}
-            if ({str(self.show_regions).lower()} && reg) {{
-              const color = regionColors[(parseInt(reg, 10) - 1) % regionColors.length];
-              return {{color: color, weight: 1, opacity: 0.8, fillOpacity: {region_fill_opacity}, fillColor: color}};
-            }} else {{
-              return {{color: '{state_border}', weight: 1, opacity: {state_border_opacity}, fillOpacity: 0}};
-            }}
-          }},
-          onEachFeature: function (feature, layer) {{
-            const props = feature.properties || {{}};
-            const fullName = (props.STATE_NAME || props.name || props.state || '').toUpperCase();
-            let stateAbbr = (props.state_abbrev || props.state || '').toUpperCase();
-            if (stateAbbr && stateAbbr.length !== 2 && window.STATE_ABBR_FROM_NAME && window.STATE_ABBR_FROM_NAME[stateAbbr]) {{
-              stateAbbr = window.STATE_ABBR_FROM_NAME[stateAbbr];
-            }}
-            if (!stateAbbr && fullName && window.STATE_ABBR_FROM_NAME && window.STATE_ABBR_FROM_NAME[fullName]) {{
-              stateAbbr = window.STATE_ABBR_FROM_NAME[fullName];
-            }}
-            const displayLabel = stateAbbr || (props.name || props.STATE_NAME || props.state);
-            if (window.regionalIntelligenceEnabled && stateAbbr) {{
-              const rollup = regionalStateRollup(stateAbbr);
-              if (regionalRollupIsActionable(rollup)) {{
-                layer.bindTooltip(regionalTooltipHtml(rollup), {{direction:'top', sticky:true, className:'cs-tooltip regional-rollup-tip'}});
-                layer.on('click', function(e) {{
-                  if (e && window.L && L.DomEvent) {{
-                    L.DomEvent.stop(e);
-                  }}
-                  openSelectedDetail(regionalDetailPayload(rollup));
-                }});
-              }}
-            }}
-            if ({str(self.show_states).lower()} && displayLabel) {{
-              const tooltip = L.tooltip({{direction:'center', permanent:true, className:'label-text no-border state-label'}});
-              tooltip.setContent(displayLabel);
-              layer.bindTooltip(tooltip);
-            }}
-            if ({str(self.show_states).lower()} && window.propOverlayEnabled) {{
-              const st = stateAbbr || '';
-              const stEntry = st && window.propStateScores[st];
-              if (stEntry) {{
-                const tip = stEntry.band + ' (' + stEntry.level.toUpperCase() + ')';
-                layer.on('mouseover', function() {{
-                  this.bindTooltip(tip, {{direction:'top', sticky:true}});
-                  this.openTooltip();
-                }});
-                layer.on('mouseout', function() {{
-                  this.closeTooltip();
-                }});
-              }}
-            }}
-            // FEMA region tooltip from state
-            if ({str(self.show_regions).lower()}) {{
-              const abbrev = (props.state_abbrev || props.state || props.name || '').toUpperCase();
-              const fullName = (props.STATE_NAME || props.name || props.state || '').toUpperCase();
-              let reg = null;
-              if (abbrev && window.FEMA_LOOKUP_ABBR && window.FEMA_LOOKUP_ABBR[abbrev]) {{
-                reg = window.FEMA_LOOKUP_ABBR[abbrev];
-              }} else if (fullName && window.FEMA_LOOKUP_NAME && window.FEMA_LOOKUP_NAME[fullName]) {{
-                reg = window.FEMA_LOOKUP_NAME[fullName];
-              }}
-              if (reg) {{
-                const labelTxt = 'R' + reg.toString().padStart(2,'0');
-                if (window.propOverlayEnabled) {{
-                  const st = stateAbbr || '';
-                  const stEntry = st && window.propStateScores[st];
-                  if (stEntry) {{
-                    const tip = stEntry.band + ' (' + stEntry.level.toUpperCase() + ')';
-                    layer.bindTooltip(tip);
-                  }} else if (window.propRegionScores[labelTxt]) {{
-                    const entry = window.propRegionScores[labelTxt];
-                    const tip = entry.band + ' (' + entry.level.toUpperCase() + ')';
-                    layer.bindTooltip(tip);
-                  }}
-                }}
-                // accumulate center per region
-                const c = layer.getBounds().getCenter();
-                const key = labelTxt;
-                if (!regionCenters[key]) {{
-                  regionCenters[key] = {{lat:0, lon:0, count:0}};
-                }}
-                regionCenters[key].lat += c.lat;
-                regionCenters[key].lon += c.lng;
-                regionCenters[key].count += 1;
-              }}
-            }}
-          }}
-        }}).addTo(map);
-        // Add a single label per region using averaged centers
-        if ({str(self.show_regions).lower()}) {{
-          // Force specific placements for clarity
-          regionCenters['R09'] = {{lat: 37.0, lon: -119.0, count: 1}}; // California
-          regionCenters['R10'] = {{lat: 47.5, lon: -121.5, count: 1}}; // Washington
-          Object.keys(regionCenters).forEach(k => {{
-            const entry = regionCenters[k];
-            const lat = entry.lat / entry.count;
-            const lon = entry.lon / entry.count;
-            const icon = L.divIcon({{className:'label-text no-border region-label', html: k, iconAnchor:[0,0]}});
-            const marker = L.marker([lat, lon], {{icon}});
-            if (window.propOverlayEnabled && window.propRegionScores[k]) {{
-              const entry = window.propRegionScores[k];
-              const tip = '<span style="white-space:nowrap;">' + entry.band + ' (' + entry.level.toUpperCase() + ')</span>';
-              marker.on('mouseover', function() {{
-                this.bindTooltip(tip, {{direction:'top', sticky:true}});
-                this.openTooltip();
-              }});
-              marker.on('mouseout', function() {{
-                this.closeTooltip();
-              }});
-              const bandIcon = L.divIcon({{className:'label-text no-border region-band-label', html: tip, iconAnchor:[0,-14]}});
-              regionLabelLayer.addLayer(L.marker([lat, lon], {{icon: bandIcon}}));
-            }}
-            regionLabelLayer.addLayer(marker);
-          }});
-          regionLabelLayer.addTo(map);
-        }}
-      }}).catch(err => console.error('GeoJSON load failed', err));
-                """
-                for u in geojson_urls
-            ]
-        )
-        show_cities_flag = str(bool(self.show_cities or show_city_labels)).lower()
-        show_city_labels_flag = str(show_city_labels).lower()
-        min_pop_val = int(city_min_pop)
-        fallback_cities = [{"name": n, "lat": la, "lon": lo, "pop": p} for n, la, lo, p in CITIES]
-        city_source = f"'{cities_geojson}'" if cities_geojson else "null"
-        city_js = f"""
-    const cityLayer = L.layerGroup();
-    let showCities = {show_cities_flag};
-    let showCityLabels = {show_city_labels_flag};
-    let minPop = {min_pop_val};
-    let cityLoadedThreshold = null;
-    const citySourceUrl = {city_source};
-    const fallbackCities = {json.dumps(fallback_cities)};
-
-    function cityPopulationThreshold() {{
-      const z = map.getZoom();
-      if (z < 6) return Math.max(minPop, 250000);
-      if (z < 8) return Math.max(minPop, 50000);
-      if (z < 10) return Math.max(minPop, 10000);
-      return Math.max(minPop, 1000);
-    }}
-
-    function escapeCityLabel(value) {{
-      return String(value || '').replace(/[&<>"']/g, function(c) {{
-        return {{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c];
-      }});
-    }}
-
-    function cityNameFromProperties(props) {{
-      return props.name || props.NAME || props.city || props.town || props.NAMEASCII || props.nameascii || '';
-    }}
-
-    function cityPopulationFromProperties(props) {{
-      const pop = props.pop || props.population || props.POPULATION || props.pop_max || props.pop_min || props.POP;
-      return Number(pop || 0);
-    }}
-
-    function addCityMarker(name, lat, lon, pop) {{
-      if (!name) return;
-      if (showCityLabels) {{
-        const icon = L.divIcon({{
-          className: 'label-text place-label',
-          html: escapeCityLabel(name),
-          iconSize: null,
-          iconAnchor: [0, 0]
-        }});
-        cityLayer.addLayer(L.marker([lat, lon], {{icon, interactive: false, pane: 'stationsPane'}}));
-      }} else {{
-        const marker = L.circleMarker([lat, lon], {{radius: Number(pop || 0) >= 50000 ? 4 : 3, color: '#1b4f72', weight: 1, fillColor: '#1b4f72', fillOpacity: 0.75}});
-        marker.bindTooltip(name, {{direction:'right'}});
-        cityLayer.addLayer(marker);
-      }}
-    }}
-
-    function loadCities() {{
-      const threshold = cityPopulationThreshold();
-      if (cityLayer._loaded && cityLoadedThreshold === threshold) return;
-      cityLayer._loaded = true;
-      cityLoadedThreshold = threshold;
-      cityLayer.clearLayers();
-      if (citySourceUrl) {{
-        fetch(citySourceUrl)
-          .then(r => r.json())
-          .then(data => {{
-            const layer = L.geoJSON(data, {{
-              filter: function(f) {{
-                const pop = cityPopulationFromProperties(f.properties || {{}});
-                return pop >= threshold;
-              }},
-              pointToLayer: function(feature, latlng) {{
-                const props = feature.properties || {{}};
-                const name = cityNameFromProperties(props);
-                const pop = cityPopulationFromProperties(props);
-                if (showCityLabels && name) {{
-                  const icon = L.divIcon({{className:'label-text place-label', html:escapeCityLabel(name), iconSize:null, iconAnchor:[0,0]}});
-                  return L.marker(latlng, {{icon, interactive:false, pane:'stationsPane'}});
-                }}
-                return L.circleMarker(latlng, {{radius: pop >= 50000 ? 4 : 3, color: '#1b4f72', weight: 1, fillColor: '#1b4f72', fillOpacity: 0.75}});
-              }},
-              onEachFeature: function(feature, layer) {{
-                const props = feature.properties || {{}};
-                const name = cityNameFromProperties(props);
-                if (name && !showCityLabels) {{
-                  layer.bindTooltip(name, {{direction:'right'}});
-                }}
-              }}
-            }});
-            cityLayer.addLayer(layer);
-            updateCityVisibility();
-          }})
-          .catch(err => console.error('City load failed', err));
-      }} else {{
-        fallbackCities.forEach(c => {{
-          if (c.pop >= threshold) {{
-            addCityMarker(c.name, c.lat, c.lon, c.pop);
-          }}
-        }});
-      }}
-    }}
-
-    function updateCityVisibility() {{
-      if (!showCities) {{
-        map.removeLayer(cityLayer);
-        return;
-      }}
-      if (map.getZoom() >= 5) {{
-        loadCities();
-        map.addLayer(cityLayer);
-      }} else {{
-        map.removeLayer(cityLayer);
-      }}
-    }}
-    function setCityConfig(config) {{
-      const nextShow = !!(config && config.show_cities);
-      const nextLabels = !!(config && config.show_city_labels);
-      const nextMinPop = Number(config && config.city_min_pop ? config.city_min_pop : minPop);
-      const changed = nextShow !== showCities || nextLabels !== showCityLabels || nextMinPop !== minPop;
-      showCities = nextShow;
-      showCityLabels = nextLabels;
-      minPop = nextMinPop;
-      if (changed) {{
-        cityLayer.clearLayers();
-        cityLayer._loaded = false;
-      }}
-      updateCityVisibility();
-    }}
-    map.on('zoomend', updateCityVisibility);
-    updateCityVisibility();
-            """
-        dark_map_filter = "filter: brightness(0.75) saturate(0.85) contrast(1.05);" if is_dark else ""
-        label_font_px = max(10.0, 10.0 * float(ui_text_scale))
-        state_label_font_px = max(10.0, 10.0 * float(ui_text_scale))
-        callsign_label_font_px = max(11.0, 11.0 * float(ui_text_scale))
-        region_label_font_px = max(12.0, 12.0 * float(ui_text_scale))
-        region_band_label_font_px = max(10.0, 10.0 * float(ui_text_scale))
-        panel_font_px = max(11.0, 11.0 * float(ui_text_scale))
-        legend_font_px = max(12.0, 12.0 * float(ui_text_scale))
-        return f"""
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>Stations Map</title>
-  <link rel="stylesheet" href="{leaflet_css}" />
-  <style>
-    html, body {{ height: 100%; margin: 0; padding: 0; }}
-    body {{ min-height: 100%; background: {theme.get("bg", legend_bg)}; }}
-    #map-shell {{ height: 100%; position: relative; display: flex; flex-direction: column; }}
-    #map-wrap {{ position: relative; flex: 1 1 auto; min-height: 0; }}
-    #map {{ height: 100%; {dark_map_filter} }}
-    #legendDock {{ position: absolute; left: 10px; right: 10px; bottom: 10px; z-index: 900; display: flex; justify-content: center; align-items: flex-end; gap: 8px; pointer-events: none; }}
-    #legendDock * {{ pointer-events: auto; }}
-    #legendDock.collapsed .legend-box {{ display: none; }}
-    .legend-toggle {{ background: {legend_bg}; color: {legend_text}; border: 1px solid {tooltip_border}; border-radius: 4px; padding: 6px 10px; font-size: {panel_font_px:.1f}px; font-weight: 700; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,0.25); }}
-    .label-text {{ font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; font-size: {label_font_px:.1f}px; line-height: 1; letter-spacing: 0; color: {label_color}; background: transparent; padding: 0; border: none; box-shadow: none; pointer-events: none; text-shadow: {label_halo}; white-space: nowrap; text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; }}
-    .label-text.no-border {{ background: transparent; border: none; box-shadow: none; pointer-events: none; }}
-    .state-label {{ color: {state_label_color}; font-size: {state_label_font_px:.1f}px; font-weight: 600; opacity: 0.88; text-transform: uppercase; }}
-    .region-label {{ color: {region_label_color}; font-size: {region_label_font_px:.1f}px; font-weight: 800; pointer-events: auto; }}
-    .callsign-label {{ color: {callsign_label_color}; font-size: {callsign_label_font_px:.1f}px; font-weight: 700; padding: 1px 4px; border: 1px solid {callsign_chip_border}; border-radius: 3px; background: {callsign_chip_bg}; box-shadow: 0 1px 2px rgba(0,0,0,0.18); pointer-events: auto; }}
-    .place-label {{ color: {label_color}; font-size: {label_font_px:.1f}px; font-weight: 650; padding: 1px 4px; border-radius: 3px; background: {marker_surface_transparent}; box-shadow: 0 1px 2px {marker_text_shadow}; pointer-events: none; }}
-    .region-band-label {{ color: {region_band_label_color}; font-size: {region_band_label_font_px:.1f}px; font-weight: 600; pointer-events: none; }}
-    .cs-tooltip {{ background: {tooltip_bg}; color: {tooltip_text}; border: 1px solid {tooltip_border}; padding: 5px 7px; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.4); z-index: 10000; }}
-    .leaflet-tooltip.cs-tooltip {{ z-index: 10000; pointer-events: none; }}
-    .leaflet-popup.cs-tooltip {{ z-index: 10001; }}
-    .fio-link-arrow {{ display: flex; align-items: center; justify-content: center; width: 18px; height: 18px; font-size: {callsign_label_font_px:.1f}px; font-weight: 900; line-height: {callsign_label_font_px:.1f}px; text-shadow: {label_halo}; pointer-events: none; }}
-    .detail-panel {{ background: {legend_bg}; color: {legend_text}; padding: 6px 8px; border: 1px solid {tooltip_border}; border-radius: 4px; width: 260px; max-width: calc(100vw - 34px); box-sizing: border-box; font-size: {panel_font_px:.1f}px; line-height: 1.35; white-space: normal; overflow-wrap: anywhere; word-break: normal; }}
-    .zoom-display {{ position: relative; padding: 0; font-size: {panel_font_px:.1f}px; background: {legend_bg}; color: {legend_text}; border: 1px solid {tooltip_border}; }}
-    .zoom-chip {{ display: block; min-width: 108px; border: 0; background: transparent; color: inherit; padding: 6px 9px; font: inherit; font-weight: 700; text-align: left; cursor: pointer; }}
-    .zoom-chip:hover {{ background: {marker_hover}; }}
-    .zoom-menu {{ display: none; position: absolute; right: 0; top: calc(100% + 4px); min-width: 156px; padding: 5px; border: 1px solid {tooltip_border}; border-radius: 4px; background: {legend_bg}; color: {legend_text}; box-shadow: 0 2px 8px rgba(0,0,0,0.28); z-index: 1200; }}
-    .zoom-display.open .zoom-menu {{ display: block; }}
-    .zoom-menu button {{ display: block; width: 100%; border: 0; border-radius: 3px; background: transparent; color: inherit; padding: 6px 8px; font: inherit; text-align: left; cursor: pointer; }}
-    .zoom-menu button:hover {{ background: {marker_hover_strong}; }}
-    .legend-box {{ background: {legend_bg}; color: {legend_text}; padding: 8px 12px; border: 1px solid {tooltip_border}; border-radius: 4px; font-size: {legend_font_px:.1f}px; line-height: 1.35; max-width: min(100%, 860px); box-sizing: border-box; }}
-    .summary-panel {{ background: {legend_bg}; color: {legend_text}; padding: 6px 8px; border: 1px solid {tooltip_border}; border-radius: 4px; font-size: {panel_font_px:.1f}px; line-height: 1.35; min-width: 180px; max-width: 240px; }}
-    .summary-region {{ margin-top: 6px; }}
-    .summary-region:first-of-type {{ margin-top: 4px; }}
-    .summary-region-header {{ font-weight: 700; color: {legend_text}; opacity: 0.95; margin-bottom: 3px; }}
-    .summary-row {{ display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }}
-    .summary-row + .summary-row {{ margin-top: 3px; }}
-    .summary-state {{ font-weight: 700; }}
-    .summary-counts {{ color: {legend_text}; opacity: 0.9; text-align: right; }}
-    .summary-muted {{ color: {legend_text}; opacity: 0.78; }}
-    .regional-rollup-tip {{ min-width: 190px; }}
-    .regional-rollup-title {{ font-weight: 800; margin-bottom: 3px; }}
-    .regional-rollup-meta {{ opacity: 0.9; }}
-    .regional-summary-panel {{ background: {legend_bg}; color: {legend_text}; padding: 7px 8px; border: 1px solid {tooltip_border}; border-radius: 4px; font-size: {panel_font_px:.1f}px; line-height: 1.3; width: 245px; max-width: calc(100vw - 34px); box-sizing: border-box; }}
-    .regional-summary-heading {{ display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-weight: 800; margin-bottom: 5px; }}
-    .regional-summary-heading-button {{ width: 100%; border: 0; border-radius: 3px; background: transparent; color: inherit; padding: 3px 4px; font: inherit; cursor: pointer; }}
-    .regional-summary-heading-button:hover {{ background: {marker_hover_strong}; }}
-    .regional-summary-meta {{ color: {legend_text}; opacity: 0.78; font-weight: 600; }}
-    .regional-summary-section {{ margin-top: 6px; }}
-    .regional-summary-section-title {{ color: {legend_text}; opacity: 0.85; font-weight: 700; margin-bottom: 3px; }}
-    .regional-summary-row {{ width: 100%; border: 0; border-radius: 3px; background: transparent; color: inherit; display: grid; grid-template-columns: auto 1fr; gap: 6px; align-items: start; text-align: left; padding: 4px; font: inherit; cursor: pointer; }}
-    .regional-summary-row:hover {{ background: {marker_hover_strong}; }}
-    .regional-summary-chip {{ width: 9px; height: 9px; border-radius: 2px; display: inline-block; margin-top: 5px; }}
-    .regional-summary-area {{ font-weight: 800; white-space: nowrap; }}
-    .regional-summary-detail {{ margin-top: 1px; opacity: 0.92; overflow-wrap: anywhere; }}
-    .regional-summary-count {{ margin-top: 1px; opacity: 0.78; font-size: 0.93em; }}
-    .regional-summary-overflow {{ margin: 4px 4px 0 19px; color: {legend_text}; opacity: 0.72; font-size: 0.92em; }}
-    .regional-summary-toggle {{ width: 100%; border: 0; border-radius: 3px; background: transparent; color: inherit; display: flex; justify-content: space-between; gap: 8px; padding: 3px 4px; font: inherit; font-weight: 800; cursor: pointer; }}
-    .regional-summary-toggle:hover {{ background: {marker_hover_strong}; }}
-    .regional-summary-panel.collapsed {{ width: auto; min-width: 150px; }}
-    .regional-summary-panel.collapsed .regional-summary-body {{ display: none; }}
-    .legend-rows {{ display: flex; flex-direction: column; align-items: center; gap: 8px; }}
-    .legend-row {{ display: inline-flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 14px; max-width: 100%; }}
-    .legend-label {{ font-weight: 700; white-space: nowrap; }}
-    .legend-sep {{ display: inline-block; width: 0; height: 12px; border-left: 1px solid {tooltip_border}; opacity: 0.55; }}
-    .legend-item {{ display: inline-flex; align-items: center; justify-content: center; gap: 5px; white-space: nowrap; }}
-    .legend-swatch {{ display: inline-block; min-width: 12px; text-align: center; }}
-    .wx-marker {{ width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 2px solid {marker_muted}; background: {marker_surface_faint}; box-shadow: 0 2px 6px {marker_shadow}; position: relative; box-sizing: border-box; }}
-    .wx-marker svg {{ width: 21px; height: 21px; display: block; }}
-    .wx-severe {{ border-color: {marker_danger}; }}
-    .wx-caution {{ border-color: {marker_warning}; }}
-    .wx-routine {{ border-color: {marker_info}; }}
-    .wx-unknown {{ border-color: {marker_muted}; }}
-    .wx-kind-general {{ background: {marker_surface_faint}; color: {marker_muted}; }}
-    .wx-kind-rain {{ background: {marker_info_faint}; color: {marker_info}; }}
-    .wx-kind-storm {{ background: {marker_danger_faint}; color: {marker_danger}; }}
-    .wx-kind-wind {{ background: {marker_success_faint}; color: {marker_success}; }}
-    .wx-kind-snow {{ background: {marker_info_faint}; color: {marker_info}; }}
-    .wx-kind-flood {{ background: {marker_info_faint}; color: {marker_info}; }}
-    .wx-kind-fire {{ background: {marker_danger_faint}; color: {marker_danger}; }}
-    .wx-kind-heat {{ background: {marker_warning_faint}; color: {marker_warning}; }}
-    .wx-count {{ position: absolute; right: -7px; top: -7px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: {marker_text}; color: {marker_inverse}; font-size: {marker_count_font_px:.1f}px; line-height: {marker_count_font_px:.1f}px; text-align: center; font-weight: 700; border: 1px solid {marker_surface}; box-sizing: border-box; }}
-    .op-marker {{ width: 34px; height: 34px; border-radius: 7px; display: flex; align-items: center; justify-content: center; border: 2px solid {marker_muted}; background: {marker_surface_faint}; box-shadow: 0 2px 6px {marker_shadow}; position: relative; box-sizing: border-box; }}
-    .op-marker svg {{ width: 21px; height: 21px; display: block; }}
-    .op-source-hf {{ border-radius: 7px; outline: 2px solid {marker_success_faint}; }}
-    .op-source-commstat {{ border-radius: 5px 12px 5px 12px; outline: 2px solid {marker_info_faint}; }}
-    .op-source-local {{ border-radius: 50% 50% 50% 8px; outline: 2px solid {marker_accent_faint}; transform: rotate(-45deg); }}
-    .op-source-local svg, .op-source-local .wx-count {{ transform: rotate(45deg); }}
-    .op-source-pin {{ border-radius: 5px; outline: 2px solid {marker_warning_faint}; background: {marker_warning_faint}; border-color: {marker_warning}; }}
-    .op-source-mixed {{ border-radius: 50%; outline: 2px solid {marker_accent_faint}; }}
-    .op-severe {{ border-color: {marker_danger}; }}
-    .op-caution {{ border-color: {marker_warning}; }}
-    .op-routine {{ border-color: {marker_info}; }}
-    .op-unknown {{ border-color: {marker_muted}; }}
-    .op-layer-alert {{ background: {marker_warning_faint}; color: {marker_warning}; }}
-    .op-layer-infrastructure {{ background: {marker_success_faint}; color: {marker_success}; }}
-    .op-kind-power {{ background: {marker_warning_faint}; color: {marker_warning}; }}
-    .op-kind-water {{ background: {marker_info_faint}; color: {marker_info}; }}
-    .op-kind-comms {{ background: {marker_info_faint}; color: {marker_info}; }}
-    .op-kind-transport {{ background: {marker_surface_faint}; color: {marker_muted}; }}
-    .op-kind-warning {{ background: {marker_warning_faint}; color: {marker_warning}; }}
-    .op-kind-evacuation {{ background: {marker_danger_faint}; color: {marker_danger}; }}
-    .op-kind-rfi {{ background: {marker_accent_faint}; color: {marker_accent}; }}
-    .op-kind-fire {{ background: {marker_danger_faint}; color: {marker_danger}; }}
-    .op-kind-medical {{ background: {marker_danger_faint}; color: {marker_danger}; }}
-    .op-kind-security {{ background: {marker_danger_faint}; color: {marker_danger}; }}
-    .op-kind-shelter {{ background: {marker_info_faint}; color: {marker_info}; }}
-    .op-kind-food {{ background: {marker_success_faint}; color: {marker_success}; }}
-    .op-kind-fuel {{ background: {marker_warning_faint}; color: {marker_warning}; }}
-    .op-kind-logistics {{ background: {marker_surface_faint}; color: {marker_muted}; }}
-    .op-kind-utility {{ background: {marker_success_faint}; color: {marker_success}; }}
-    .op-kind-storm {{ background: {marker_danger_faint}; color: {marker_danger}; }}
-    .op-kind-general {{ background: {marker_surface_faint}; color: {marker_muted}; }}
-  </style>
-</head>
-<body>
-  <div id="map-shell">
-    <div id="map-wrap">
-      <div id="map"></div>
-    </div>
-    <div id="legendDock" class="collapsed">
-      <button class="legend-toggle" id="legendToggle" type="button">Legend</button>
-      <div class="legend-box" id="legendBox"></div>
-    </div>
-  </div>
-  <script src="{leaflet_js}"></script>
-  <script>
-    window.FEMA_LOOKUP = {json.dumps({s:r[1:] for r,states in FEMA_REGIONS.items() for s in states})};
-    const regionColors = ['#1E88E5','#43A047','#FB8C00','#8E24AA','#00ACC1','#F4511E','#3949AB','#FB8C00','#6D4C41','#00897B'];
-    window.propOverlayEnabled = {str(bool(prop_overlay_enabled)).lower()};
-    window.propRegionScores = {json.dumps(prop_region_best)};
-    window.propStateScores = {json.dumps(prop_state_best)};
-    window.propBandColors = {json.dumps(prop_colors)};
-    let markers = {markers_json};
-    let links = {links_json};
-    let weatherEvents = {weather_events_json};
-    let alertEvents = {alert_events_json};
-    let infrastructureEvents = {infrastructure_events_json};
-    let sitrepStateSummary = {sitrep_state_summary_json};
-    let sitrepSummaryGroup = {sitrep_summary_group_json};
-    let regionalIntelligence = {regional_intelligence_json};
-    let mapMode = {map_mode_json};
-    let initialAutoFit = {auto_fit_json};
-    window.regionalIntelligenceEnabled = !!(regionalIntelligence && regionalIntelligence.enabled);
-    window.regionalSummaryCollapsed = {str(bool(getattr(self, "_regional_summary_collapsed", True))).lower()};
-    window.FEMA_LOOKUP_ABBR = {json.dumps({s:r[1:] for r,states in FEMA_REGIONS.items() for s in states})};
-    window.FEMA_LOOKUP_NAME = {json.dumps({US_STATE_NAMES[s]:r[1:] for r,states in FEMA_REGIONS.items() for s in states if s in US_STATE_NAMES})};
-    window.STATE_ABBR_FROM_NAME = {json.dumps({**US_STATE_ABBR_FROM_NAME, **CANADA_PROV_ABBR_FROM_NAME})};
-    if (typeof L === 'undefined') {{
-      document.getElementById('map').innerHTML = '<h3>Leaflet failed to load.</h3>';
-    }} else {{
-    const map = L.map('map', {{maxZoom: {max_zoom}}}).setView([{init_lat}, {init_lon}], {init_zoom});
-    // Dedicated pane for stations to keep them above overlays
-    map.createPane('stationsPane');
-    map.getPane('stationsPane').style.zIndex = 650;
-    map.getPane('stationsPane').style.pointerEvents = 'auto';
-    if (map.getPane('popupPane')) map.getPane('popupPane').style.zIndex = 1100;
-    if (map.getPane('tooltipPane')) map.getPane('tooltipPane').style.zIndex = 1200;
-    window._leafletMap = map;
-    window._lastView = {{lat: {init_lat}, lon: {init_lon}, zoom: {init_zoom}}};
-    window.centerMapOn = function(lat, lon, minZoom) {{
-      const targetLat = Number(lat);
-      const targetLon = Number(lon);
-      if (!Number.isFinite(targetLat) || !Number.isFinite(targetLon)) return false;
-      const targetZoom = Math.max(map.getZoom(), Number(minZoom || 6));
-      map.invalidateSize(true);
-      map.setView([targetLat, targetLon], targetZoom);
-      return true;
-    }};
-    {tile_layer}
-    const regionLabelLayer = L.layerGroup();
-    if ({str(self.show_regions).lower()}) {{
-      regionLabelLayer.addTo(map);
-    }}
-    // Zoom display and preset control
-    const ZoomDisplay = L.Control.extend({{
-      options: {{ position: 'topright' }},
-      onAdd: function() {{
-        const div = L.DomUtil.create('div', 'leaflet-bar zoom-display');
-        div.innerHTML = `
-          <button class="zoom-chip" type="button" title="Open zoom presets">Zoom: 0% \u25be</button>
-          <div class="zoom-menu" role="menu" aria-label="Map zoom presets">
-            <button type="button" data-zoom-preset="fit">Fit Results</button>
-            <button type="button" data-zoom-preset="station">Station</button>
-            <button type="button" data-zoom-preset="region">Region</button>
-            <button type="button" data-zoom-preset="north-america">North America</button>
-          </div>`;
-        L.DomEvent.disableClickPropagation(div);
-        L.DomEvent.disableScrollPropagation(div);
-        const chip = div.querySelector('.zoom-chip');
-        if (chip) {{
-          chip.addEventListener('click', function(event) {{
-            event.preventDefault();
-            div.classList.toggle('open');
-          }});
-        }}
-        div.querySelectorAll('[data-zoom-preset]').forEach(function(button) {{
-          button.addEventListener('click', function(event) {{
-            event.preventDefault();
-            div.classList.remove('open');
-            window.zoomPreset(button.getAttribute('data-zoom-preset') || '');
-          }});
-        }});
-        return div;
-      }}
-    }});
-    const zoomDisplay = new ZoomDisplay();
-    map.addControl(zoomDisplay);
-    function updateZoomDisplay() {{
-      const pct = Math.round((map.getZoom() / map.getMaxZoom()) * 100);
-      const el = document.querySelector('.zoom-display');
-      if (el) {{
-        const chip = el.querySelector('.zoom-chip');
-        if (chip) {{
-          chip.innerHTML = 'Zoom: ' + pct + '% \u25be';
-        }}
-      }}
-      const c = map.getCenter();
-      window._lastView = {{lat: c.lat, lon: c.lng, zoom: map.getZoom()}};
-    }}
-    map.on('zoomend', updateZoomDisplay);
-    map.on('moveend', updateZoomDisplay);
-    updateZoomDisplay();
-    function collectResultLatLngs() {{
-      const points = [];
-      (markers || []).forEach(function(m) {{
-        const lat = Number(m.lat);
-        const lon = Number(m.lon);
-        if (Number.isFinite(lat) && Number.isFinite(lon)) points.push([lat, lon]);
-      }});
-      (weatherEvents || []).forEach(function(e) {{
-        const lat = Number(e.lat);
-        const lon = Number(e.lon);
-        if (Number.isFinite(lat) && Number.isFinite(lon)) points.push([lat, lon]);
-      }});
-      (alertEvents || []).forEach(function(e) {{
-        const lat = Number(e.lat);
-        const lon = Number(e.lon);
-        if (Number.isFinite(lat) && Number.isFinite(lon)) points.push([lat, lon]);
-      }});
-      (infrastructureEvents || []).forEach(function(e) {{
-        const lat = Number(e.lat);
-        const lon = Number(e.lon);
-        if (Number.isFinite(lat) && Number.isFinite(lon)) points.push([lat, lon]);
-      }});
-      (links || []).forEach(function(l) {{
-        const lat1 = Number(l.lat1);
-        const lon1 = Number(l.lon1);
-        const lat2 = Number(l.lat2);
-        const lon2 = Number(l.lon2);
-        if (Number.isFinite(lat1) && Number.isFinite(lon1)) points.push([lat1, lon1]);
-        if (Number.isFinite(lat2) && Number.isFinite(lon2)) points.push([lat2, lon2]);
-      }});
-      return points;
-    }}
-    window.fitMapResults = function() {{
-      const points = collectResultLatLngs();
-      if (points.length === 0) {{
-        map.setView([45, -97], 3);
-        return false;
-      }}
-      if (points.length === 1) {{
-        map.setView(points[0], Math.max(map.getZoom(), 6));
-        return true;
-      }}
-      map.fitBounds(L.latLngBounds(points), {{padding: [28, 28], maxZoom: 8}});
-      return true;
-    }};
-    window.zoomPreset = function(name) {{
-      const preset = String(name || '').toLowerCase();
-      if (preset === 'fit') {{
-        window.fitMapResults();
-      }} else if (preset === 'station') {{
-        const points = collectResultLatLngs();
-        if (points.length > 0) {{
-          map.setView(points[0], Math.max(map.getZoom(), 7));
-        }}
-      }} else if (preset === 'region') {{
-        const fitted = window.fitMapResults();
-        if (!fitted) map.setView([39, -98], 5);
-      }} else if (preset === 'north-america') {{
-        map.setView([45, -97], 3);
-      }}
-    }};
-    {geojson_fetches}
-    {road_fetch}
-    {grid_layer}
-    L.control.zoom({{position:'topright'}}).addTo(map);
-    // USA outline frame
-    const frame = [[{USA_FRAME[0][0]}, {USA_FRAME[0][1]}], [{USA_FRAME[1][0]}, {USA_FRAME[1][1]}]];
-    L.rectangle(frame, {{color: '#444', weight: 1, fillOpacity: 0}}).addTo(map);
-
-    // Cities/towns overlay (pop filter)
-    {city_js}
-
-    // Hover stays lightweight; click opens the native right-side inspector.
-    function escapeHtml(value) {{
-      return String(value === undefined || value === null ? '' : value)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-    }}
-    function cleanMapDetailText(value) {{
-      let text = String(value === undefined || value === null ? '' : value);
-      for (let i = 0; i < 3; i++) {{
-        const decoded = text
-          .replace(/&gt;/g, '>')
-          .replace(/&lt;/g, '<')
-          .replace(/&amp;/g, '&');
-        if (decoded === text) break;
-        text = decoded;
-      }}
-      return text
-        .replace(/<br\\s*\\/?>/gi, '\\n')
-        .replace(/<[^>]+>/g, ' ')
-        .replace(/\\n{{3,}}/g, '\\n\\n')
-        .trim();
-    }}
-    function normalizeMapSourceLabel(value) {{
-      const raw = cleanMapDetailText(value);
-      const key = raw.toLowerCase().replace(/[_-]+/g, ' ').trim();
-      if (!key) return '';
-      if (['fused', 'mixed', 'multiple', 'multiple source', 'multiple sources'].includes(key)) return 'Multiple Sources';
-      if (key === 'js8spotter') return 'JS8Spotter';
-      if (key === 'js8call' || key === 'js8') return 'JS8Call';
-      if (key === 'flmsg') return 'FLMsg';
-      if (key === 'flamp') return 'FLAmp';
-      if (key === 'commstat') return 'CommStat';
-      if (key === 'varac') return 'VarAC';
-      if (key === 'rf pin' || key === 'pin' || key === 'planning pin') return 'Planning Pin';
-      return raw;
-    }}
-    function regionalLevelColor(level) {{
-      const key = String(level || '').toLowerCase();
-      if (key === 'red') return '#C62828';
-      if (key === 'orange') return '#EF6C00';
-      if (key === 'yellow') return '#FBC02D';
-      if (key === 'blue') return '#1E88E5';
-      if (key === 'green') return '#43A047';
-      return '#B0BEC5';
-    }}
-    function regionalLevelRank(level) {{
-      const key = String(level || '').toLowerCase();
-      if (key === 'red') return 5;
-      if (key === 'orange') return 4;
-      if (key === 'yellow') return 3;
-      if (key === 'blue') return 2;
-      if (key === 'green') return 1;
-      return 0;
-    }}
-    function regionalLevelForRank(rank) {{
-      if (rank >= 5) return 'red';
-      if (rank >= 4) return 'orange';
-      if (rank >= 3) return 'yellow';
-      if (rank >= 2) return 'blue';
-      if (rank >= 1) return 'green';
-      return 'gray';
-    }}
-    function regionalFillOpacity(level) {{
-      const key = String(level || '').toLowerCase();
-      if (key === 'red') return 0.52;
-      if (key === 'orange') return 0.42;
-      if (key === 'yellow') return 0.34;
-      if (key === 'blue') return 0.24;
-      if (key === 'green') return 0.18;
-      return 0.06;
-    }}
-    function regionalRollupIsActionable(rollup) {{
-      return regionalLevelRank(rollup && rollup.level) > regionalLevelRank('green');
-    }}
-    function regionalQuietStateStyle() {{
-      return {{color: '{state_border}', weight: 1, opacity: 0.45, fillOpacity: 0}};
-    }}
-    function regionalGreenStateStyle() {{
-      const color = regionalLevelColor('green');
-      return {{color: color, weight: 1.1, opacity: 0.75, fillOpacity: regionalFillOpacity('green'), fillColor: color}};
-    }}
-    function regionalStateRollup(stateAbbr) {{
-      const states = (regionalIntelligence && regionalIntelligence.states) || {{}};
-      return states[String(stateAbbr || '').toUpperCase()] || null;
-    }}
-    function regionalStateStyle(stateAbbr) {{
-      const rollup = regionalStateRollup(stateAbbr);
-      if (!regionalRollupIsActionable(rollup)) {{
-        return regionalGreenStateStyle();
-      }}
-      const color = regionalLevelColor(rollup.level);
-      return {{color: color, weight: 1.6, opacity: 0.95, fillOpacity: regionalFillOpacity(rollup.level), fillColor: color}};
-    }}
-    function regionalTopicSummary(rollup) {{
-      const topics = Array.isArray(rollup.top_topics) ? rollup.top_topics : [];
-      if (!topics.length) return '';
-      return topics.slice(0, 3).map(t => `${{t.topic || 'Topic'}} (${{t.level || 'watch'}})`).join(', ');
-    }}
-    function regionalTopicNames(rollup) {{
-      const topics = Array.isArray(rollup.top_topics) ? rollup.top_topics : [];
-      if (!topics.length) return '';
-      return topics.slice(0, 3).map(t => t.topic || 'Topic').join(', ');
-    }}
-    function regionalEvidenceSummary(rollup) {{
-      const evidence = Array.isArray(rollup.evidence) ? rollup.evidence : [];
-      if (!evidence.length) return '';
-      return evidence.slice(0, 4).map(e => {{
-        const who = e.reporter_callsign ? (e.reporter_callsign + ': ') : '';
-        const topic = e.topic ? ('[' + e.topic + '] ') : '';
-        return who + topic + (e.summary || e.source_family || 'Evidence');
-      }}).join('\\n');
-    }}
-    function regionalSourceMixText(rollup) {{
-      const mix = (rollup && rollup.source_mix) || {{}};
-      const order = ['RF Reports', 'RF Signal', 'CommStat', 'Local', 'Other'];
-      return order
-        .filter(label => Number(mix[label] || 0) > 0)
-        .map(label => `${{label}} ${{Number(mix[label] || 0)}}`)
-        .join(', ');
-    }}
-    function regionalAgeWindowLabel() {{
-      const seconds = Number((regionalIntelligence && regionalIntelligence.recency_seconds) || 0);
-      if (!seconds || seconds < 1) return 'All available history';
-      if (seconds < 3600) return `Last ${{Math.round(seconds / 60)}} min`;
-      if (seconds < 86400) return `Last ${{Number(seconds / 3600).toFixed(seconds % 3600 ? 1 : 0)}}h`;
-      return `Last ${{Number(seconds / 86400).toFixed(seconds % 86400 ? 1 : 0)}}d`;
-    }}
-    function regionalAgeText(hours) {{
-      if (hours === null || hours === undefined || Number.isNaN(Number(hours))) return '';
-      const value = Number(hours);
-      if (value < 1) return `${{Math.max(1, Math.round(value * 60))}} min ago`;
-      if (value < 24) return `${{value.toFixed(value < 10 ? 1 : 0)}}h ago`;
-      return `${{(value / 24).toFixed(value < 240 ? 1 : 0)}}d ago`;
-    }}
-    function regionalRollupsByScore(kind, limit) {{
-      const collection = kind === 'region'
-        ? ((regionalIntelligence && regionalIntelligence.regions) || {{}})
-        : ((regionalIntelligence && regionalIntelligence.states) || {{}});
-      return Object.values(collection)
-        .filter(Boolean)
-        .sort((a, b) => {{
-          const scoreDiff = Number(b.score || 0) - Number(a.score || 0);
-          if (scoreDiff !== 0) return scoreDiff;
-          return String(a.area_id || '').localeCompare(String(b.area_id || ''));
-        }})
-        .slice(0, limit);
-    }}
-    function regionalActionableRollupsByScore(kind, limit) {{
-      return regionalRollupsByScore(kind, 500)
-        .filter(regionalRollupIsActionable)
-        .slice(0, limit);
-    }}
-    function regionalActionableOverflowCount(kind, shownCount) {{
-      const count = regionalRollupsByScore(kind, 500).filter(regionalRollupIsActionable).length;
-      return Math.max(0, count - Number(shownCount || 0));
-    }}
-    function regionalNationalRollup() {{
-      const states = regionalRollupsByScore('state', 500);
-      if (!states.length) {{
-        return {{
-          area_type: 'national',
-          area_id: 'National',
-          label: 'National',
-          level: 'gray',
-          score: 0,
-          evidence_count: 0,
-          reporter_count: 0,
-          signal_count: 0,
-          trend: 'flat',
-          top_topics: [],
-          source_mix: {{}},
-          evidence: [],
-          state_list: []
-        }};
-      }}
-      const topicTotals = new Map();
-      const sourceMix = {{}};
-      let score = 0;
-      let evidenceCount = 0;
-      let reporterCount = 0;
-      let signalCount = 0;
-      let newest = null;
-      let rank = 0;
-      let increasing = false;
-      let fading = true;
-      const evidence = [];
-      const stateList = [];
-      states.forEach(s => {{
-        score = Math.max(score, Number(s.score || 0));
-        evidenceCount += Number(s.evidence_count || 0);
-        reporterCount += Number(s.reporter_count || 0);
-        signalCount += Number(s.signal_count || 0);
-        rank = Math.max(rank, regionalLevelRank(s.level));
-        if (s.trend === 'increasing') increasing = true;
-        if (s.trend !== 'fading') fading = false;
-        if (s.area_id) stateList.push(s.area_id);
-        const age = s.newest_age_hours;
-        if (age !== null && age !== undefined) newest = newest === null ? Number(age) : Math.min(newest, Number(age));
-        Object.entries(s.source_mix || {{}}).forEach(([label, count]) => {{
-          sourceMix[label] = Number(sourceMix[label] || 0) + Number(count || 0);
-        }});
-        (Array.isArray(s.top_topics) ? s.top_topics : []).forEach(t => {{
-          const key = t.topic || 'Topic';
-          const existing = topicTotals.get(key) || {{topic: key, score: 0, evidence_count: 0, reporter_count: 0, newest_age_hours: null, level: 'gray'}};
-          existing.score += Number(t.score || 0);
-          existing.evidence_count += Number(t.evidence_count || 0);
-          existing.reporter_count += Number(t.reporter_count || 0);
-          existing.level = regionalLevelRank(t.level) > regionalLevelRank(existing.level) ? t.level : existing.level;
-          if (t.newest_age_hours !== null && t.newest_age_hours !== undefined) {{
-            existing.newest_age_hours = existing.newest_age_hours === null ? Number(t.newest_age_hours) : Math.min(existing.newest_age_hours, Number(t.newest_age_hours));
-          }}
-          topicTotals.set(key, existing);
-        }});
-        (Array.isArray(s.evidence) ? s.evidence : []).slice(0, 2).forEach(item => evidence.push(item));
-      }});
-      const topTopics = Array.from(topicTotals.values()).sort((a, b) => Number(b.score || 0) - Number(a.score || 0)).slice(0, 5);
-      return {{
-        area_type: 'national',
-        area_id: 'National',
-        label: 'National',
-        level: regionalLevelForRank(rank),
-        score: score,
-        evidence_count: evidenceCount,
-        reporter_count: reporterCount,
-        signal_count: signalCount,
-        newest_age_hours: newest,
-        trend: increasing ? 'increasing' : (fading ? 'fading' : 'flat'),
-        top_topics: topTopics,
-        source_mix: sourceMix,
-        evidence: evidence.slice(0, 8),
-        state_list: stateList,
-        lat: 39,
-        lon: -98
-      }};
-    }}
-    function regionalSummaryRow(rollup) {{
-      const color = regionalLevelColor(rollup.level);
-      const level = String(rollup.level || 'activity').toUpperCase();
-      const topics = regionalTopicNames(rollup) || 'Evidence available';
-      const count = `${{rollup.evidence_count || 0}} reports from ${{rollup.reporter_count || 0}} stations`;
-      return `<button class="regional-summary-row" type="button" data-area-type="${{escapeHtml(rollup.area_type || '')}}" data-area-id="${{escapeHtml(rollup.area_id || '')}}">
-        <span class="regional-summary-chip" style="background:${{color}}"></span>
-        <span>
-          <span class="regional-summary-area">${{escapeHtml(rollup.area_id || rollup.label || 'Area')}} ${{escapeHtml(level)}}</span>
-          <span class="regional-summary-detail">${{escapeHtml(topics)}}</span>
-          <span class="regional-summary-count">${{escapeHtml(count)}}</span>
-        </span>
-      </button>`;
-    }}
-    function regionalFindRollup(areaType, areaId) {{
-      const key = String(areaId || '').toUpperCase();
-      if (!key) return null;
-      if (areaType === 'national') {{
-        return regionalNationalRollup();
-      }}
-      if (areaType === 'fema_region') {{
-        return ((regionalIntelligence && regionalIntelligence.regions) || {{}})[key] || null;
-      }}
-      return ((regionalIntelligence && regionalIntelligence.states) || {{}})[key] || null;
-    }}
-    function stateAbbrForFeature(feature) {{
-      const props = (feature && feature.properties) || {{}};
-      const fullName = (props.STATE_NAME || props.name || props.state || '').toUpperCase();
-      let stateAbbr = (props.state_abbrev || props.state || '').toUpperCase();
-      if (stateAbbr && stateAbbr.length !== 2 && window.STATE_ABBR_FROM_NAME && window.STATE_ABBR_FROM_NAME[stateAbbr]) {{
-        stateAbbr = window.STATE_ABBR_FROM_NAME[stateAbbr];
-      }}
-      if (!stateAbbr && fullName && window.STATE_ABBR_FROM_NAME && window.STATE_ABBR_FROM_NAME[fullName]) {{
-        stateAbbr = window.STATE_ABBR_FROM_NAME[fullName];
-      }}
-      return stateAbbr || '';
-    }}
-    function buildRegionalIntelSummaryHtml() {{
-      if (!window.regionalIntelligenceEnabled) return '';
-      const sensitivity = escapeHtml((regionalIntelligence && regionalIntelligence.sensitivity) || 'active');
-      const toggleLabel = window.regionalSummaryCollapsed ? 'Show' : 'Hide';
-      const toggle = '<button class="regional-summary-toggle" type="button" data-regional-summary-toggle="1"><span>Regional Intel</span><span class="regional-summary-meta">' + toggleLabel + '</span></button>';
-      const states = regionalActionableRollupsByScore('state', 5);
-      const regions = regionalActionableRollupsByScore('region', 3);
-      if (!states.length && !regions.length) {{
-        return toggle + '<div class="regional-summary-body"><div class="regional-summary-heading"><span>All Topics</span><span class="regional-summary-meta">No active evidence</span></div></div>';
-      }}
-      const topic = escapeHtml((regionalIntelligence && regionalIntelligence.topic_filter) || 'All Topics');
-      const stateRows = states.map(regionalSummaryRow).join('');
-      const regionRows = regions.map(regionalSummaryRow).join('');
-      const stateMore = regionalActionableOverflowCount('state', states.length);
-      const regionMore = regionalActionableOverflowCount('region', regions.length);
-      const stateMoreText = stateMore ? '<div class="regional-summary-overflow">+' + stateMore + ' more states in current filters</div>' : '';
-      const regionMoreText = regionMore ? '<div class="regional-summary-overflow">+' + regionMore + ' more FEMA regions in current filters</div>' : '';
-      return toggle + '<div class="regional-summary-body">' +
-        '<button class="regional-summary-heading regional-summary-heading-button" type="button" data-area-type="national" data-area-id="National"><span>National Summary</span><span class="regional-summary-meta">' + sensitivity + '</span></button>' +
-        '<div class="regional-summary-meta">' + topic + '</div>' +
-        (stateRows ? '<div class="regional-summary-section"><div class="regional-summary-section-title">States Needing Review</div>' + stateRows + stateMoreText + '</div>' : '') +
-        (regionRows ? '<div class="regional-summary-section"><div class="regional-summary-section-title">FEMA Regions Needing Review</div>' + regionRows + regionMoreText + '</div>' : '') +
-        '</div>';
-    }}
-    function regionalTooltipHtml(rollup) {{
-      const title = escapeHtml((rollup.label || rollup.area_id || 'Area') + ' ' + String(rollup.level || 'gray').toUpperCase());
-      const topics = escapeHtml(regionalTopicSummary(rollup) || 'No active topic drivers');
-      const meta = escapeHtml(`${{rollup.evidence_count || 0}} reports | ${{rollup.reporter_count || 0}} stations | trend ${{rollup.trend || 'flat'}}`);
-      const sourceMix = escapeHtml(regionalSourceMixText(rollup));
-      return `<div class="regional-rollup-title">${{title}}</div><div>${{topics}}</div><div class="regional-rollup-meta">${{meta}}</div>${{sourceMix ? `<div class="regional-rollup-meta">${{sourceMix}}</div>` : ''}}`;
-    }}
-    function regionalDetailPayload(rollup) {{
-      const topics = (Array.isArray(rollup.top_topics) ? rollup.top_topics : []).map(t => t.topic).filter(Boolean);
-      const primaryTopic = topics.length ? topics[0] : ((regionalIntelligence && regionalIntelligence.topic_filter) || '');
-      const areaType = String(rollup.area_type || '').toLowerCase();
-      const regionId = areaType === 'fema_region' ? rollup.area_id : rollup.fema_region;
-      const stateId = areaType === 'fema_region' ? '' : rollup.area_id;
-      const area = areaType === 'national'
-        ? 'National'
-        : areaType === 'fema_region'
-        ? [rollup.area_id, Array.isArray(rollup.state_list) ? rollup.state_list.join(', ') : ''].filter(Boolean).join(' / ')
-        : [rollup.area_id, rollup.fema_region].filter(Boolean).join(' / ');
-      return {{
-        action: 'select_detail',
-        type: 'regional_intelligence',
-        title: `${{rollup.label || rollup.area_id}} Regional Intelligence`,
-        route: `${{String(rollup.level || 'gray').toUpperCase()}} | ${{regionalIntelligence.sensitivity || 'active'}} | ${{primaryTopic || 'All Topics'}}`,
-        lat: rollup.lat,
-        lon: rollup.lon,
-        group: '',
-        topic: primaryTopic,
-        topics: topics,
-        area_type: areaType,
-        state: areaType === 'national' ? '' : stateId,
-        fema_region: regionId,
-        state_list: Array.isArray(rollup.state_list) ? rollup.state_list : [],
-        level: String(rollup.level || 'gray').toUpperCase(),
-        trend: rollup.trend || 'flat',
-        newest_age_hours: rollup.newest_age_hours,
-        age_window: regionalAgeWindowLabel(),
-        source_mix: rollup.source_mix || {{}},
-        evidence: Array.isArray(rollup.evidence) ? rollup.evidence : [],
-        top_topics: Array.isArray(rollup.top_topics) ? rollup.top_topics : [],
-        summary: regionalEvidenceSummary(rollup) || regionalTooltipHtml(rollup),
-        rows: [
-          detailRowPayload('Status', `${{String(rollup.level || 'gray').toUpperCase()}}${{rollup.trend ? ' / ' + rollup.trend : ''}}`),
-          detailRowPayload('Area', area),
-          detailRowPayload('Window', regionalAgeWindowLabel()),
-          detailRowPayload('Why', regionalTopicSummary(rollup) || 'Evidence is present but no dominant topic is established.'),
-          detailRowPayload('Evidence', `${{rollup.evidence_count || 0}} reports from ${{rollup.reporter_count || 0}} stations`),
-          detailRowPayload('Newest', regionalAgeText(rollup.newest_age_hours)),
-          detailRowPayload('Topics', topics.join(', ')),
-          detailRowPayload('Sources', regionalSourceMixText(rollup)),
-          detailRowPayload('Next', 'Open Messages to review matching non-green reports for this area and age window.')
-        ].filter(Boolean)
-      }};
-    }}
-    function refreshRegionalBoundaryInteractions() {{
-      if (!map || !map.eachLayer) return;
-      map.eachLayer(function(layer) {{
-        if (!layer || !layer.feature || !layer.setStyle) return;
-        const stateAbbr = stateAbbrForFeature(layer.feature);
-        if (!stateAbbr) return;
-        const rollup = window.regionalIntelligenceEnabled ? regionalStateRollup(stateAbbr) : null;
-        if (layer._fioRegionalClickHandler) {{
-          layer.off('click', layer._fioRegionalClickHandler);
-          layer._fioRegionalClickHandler = null;
-        }}
-        if (window.regionalIntelligenceEnabled) {{
-          try {{ layer.setStyle(regionalStateStyle(stateAbbr)); }} catch (e) {{}}
-        }}
-        if (!regionalRollupIsActionable(rollup)) {{
-          try {{
-            const el = layer.getElement && layer.getElement();
-            if (el) el.style.cursor = '';
-          }} catch (e) {{}}
-          return;
-        }}
-        try {{ layer.bindTooltip(regionalTooltipHtml(rollup), {{direction:'top', sticky:true, className:'cs-tooltip regional-rollup-tip'}}); }} catch (e) {{}}
-        layer._fioRegionalClickHandler = function(e) {{
-          if (e && window.L && L.DomEvent) {{
-            L.DomEvent.stop(e);
-          }}
-          const latestRollup = regionalStateRollup(stateAbbr);
-          if (latestRollup) openSelectedDetail(regionalDetailPayload(latestRollup));
-        }};
-        layer.on('click', layer._fioRegionalClickHandler);
-        try {{
-          const el = layer.getElement && layer.getElement();
-          if (el) el.style.cursor = 'pointer';
-        }} catch (e) {{}}
-      }});
-    }}
-	    function openSelectedDetail(payload) {{
-      try {{
-        if (map && map.closePopup) {{
-          map.closePopup();
-        }}
-        document.querySelectorAll('.leaflet-popup').forEach(function(el) {{
-          if (el && el.parentNode) el.parentNode.removeChild(el);
-        }});
-      }} catch (e) {{}}
-      emitMapAction('select_detail', payload || {{}});
-	    }}
-    function detailRowPayload(label, value) {{
-      const cleaned = cleanMapDetailText(value);
-      if (cleaned.trim() === '') return null;
-      return {{label: label, value: cleaned}};
-    }}
-    function emitMapAction(action, payload) {{
-      try {{
-        const body = Object.assign({{}}, payload || {{}}, {{action: action}});
-        body._nonce = Date.now() + ':' + Math.random().toString(16).slice(2);
-        document.title = 'fio-map-action:' + encodeURIComponent(JSON.stringify(body));
-      }} catch (e) {{}}
-    }}
-    function stationDetailPayload(m) {{
-      const call = m.callsign || (m.title || '').split('\\n')[0] || 'Station';
-      const group = m.group || m.spotter_status_group || '';
-      const groups = Array.isArray(m.groups) ? m.groups.filter(Boolean) : (group ? [group] : []);
-      const area = [m.state, m.grid].filter(Boolean).join(' / ');
-      const modeText = Array.isArray(m.modes) ? m.modes.join(', ') : (m.modes || '');
-      const useText = Array.isArray(m.app_uses) ? m.app_uses.join(', ') : (m.app_uses || '');
-      const detectedText = m.detected || [
-        modeText ? ('Traffic: ' + modeText) : '',
-        useText ? ('Uses: ' + useText) : ''
-      ].filter(Boolean).join('; ');
-      const activityBits = [
-        m.last_band ? ('JS8Call ' + m.last_band) : '',
-        m.varac_last_band ? ('VarAC ' + m.varac_last_band) : '',
-        m.last_contact_band ? ('Contact ' + m.last_contact_band) : ''
-      ].filter(Boolean).join(' | ');
-      const js8SnrBits = [
-        m.direct_snr !== undefined && m.direct_snr !== null ? ('direct ' + formatSnr(m.direct_snr)) : '',
-        m.avg_snr_excl_my !== undefined && m.avg_snr_excl_my !== null ? ('network avg ' + formatSnr(m.avg_snr_excl_my)) : ''
-      ].filter(Boolean).join(' / ');
-      const js8ContactBits = [
-        m.last_contact || '',
-        m.last_contact_band ? ('band ' + m.last_contact_band) : '',
-        m.last_contact_snr !== undefined && m.last_contact_snr !== null ? ('SNR ' + formatSnr(m.last_contact_snr)) : ''
-      ].filter(Boolean).join(' | ');
-      const varacBits = [
-        m.varac_last_seen || '',
-        m.varac_last_band ? ('band ' + m.varac_last_band) : '',
-        m.varac_avg_snr !== undefined && m.varac_avg_snr !== null ? ('avg SNR ' + formatSnr(m.varac_avg_snr)) : ''
-      ].filter(Boolean).join(' | ');
-      const markerMeaningByStatus = {{
-        green: 'Green: latest status is functioning',
-        yellow: 'Yellow: latest status needs attention',
-        red: 'Red: latest status reports a problem',
-        unknown: 'Blue: no current status report'
-      }};
-      const statusKey = String(m.spotter_status_key || 'unknown').toLowerCase();
-      const markerMeaning = markerMeaningByStatus[statusKey] || markerMeaningByStatus.unknown;
-      const route = [call, group].filter(Boolean).join(' | ');
-      const summary = m.spotter_map_summary || m.spotter_status_brevity || m.qsy_text || '';
-      return {{
-        action: 'select_detail',
-        type: 'station',
-        source_family: m.spotter_status_source || '',
-        title: call,
-        route: route,
-        lat: m.lat,
-        lon: m.lon,
-        group: group,
-        groups: groups,
-        topic: '',
-        summary: summary,
-        rows: [
-          detailRowPayload('Name', m.name),
-          detailRowPayload('Area', area),
-          detailRowPayload('FEMA Region', m.fema_region),
-          detailRowPayload('Groups', groups.join(', ')),
-          detailRowPayload('Detected', detectedText),
-          detailRowPayload('Modes', modeText),
-          detailRowPayload('Activity', activityBits),
-          detailRowPayload('SitRep', m.spotter_status_label),
-          detailRowPayload('Marker', markerMeaning),
-          detailRowPayload('Updated', m.spotter_status_age || m.spotter_status_ts),
-          detailRowPayload('Source', normalizeMapSourceLabel(m.spotter_status_source || m.spotter_status_source_chips)),
-          detailRowPayload('Schedule', m.qsy_text),
-          detailRowPayload('JS8 Heard', m.last_seen || m.last_spotter),
-          detailRowPayload('JS8 Contact', js8ContactBits),
-          detailRowPayload('JS8 SNR', js8SnrBits),
-          detailRowPayload('VarAC Heard', varacBits),
-          detailRowPayload('Trust', m.trusted ? 'Trusted roster entry' : ''),
-          detailRowPayload('Form', m.spotter_map_form)
-        ].filter(Boolean)
-      }};
-    }}
-    function compactStationTooltip(m) {{
-      const call = m.callsign || (m.title || '').split('\\n')[0] || 'Station';
-      const group = m.group || m.spotter_status_group || '';
-      const area = [m.state, m.grid].filter(Boolean).join(' / ');
-      const report = m.spotter_map_form || m.spotter_status_label || '';
-      return [call, group, area, report].filter(Boolean).map(escapeHtml).join(' | ');
-    }}
-    function reportDetailPayload(event, fallbackTitle) {{
-      const title = event.title || fallbackTitle || 'Report';
-      const source = normalizeMapSourceLabel(event.source_mix || event.source_kind || '');
-      const sourceFamily = event.source_family || event.primary_source_family || '';
-      const group = event.primary_group || (Array.isArray(event.groups) && event.groups.length ? event.groups[0] : '');
-      const topic = event.primary_topic || (Array.isArray(event.topics) && event.topics.length ? event.topics[0] : '');
-      const calls = Array.isArray(event.callsigns) ? event.callsigns.filter(Boolean) : [];
-      const callLabel = event.call_label || (calls.length === 1 ? calls[0] : (calls.length ? (calls[0] + ' +' + (calls.length - 1)) : ''));
-      const reportedBy = event.reported_by || callLabel;
-      const reportedFor = [event.reported_for_state || event.state, event.reported_for_grid || event.grid].filter(Boolean).join(' / ');
-      const area = [event.state, event.grid].filter(Boolean).join(' / ');
-      const route = event.route || [group, topic, callLabel ? ('from ' + callLabel) : ''].filter(Boolean).join(' | ');
-      return {{
-        action: 'select_detail',
-        type: 'report',
-        source_family: sourceFamily,
-        title: title,
-        route: route,
-        lat: event.lat,
-        lon: event.lon,
-        group: group,
-        topic: topic,
-        groups: event.groups || [],
-        topics: event.topics || [],
-        state: event.state || '',
-        grid: event.grid || '',
-        reported_for_state: event.reported_for_state || '',
-        reported_for_grid: event.reported_for_grid || '',
-        reported_by: reportedBy,
-        scope: event.scope || '',
-        state_confidence: event.state_confidence || '',
-        geo_confidence: event.geo_confidence || '',
-        to_target: event.to_target || '',
-        source_ref: event.source_ref || '',
-        source_refs: event.source_refs || [],
-        metadata_path: event.metadata_path || '',
-        callsigns: calls,
-        callsign: event.callsign || (calls.length === 1 ? calls[0] : ''),
-        call_label: callLabel,
-        summary: cleanMapDetailText(event.summary || event.tooltip || title),
-        rows: [
-          detailRowPayload('MCF', title),
-          detailRowPayload('Reports', event.count),
-          detailRowPayload('Status', event.severity),
-          detailRowPayload('Age', event.age),
-          detailRowPayload('Source', source),
-          detailRowPayload('Reporter', reportedBy),
-          detailRowPayload('Groups', Array.isArray(event.groups) ? event.groups.join(', ') : ''),
-          detailRowPayload('Topics', Array.isArray(event.topics) ? event.topics.join(', ') : ''),
-          detailRowPayload('From', calls.join(', ')),
-          detailRowPayload('Report Scope', event.scope || ''),
-          detailRowPayload('Reported For', reportedFor),
-          detailRowPayload('Area', area),
-          detailRowPayload('Location', area)
-        ].filter(Boolean)
-      }};
-    }}
-
-    function buildSitrepSummaryHtml(rows, groupName) {{
-      if (!rows || !rows.length) {{
-        return '';
-      }}
-      const totals = (rows || []).reduce((acc, r) => {{
-        acc.callsign_count += (r.callsign_count || 0);
-        acc.red_count += (r.red_count || 0);
-        acc.yellow_count += (r.yellow_count || 0);
-        acc.green_count += (r.green_count || 0);
-        return acc;
-      }}, {{callsign_count: 0, red_count: 0, yellow_count: 0, green_count: 0}});
-      const topIssues = (rows || [])
-        .filter(r => (Number(r.red_count || 0) + Number(r.yellow_count || 0)) > 0)
-        .sort((a, b) => {{
-          const aScore = Number(a.red_count || 0) * 3 + Number(a.yellow_count || 0);
-          const bScore = Number(b.red_count || 0) * 3 + Number(b.yellow_count || 0);
-          return bScore - aScore;
-        }})
-        .slice(0, 4)
-        .map(r => {{
-          const stateCode = escapeHtml(String(r.state_code || '').toUpperCase());
-          const counts = [
-            r.red_count ? ('R' + Number(r.red_count || 0)) : '',
-            r.yellow_count ? ('Y' + Number(r.yellow_count || 0)) : '',
-            r.green_count ? ('G' + Number(r.green_count || 0)) : ''
-          ].filter(Boolean).join(' ');
-          return '<div class="summary-row"><span class="summary-state">' + stateCode + '</span><span class="summary-counts">' + escapeHtml(counts) + '</span></div>';
-        }})
-        .join('');
-      const scope = groupName ? ('Group: ' + escapeHtml(groupName)) : 'All Groups';
-      const totalsLine = [
-        totals.red_count ? ('Red ' + totals.red_count) : '',
-        totals.yellow_count ? ('Yellow ' + totals.yellow_count) : '',
-        totals.green_count ? ('Green ' + totals.green_count) : ''
-      ].filter(Boolean).join(' | ') || 'No known status reports';
-      return '<b>Station Status</b><br/>' +
-        '<span class="summary-muted">' + scope + '</span><br/>' +
-        escapeHtml(totals.callsign_count + ' stations with known status') + '<br/>' +
-        '<span class="summary-muted">' + escapeHtml(totalsLine) + '</span>' +
-        (topIssues ? '<div class="summary-region">' + topIssues + '</div>' : '');
-    }}
-
-    const sitrepSummaryPanel = L.control({{position: 'bottomleft'}});
-    sitrepSummaryPanel.onAdd = function() {{
-      this._div = L.DomUtil.create('div', 'summary-panel');
-      this._div.innerHTML = buildSitrepSummaryHtml(sitrepStateSummary, sitrepSummaryGroup);
-      this._div.style.display = (sitrepStateSummary && sitrepStateSummary.length) ? 'block' : 'none';
-      return this._div;
-    }};
-    sitrepSummaryPanel.addTo(map);
-    function updateSitrepSummaryPanel(rows, groupName) {{
-      const el = document.querySelector('.summary-panel');
-      if (el) {{
-        el.style.display = (rows && rows.length) ? 'block' : 'none';
-        el.innerHTML = buildSitrepSummaryHtml(rows || [], groupName || '');
-      }}
-    }}
-
-    const regionalSummaryPanel = L.control({{position: 'bottomleft'}});
-    regionalSummaryPanel.onAdd = function() {{
-      this._div = L.DomUtil.create('div', 'regional-summary-panel');
-      L.DomEvent.disableClickPropagation(this._div);
-      L.DomEvent.disableScrollPropagation(this._div);
-      this._div.innerHTML = buildRegionalIntelSummaryHtml();
-      if (window.regionalSummaryCollapsed) this._div.classList.add('collapsed');
-      this._div.style.display = window.regionalIntelligenceEnabled ? 'block' : 'none';
-      this._div.addEventListener('click', function(e) {{
-        const toggle = e.target && e.target.closest ? e.target.closest('[data-regional-summary-toggle]') : null;
-        if (toggle) {{
-          window.regionalSummaryCollapsed = !window.regionalSummaryCollapsed;
-          this.classList.toggle('collapsed', window.regionalSummaryCollapsed);
-          this.innerHTML = buildRegionalIntelSummaryHtml();
-          emitMapAction('regional_summary_collapsed', {{collapsed: window.regionalSummaryCollapsed}});
-          return;
-        }}
-        const row = e.target && e.target.closest ? e.target.closest('.regional-summary-row, .regional-summary-heading-button') : null;
-        if (!row) return;
-        const rollup = regionalFindRollup(row.getAttribute('data-area-type'), row.getAttribute('data-area-id'));
-        if (rollup) {{
-          openSelectedDetail(regionalDetailPayload(rollup));
-        }}
-      }});
-      return this._div;
-    }};
-    regionalSummaryPanel.addTo(map);
-    function updateRegionalIntelSummaryPanel() {{
-      const el = document.querySelector('.regional-summary-panel');
-      if (el) {{
-        el.style.display = window.regionalIntelligenceEnabled ? 'block' : 'none';
-        el.classList.toggle('collapsed', !!window.regionalSummaryCollapsed);
-        el.innerHTML = buildRegionalIntelSummaryHtml();
-      }}
-    }}
-
-    // Legend for link colors
-    function linkColor(val) {{
-      if (val === null || val === undefined || isNaN(val)) return '#607d8b';
-      if (val >= 5) return '#1b5e20';
-      if (val >= 0) return '#2e7d32';
-      if (val >= -5) return '#fbc02d';
-      if (val >= -10) return '#f57c00';
-      return '#c62828';
-    }}
-    function formatSnr(value) {{
-      if (value === null || value === undefined || value === '') return '--';
-      const n = Number(value);
-      if (!Number.isFinite(n)) return String(value);
-      return String(Math.round(n));
-    }}
-    function linkBearingDeg(lat1, lon1, lat2, lon2) {{
-      const phi1 = Number(lat1) * Math.PI / 180.0;
-      const phi2 = Number(lat2) * Math.PI / 180.0;
-      const lambda1 = Number(lon1) * Math.PI / 180.0;
-      const lambda2 = Number(lon2) * Math.PI / 180.0;
-      const y = Math.sin(lambda2 - lambda1) * Math.cos(phi2);
-      const x = Math.cos(phi1) * Math.sin(phi2) -
-        Math.sin(phi1) * Math.cos(phi2) * Math.cos(lambda2 - lambda1);
-      if (!Number.isFinite(x) || !Number.isFinite(y)) return 0;
-      return (Math.atan2(y, x) * 180.0 / Math.PI + 360.0) % 360.0;
-    }}
-    function legendItem(color, symbol, label) {{
-      return '<div class="legend-item"><span class="legend-swatch" style="color:' + color + ';">' + symbol + '</span><span>' + label + '</span></div>';
-    }}
-    function legendRow(label, items) {{
-      const body = items.map(function(item, idx) {{
-        return (idx ? '<span class="legend-sep"></span>' : '') + item;
-      }}).join('');
-      return '<div class="legend-row"><span class="legend-label">' + label + '</span>' + body + '</div>';
-    }}
-    let nowReachableEnabled = {now_reachable_enabled};
-    let linkDirectionMarkers = {link_direction_markers_enabled};
-    const propOverlayLegendEnabled = {'true' if prop_overlay_enabled else 'false'};
-    function buildLegendHtml(showPeerSchedNow) {{
-      const rows = [];
-      const mode = String(mapMode || '').toLowerCase();
-      if (mode === 'regional' && window.regionalIntelligenceEnabled) {{
-        rows.push(legendRow('Regional Concern:', [
-          legendItem(regionalLevelColor('blue'), '&#9632;', 'Activity'),
-          legendItem(regionalLevelColor('yellow'), '&#9632;', 'Watch'),
-          legendItem(regionalLevelColor('orange'), '&#9632;', 'Concern'),
-          legendItem(regionalLevelColor('red'), '&#9632;', 'Severe'),
-          legendItem(regionalLevelColor('gray'), '&#9632;', 'No Data')
-        ]));
-      }}
-      if (mode === 'paths' || links.length || linkDirectionMarkers) {{
-        rows.push(legendRow('Link SNR:', [
-          legendItem(linkColor(5), '&#9632;', '&gt;= 5'),
-          legendItem(linkColor(0), '&#9632;', '0 to &lt;5'),
-          legendItem(linkColor(-5), '&#9632;', '-5 to &lt;0'),
-          legendItem(linkColor(-6), '&#9632;', '-10 to &lt;-5'),
-          legendItem(linkColor(-11), '&#9632;', '&lt; -10')
-        ]));
-      }}
-      if (mode === 'sitrep' || mode === 'all' || mode === 'peer') {{
-        const stationStatusItems = [
-          legendItem('#43A047', '&#9679;', 'Functioning'),
-          legendItem('#FBC02D', '&#9679;', 'Partially Functioning'),
-          legendItem('#D32F2F', '&#9679;', 'Not Functioning')
-        ];
-        if (mode !== 'sitrep') {{
-          stationStatusItems.push(legendItem('#4FC3F7', '&#9679;', 'Unknown / No Report'));
-        }}
-        const stationStatusAlias = 'Station Status:';
-        rows.push(legendRow('SitRep Status:', stationStatusItems));
-      }}
-      if (showPeerSchedNow) {{
-        rows.push(legendRow('Peer Sched Now:', [
-          legendItem('#2E7D32', '&#9679;', 'NOW'),
-          legendItem('#1E88E5', '&#9679;', 'Later Today'),
-          legendItem('#7E57C2', '&#9679;', 'QSY &lt;10m')
-        ]));
-      }}
-      if (mode === 'reports' || mode === 'hf' || mode === 'local' || mode === 'regional') {{
-        rows.push(legendRow('Report Source:', [
-          legendItem('#00695C', '&#9632;', 'HF'),
-          legendItem('#00838F', '&#9632;', 'CommStat'),
-          legendItem('#5E35B1', '&#9670;', 'Local'),
-          legendItem('#455A64', '&#9679;', 'Mixed')
-        ]));
-      }}
-      if (propOverlayLegendEnabled) {{
-        rows.push(legendRow(
-          'Best Band Now:',
-          Object.keys(window.propBandColors).map(k => legendItem(window.propBandColors[k], '&#9632;', k))
-        ));
-      }}
-      return '<div class="legend-rows">' + rows.join('') + '</div>';
-    }}
-    function updateLegend() {{
-      const legendEl = document.getElementById('legendBox');
-      if (legendEl) {{
-        legendEl.innerHTML = buildLegendHtml(nowReachableEnabled);
-      }}
-    }}
-    updateLegend();
-    const legendDock = document.getElementById('legendDock');
-    const legendToggle = document.getElementById('legendToggle');
-    if (legendDock && legendToggle) {{
-      legendToggle.addEventListener('click', function() {{
-        const collapsed = legendDock.classList.toggle('collapsed');
-        legendToggle.textContent = collapsed ? 'Legend' : 'Hide Legend';
-      }});
-    }}
-
-    const stationsLayer = L.layerGroup().addTo(map);
-    const linksLayer = L.layerGroup().addTo(map);
-    const weatherLayer = L.layerGroup().addTo(map);
-    const alertLayer = L.layerGroup().addTo(map);
-    const infrastructureLayer = L.layerGroup().addTo(map);
-    const layerCaches = {{
-      stations: new Map(),
-      links: new Map(),
-      weather: new Map(),
-      alert: new Map(),
-      infrastructure: new Map()
-    }};
-
-    function stableItemKey(item, prefix, index) {{
-      const parts = [
-        item && (item.source_ref || item.id || item.key || item.callsign || item.name || item.label),
-        item && item.source_family,
-        item && item.lat,
-        item && item.lon,
-        item && item.lat1,
-        item && item.lon1,
-        item && item.lat2,
-        item && item.lon2
-      ].filter(v => v !== undefined && v !== null && String(v).trim() !== '');
-      if (parts.length) return prefix + ':' + parts.map(v => String(v)).join('|');
-      return prefix + ':idx:' + String(index);
-    }}
-
-    function stableItemSignature(item) {{
-      try {{
-        return JSON.stringify(item || {{}});
-      }} catch (e) {{
-        return String(item || '');
-      }}
-    }}
-
-    function reconcileLayer(layer, cacheName, list, prefix, buildItemLayer) {{
-      const cache = layerCaches[cacheName] || new Map();
-      layerCaches[cacheName] = cache;
-      const seen = new Set();
-      (list || []).forEach(function(item, index) {{
-        const key = stableItemKey(item || {{}}, prefix, index);
-        const sig = stableItemSignature(item || {{}});
-        seen.add(key);
-        const cached = cache.get(key);
-        if (cached && cached.sig === sig) {{
-          return;
-        }}
-        if (cached && cached.layer) {{
-          layer.removeLayer(cached.layer);
-        }}
-        const itemLayer = buildItemLayer(item || {{}}, index);
-        if (!itemLayer) {{
-          cache.delete(key);
-          return;
-        }}
-        layer.addLayer(itemLayer);
-        cache.set(key, {{sig: sig, layer: itemLayer}});
-      }});
-      Array.from(cache.keys()).forEach(function(key) {{
-        if (!seen.has(key)) {{
-          const cached = cache.get(key);
-          if (cached && cached.layer) {{
-            layer.removeLayer(cached.layer);
-          }}
-          cache.delete(key);
-        }}
-      }});
-    }}
-
-    function weatherSvg(kind) {{
-      const common = "fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'";
-      if (kind === 'storm') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M7 18a4 4 0 1 1 .9-7.9A6 6 0 0 1 19 12.5 3.5 3.5 0 0 1 18 19h-2"/><path ${{common}} d="M13 13l-3 5h4l-2 4"/></svg>`;
-      if (kind === 'rain') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M7 17a4 4 0 1 1 .9-7.9A6 6 0 0 1 19 11.5 3.5 3.5 0 0 1 18 18H8"/><path ${{common}} d="M8 21l1-2M13 21l1-2M18 21l1-2"/></svg>`;
-      if (kind === 'wind') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M3 8h12a3 3 0 1 0-3-3"/><path ${{common}} d="M3 13h16a3 3 0 1 1-3 3"/><path ${{common}} d="M3 18h8"/></svg>`;
-      if (kind === 'snow') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M12 2v20M4.9 4.9l14.2 14.2M2 12h20M4.9 19.1L19.1 4.9"/></svg>`;
-      if (kind === 'fire') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M12 22c4 0 7-3 7-7 0-3-2-5-4-7 .2 2-.8 3.2-2 4-1-4-4-6-4-9-3 2-5 6-5 10 0 5 3.5 9 8 9z"/></svg>`;
-      if (kind === 'flood') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M3 16c2 0 2-1 4-1s2 1 4 1 2-1 4-1 2 1 4 1 2-1 2-1"/><path ${{common}} d="M3 20c2 0 2-1 4-1s2 1 4 1 2-1 4-1 2 1 4 1 2-1 2-1"/><path ${{common}} d="M12 3l5 8H7l5-8z"/></svg>`;
-      if (kind === 'heat') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M14 14.8V5a2 2 0 0 0-4 0v9.8a4 4 0 1 0 4 0z"/><path ${{common}} d="M12 9v8"/></svg>`;
-      return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M7 18a4 4 0 1 1 .9-7.9A6 6 0 0 1 19 12.5 3.5 3.5 0 0 1 18 19H8"/></svg>`;
-    }}
-
-    function weatherIcon(event) {{
-      const severity = (event.severity || 'unknown').toLowerCase();
-      const kind = (event.icon || 'general').toLowerCase();
-      const count = Number(event.count || 0);
-      const badge = count > 1 ? `<span class="wx-count">${{count > 99 ? '99+' : count}}</span>` : '';
-      return L.divIcon({{
-        className: '',
-        html: `<div class="wx-marker wx-${{severity}} wx-kind-${{kind}}">${{weatherSvg(kind)}}${{badge}}</div>`,
-        iconSize: [34, 34],
-        iconAnchor: [17, 17]
-      }});
-    }}
-
-    function renderWeatherEvents(list) {{
-      reconcileLayer(weatherLayer, 'weather', list || [], 'weather', function(event) {{
-        if (event.lat === undefined || event.lon === undefined) return;
-        const marker = L.marker([event.lat, event.lon], {{icon: weatherIcon(event), pane: 'stationsPane'}});
-        const tipText = event.tooltip || 'Weather report received';
-        marker.bindTooltip(tipText, {{direction:'top', sticky:true, className:'cs-tooltip'}});
-        const payload = reportDetailPayload(event, 'Weather Reports');
-        marker.on('click', function() {{ openSelectedDetail(payload); }});
-        return marker;
-      }});
-    }}
-
-    function operationalSvg(kind, layerType, sourceKind) {{
-      const common = "fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'";
-      if (sourceKind === 'pin') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M12 21s6-5.5 6-11a6 6 0 1 0-12 0c0 5.5 6 11 6 11z"/><circle ${{common}} cx="12" cy="10" r="2"/></svg>`;
-      if (kind === 'power') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M13 2L5 14h6l-1 8 8-12h-6l1-8z"/></svg>`;
-      if (kind === 'water') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M12 3s6 6.4 6 11a6 6 0 0 1-12 0c0-4.6 6-11 6-11z"/></svg>`;
-      if (kind === 'fire') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M12 22c4-2 6-5 6-8 0-3-2-5-4-7 0 3-2 4-2 4S9 8 10 3c-3 2-5 6-5 10 0 4 3 7 7 9z"/></svg>`;
-      if (kind === 'storm') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M7 16a5 5 0 0 1 1-9 7 7 0 0 1 13 3 4 4 0 0 1-3 6"/><path ${{common}} d="M13 12l-3 5h4l-2 4"/></svg>`;
-      if (kind === 'medical') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M12 5v14M5 12h14"/><circle ${{common}} cx="12" cy="12" r="9"/></svg>`;
-      if (sourceKind === 'commstat' && kind === 'general') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M6 4h9l3 3v13H6z"/><path ${{common}} d="M15 4v4h4"/><path ${{common}} d="M9 12h6M9 16h4"/></svg>`;
-      if (kind === 'comms') return `<svg viewBox="0 0 24 24" aria-hidden="true"><rect ${{common}} x="6" y="5" width="12" height="14" rx="2"/><path ${{common}} d="M9 9h6M9 13h6M10 17h4"/><path ${{common}} d="M8 3h8"/></svg>`;
-      if (kind === 'transport') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M6 19L10 3h4l4 16"/><path ${{common}} d="M8 11h8M7 15h10"/></svg>`;
-      if (kind === 'security') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M12 3l7 3v5c0 5-3 8-7 10-4-2-7-5-7-10V6l7-3z"/></svg>`;
-      if (kind === 'shelter') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M3 11l9-7 9 7"/><path ${{common}} d="M5 10v10h14V10"/><path ${{common}} d="M10 20v-6h4v6"/></svg>`;
-      if (kind === 'food') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M6 3v18M10 3v6a4 4 0 0 1-4 4"/><path ${{common}} d="M17 3v18M14 3h6"/></svg>`;
-      if (kind === 'fuel') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M5 21V5a2 2 0 0 1 2-2h7v18"/><path ${{common}} d="M5 11h9M14 7h2l3 3v8a2 2 0 0 0 2 2"/></svg>`;
-      if (kind === 'logistics') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M3 7l9-4 9 4-9 4-9-4z"/><path ${{common}} d="M3 7v10l9 4 9-4V7"/><path ${{common}} d="M12 11v10"/></svg>`;
-      if (kind === 'utility') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M14.7 6.3a4 4 0 0 0-5 5L4 17v3h3l5.7-5.7a4 4 0 0 0 5-5l-3 3-2-2 3-3z"/></svg>`;
-      if (kind === 'evacuation') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M12 3l9 18H3L12 3z"/><path ${{common}} d="M12 9v5M12 17h.01"/></svg>`;
-      if (kind === 'rfi') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M9 9a3 3 0 1 1 4.5 2.6c-1 .6-1.5 1.2-1.5 2.4"/><path ${{common}} d="M12 18h.01"/><circle ${{common}} cx="12" cy="12" r="10"/></svg>`;
-      if (kind === 'warning' || layerType === 'alert') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M12 3l9 18H3L12 3z"/><path ${{common}} d="M12 9v5M12 17h.01"/></svg>`;
-      return `<svg viewBox="0 0 24 24" aria-hidden="true"><circle ${{common}} cx="12" cy="12" r="9"/><path ${{common}} d="M12 10v6"/><path ${{common}} d="M12 7h.01"/></svg>`;
-    }}
-
-    function operationalIcon(event, layerType) {{
-      const severity = (event.severity || 'unknown').toLowerCase();
-      const kind = (event.icon || 'general').toLowerCase();
-      const sourceKind = (event.source_kind || 'hf').toLowerCase();
-      const count = Number(event.count || 0);
-      const badge = count > 1 ? `<span class="wx-count">${{count > 99 ? '99+' : count}}</span>` : '';
-      return L.divIcon({{
-        className: '',
-        html: `<div class="op-marker op-${{severity}} op-layer-${{layerType}} op-kind-${{kind}} op-source-${{sourceKind}}">${{operationalSvg(kind, layerType, sourceKind)}}${{badge}}</div>`,
-        iconSize: [34, 34],
-        iconAnchor: [17, 17]
-      }});
-    }}
-
-    function renderOperationalEvents(layer, list, layerType) {{
-      const cacheName = layerType === 'alert' ? 'alert' : 'infrastructure';
-      reconcileLayer(layer, cacheName, list || [], layerType, function(event) {{
-        if (event.lat === undefined || event.lon === undefined) return;
-        const marker = L.marker([event.lat, event.lon], {{icon: operationalIcon(event, layerType), pane: 'stationsPane'}});
-        const tipText = event.tooltip || 'Report received';
-        marker.bindTooltip(tipText, {{direction:'top', sticky:true, className:'cs-tooltip'}});
-        const fallbackTitle = layerType === 'alert' ? 'Alerts/Intel' : 'Infrastructure/Utilities';
-        const payload = reportDetailPayload(event, fallbackTitle);
-        marker.on('click', function() {{ openSelectedDetail(payload); }});
-        return marker;
-      }});
-    }}
-
-    function renderMarkers(list) {{
-      const renderList = (list || []).map(function(m) {{
-        return Object.assign({{}}, m || {{}}, {{_render_now_reachable: !!nowReachableEnabled}});
-      }});
-      reconcileLayer(stationsLayer, 'stations', renderList, 'station', function(m) {{
-        const qsySoon = !!m.qsy_soon;
-        const qsyText = String(m.qsy_text || '').toLowerCase();
-        const scheduleState = qsySoon
-          ? 'qsy_soon'
-          : (qsyText.startsWith('stable') ? 'now' : 'later_today');
-        const scheduleStrokeByState = {{
-          now: '#2E7D32',
-          later_today: '#1E88E5',
-          qsy_soon: '#7E57C2'
-        }};
-        const statusKey = (m.spotter_status_key || 'unknown').toLowerCase();
-        const markerFillByStatus = {{
-          red: '#D32F2F',
-          yellow: '#FBC02D',
-          green: '#43A047',
-          unknown: '#4FC3F7'
-        }};
-        const markerStrokeByStatus = {{
-          red: '#8E0000',
-          yellow: '#8D6E00',
-          green: '#1B5E20',
-          unknown: '#1976D2'
-        }};
-        const baseStroke = markerStrokeByStatus[statusKey] || markerStrokeByStatus.unknown;
-        const markerStroke = nowReachableEnabled
-          ? (scheduleStrokeByState[scheduleState] || baseStroke)
-          : (qsySoon ? '#5E35B1' : baseStroke);
-        const markerFill = markerFillByStatus[statusKey] || markerFillByStatus.unknown;
-        const circle = L.circleMarker([m.lat, m.lon], {{
-          radius: qsySoon ? 7 : 6,
-          color: markerStroke,
-          weight: 1,
-          fillColor: markerFill,
-          fillOpacity: 0.8,
-          pane: 'stationsPane'
-        }});
-        const itemLayer = L.layerGroup();
-        itemLayer.addLayer(circle);
-        const hasJS8 = m.last_seen || m.last_band || m.last_contact || m.last_contact_band || m.direct_snr !== undefined || m.avg_snr_excl_my !== undefined;
-        const hasVarAC = m.varac_last_seen || m.varac_last_band || m.varac_avg_snr !== undefined;
-        const tipText = compactStationTooltip(m);
-        const payload = stationDetailPayload(m);
-        circle.bindTooltip(tipText, {{direction:'top', sticky:true, className:'cs-tooltip'}});
-        circle.on('mouseover', function() {{
-          this.bringToFront();
-        }});
-        circle.on('click', function() {{
-          this.bringToFront();
-          openSelectedDetail(payload);
-        }});
-        // Permanent label only when show_callsigns is on
-        if (m.label) {{
-          const icon = L.divIcon({{
-            className: 'label-text callsign-label',
-            html: m.label
-          }});
-          const labelMarker = L.marker([m.lat, m.lon], {{icon, pane:'stationsPane'}});
-          itemLayer.addLayer(labelMarker);
-          labelMarker.bindTooltip(tipText, {{direction:'top', sticky:true, className:'cs-tooltip'}});
-          labelMarker.on('click', function() {{
-            openSelectedDetail(payload);
-          }});
-        }}
-        return itemLayer;
-      }});
-    }}
-    // JS8 links
-    function renderLinks(list) {{
-      const showDirectionMarkers = !!linkDirectionMarkers && Array.isArray(list) && list.length <= 80;
-      const renderList = (list || []).map(function(l) {{
-        return Object.assign({{}}, l || {{}}, {{_render_direction_markers: showDirectionMarkers}});
-      }});
-      reconcileLayer(linksLayer, 'links', renderList, 'link', function(l) {{
-        const color = linkColor(l.snr);
-        const itemLayer = L.layerGroup();
-        const line = L.polyline([[l.lat1, l.lon1], [l.lat2, l.lon2]], {{color: color, weight: 2.5, opacity: 0.8}});
-        const snr = formatSnr(l.snr);
-        const relay = l.relay_via ? ` via ${{l.relay_via}}` : '';
-        const origin = l.origin || '';
-        const destination = l.destination || '';
-        const direction = (origin && destination) ? `${{origin}} \u2192 ${{destination}}` : `${{origin}} \u2194 ${{destination}}`;
-        const tip = `${{direction}}${{relay}} | SNR ${{snr}}`;
-        line.bindTooltip(tip, {{direction:'top', sticky:true, className:'cs-tooltip'}});
-        itemLayer.addLayer(line);
-        if (showDirectionMarkers && origin && destination) {{
-          const lat1 = Number(l.lat1);
-          const lon1 = Number(l.lon1);
-          const lat2 = Number(l.lat2);
-          const lon2 = Number(l.lon2);
-          if (Number.isFinite(lat1) && Number.isFinite(lon1) && Number.isFinite(lat2) && Number.isFinite(lon2)) {{
-            const midLat = (lat1 + lat2) / 2.0;
-            const midLon = (lon1 + lon2) / 2.0;
-            const bearing = linkBearingDeg(lat1, lon1, lat2, lon2);
-            // The arrow glyph points east at zero degrees; bearing zero is north.
-            const arrowRotation = bearing - 90;
-            const arrowIcon = L.divIcon({{
-              className: '',
-              html: `<div class="fio-link-arrow" style="color:${{color}}; transform: rotate(${{arrowRotation}}deg);">&#10148;</div>`,
-              iconSize: [18, 18],
-              iconAnchor: [9, 9]
-            }});
-            const arrow = L.marker([midLat, midLon], {{icon: arrowIcon, interactive: false, pane: 'stationsPane'}});
-            itemLayer.addLayer(arrow);
-          }}
-        }}
-        return itemLayer;
-      }});
-    }}
-
-    window.updateMapData = function(payload) {{
-      if (!payload) return;
-      if (Object.prototype.hasOwnProperty.call(payload, 'map_mode')) {{
-        mapMode = payload.map_mode || mapMode || 'all';
-      }}
-      if (Object.prototype.hasOwnProperty.call(payload, 'link_direction_markers')) {{
-        linkDirectionMarkers = !!payload.link_direction_markers;
-      }}
-      if (payload.markers) {{ markers = payload.markers; renderMarkers(markers); }}
-      if (payload.links) {{ links = payload.links; renderLinks(links); }}
-      if (payload.weather_events) {{ weatherEvents = payload.weather_events; renderWeatherEvents(weatherEvents); }}
-      if (payload.alert_events) {{ alertEvents = payload.alert_events; renderOperationalEvents(alertLayer, alertEvents, 'alert'); }}
-      if (payload.infrastructure_events) {{ infrastructureEvents = payload.infrastructure_events; renderOperationalEvents(infrastructureLayer, infrastructureEvents, 'infrastructure'); }}
-      if (Object.prototype.hasOwnProperty.call(payload, 'now_reachable_enabled')) {{
-        nowReachableEnabled = !!payload.now_reachable_enabled;
-        updateLegend();
-      }}
-      if (Object.prototype.hasOwnProperty.call(payload, 'sitrep_state_summary')) {{
-        sitrepStateSummary = payload.sitrep_state_summary || [];
-      }}
-      if (Object.prototype.hasOwnProperty.call(payload, 'sitrep_summary_group')) {{
-        sitrepSummaryGroup = payload.sitrep_summary_group || '';
-      }}
-      if (Object.prototype.hasOwnProperty.call(payload, 'regional_intelligence')) {{
-        regionalIntelligence = payload.regional_intelligence || {{}};
-        window.regionalIntelligenceEnabled = !!regionalIntelligence.enabled;
-      }}
-      if (
-        Object.prototype.hasOwnProperty.call(payload, 'show_cities') ||
-        Object.prototype.hasOwnProperty.call(payload, 'show_city_labels') ||
-        Object.prototype.hasOwnProperty.call(payload, 'city_min_pop')
-      ) {{
-        setCityConfig({{
-          show_cities: !!payload.show_cities || !!payload.show_city_labels,
-          show_city_labels: !!payload.show_city_labels,
-          city_min_pop: payload.city_min_pop || minPop
-        }});
-      }}
-      refreshRegionalBoundaryInteractions();
-      updateSitrepSummaryPanel(sitrepStateSummary, sitrepSummaryGroup);
-      updateRegionalIntelSummaryPanel();
-      updateLegend();
-      if (payload.auto_fit) {{
-        window.setTimeout(function() {{
-          try {{
-            if (map && map.invalidateSize) map.invalidateSize(false);
-            window.fitMapResults();
-          }} catch (e) {{}}
-        }}, 40);
-      }}
-    }};
-    window.updateMapData({{
-      markers: markers,
-      map_mode: mapMode,
-      links: links,
-      weather_events: weatherEvents,
-      alert_events: alertEvents,
-      infrastructure_events: infrastructureEvents,
-      link_direction_markers: linkDirectionMarkers,
-      sitrep_state_summary: sitrepStateSummary,
-      sitrep_summary_group: sitrepSummaryGroup,
-      regional_intelligence: regionalIntelligence,
-      auto_fit: initialAutoFit
-    }});
-    window._mapReady = true;
-    }}
-    </script>
-</body>
-</html>
-        """
-
-    # ------------- UI handlers ------------- #
     def _on_show_calls_changed(self, state):
         self.show_callsigns = bool(state)
         self._save_display_preferences()
@@ -17017,89 +14981,3 @@ function addGridLabels(res, level, bounds, maxLabels) {
         self.prop_adaptive_enabled = bool(state)
         self._save_display_preferences()
         self._request_map_refresh(level="full", reason="prop_adaptive")
-    def _ensure_leaflet_assets(self) -> tuple[str, str]:
-        """
-        Resolve Leaflet asset URLs without blocking the UI thread.
-        Prefer local bundled assets; fall back to CDN when unavailable.
-        Returns (js_url, css_url).
-        """
-        js_file = self._asset_dir / "leaflet.js"
-        css_file = self._asset_dir / "leaflet.css"
-        self._asset_dir.mkdir(parents=True, exist_ok=True)
-
-        js_url = QUrl.fromLocalFile(str(js_file)).toString() if js_file.exists() else "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-        css_url = QUrl.fromLocalFile(str(css_file)).toString() if css_file.exists() else "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-        return js_url, css_url
-
-    def _ensure_geojson(self, dest: Path, url: str) -> Optional[str]:
-        """
-        Resolve GeoJSON URL without blocking the UI thread.
-        Prefer local file; fall back to remote URL when unavailable.
-        """
-        if dest.exists() and dest.stat().st_size > 0:
-            return QUrl.fromLocalFile(str(dest)).toString()
-        return url
-
-    def _ensure_cities_geojson(self) -> Optional[str]:
-        """
-        Return a local GeoJSON URL for cities/towns (pop >= 1000) if available.
-        Users can drop a pre-filtered file at config/leaflet/cities_na_1k.geojson.
-        """
-        try:
-            if self._cities_geojson.exists() and self._cities_geojson.stat().st_size > 0:
-                return QUrl.fromLocalFile(str(self._cities_geojson)).toString()
-            # fallback to Natural Earth populated places if downloaded
-            ne_places = self._asset_dir / "ne_populated_places.geojson"
-            if ne_places.exists() and ne_places.stat().st_size > 0:
-                return QUrl.fromLocalFile(str(ne_places)).toString()
-        except Exception as e:
-            log.warning("StationsMap: failed to load cities geojson: %s", e)
-        return None
-
-    def _ensure_fema_geojson(self) -> Optional[str]:
-        """
-        Build a simple GeoJSON for FEMA regions from the state outline data if available.
-        """
-        # If we already built it, reuse
-        fema_path = self._asset_dir / "fema_regions.geojson"
-        if fema_path.exists() and fema_path.stat().st_size > 0:
-            return QUrl.fromLocalFile(str(fema_path)).toString()
-
-        # Try to derive from US states GeoJSON
-        us_path = self._geojson_path
-        if not us_path.exists():
-            return None
-        try:
-            import json as _json
-            data = _json.loads(us_path.read_text(encoding="utf-8"))
-            features = []
-            for feat in data.get("features", []):
-                props = feat.get("properties", {})
-                name = props.get("name") or props.get("STATE_NAME") or props.get("state")
-                if not name:
-                    continue
-                abbrev = props.get("state_abbrev") or props.get("state") or ""
-                if not abbrev:
-                    upper_name = str(name).upper()
-                    if upper_name in US_STATE_ABBR_FROM_NAME:
-                        abbrev = US_STATE_ABBR_FROM_NAME[upper_name]
-                    elif upper_name in CANADA_PROV_ABBR_FROM_NAME:
-                        abbrev = CANADA_PROV_ABBR_FROM_NAME[upper_name]
-                abbrev = (abbrev or "").upper()
-                region = None
-                for r, states in FEMA_REGIONS.items():
-                    if abbrev in states:
-                        region = r[1:]  # numeric
-                        break
-                if region:
-                    # attach region label
-                    new_props = dict(props)
-                    new_props["fema_region"] = region
-                    features.append({"type": "Feature", "geometry": feat.get("geometry"), "properties": new_props})
-            if features:
-                out = {"type": "FeatureCollection", "features": features}
-                fema_path.write_text(_json.dumps(out), encoding="utf-8")
-                return QUrl.fromLocalFile(str(fema_path)).toString()
-        except Exception as e:
-            log.warning("StationsMap: failed to build FEMA geojson: %s", e)
-        return None
