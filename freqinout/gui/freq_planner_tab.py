@@ -80,7 +80,16 @@ from freqinout.core.operational_projection import (
 )
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.plan_context_label import PLAN_CONTEXT_FALLBACK_TEXT, PlanContextLabel
-from freqinout.gui.theme import resolve_theme, button_style, band_cell_colors, qcolor, BAND_COLORS_LIGHT, BAND_COLORS_DARK
+from freqinout.gui.theme import (
+    resolve_theme,
+    button_style,
+    label_style,
+    font_derived_widget_height,
+    band_cell_colors,
+    qcolor,
+    BAND_COLORS_LIGHT,
+    BAND_COLORS_DARK,
+)
 
 DAY_NAMES = [
     "Sunday",
@@ -356,11 +365,12 @@ class FreqPlannerTab(QWidget):
             self.plan_ingredient_assignments,
         ):
             chip.setWordWrap(False)
-            chip.setMinimumHeight(28)
+            chip.setMinimumHeight(font_derived_widget_height(chip, vertical_padding=8, floor=0))
             chip.setMinimumWidth(230)
             chip.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             chip.setStyleSheet(
-                "QLabel { border: 1px solid #c8d3df; border-radius: 6px; padding: 4px 8px; background: #eef4fa; }"
+                f"QLabel {{ border: 1px solid {theme['border']}; border-radius: 6px; "
+                f"padding: 4px 8px; background: {theme['surface_alt']}; }}"
             )
             ingredients_layout.addWidget(chip)
         ingredients_layout.addStretch(1)
@@ -378,7 +388,9 @@ class FreqPlannerTab(QWidget):
         self.plan_layers_label = QLabel("")
         self.plan_layers_label.setObjectName("freqPlannerPlanLayers")
         self.plan_layers_label.setWordWrap(False)
-        self.plan_layers_label.setMaximumHeight(28)
+        self.plan_layers_label.setMaximumHeight(
+            font_derived_widget_height(self.plan_layers_label, vertical_padding=8, floor=0)
+        )
         self.plan_layers_label.setToolTip(
             "Shows the selected Daily baseline, Net overlay, SOP condition layer, and review state for this Frequency Plan."
         )
@@ -460,7 +472,9 @@ class FreqPlannerTab(QWidget):
         )
         self.frequency_plan_action_hint_label.setObjectName("freqPlannerFrequencyPlanActionHint")
         self.frequency_plan_action_hint_label.setWordWrap(False)
-        self.frequency_plan_action_hint_label.setMaximumHeight(26)
+        self.frequency_plan_action_hint_label.setMaximumHeight(
+            font_derived_widget_height(self.frequency_plan_action_hint_label, vertical_padding=8, floor=0)
+        )
         review_controls_layout.addWidget(self.frequency_plan_action_hint_label)
         layout.addWidget(self.plan_review_controls_frame)
         self.rf_guard_review_card = QFrame()
@@ -471,7 +485,7 @@ class FreqPlannerTab(QWidget):
         rf_guard_review_layout.setSpacing(6)
         rf_guard_review_header = QHBoxLayout()
         self.rf_guard_review_title_label = QLabel("RF Guard Review")
-        self.rf_guard_review_title_label.setStyleSheet("font-weight: 700;")
+        self.rf_guard_review_title_label.setStyleSheet(label_style("text", theme, weight=700))
         self.rf_guard_review_summary_label = QLabel("Review conflicts before assigning or updating this plan.")
         self.rf_guard_review_summary_label.setWordWrap(True)
         rf_guard_review_header.addWidget(self.rf_guard_review_title_label)
@@ -505,7 +519,7 @@ class FreqPlannerTab(QWidget):
         selected_layout.setSpacing(12)
         self.selected_window_title_label = QLabel("Select a window")
         self.selected_window_title_label.setObjectName("freqPlannerSelectedWindowTitle")
-        self.selected_window_title_label.setStyleSheet("font-weight: 700;")
+        self.selected_window_title_label.setStyleSheet(label_style("text", theme, weight=700))
         self.selected_window_detail_label = QLabel("Click a row to review and edit its Daily, Net, or SOP source.")
         self.selected_window_detail_label.setObjectName("freqPlannerSelectedWindowDetail")
         self.selected_window_detail_label.setWordWrap(True)
@@ -523,7 +537,7 @@ class FreqPlannerTab(QWidget):
         inline_layout.setSpacing(6)
         inline_header = QHBoxLayout()
         self.inline_editor_title_label = QLabel("Selected Window Editor")
-        self.inline_editor_title_label.setStyleSheet("font-weight: 700;")
+        self.inline_editor_title_label.setStyleSheet(label_style("text", theme, weight=700))
         self.inline_editor_scope_label = QLabel("Select an Effective Windows row to edit.")
         self.inline_editor_scope_label.setWordWrap(True)
         inline_header.addWidget(self.inline_editor_title_label)

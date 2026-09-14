@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QTimer, Qt, Signal
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QTimer, Qt, Signal, QEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -37,6 +37,8 @@ from PySide6.QtWidgets import (
     QToolButton,
     QVBoxLayout,
     QWidget,
+    QScrollArea,
+    QBoxLayout,
 )
 
 from freqinout.core.known_operating_groups import net_resources_db_path
@@ -64,6 +66,7 @@ from freqinout.core.logger import log
 from freqinout.core.perf_metrics import emit_span
 from freqinout.core.scheduler_serial_executor import DaemonSerialExecutor
 from freqinout.gui.help_registry import resolve_help_host
+from freqinout.gui.theme import active_app_theme, button_height_for_font, button_style, control_height_for_font, font_derived_widget_height, label_style, style_splitter_handles
 
 
 _DISPLAY_COLUMNS = (
@@ -265,6 +268,7 @@ class ShortwaveExploreView(QWidget):
         filters = QWidget(self)
         filters.setObjectName("shortwaveExploreFilters")
         filter_layout = QHBoxLayout(filters)
+        self.filter_layout = filter_layout
         filter_layout.setContentsMargins(0, 0, 0, 0)
         filter_layout.setSpacing(6)
         self.search = QLineEdit(filters)
@@ -312,6 +316,7 @@ class ShortwaveExploreView(QWidget):
 
         detail_filters = QWidget(self)
         detail_filter_layout = QHBoxLayout(detail_filters)
+        self.detail_filter_layout = detail_filter_layout
         detail_filter_layout.setContentsMargins(0, 0, 0, 0)
         detail_filter_layout.setSpacing(6)
         self.language = QLineEdit(detail_filters)
@@ -359,7 +364,8 @@ class ShortwaveExploreView(QWidget):
         self.status.setWordWrap(True)
         self.status.setAccessibleName("Shortwave result status")
         outer.addWidget(self.status)
-        split = QSplitter(Qt.Horizontal, self)
+        self.splitter = QSplitter(Qt.Horizontal, self)
+        split = self.splitter
         self.model = ShortwaveListingTableModel(split)
         self.table = QTableView(split)
         self.table.setObjectName("shortwaveListingTable")
@@ -374,7 +380,12 @@ class ShortwaveExploreView(QWidget):
         self.table.selectionModel().currentRowChanged.connect(self._show_detail)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         split.addWidget(self.table)
-        detail_panel = QWidget(split)
+        self.detail_scroll = QScrollArea(split)
+        self.detail_scroll.setWidgetResizable(True)
+        self.detail_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.detail_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        detail_panel = QWidget(self.detail_scroll)
+        self.detail_scroll.setWidget(detail_panel)
         detail_layout = QVBoxLayout(detail_panel)
         detail_layout.setContentsMargins(0, 0, 0, 0)
         detail_layout.setSpacing(4)
@@ -404,6 +415,36 @@ class ShortwaveExploreView(QWidget):
         split.setStretchFactor(1, 2)
         split.setSizes([700, 420])
         outer.addWidget(split, 1)
+        self.apply_theme()
+
+    def apply_theme(self) -> None:
+        theme = active_app_theme()
+        self.status.setStyleSheet(label_style("muted", theme))
+        self.detail.setStyleSheet(f"QPlainTextEdit {{ border: 1px solid {theme['border']}; }}")
+        for control in (self.search, self.timing, self.soon, self.band, self.language, self.target, self.season):
+            control.setMinimumHeight(control_height_for_font(control))
+        for button in (self.refresh_btn, self.add_listening_btn, *self.classification_chips.values()):
+            button.setMinimumHeight(button_height_for_font(button))
+        self.refresh_btn.setStyleSheet(button_style("primary", theme))
+        self.add_listening_btn.setStyleSheet(button_style("primary", theme))
+        self.table.verticalHeader().setDefaultSectionSize(font_derived_widget_height(self.table))
+        style_splitter_handles(self.splitter, theme, width=12)
+        self._apply_responsive_layout()
+
+    def _apply_responsive_layout(self) -> None:
+        compact = self.width() > 0 and self.width() < max(900, self.fontMetrics().horizontalAdvance("Shortwave listings") * 24)
+        self.filter_layout.setDirection(QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight)
+        self.detail_filter_layout.setDirection(QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight)
+        self.splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_responsive_layout()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange:
+            self.apply_theme()
 
     def set_active(self, active: bool) -> None:
         active = bool(active)
@@ -668,7 +709,8 @@ class ShortwaveListeningView(QWidget):
         self.status = QLabel("Open Listening to load saved reminders.")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
-        split = QSplitter(Qt.Vertical, self)
+        self.splitter = QSplitter(Qt.Vertical, self)
+        split = self.splitter
         self.model = ShortwaveListeningTableModel(split)
         self.table = QTableView(split)
         self.table.setModel(self.model)
@@ -681,7 +723,12 @@ class ShortwaveListeningView(QWidget):
         self.table.setAccessibleName("Saved Shortwave listening reminders")
         self.table.selectionModel().currentRowChanged.connect(self._select_reminder)
         split.addWidget(self.table)
-        editor = QWidget(split)
+        self.editor_scroll = QScrollArea(split)
+        self.editor_scroll.setWidgetResizable(True)
+        self.editor_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.editor_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        editor = QWidget(self.editor_scroll)
+        self.editor_scroll.setWidget(editor)
         editor_layout = QVBoxLayout(editor)
         editor_layout.setContentsMargins(0, 0, 0, 0)
         editor_layout.setSpacing(5)
@@ -749,6 +796,28 @@ class ShortwaveListeningView(QWidget):
         split.setStretchFactor(1, 2)
         split.setSizes([300, 260])
         layout.addWidget(split, 1)
+        self.apply_theme()
+
+    def apply_theme(self) -> None:
+        theme = active_app_theme()
+        self.status.setStyleSheet(label_style("muted", theme))
+        self.snapshot_summary.setStyleSheet(label_style("muted", theme))
+        for control in (self.label_edit, self.notes_edit, self.lead_combo, self.receiver_combo):
+            control.setMinimumHeight(control_height_for_font(control))
+        for button in (self.save_btn, self.remove_btn, self.apply_btn, self.keep_btn, self.refresh_btn):
+            button.setMinimumHeight(button_height_for_font(button))
+        self.save_btn.setStyleSheet(button_style("primary", theme))
+        self.apply_btn.setStyleSheet(button_style("primary", theme))
+        self.remove_btn.setStyleSheet(button_style("eligible_danger", theme))
+        self.keep_btn.setStyleSheet(button_style("secondary", theme))
+        self.refresh_btn.setStyleSheet(button_style("muted", theme))
+        self.table.verticalHeader().setDefaultSectionSize(font_derived_widget_height(self.table))
+        style_splitter_handles(self.splitter, theme, width=12)
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange:
+            self.apply_theme()
 
     def set_active(self, active: bool) -> None:
         active = bool(active)
@@ -1028,6 +1097,7 @@ class ShortwaveDataSourcesView(QWidget):
         self.status.setAccessibleName("Shortwave source status")
         layout.addWidget(self.status)
         source_row = QHBoxLayout()
+        self.source_row = source_row
         self.refresh_btn = QPushButton("Refresh source status", self)
         self.refresh_btn.clicked.connect(self.refresh_status)
         source_row.addWidget(self.refresh_btn)
@@ -1060,6 +1130,7 @@ class ShortwaveDataSourcesView(QWidget):
         form.addRow("Provider update UTC", self.publisher_updated)
         layout.addWidget(metadata)
         actions = QHBoxLayout()
+        self.actions_row = actions
         self.apply_btn = QPushButton("Apply reviewed import", self)
         self.apply_btn.setEnabled(False)
         self.apply_btn.setAccessibleName("Apply reviewed Shortwave import")
@@ -1083,6 +1154,37 @@ class ShortwaveDataSourcesView(QWidget):
         self.preview_text.setPlaceholderText("Import/update preview and diagnostics appear here. Nothing is changed until Apply.")
         self.preview_text.setAccessibleName("Shortwave import preview and diagnostics")
         layout.addWidget(self.preview_text, 1)
+        self.apply_theme()
+
+    def apply_theme(self) -> None:
+        theme = active_app_theme()
+        self.status.setStyleSheet(label_style("muted", theme))
+        self.preview_text.setStyleSheet(f"QPlainTextEdit {{ border: 1px solid {theme['border']}; }}")
+        for control in (self.season_code, self.season_from, self.season_to, self.publisher_updated, self.rollback_selector):
+            control.setMinimumHeight(control_height_for_font(control))
+        for button in (self.refresh_btn, self.review_bundled_btn, self.review_official_btn, self.review_file_btn, self.apply_btn, self.rollback_btn, self.export_diagnostics_btn):
+            button.setMinimumHeight(button_height_for_font(button))
+        self.refresh_btn.setStyleSheet(button_style("muted", theme))
+        self.apply_btn.setStyleSheet(button_style("primary", theme))
+        self.preview_text.setMinimumHeight(
+            max(control_height_for_font(self.preview_text, vertical_padding=18, floor=48) * 3, self.preview_text.fontMetrics().lineSpacing() * 4 + 20)
+        )
+        self._apply_responsive_layout()
+
+    def _apply_responsive_layout(self) -> None:
+        compact = self.width() > 0 and self.width() < max(900, self.fontMetrics().horizontalAdvance("Shortwave source data") * 24)
+        direction = QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight
+        self.source_row.setDirection(direction)
+        self.actions_row.setDirection(direction)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_responsive_layout()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange:
+            self.apply_theme()
 
     def set_active(self, active: bool) -> None:
         active = bool(active)
@@ -1313,10 +1415,9 @@ class ShortwaveWorkspace(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         title_row = QHBoxLayout()
-        title = QLabel("Shortwave")
-        title.setStyleSheet("font-weight: 700; font-size: 18px;")
-        title.setAccessibleName("Shortwave Resources workspace")
-        title_row.addWidget(title)
+        self.title_label = QLabel("Shortwave")
+        self.title_label.setAccessibleName("Shortwave Resources workspace")
+        title_row.addWidget(self.title_label)
         title_row.addStretch(1)
         self.help_btn = QPushButton("Help", self)
         self.help_btn.setAccessibleName("Open Shortwave help")
@@ -1336,6 +1437,22 @@ class ShortwaveWorkspace(QWidget):
         self.tabs.currentChanged.connect(self._on_tab_changed)
         layout.addWidget(self.tabs, 1)
         self._ensure_page(0)
+        self.apply_theme()
+
+    def apply_theme(self) -> None:
+        theme = active_app_theme()
+        self.title_label.setStyleSheet(label_style("text", theme, weight=700))
+        self.help_btn.setStyleSheet(button_style("muted", theme))
+        self.help_btn.setMinimumHeight(button_height_for_font(self.help_btn))
+        for page in self._pages.values():
+            apply_theme = getattr(page, "apply_theme", None)
+            if callable(apply_theme):
+                apply_theme()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange:
+            self.apply_theme()
 
     def _open_context_help(self) -> None:
         host = resolve_help_host(self)

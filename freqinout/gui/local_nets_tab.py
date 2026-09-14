@@ -32,6 +32,7 @@ from freqinout.core.resource_catalog_models import FrequencyResource
 from freqinout.core.resource_catalog_store import ResourceCatalogStore, STATION_MANUAL_SOURCE_KEY
 from freqinout.gui.resource_picker import choose_frequency_resource, frequency_where_text, session_when_text
 from freqinout.gui.help_registry import resolve_help_host
+from freqinout.gui.theme import label_style, resolve_theme
 
 
 REMINDER_COPY = "Reminder only — FIO will not tune a radio"
@@ -75,12 +76,13 @@ class LocalNetEditorDialog(QDialog):
         self.schedule = schedule
         self._selected_frequency: FrequencyResource | None = None
         self.setWindowTitle("Edit Local Net" if schedule else "Add Local Net")
-        self.setMinimumSize(680, 500)
-        self.resize(760, 680)
+        # The body owns vertical scrolling; keep the editor launch geometry
+        # usable on compact/large-text screens without imposing a hard floor.
+        self.resize(760, 560)
         root = QVBoxLayout(self)
         scroll = QScrollArea(self); scroll.setWidgetResizable(True); scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         body = QWidget(scroll); layout = QVBoxLayout(body); layout.setContentsMargins(10, 10, 10, 10); layout.setSpacing(10)
-        warning = QLabel(REMINDER_COPY); warning.setObjectName("localNetsReminderOnly"); warning.setWordWrap(True); warning.setStyleSheet("font-weight: 700;")
+        warning = QLabel(REMINDER_COPY); warning.setObjectName("localNetsReminderOnly"); warning.setWordWrap(True); warning.setStyleSheet(label_style("warning", resolve_theme(settings or {}), weight=700))
         layout.addWidget(warning)
 
         net_box = QGroupBox("1. Net", body); net_form = QFormLayout(net_box)
@@ -319,7 +321,7 @@ class LocalNetsTab(QWidget):
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self); layout.setContentsMargins(10, 10, 10, 10); layout.setSpacing(8)
         header = QHBoxLayout()
-        title = QLabel("Local Nets"); title.setStyleSheet("font-size: 18px; font-weight: 700;"); header.addWidget(title)
+        title = QLabel("Local Nets"); title.setStyleSheet(label_style("text", resolve_theme(self.settings or {}), weight=700)); header.addWidget(title)
         header.addStretch(1)
         self.help_btn = QPushButton("Help", self); self.help_btn.setToolTip("Open Local Nets help."); self.help_btn.setAccessibleName("Open Local Nets help")
         self.help_btn.clicked.connect(self._open_context_help); header.addWidget(self.help_btn)

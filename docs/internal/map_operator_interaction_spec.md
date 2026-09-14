@@ -602,6 +602,99 @@ Lifecycle rules:
 
 ## Acceptance Tests
 
+### Cross-platform first-activation and window-placement stability
+
+Map activation must preserve the operator's top-level FIO window geometry,
+window state, and assigned monitor. Constructing, warming, showing, hiding,
+loading, or resizing the embedded map must never call top-level move, resize,
+normalize, maximize, or screen-placement operations.
+
+- On macOS and Windows, WebEngine helper startup is prewarmed before first Map
+  navigation. Warm-up is page-only: it must not create, resize, or show a
+  native `QWebEngineView` parented to the main window. Linux remains opt-in
+  because its startup behavior varies by desktop and WebEngine package.
+- The real WebEngine view is created only inside the already-laid-out Map
+  canvas. Cold activation may show one stable loading state and one transition
+  to the map; adjacent FIO pages must never become visible during lazy-page
+  replacement.
+- First Map activation settles the current page, its parent layouts, and both
+  Map splitters synchronously before `set_map_visible(True)` may queue native
+  WebEngine construction. Positive geometry alone is not sufficient: the full
+  relevant signature (top-level rectangle/state/screen, Map page and container,
+  filter bar, splitters and sizes, stack and browser viewport) must remain
+  unchanged for at least two samples and 150 ms before attachment. A resize or
+  responsive reflow invalidates the pending settlement. A zero-sized or
+  provisional canvas defers creation through a bounded retry; it must never be
+  treated as a WebEngine failure.
+- The Map stack and WebEngine child ignore dynamic content size hints so
+  browser initialization cannot redistribute the Map workspace or influence
+  the top-level shell. Geometry preparation and final presentation are distinct
+  lifecycle states; they must never compete for or reset one shared settle
+  phase.
+- The WebEngine view is always constructed in its permanent stack parent with
+  layout-owned geometry. On macOS, loading the first real document through
+  `QWebEngineView.setUrl()` or `setHtml()` is forbidden while the operator's
+  top-level window is full-screen: production telemetry proved that a
+  non-current view can still clear the native full-screen state. The cold Map
+  document instead loads on a retained page-only `QWebEnginePage` that is not
+  attached to the native view. The stable, shared-theme Qt `Preparing map`
+  surface remains current. This isolation applies only to the cold first page;
+  an already usable map remains visible during ordinary data/layer reloads.
+- After cold page load and first-payload application, FIO makes the loaded
+  page the native view's page, then makes that view current exactly once behind
+  the opaque Qt loading surface. That presentation is `NoFocus`, performs no
+  top-level window operation, and uses one generation-fenced final quiescence
+  phase before paint acknowledgement and overlay removal. Stale prepare,
+  resize, JavaScript and title callbacks are no-ops. The implementation must
+  never alternate between stack children or phase names during this sequence.
+- `loadFinished` is necessary but is not paint readiness. The loading surface
+  may be removed only after load success, nonzero canvas and WebEngine geometry,
+  successful application of the first real map payload, and a page-owned
+  two-animation-frame acknowledgement. The WebEngine view has `NoFocus` during
+  attachment and accepts normal focus only after that reveal gate passes. A
+  bounded presentation deadline must replace an indefinitely retained loading
+  overlay with a calm degraded/retry surface; it must not alter the top-level
+  window to recover.
+- First-surface diagnostics record the final canvas, WebEngine and read-only
+  top-level geometry plus state, full-screen/maximized flags and assigned screen
+  at native construction and final reveal. With no operator resize between
+  those events, their top-level state/screen and settled canvas rectangle must
+  agree. Diagnostics may observe geometry but must never alter it.
+- Hidden primary pages and hidden Message modes do not contribute geometry
+  hints to the current workspace. The main shell ignores even the active
+  page's transient minimum-size hint: each page owns internal overflow while
+  the operator/window manager owns the top-level window rectangle.
+- Map resize events schedule one coalesced cache-only geometry pass. Filter-grid
+  and splitter writes are idempotent and occur only when their resolved layout
+  state changes; resize, paint, and layout settlement perform no data refresh or
+  external I/O.
+- After the WebEngine viewport is visible, nonzero, and its Leaflet page is
+  ready, FIO invokes `invalidateSize(false)` once for that page generation and
+  viewport size. A true size change may schedule one new invalidation; hiding or
+  ordinary repaint does not reload the HTML or refresh map data.
+- Deferred activation and first-visible layout callbacks are navigation-
+  generation fenced. A superseded hidden tab cannot resize, refresh, or replace
+  the current page.
+- A transient `ApplicationInactive` emitted while WebEngine attaches its first
+  native surface is grace-period fenced. If FIO becomes active again within the
+  bounded grace period, child tabs are not paused/resumed and Map is not rendered
+  a second time. Sustained inactivity still pauses noncritical work; explicit
+  hidden/suspended application states pause immediately.
+- Re-entering an initialized, unchanged Map reuses the live page. Navigation or
+  application-focus changes alone do not mark Map data dirty, request a render,
+  or expand/collapse the status strip. Real source updates received while Map
+  is hidden remain dirty and are refreshed once on return.
+- Routine refresh feedback for an already usable map remains in the same
+  font-derived compact status strip. Only initial-load and degraded/error
+  states may expose the expanded recovery actions.
+
+Acceptance includes first Map activation and repeated Map/Inbox navigation on
+macOS, Linux, and Windows, at normal and maximized/full-screen window states and
+on a secondary monitor where available. No Space/focus switch,
+flash/reposition sequence, monitor jump, top-level growth, adjacent-page
+exposure, status-strip height jump, or minimize/restore repair step is
+acceptable.
+
 - Regional Intel summary list excludes green rows by default.
 - Green evidence can still lower concern or support trend internally.
 - Regional Intel map geography paints no-action states green for situational

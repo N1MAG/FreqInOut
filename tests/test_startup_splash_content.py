@@ -26,7 +26,7 @@ def test_startup_splash_includes_dedication_and_project_support_message() -> Non
         description = splash._splash.accessibleDescription()
         assert splash.DEDICATION in description
         assert splash.SUPPORT_URL in description
-        assert splash._splash.pixmap().size().width() == 540
-        assert splash._splash.pixmap().size().height() == 270
+        assert splash._splash.pixmap().size().width() >= 540
+        assert splash._splash.pixmap().size().height() >= 270
     finally:
         splash.close()

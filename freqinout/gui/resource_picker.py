@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Callable, Iterable, Mapping
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QVBoxLayout,
     QWidget,
+    QBoxLayout,
 )
 
 from freqinout.core.resource_catalog_models import FrequencyResource, NetDirectorySession
@@ -30,6 +31,13 @@ from freqinout.core.resource_catalog_store import (
     MAX_RESULTS,
     STATION_MANUAL_SOURCE_KEY,
     ResourceCatalogStore,
+)
+from freqinout.gui.theme import (
+    active_app_theme,
+    button_height_for_font,
+    button_style,
+    control_height_for_font,
+    label_style,
 )
 
 
@@ -157,19 +165,19 @@ class ResourcePicker(QDialog):
         self.service = service
         self.selected_resource: FrequencyResource | None = None
         self.setWindowTitle("Choose Frequency Resource")
-        self.setMinimumSize(620, 420)
         self._build_ui()
         self.refresh_results()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         heading = QLabel("Choose a reusable frequency resource")
-        heading.setStyleSheet("font-weight: 700; font-size: 16px;")
+        self.heading = heading
         layout.addWidget(heading)
         copy = QLabel("Search the station catalog. Selecting a resource does not tune a radio or evaluate transmit eligibility.")
         copy.setWordWrap(True)
         layout.addWidget(copy)
         search_row = QHBoxLayout()
+        self.search_row = search_row
         self.search_edit = QLineEdit(self)
         self.search_edit.setPlaceholderText("Search label, channel, frequency, locality, or coverage")
         self.search_edit.setAccessibleName("Search frequency catalog")
@@ -196,6 +204,35 @@ class ResourcePicker(QDialog):
         choose.clicked.connect(self._accept_selected)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        self.apply_theme()
+
+    def apply_theme(self) -> None:
+        theme = active_app_theme()
+        self.heading.setStyleSheet(label_style("text", theme, weight=700))
+        self.status_label.setStyleSheet(label_style("muted", theme))
+        self.table.setStyleSheet(f"QTableWidget {{ gridline-color: {theme['border']}; }}")
+        self.search_edit.setMinimumHeight(control_height_for_font(self.search_edit))
+        self.table.verticalHeader().setDefaultSectionSize(
+            control_height_for_font(self.table, vertical_padding=10, floor=1)
+        )
+        for button in self.findChildren(QPushButton):
+            button.setMinimumHeight(button_height_for_font(button))
+            if button.text() == "Search":
+                button.setStyleSheet(button_style("primary", theme))
+        self._apply_responsive_layout()
+
+    def _apply_responsive_layout(self) -> None:
+        compact = self.width() > 0 and self.width() < max(700, self.fontMetrics().horizontalAdvance("Choose a reusable frequency resource") * 20)
+        self.search_row.setDirection(QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_responsive_layout()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange:
+            self.apply_theme()
 
     def refresh_results(self) -> None:
         rows = self.store.list_frequencies(search=self.search_edit.text(), service=self.service, limit=MAX_RESULTS)

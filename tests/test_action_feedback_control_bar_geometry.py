@@ -197,7 +197,7 @@ def test_repeated_feedback_visibility_keeps_bar_stable_at_fullscreen_and_compact
             right.resize(width, height)
             app.processEvents()
             baseline_height = bar.height()
-            for _ in range(3):
+            for _ in range(10):
                 MainWindow._on_action_feedback_event(shell, event)
                 app.processEvents()
                 assert not banner.isHidden()

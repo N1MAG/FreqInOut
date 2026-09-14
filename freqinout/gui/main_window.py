@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QGridLayout,
-    QStackedWidget,
     QVBoxLayout,
     QPushButton,
     QButtonGroup,
@@ -117,6 +116,7 @@ from freqinout.radio_interface.js8_rx_hub import JS8RxHub
 from freqinout.version import __version__
 
 from freqinout.gui.settings_tab import SettingsTab
+from freqinout.gui.current_page_stack import CurrentPageStack
 from freqinout.gui.daily_schedule_tab import DailyScheduleTab  # HF Frequency Schedule tab
 from freqinout.gui.net_schedule_tab import NetScheduleTab
 from freqinout.gui.fldigi_net_control_tab import FldigiNetControlTab
@@ -181,6 +181,7 @@ from freqinout.gui.theme import (
     button_style,
     control_height_for_font,
     fit_child_combo_boxes,
+    label_style,
     led_style,
     resolve_theme,
     resolve_ui_text_scale,
@@ -261,6 +262,8 @@ class MainWindow(QMainWindow):
         self._ui_refresh_dirty = False
         self._heavy_content_refresh_active = False
         self._ui_timers_paused_for_inactive = False
+        self._observed_application_state = Qt.ApplicationActive
+        self._ui_inactive_pending = False
         self._status_refresh_pending = False
         self._status_refresh_running = False
         self._station_command_refresh_pending = False
@@ -273,6 +276,14 @@ class MainWindow(QMainWindow):
         self._ui_resume_settle_timer.setSingleShot(True)
         self._ui_resume_settle_timer.setInterval(350)
         self._ui_resume_settle_timer.timeout.connect(self._on_ui_resume_settled)
+        self._ui_inactive_settle_timer = QTimer(self)
+        self._ui_inactive_settle_timer.setSingleShot(True)
+        # WebEngine can briefly make the application inactive while its first
+        # native surface/process is attached.  Sustained backgrounding still
+        # pauses work, but a cold Map launch must not trigger pause/resume and a
+        # second render cycle.
+        self._ui_inactive_settle_timer.setInterval(1500)
+        self._ui_inactive_settle_timer.timeout.connect(self._on_ui_inactive_settled)
 
         def _construct_startup_component(name: str, factory: Callable[[], object]):
             with perf_span(f"startup.construct.{name}", min_ms=0.0):
@@ -330,6 +341,7 @@ class MainWindow(QMainWindow):
         # Central widget with sidebar navigation + stacked pages
         central = QWidget()
         layout = QHBoxLayout(central)
+        layout.setSizeConstraint(QLayout.SetNoConstraint)
         self.setCentralWidget(central)
 
         # Keep the first shell limited to Settings, Ops Center, and the SOP
@@ -800,7 +812,10 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._sync_status_box_width)
 
         # Stacked content
-        self.stack = QStackedWidget()
+        # Hidden primary pages must not inflate the active page or the native
+        # window. This is especially important when a tall deferred Compose or
+        # WebEngine-backed Map page is constructed for the first time.
+        self.stack = CurrentPageStack()
         for _label, widget in self._screens:
             self.stack.addWidget(widget)
 
@@ -1013,10 +1028,16 @@ class MainWindow(QMainWindow):
         # Layout composition
         layout.addWidget(self.nav_widget)
         layout.addWidget(right_container, stretch=1)
-        self.stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # The shell, not the active page's transient native size hint, owns the
+        # top-level window geometry. Layout stretch still gives the current page
+        # all available space; Ignored prevents a cold WebEngine Map page from
+        # resizing or repositioning the application window during activation.
+        self.stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
 
-        # Suggest a modest minimum size
-        self.setMinimumSize(900, 600)
+        # Every primary page owns compact overflow.  Do not impose a shell
+        # floor that prevents the audited 900x560 workflow or a smaller
+        # platform work area from remaining reachable.
+        self.setMinimumSize(0, 0)
 
         self._apply_app_theme()
         self._ui_watchdog = UiEventLoopWatchdog(self)
@@ -1245,6 +1266,7 @@ class MainWindow(QMainWindow):
         if app is not None:
             try:
                 self._app_active = app.applicationState() == Qt.ApplicationActive
+                self._observed_application_state = app.applicationState()
                 app.applicationStateChanged.connect(self._on_application_state_changed)
             except Exception as e:
                 log.debug("MainWindow: UI lifecycle state wiring failed: %s", e)
@@ -1785,23 +1807,60 @@ class MainWindow(QMainWindow):
             log.debug("UI_LIFECYCLE|scheduler_resume_failed err=%s", exc)
         self._flush_visible_ui_refresh("app_resume")
 
-    def _on_application_state_changed(self, state) -> None:
-        active = state == Qt.ApplicationActive
-        if active == getattr(self, "_app_active", True):
+    def _on_ui_inactive_settled(self) -> None:
+        """Pause only after inactivity survives the native-surface grace period."""
+        if bool(getattr(self, "_shutting_down", False)):
+            self._ui_inactive_pending = False
             return
-        self._app_active = active
-        log.info("UI_LIFECYCLE|app_active=%s state=%s", active, state)
-        if not active:
-            self._ui_resume_pending = False
-            self._ui_resume_settle_timer.stop()
-            self._pause_noncritical_ui_timers()
-            self._set_child_app_active(False)
-            self._mark_ui_refresh_dirty("app_inactive")
+        if not bool(getattr(self, "_ui_inactive_pending", False)):
             return
-        self._ui_resume_pending = True
+        self._ui_inactive_pending = False
+        if getattr(self, "_observed_application_state", Qt.ApplicationActive) == Qt.ApplicationActive:
+            return
+        if not bool(getattr(self, "_app_active", True)):
+            return
+        self._app_active = False
+        log.info(
+            "UI_LIFECYCLE|app_active=False state=%s",
+            getattr(self, "_observed_application_state", Qt.ApplicationInactive),
+        )
+        self._ui_resume_pending = False
+        self._ui_resume_settle_timer.stop()
         self._pause_noncritical_ui_timers()
         self._set_child_app_active(False)
-        self._ui_resume_settle_timer.start()
+        self._mark_ui_refresh_dirty("app_inactive")
+
+    def _on_application_state_changed(self, state) -> None:
+        active = state == Qt.ApplicationActive
+        self._observed_application_state = state
+        if active:
+            pending_inactive = bool(getattr(self, "_ui_inactive_pending", False))
+            self._ui_inactive_pending = False
+            self._ui_inactive_settle_timer.stop()
+            if bool(getattr(self, "_app_active", True)):
+                if pending_inactive:
+                    log.info("UI_LIFECYCLE|transient_inactive_ignored state=%s", state)
+                return
+            self._app_active = True
+            log.info("UI_LIFECYCLE|app_active=True state=%s", state)
+            self._ui_resume_pending = True
+            self._pause_noncritical_ui_timers()
+            self._set_child_app_active(False)
+            self._ui_resume_settle_timer.start()
+            return
+        if not bool(getattr(self, "_app_active", True)):
+            return
+        self._ui_inactive_pending = True
+        immediate_states = {
+            getattr(Qt, "ApplicationHidden", None),
+            getattr(Qt, "ApplicationSuspended", None),
+        }
+        if state in immediate_states:
+            self._ui_inactive_settle_timer.stop()
+            self._on_ui_inactive_settled()
+            return
+        log.info("UI_LIFECYCLE|inactive_pending state=%s grace_ms=1500", state)
+        self._ui_inactive_settle_timer.start()
 
     def refresh_operator_history_views(self):
         """
@@ -2086,13 +2145,8 @@ class MainWindow(QMainWindow):
         target_value_row.addStretch()
         v.addLayout(target_value_row)
         self.map_prop_badge = QLabel("Best Band: --")
-        try:
-            theme = resolve_theme(self.settings)
-            self.map_prop_badge.setStyleSheet(
-                f"font-weight: bold; color: {theme.get('info', theme.get('accent', '#1E88E5'))};"
-            )
-        except Exception:
-            self.map_prop_badge.setStyleSheet("font-weight: bold; color: #1E88E5;")
+        theme = resolve_theme(self.settings)
+        self.map_prop_badge.setStyleSheet(label_style("info", theme, weight=700))
         v.addWidget(self.map_prop_badge)
         self.map_cb_prop_overlay.stateChanged.connect(self._on_sidebar_prop_changed)
         self.map_prop_mode_combo.currentIndexChanged.connect(self._on_sidebar_prop_mode_changed)
@@ -2938,7 +2992,9 @@ class MainWindow(QMainWindow):
 
         if off_schedule:
             self.scheduler_status_header.setText("Off Schedule")
-            self.scheduler_status_header.setStyleSheet("font-weight: bold; color: #C62828;")
+            self.scheduler_status_header.setStyleSheet(
+                label_style("danger", resolve_theme(self.settings), weight=700)
+            )
             self._set_scheduler_reasons(reasons or [""])
             self.resume_schedule_btn.setVisible(True)
             self.suspend_duration_label.setVisible(True)
@@ -5355,7 +5411,6 @@ class MainWindow(QMainWindow):
                 "QLabel#stationCommandNow {"
                 f"background: {theme.get('surface', '#FFFFFF')}; color: {text};"
                 f"border: 1px solid {border}; border-radius: 5px; padding: 4px 10px; font-weight: 800;"
-                "font-size: 20px;"
                 "}"
             )
         if getattr(self, "station_command_radio_combo", None) is not None:
@@ -5363,7 +5418,6 @@ class MainWindow(QMainWindow):
                 "QComboBox#stationCommandRadioSelector {"
                 f"background: {theme.get('surface', '#FFFFFF')}; color: {text};"
                 f"border: 1px solid {border}; border-radius: 5px; padding: 4px 28px 4px 10px; font-weight: 800;"
-                "font-size: 20px;"
                 "}"
                 "QComboBox#stationCommandRadioSelector::drop-down {"
                 "border: none; width: 24px;"
@@ -5662,13 +5716,18 @@ class MainWindow(QMainWindow):
             return default
         return raw in {"1", "true", "yes", "on"}
 
+    @staticmethod
+    def _platform_needs_webengine_prewarm() -> bool:
+        """Return whether first-use WebEngine startup can disturb window focus."""
+        return sys.platform == "darwin" or sys.platform.startswith("win")
+
     def _should_prewarm_webengine_at_startup(self) -> bool:
         """
-        Default to startup WebEngine prewarm on Windows, where the hidden
-        startup path measurably improves first Map activation. Other platforms
-        stay opt-in unless explicitly overridden in settings.
+        Default to startup WebEngine prewarm on macOS and Windows, where helper
+        process startup during first Map activation can disturb focus, Spaces,
+        or monitor placement. Linux remains opt-in unless explicitly enabled.
         """
-        default_enabled = sys.platform.startswith("win")
+        default_enabled = self._platform_needs_webengine_prewarm()
         try:
             raw = self.settings.get("map_webengine_startup_prewarm", None)
         except Exception:
@@ -5721,11 +5780,11 @@ class MainWindow(QMainWindow):
 
     def _queue_map_switch_after_webengine_warmup(self, index: int) -> bool:
         """
-        On Windows, keep the current tab visible for the one-time WebEngine
-        warmup so the first Map navigation does not visibly coincide with the
-        helper-process startup path.
+        On macOS and Windows, keep the current tab visible for the one-time
+        WebEngine warmup so first Map navigation does not visibly coincide with
+        helper-process startup or native-surface attachment.
         """
-        if not sys.platform.startswith("win"):
+        if not self._platform_needs_webengine_prewarm():
             return False
         if self._shutting_down or self._webengine_warmup_done:
             return False
@@ -5754,19 +5813,19 @@ class MainWindow(QMainWindow):
         if idx is None:
             return
         self._pending_map_switch_index = None
-        try:
-            if hasattr(self, "stations_map_tab") and self.stations_map_tab is not None:
-                if hasattr(self.stations_map_tab, "prepare_webview_for_first_show"):
-                    self.stations_map_tab.prepare_webview_for_first_show()
-        except Exception as e:
-            log.debug("MainWindow: hidden Map webview precreate failed: %s", e)
+        # The native WebEngine surface is intentionally not constructed while
+        # Map is hidden.  _set_screen first gives the real Map canvas its final
+        # geometry, then the tab creates the surface in that final parent.
         QTimer.singleShot(0, lambda i=idx: self._set_screen(i))
 
     def _prewarm_webengine(self) -> None:
         """
-        Warm up Qt WebEngine process/components and native view startup early so
-        first Map activation avoids the one-time close/reopen-style visual glitch
-        on some Windows systems.
+        Warm up Qt WebEngine without creating or showing a native child view.
+
+        A QWebEngineView attached directly to the top-level window can
+        participate in native-window placement while Windows is restoring a
+        multi-monitor layout.  A page-only warmup starts the WebEngine process
+        without changing the FIO window geometry or screen assignment.
         """
         if self._shutting_down:
             return
@@ -5775,46 +5834,33 @@ class MainWindow(QMainWindow):
         if self._webengine_warmup_widget is not None:
             return
         try:
-            from PySide6.QtWebEngineWidgets import QWebEngineView
+            from PySide6.QtWebEngineCore import QWebEnginePage
         except Exception:
             return
         try:
-            web = QWebEngineView(self)
-            web.resize(4, 4)
-            self._webengine_warmup_widget = web
-            try:
-                # Force an offscreen show once so WebEngine native surface/process
-                # startup does not occur during first visible Map activation.
-                web.setAttribute(Qt.WA_DontShowOnScreen, True)
-            except Exception:
-                pass
+            page = QWebEnginePage(self)
+            self._webengine_warmup_widget = page
 
             def _cleanup() -> None:
                 try:
-                    if self._webengine_warmup_widget is web:
+                    if self._webengine_warmup_done and self._webengine_warmup_widget is not page:
+                        return
+                    if self._webengine_warmup_widget is page:
                         self._webengine_warmup_widget = None
                     self._webengine_warmup_done = True
-                    try:
-                        web.hide()
-                    except Exception:
-                        pass
-                    web.deleteLater()
+                    page.deleteLater()
                     QTimer.singleShot(0, self._complete_pending_map_switch_after_webengine_warmup)
                 except Exception:
                     pass
 
             try:
-                web.loadFinished.connect(lambda _ok: _cleanup())
+                page.loadFinished.connect(lambda _ok: _cleanup())
             except Exception:
                 pass
-            try:
-                web.show()
-            except Exception:
-                pass
-            web.setUrl(QUrl("about:blank"))
+            page.setUrl(QUrl("about:blank"))
             QTimer.singleShot(3000, _cleanup)
         except Exception as e:
-            log.debug("MainWindow: WebEngine warmup (hidden-view) skipped: %s", e)
+            log.debug("MainWindow: WebEngine warmup (page-only) skipped: %s", e)
             self._webengine_warmup_widget = None
 
     def _prewarm_next_lazy_tab(self) -> None:
@@ -6201,16 +6247,60 @@ class MainWindow(QMainWindow):
             except Exception:
                 log.exception("MainWindow: failed to create deferred screen %r", label)
                 return
+            placeholder = self._lazy_placeholders.get(label)
+            current_widget = self.stack.currentWidget()
+            placeholder_index = self.stack.indexOf(placeholder) if placeholder is not None else -1
+            insert_index = placeholder_index if placeholder_index >= 0 else index
+            # Insert the real page before removing its placeholder.  Removing a
+            # current QStackedWidget page first can briefly expose an adjacent
+            # page, which users perceive as the recurring "swipe and vanish".
+            self.stack.insertWidget(insert_index, new_widget)
+            if current_widget is placeholder:
+                self.stack.setCurrentWidget(new_widget)
+            if placeholder is not None and placeholder_index >= 0:
+                self.stack.removeWidget(placeholder)
+                placeholder.deleteLater()
+            elif current_widget is not None and current_widget is not placeholder:
+                self.stack.setCurrentWidget(current_widget)
+            self._screens[index] = (label, new_widget)
             try:
                 if hasattr(new_widget, "apply_theme"):
                     new_widget.apply_theme()
             except Exception:
                 pass
-            placeholder = self._lazy_placeholders.get(label)
-            if placeholder is not None:
-                self.stack.removeWidget(placeholder)
-            self.stack.insertWidget(index, new_widget)
-            self._screens[index] = (label, new_widget)
+
+    def _settle_active_screen_layout(self, index: int, navigation_epoch: int) -> None:
+        """Finish one first-visible layout pass without resizing the top-level window."""
+        if bool(getattr(self, "_shutting_down", False)):
+            return
+        if int(getattr(self, "_navigation_epoch", -1)) != int(navigation_epoch):
+            return
+        if int(self.stack.currentIndex()) != int(index):
+            return
+        widget = self.stack.widget(index)
+        if widget is None or widget is not self.stack.currentWidget():
+            return
+        try:
+            widget.ensurePolished()
+            page_layout = widget.layout()
+            if page_layout is not None:
+                page_layout.invalidate()
+                page_layout.activate()
+            stack_layout = self.stack.layout()
+            if stack_layout is not None:
+                stack_layout.invalidate()
+                stack_layout.activate()
+            widget.updateGeometry()
+            widget.update()
+            self.stack.update()
+        except Exception:
+            pass
+        try:
+            hook = getattr(widget, "on_first_visible_layout_ready", None)
+            if callable(hook):
+                hook()
+        except Exception:
+            log.debug("MainWindow: first-visible layout hook failed for %s", self._screens[index][0], exc_info=True)
 
     def _get_tab_by_label(self, label: str) -> QWidget | None:
         for name, widget in self._screens:
@@ -12968,6 +13058,11 @@ class MainWindow(QMainWindow):
                     fit_child_combo_boxes(self.stack.widget(index))
                 except Exception:
                     pass
+                if label == "Map":
+                    # A QWebEngineView is a native/composited surface.  Settle
+                    # every parent splitter and the canvas synchronously before
+                    # set_map_visible() is allowed to queue its construction.
+                    self._settle_active_screen_layout(index, navigation_epoch)
                 try:
                     widget_active = self.stack.widget(index)
                     if label == "Messages":
@@ -13005,6 +13100,14 @@ class MainWindow(QMainWindow):
                         )
                 except Exception:
                     pass
+                if label != "Map":
+                    QTimer.singleShot(
+                        0,
+                        lambda expected=index, epoch=navigation_epoch: self._settle_active_screen_layout(
+                            expected,
+                            epoch,
+                        ),
+                    )
 
     def _on_ncs_net_status_changed(self, kind: str, active: bool) -> None:
         kind_key = (kind or "").strip().upper()

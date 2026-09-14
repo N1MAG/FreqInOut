@@ -4,6 +4,102 @@ All new entries must follow the authoritative multi-model delivery contract in
 `docs/internal/project_delivery_rules.md` and record the required package/model,
 primary-review, acceptance, and exit-gate evidence.
 
+## 2026-09-13 — Whole-application UI design-control conformance audit
+
+Status: audit and all UIA-0 through UIA-5 remediation exit gates passed; native
+Linux visual qualification remains operator-assisted.
+
+All 23 screens in the current MainWindow registry, their routed navigation
+contexts, and principal nested tabs/settings sections were reviewed against the
+task-oriented workspace guideline, LN-0 geometry fixtures, shared-theme rule,
+performance/lifecycle contract, and the newly explicit Font-Derived Vertical
+Geometry Contract. The resulting
+`ui_tab_design_control_conformance_audit.md` separates confirmed source-level
+violations from runtime risks and defines five gated remediation slices after a
+shared conformance-harness slice.
+
+The highest-priority confirmed gaps are synchronous database/process work in
+Station Overview, Resources, Station Health, Managed BBS and Settings Message
+Auth; transient exact-height locking in Settings; fixed 24 px Ops table rows;
+nonresponsive Map/NCS/schedule layouts; horizontal scrolling in a normal Compose
+setup form; and broad screen-local typography/color/splitter treatments that
+bypass the shared theme. The current global text-size guard and 48 px source
+heuristic are explicitly classified as safety nets, not compliance proof.
+
+Work packages and models:
+
+- high-reasoning primary GPT-5: rubric, font-derived-height architecture,
+  complete surface inventory, concurrency/performance reconciliation,
+  specification/work-log edits, delegated-result review and exit gate;
+- `gpt-5.6-terra` (high): Settings, Station, Plans, Resources, Shortwave and
+  schedule audit;
+- `gpt-5.6-luna` (high): Messages, Compose, Spotter, BBS, Map and Ops audit;
+- `gpt-5.6-terra` (medium): NCS, Operators, Help, remaining dialogs and
+  mechanical geometry/theme scan.
+
+No application code, schema, migration, configuration, RF/device behavior or
+production data changed. Delegates edited no files. Primary review preserved
+unrelated worktree artifacts.
+
+### UIA-0 conformance harness completion
+
+Status: UIA-0 exit gate passed; UIA-1 authorized next.
+
+The source audit now classifies hard violations and review candidates across
+literal text geometry, exact locks, item-view rows/headers, local typography and
+colors, and splitter handles, with rule-specific documented exceptions. The
+runtime harness covers font/style floors, tabs, item views, scroll ownership,
+lazy theme/text-scale lifecycle, bounded settling, all 23 registered screens,
+and principal nested workspaces. The shared theme guard now raises missing
+font/style floors for native input families, tabs, buttons/checks/radios,
+titled groups and table/tree rows/headers after startup or lazy construction.
+
+Work packages and models:
+
+- high-reasoning primary GPT-5: shared-theme architecture and implementation,
+  integration, delegated-diff review/correction and gate;
+- `gpt-5.6-terra` (high): static semantic audit and seeded tests;
+- `gpt-5.6-luna` (high): runtime geometry harness and coverage manifest.
+
+Primary review corrected horizontal-header width/height interpretation,
+whole-view versus row size hints, and incomplete dynamic nested-tab manifest
+coverage. Acceptance: 27 focused tests pass, Python compilation and
+`git diff --check` pass. No persistence, migration, RF/device behavior or
+production data changed.
+
+### UIA-1 snapshot and geometry-authority completion
+
+Status: UIA-1 exit gate passed; UIA-2 authorized next.
+
+Resources Frequency Catalog and Net Directory, Station Overview, Station
+Health, and Managed BBS now publish bounded generation-keyed snapshots. Their
+typing, selection, filtering, resize, theme, paint, and tab-navigation paths
+project from the last coherent cache. Slow/stale refreshes neither block the
+GUI nor replace newer results. BBS explicit mutations refresh the cache without
+losing the operator-facing outcome message.
+
+Settings no longer freezes expanded stack pages to a transient exact height.
+Message Auth GPG executable and key discovery runs in a coalesced worker and
+keeps current results visible until a complete replacement arrives. All new
+workers have bounded shutdown ownership; no schema or migration changed.
+
+Work packages and models:
+
+- high-reasoning primary GPT-5: snapshot/lifecycle architecture, Settings and
+  BBS implementation, delegated diff review/correction, compatibility fixes,
+  specifications/work log, integration and exit gate;
+- `gpt-5.6-terra` (high): Resources immutable snapshot service, Frequency/Net
+  cache-only projections, and focused tests; and
+- `gpt-5.6-luna` (high): Station Overview/Health snapshot workers, lifecycle,
+  coherent-result behavior, and focused tests.
+
+Primary review corrected cross-page snapshot ownership, BBS catalog-only
+database compatibility, BBS post-mutation cache refresh/status preservation,
+Settings GPG worker coalescing, and legacy exact-height test expectations.
+Acceptance: 212 combined UIA-1 tests pass, all changed Python modules compile,
+and `git diff --check` passes. No persistence schema, migration, RF/device
+behavior, external endpoint, or production data changed.
+
 ## 2026-09-11 — Standing multi-model delivery governance
 
 Status: documentation/governance exit gate passed; no runtime behavior changed.
@@ -5193,3 +5289,446 @@ Settings, and Station-shell tests** pass. Changed Python files compile and
 `git diff --check` passes. No migration, RF transmission, device write, endpoint
 action, application restart, destructive action, or production-data mutation
 occurred.
+
+## 2026-09-13 — UI tab conformance UIA-2
+
+Status: implementation complete and automated exit gate passed. Production
+Linux visual confirmation remains operator-assisted.
+
+The application shell, Ops, Messages/Compose, Map, Managed BBS, and FIO Spotter
+now conform to the shared font-derived geometry and theme authority for this
+slice. Ops rows/headers and semantic status treatments scale with the active
+font. Map filters reflow from measured control widths, and generated detail and
+marker HTML uses shared theme roles. Compose stacks ordinary form controls,
+keeps horizontal scrolling off its setup surface, preserves draft/scroll state,
+and settles without height ratcheting. Managed BBS uses visible shared splitter
+handles and font-derived chips; BBS and Spotter retain cache-only snapshot and
+selection behavior.
+
+Work packages and models:
+
+- high-reasoning primary GPT-5: architecture, shell/shared-theme work,
+  breakpoint and contrast corrections, review of every delegated diff,
+  integration, specifications/work log, and exit gate;
+- `gpt-5.6-terra` (high): Ops and Map UI implementation and focused tests;
+- `gpt-5.6-luna` (high): Messages/Compose implementation and focused tests;
+- `gpt-5.6-terra` (high): BBS/Spotter implementation, Map semantic-theme
+  follow-up, and focused tests.
+
+Acceptance evidence: **207 integrated UIA-2 tests** pass. The Map regression
+suite passes **243 tests**, the BBS/Spotter suite passes **39 tests**, and the
+narrow Expect check passes ten repeated runs. The audit reports no finding for
+any UIA-2 owning file and the repository backlog is now **22 hard findings and
+48 candidates** for later gated slices. Changed Python modules compile and
+`git diff --check` passes. No migration, RF transmission, device write,
+endpoint action, application restart, destructive action, or production-data
+mutation occurred.
+
+## 2026-09-13 — UI tab conformance UIA-3
+
+Status: implementation complete and automated exit gate passed. Production
+Linux visual confirmation remains operator-assisted.
+
+JS8, FLDigi/SSB, and VHF/UHF net-control workspaces now reflow from live font
+and control measurements, retain one page-level vertical scroll owner, and keep
+their operational actions and dominant roster/list surfaces usable at the audit
+viewports. FLDigi macro mapping no longer requires an oversized dialog. HF and
+local operator history, Local Callsigns, and Local Reports now use shared theme
+roles, font-derived rows/controls/detail areas, responsive control bands, and
+compact dialogs with reachable action footers. Resize and theme paths are
+layout/cache-only and preserve the current draft, selection, and detail.
+
+Primary review corrected delegated magic breakpoints and theme-foreground
+guesses by adding a shared content-measured horizontal-layout breakpoint and
+using the shared filled-surface contrast helper. It also restored count-chip
+theme refresh and reconciled stale test doubles/static responsiveness checks
+with the already-implemented receiver-control and bounded-worker contracts.
+
+Work packages and models:
+
+- high-reasoning primary GPT-5: architecture, shared primitives, review and
+  correction of all delegated diffs, integration, specs/work log, and gate;
+- `gpt-5.6-terra` (high): JS8 and VHF/UHF NCS UI plus focused tests;
+- `gpt-5.6-luna` (high): FLDigi/SSB NCS and macro dialog UI plus focused tests;
+- `gpt-5.6-terra` (high): HF/Local Callsigns and Local Reports UI plus focused
+  tests.
+
+Acceptance evidence: **247 combined UIA-3/regression tests pass with 1 skipped**;
+the scanner/harness suite adds **16 passing tests**. No UIA-3 owning file remains
+in the static findings, and the repository backlog is **22 hard findings and 34
+candidates** for UIA-4/UIA-5. Changed Python files compile and `git diff --check`
+passes. No migration, RF transmission, device write, endpoint action,
+application restart, destructive action, or production-data mutation occurred.
+
+## 2026-09-13 — UI tab conformance UIA-4
+
+Status: implementation complete and automated exit gate passed. Production
+Linux visual confirmation remains operator-assisted.
+
+Resources, planning/schedule/SOP, Settings and Software Administration now use
+font-derived multiline and visible-row geometry, semantic shared-theme roles,
+and compact task-order reflow. Resource filters and selection render from a
+coherent off-thread catalog snapshot; stale generations are discarded and
+queued work is coalesced. Settings theme repaint is explicitly cache-only and
+cannot schedule dependency probes. Ordinary form surfaces retain one vertical
+scroll owner while intentionally wide data surfaces keep local scrolling.
+
+Primary review corrected schedule table clamps, active-theme use in peer
+schedule validation, Resources request coalescing, Software filled-surface
+contrast and strip sizing, and remaining UIA-4 static classifications.
+
+Work packages and models:
+
+- high-reasoning primary GPT-5: architecture/concurrency, shared primitives,
+  delegated-diff review and corrections, integration, docs and exit gate;
+- `gpt-5.6-terra` (high): Resources workspace and focused tests;
+- `gpt-5.6-luna` (high): planning, SOP and schedules plus focused tests; and
+- `gpt-5.6-terra` (high): Settings/Software mechanical conformance and focused
+  tests.
+
+Acceptance evidence: **462 integrated tests pass with 19 platform skips**; a
+corrected planning subset adds **30 passing tests**; the Local Nets 1,000-row
+warm projection budget passes independently. UIA-4 owning files have no scanner
+finding; the repository remainder is **7 hard findings and 0 candidates** for
+UIA-5. Changed Python modules compile and `git diff --check` passes. No
+migration, RF transmission, device write, endpoint action, application restart,
+destructive action, or production-data mutation occurred.
+
+## 2026-09-13 — UI tab conformance UIA-5 and final integration
+
+Status: implementation and automated exit gate complete. Native Linux visual
+qualification remains operator-assisted.
+
+Shortwave, Help, Logs, startup splash, HF subscription and remaining secondary
+dialogs now complete the repository-wide font-derived geometry, shared-theme,
+responsive reflow and scroll-ownership program. Shortwave keeps its source and
+broadcast insight readable at compact widths. Help publishes one coherent
+background-loaded document snapshot and navigates it without repeated file
+reads. Logs performs a bounded off-thread tail read, coalesces refresh requests,
+retains the prior coherent view on failure, and keeps search/theme/resize paths
+cache-only. Splash and dialog geometry now follow application typography rather
+than pixel-era assumptions.
+
+Primary review corrected four material issues before acceptance: delegated Log
+rendering still reread the complete file on the GUI thread; Help topic changes
+still touched the filesystem; splash text was scaled twice; and a lazy widget
+released via `deleteLater()` could destroy its child QThread before the snapshot
+controller stopped it. The corrected shared worker fences callbacks and shuts
+down first. Test reconciliation also preserved per-source JS8 provenance, used
+non-expiring relative ingest timestamps, consumed the scheduler's published
+asynchronous cache rather than forcing GUI-thread projection work, and assigned
+the required VarAC instance before editing its radio-scoped settings.
+
+Work packages and models:
+
+- high-reasoning primary GPT-5: architecture, concurrency and lifecycle review,
+  shared primitives, delegated-diff correction, integration, specifications/work
+  log and final exit gate;
+- `gpt-5.6-terra` (high): Shortwave and HF subscription implementation and
+  focused tests;
+- `gpt-5.6-luna` (high): Help, Logs and startup splash implementation and
+  focused tests;
+- `gpt-5.6-terra` (high): optional/lazy coverage manifest and scheduler
+  cache-fixture reconciliation; and
+- `gpt-5.6-luna` (high): full-suite stale-fixture reconciliation for JS8 source
+  identity, ingest age, scheduler projection and VarAC assignment.
+
+Acceptance evidence: **291 UIA-5 changed-surface/integration tests**, **24
+scanner/harness tests**, and **132 Phase 7/native-construction stress tests**
+pass. The complete inventory also passes in bounded process-isolated shards:
+**1,090 passed/2 skipped**, **5 passed** for the Local Nets release file
+(including its unchanged 50 ms p95 benchmark), **1,107 passed**, **814 passed/7
+skipped**, **461 passed/27 skipped**, and **220 passed/1 skipped**. The
+repository semantic scanner reports **0 hard findings and 0 candidates**.
+Changed Python files compile and `git diff --check` passes.
+
+The shard boundary is test-process isolation only: no assertion is disabled or
+relaxed. A monolithic macOS offscreen PySide run accumulates legacy native Qt
+state across thousands of tests and can abort inside Qt even though each owning
+file passes from a clean process. No migration, RF transmission, radio/device
+write, endpoint action, application restart, destructive action, or production
+data mutation occurred.
+
+## 2026-09-13 — First-render and Map activation stability remediation
+
+Status: implementation and automated gate complete; Linux/Windows production
+visual and Windows multi-monitor qualification remain operator-assisted.
+
+- Replaced the main page stack and Messages Inbox/Compose mode stack with the
+  active-page geometry primitive so hidden tall pages cannot expand or distort
+  the visible workspace.
+- Made deferred-page replacement atomic and added one navigation-generation-
+  fenced first-visible layout settlement, eliminating the transient adjacent
+  page behind the recurring swipe/vanish symptom.
+- Reworked Map resize handling into one coalesced cache-only pass. Filter grids
+  and splitters now skip unchanged resolved geometry instead of repeatedly
+  resizing the native WebEngine surface.
+- Added a bounded Leaflet post-layout `invalidateSize(false)` contract keyed by
+  page generation and real viewport size; it does not reload HTML or data.
+- Replaced the Windows native child-view warm-up with page-only WebEngine
+  warm-up so preheating cannot move, resize, or reassign the FIO top-level
+  window to another monitor.
+
+Work packages: `gpt-5.6-sol` (high reasoning) owned lifecycle architecture,
+cross-platform implementation, integration and documentation;
+`gpt-5.6-terra` (high) audited/tested Map activation and geometry;
+`gpt-5.6-luna` (high) reproduced/tested hidden-page first-render geometry; and
+`gpt-5.6-terra` (high) independently audited responsive re-entry paths. Primary
+review accepted both delegated test diffs and added the unchanged-drawer
+splitter regression.
+
+Acceptance evidence: **336 tests** pass for first-render, Map, current-page,
+Phase 7 shell and related Map behavior; **52 tests** pass for the UI lifecycle,
+design-control, theme and feedback geometry gate; **36 tests** pass for the
+multi-rig main-shell gate; and **306 tests** pass for the high-use
+Messages/Compose/Spotter/Map regression gate. Changed Python files compile and `git diff --check`
+passes. No migration, runtime configuration/data write, RF/device command,
+commit, or push occurred.
+
+### P1 follow-up after continued Map swipe report
+
+The first remediation removed adjacent-page exposure and Map resize churn but
+left the primary stack willing to propagate the active Map page's transient
+native minimum-size hint. A focused Qt reproduction switched a shown 900x560
+window to a synthetic 2400x1800 Map-like page and observed top-level growth to
+2418x1818. The primary stack now uses `QSizePolicy.Ignored` on both axes, which
+preserves the 900x560 window while layout stretch continues to fill the
+available workspace.
+
+The active runtime log provided a second causal sequence: cold Map page load
+emitted `ApplicationInactive`, Map was paused while loading, `loadFinished`
+deferred its update, and `ApplicationActive` triggered a second Map render and
+visible refresh. Inactive state now has a 1.5-second settlement grace period.
+Transient WebEngine focus/surface events do not change the settled application
+state or child lifecycle; sustained inactivity still pauses and explicit
+hidden/suspended states pause immediately.
+
+The `gpt-5.6-sol` high-reasoning primary owned lifecycle design and production
+changes. `gpt-5.6-terra` (high) independently reproduced the top-level size-hint
+failure and added focused regressions; `gpt-5.6-luna` (high) traced every outer
+and inner loading-stack transition; and a second `gpt-5.6-terra` (high) audit
+confirmed Map splitter re-entry was already bounded. Primary review corrected
+the delegated top-level test so it applies the production shell policy rather
+than testing an intentionally unconstrained generic stack.
+
+Follow-up acceptance: **342 first-render/Map/shell tests**, **88 combined UI
+lifecycle/design-control and multi-rig shell tests**, and **307 high-use
+Messages/Compose/Spotter/Map tests** pass. Native Linux and Windows multi-monitor
+confirmation remains operator-assisted.
+
+### P1 follow-up from macOS Map screen recording
+
+The 19:51 macOS recording and matching runtime events isolated a native
+WebEngine cold-start focus transition rather than another primary-stack resize:
+after Map was selected, FIO's full-screen Space slid away to the Terminal
+desktop while the helper process started, then returned to the still-full-screen
+FIO Map. The earlier inactive-state grace correctly suppressed duplicate child
+pause/resume work, but it could not prevent the operating-system Space
+animation.
+
+The existing page-only WebEngine prewarm is now enabled by default on macOS as
+well as Windows. It is initiated during shell startup, creates no native view,
+and first Map navigation is deferred if the one-time warmup has not completed.
+Linux remains explicitly configurable. Warm Map re-entry was separately made
+idempotent: visibility and focus changes no longer invent dirty data, clean
+re-entry reuses the live page, and routine refresh status remains in a single
+font-derived compact strip rather than expanding and collapsing the map
+viewport.
+
+Work packages and models: `gpt-5.6-sol` (high-reasoning primary) owned video/log
+correlation, lifecycle architecture, production integration, delegated review,
+specifications and exit gates; `gpt-5.6-terra` (high) performed frame-level
+recording review; `gpt-5.6-luna` (high) traced Map visibility/refresh callbacks;
+and `gpt-5.6-terra` (high) audited native WebEngine geometry and cross-platform
+prewarm safety. The primary reviewed all findings and made the production/test
+changes directly; delegated packages made no production edits.
+
+Focused acceptance adds platform-default prewarm, clean warm re-entry,
+inactivity-without-dirtying, compact live-refresh status, application-state and
+geometry checks. The integrated Map/shell gate passes **350 tests**, and the
+high-use Messages/Compose/Spotter/Map gate passes **331 tests**. Native
+design-control, theme, responsiveness and feedback checks add **47 passing
+tests**. Native macOS/Linux/Windows qualification remains operator-assisted. No
+migration, runtime configuration/data write, RF/device command, commit, or push
+occurred.
+
+### P1 follow-up — final-parent native surface and first-painted-map gate
+
+The subsequent recording/report showed that page-only process warm-up was not
+the final defect: the native WebEngine surface was still constructed from the
+Map visibility callback before the queued first-visible splitter settlement.
+The browser could therefore attach while its canvas still had provisional
+geometry, producing the remaining full-screen swipe/bounce and lower-left
+compositor-origin appearance. The active local launch was confirmed to use
+`/Users/bill/RadioCode/runtime/multi-rig` through `start-multi-rig.sh`; matching
+runtime events showed the first WebEngine attachment still emitted a transient
+`ApplicationInactive`, while the lifecycle grace correctly prevented a second
+pause/resume render.
+
+Map activation now completes its cache-only first-visible page/layout/splitter
+settlement synchronously before publishing Map visibility. Native construction
+is bounded until the Map canvas has positive final geometry. The real
+`QWebEngineView` is created in its permanent stack parent, remains current for
+the entire cold load, and is covered by an opaque shared-theme Qt loading
+surface. It is no longer switched back to a hidden loading page, explicitly
+resized, or allowed to take focus while its compositor attaches. The loading
+surface is released only after page load, nonzero canvas and WebEngine geometry,
+the first actual map payload, and a page-owned two-animation-frame callback.
+One-time geometry/state events were added so any remaining platform issue can be
+correlated without changing window placement or polling native state.
+
+Work packages and models: `gpt-5.6-sol` (high-reasoning primary) owned runtime
+correlation, native-surface lifecycle architecture, production integration,
+delegated diff review, specifications and the exit-gate decision;
+`gpt-5.6-terra` (high) performed the widget-construction and callback-order
+audit; `gpt-5.6-luna` (high) added the focused geometry, reveal-gate and overlay
+regressions; and `gpt-5.6-terra` (high) independently reviewed the Qt 6.8
+WebEngine visibility/render contracts and platform-safe lifecycle options. The
+primary accepted the delegated test approach, corrected its synthetic focus
+fixture after adding the pre-reveal focus fence, and made all production edits.
+
+Acceptance evidence: **351 Map/first-render/current-page/Phase 7 shell tests**,
+**208 high-use Messages/Compose/Spotter/Map tests**, **51 shared-theme,
+font-derived geometry, lifecycle and design-control tests**, and **179 multi-rig
+shell tests** pass. Changed production/test Python files compile and
+`git diff --check` passes. The automated implementation gate is complete;
+native full-screen and secondary-monitor confirmation on macOS, Linux and
+Windows remains operator-assisted. No migration, configuration/data write,
+RF/device command, application restart, commit, or push occurred.
+
+### P1 follow-up — geometry-quiescence gate after full-screen collapse evidence
+
+The restarted local runtime proved the final-parent implementation was active
+and captured the remaining failure precisely. `webview_created` recorded a
+1208x545 browser inside a 1470x923 full-screen window; one second later
+`surface_revealed` recorded only 508x327, with no intervening application-
+inactive transition. The residual swipe, apparent minimize toward the left and
+half-screen return therefore correlated with a late internal geometry
+negotiation after native attachment, rather than duplicate navigation or the
+already-fenced focus lifecycle.
+
+Cold Map activation now has three bounded quiescence barriers: before native
+WebEngine construction, after attachment and before page load, and immediately
+before revealing the painted map. Each barrier requires the complete relevant
+geometry signature to be unchanged for two samples and at least 150 ms;
+resize/responsive reflow invalidates a pending settlement. The Map stack and
+browser also ignore dynamic WebEngine content size hints, leaving the splitter
+as the sole viewport-size owner. Construction telemetry records the top-level
+rectangle/state/screen immediately before and after native attachment; reveal
+telemetry records those fields again with final canvas size. Any further
+window-manager transition can therefore be distinguished from internal Map
+layout without changing geometry.
+
+Work packages and models: `gpt-5.6-sol` (high-reasoning primary) owned runtime
+correlation, quiescence/concurrency architecture, production integration,
+delegated review, specification and final gate; `gpt-5.6-terra` (high) audited
+the native-surface lifecycle and isolated the post-creation geometry collapse;
+`gpt-5.6-luna` (high) added normal/maximized/full-screen preservation tests and
+the focused quiescence regressions; and `gpt-5.6-terra` (high) reviewed official
+Qt 6.8 Cocoa/WebEngine behavior and confirmed that no supported child-view API
+requires or authorizes a top-level state change.
+
+Acceptance evidence: **357 Map/first-render/current-page/Phase 7 shell tests**,
+**82 focused high-use Messages/Compose/Spotter/Map tests**, **45 shared-theme,
+font-derived geometry, lifecycle and design-control tests**, and **135 multi-rig
+shell tests** pass. The delegated quiescence file contributes **20 passing
+tests** and is included in the Map gate. A combined long-lived offscreen Qt run
+accumulated native Qt state and aborted in an unrelated Logs construction test;
+the same Phase 7 tests pass in the clean Map process and the multi-rig files pass
+in their clean 135-test process. Changed Python files compile and `git diff
+--check` passes. Native Linux/Windows/macOS full-screen and multi-monitor
+confirmation remains operator-assisted. No migration, runtime configuration or
+data write, RF/device command, application restart, commit, or push occurred.
+
+### P1 follow-up — isolate macOS cold navigation until payload-ready presentation
+
+The 21:00 macOS recording and its matching runtime telemetry separated native
+attachment from first page navigation. `webview_created` preserved the
+1470x923 full-screen top-level window, its screen and the nonzero final Map
+canvas. The top-level window remained unchanged until the first visible
+WebEngine navigation; at `surface_revealed` it had become a 670x761 normal
+window at the upper-left of the same screen. There was no application-inactive
+event during that interval and the Map render itself consumed only about 59 ms.
+The prior geometry barrier was therefore waiting for an already-normalized
+state rather than preventing the platform transition.
+
+On macOS, only the first WebEngine page load is now isolated as a non-current
+child of its permanent, fully sized Map stack. The stable shared-theme
+`Preparing map` page remains current while Chromium navigates and the first
+real payload is applied. FIO then makes the loaded page current exactly once
+behind the opaque loading overlay, performs no top-level geometry/state/screen
+operation, waits for the post-presentation geometry barrier and two page-owned
+animation frames, and only then removes the overlay and enables focus. Hidden
+cold pages also skip Leaflet viewport invalidation until presentation. Warm
+reloads retain the already-visible Map and do not use this isolation path.
+
+Work packages and models: `gpt-5.6-sol` (high-reasoning primary) owned the
+recording/log correlation, platform lifecycle architecture, production code,
+specification, delegated-diff review and final integration; `gpt-5.6-luna`
+(high) added the bounded cold-load, exactly-once presentation, top-level
+invariant and warm-reload regression package. An earlier delegated video-only
+review was stopped once the runtime telemetry established the causal interval,
+to contain further cost. Primary review added the hidden-page viewport fence
+regression alongside the production guard.
+
+Acceptance evidence: the lifecycle file contributes **24 passing tests**; the
+integrated Map/first-render/current-page/Phase 7 shell gate passes **361 tests**;
+the high-use Messages/Compose/Spotter/Map gate passes **82 tests**; the
+shared-theme, font-derived geometry, lifecycle and design-control gate passes
+**45 tests**; and the multi-rig shell gate passes **135 tests** in clean
+process-isolated shards. A combined 135-test macOS offscreen Qt process
+completed every assertion but exited 139 during accumulated native Qt
+interpreter teardown; all owning shards then passed and exited normally.
+Changed Python files compile and `git diff --check` passes. Native macOS
+full-screen confirmation remains operator-assisted; Linux and Windows Map
+first-load/multi-monitor qualification remains required. No migration, runtime
+configuration or data write, RF/device command, application restart, commit,
+or push occurred.
+
+### P1 follow-up — detached Map document and single presentation state
+
+The 21:29 macOS recording is a failed native acceptance gate and supersedes the
+prior conclusion that a non-current `QWebEngineView` was sufficient isolation.
+Matching runtime telemetry showed `webview_created` preserving the 1470x923
+Built-in Retina full-screen window, followed immediately after the real document
+navigation by `page_load_finished` with the same rectangle and screen but
+`WindowNoState`. The Map data path was healthy: the render completed with 328
+markers and reached Ready. The retained `Refreshing All Stations` surface was a
+second failure: competing `attached` and `postload_present` callbacks repeatedly
+reset the same geometry-quiescence tracker, so the overlay could never be
+released. Existing synthetic QWidget tests did not exercise either native page
+navigation or the competing presentation phases and therefore produced a false
+green gate.
+
+The macOS cold path now loads the real document on a retained, page-only
+`QWebEnginePage` that is not attached to the native view. After load success and
+first-payload application, FIO attaches that prepared page to the permanent Map
+view and makes the view current exactly once behind the opaque loading surface.
+One generation-fenced `present` state owns final geometry settlement and the
+two-animation-frame page acknowledgement; stale preparation, resize,
+JavaScript, title and reveal callbacks are no-ops. A bounded eight-second
+deadline replaces a stuck loading surface with calm retry guidance without
+moving, resizing, normalizing, activating, or otherwise manipulating the main
+window. Warm Map reloads continue to reuse the attached page.
+
+Work packages and models: `gpt-5.6-sol` (extra-high/high-reasoning primary)
+owned the causal telemetry review, concurrency and lifecycle architecture,
+specification correction, production integration, delegated-diff review and
+final gate; `gpt-5.6-sol` (extra-high forensic delegate) independently
+correlated the full-screen state loss and quiescence loop; and `gpt-5.6-luna`
+(high) analyzed the recording timeline and added detached-navigation,
+exactly-once attachment, stale-generation, timeout, post-presentation resize
+and warm-path regressions. The primary reviewed and accepted every delegated
+change.
+
+Acceptance evidence: the focused Map lifecycle file passes **30 tests**; the
+integrated Map/first-render/current-page/Phase 7 shell gate passes **367 tests**;
+the high-use Messages/Compose/Spotter/Map gate passes **82 tests**; the
+shared-theme, font-derived geometry, lifecycle and design-control gate passes
+**45 tests**; and the multi-rig shell gate passes **135 tests** in clean,
+process-isolated shards. Changed production/test Python files compile and `git
+diff --check` passes. The automated exit gate is complete; native macOS
+full-screen confirmation of this corrected page-only load remains
+operator-assisted, followed by Linux and Windows first-load/multi-monitor
+qualification. No migration, runtime configuration or data write, RF/device
+command, application restart, commit, or push occurred.

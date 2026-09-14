@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QApplication
 
 from freqinout.gui.station_bbs_tab import StationBbsTab
 from freqinout.gui.theme import apply_app_theme, get_theme
-from tests.test_station_bbs_tab import _seed_catalog
+from tests.test_station_bbs_tab import _seed_catalog, _wait_for_catalog
 
 
 def _app() -> QApplication:
@@ -38,6 +38,7 @@ def test_bbs_radio_service_matrix_is_concise_and_reachable(tmp_path, size, scale
     app = _app()
     settings, _source, _artifact_id = _seed_catalog(tmp_path)
     tab = StationBbsTab(settings=settings)
+    _wait_for_catalog(tab, app)
     try:
         tab.service_tabs.setCurrentWidget(tab.radio_service_page)
         _show_tab(tab, size, theme, scale)
@@ -63,6 +64,7 @@ def test_bbs_location_editor_is_collapsed_and_add_cancel_is_reversible(tmp_path)
     app = _app()
     settings, _source, _artifact_id = _seed_catalog(tmp_path)
     tab = StationBbsTab(settings=settings)
+    _wait_for_catalog(tab, app)
     try:
         tab.service_tabs.setCurrentWidget(tab.locations_page)
         tab.resize(900, 560)
@@ -90,6 +92,7 @@ def test_bbs_long_labels_paths_have_no_page_overflow_and_one_summary(tmp_path):
     app = _app()
     settings, _source, _artifact_id = _seed_catalog(tmp_path)
     tab = StationBbsTab(settings=settings)
+    _wait_for_catalog(tab, app)
     try:
         tab.service_tabs.setCurrentWidget(tab.locations_page)
         tab.resize(900, 560)
@@ -116,6 +119,7 @@ def test_bbs_resize_and_theme_changes_are_geometry_only(monkeypatch, tmp_path):
     app = _app()
     settings, _source, _artifact_id = _seed_catalog(tmp_path)
     tab = StationBbsTab(settings=settings)
+    _wait_for_catalog(tab, app)
     calls = {"refresh": 0, "radio": 0}
     original_refresh = tab.refresh_catalog
     original_radio = tab._refresh_radio_services

@@ -156,10 +156,12 @@ from freqinout.gui.plan_context_label import PlanContextLabel
 from freqinout.gui.traffic_action_summary_widget import TrafficActionSummaryWidget
 from freqinout.gui.theme import (
     apply_text_size_accessibility_guards,
+    font_derived_widget_height,
     button_height_for_font,
     button_style,
     control_height_for_font,
     led_style,
+    label_style,
     resolve_theme,
     single_line_label_height,
     style_splitter_handles,
@@ -773,7 +775,7 @@ class ControlFreqTab(QWidget):
         self.applied_filters_label = QLabel("")
         self.applied_filters_label.setObjectName("controlfreqAppliedFilters")
         self.applied_filters_label.setWordWrap(True)
-        self.applied_filters_label.setStyleSheet("font-weight: 600; color: #5b6875;")
+        self.applied_filters_label.setStyleSheet(label_style("muted", self._theme(), weight=600))
         root.addWidget(self.applied_filters_label)
 
         controlfreq_context_text = (
@@ -809,7 +811,7 @@ class ControlFreqTab(QWidget):
         self.current_time_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.current_time_label.setMinimumWidth(160)
         self.current_time_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.current_time_label.setStyleSheet("font-size: 14px; font-weight: 600;")
+        self.current_time_label.setStyleSheet("font-weight: 600;")
         right_status_col.addWidget(self.current_time_label)
         self.updated_label = QLabel("Last updated: --")
         self.updated_label.setVisible(False)
@@ -885,12 +887,12 @@ class ControlFreqTab(QWidget):
         self.awareness_sop_label = QLabel("SOP: --")
         self.awareness_sop_label.setObjectName("controlfreqAwarenessSop")
         self.awareness_sop_label.setWordWrap(True)
-        self.awareness_sop_label.setStyleSheet("color: #5b6875;")
+        self.awareness_sop_label.setStyleSheet(label_style("muted", self._theme()))
         act_layout.addWidget(self.awareness_sop_label)
         self.awareness_recommend_label = QLabel("Recommended: monitor traffic.")
         self.awareness_recommend_label.setObjectName("controlfreqAwarenessRecommended")
         self.awareness_recommend_label.setWordWrap(True)
-        self.awareness_recommend_label.setStyleSheet("font-weight: 600; color: #5b6875;")
+        self.awareness_recommend_label.setStyleSheet(label_style("muted", self._theme(), weight=600))
         act_layout.addWidget(self.awareness_recommend_label)
         self.situation_summary_label = QLabel("Situation: no traffic needs attention.")
         self.situation_summary_label.setObjectName("controlfreqSituationSummary")
@@ -900,7 +902,7 @@ class ControlFreqTab(QWidget):
         self.situation_detail_label = QLabel("")
         self.situation_detail_label.setObjectName("controlfreqSituationDetail")
         self.situation_detail_label.setWordWrap(True)
-        self.situation_detail_label.setStyleSheet("color: #5b6875;")
+        self.situation_detail_label.setStyleSheet(label_style("muted", self._theme()))
         self.situation_detail_label.setVisible(False)
         act_layout.addWidget(self.situation_detail_label)
         self.situation_cards_container = QWidget()
@@ -921,7 +923,7 @@ class ControlFreqTab(QWidget):
         act_layout.addWidget(self.operational_activity_label)
         self.operational_topics_label = QLabel("")
         self.operational_topics_label.setWordWrap(True)
-        self.operational_topics_label.setStyleSheet("color: #5b6875;")
+        self.operational_topics_label.setStyleSheet(label_style("muted", self._theme()))
         act_layout.addWidget(self.operational_topics_label)
         self.awareness_topic_chip_container = QWidget()
         self.awareness_topic_chip_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -947,7 +949,7 @@ class ControlFreqTab(QWidget):
         self.awareness_pins_label = QLabel("")
         self.awareness_pins_label.setObjectName("controlfreqAwarenessPins")
         self.awareness_pins_label.setWordWrap(True)
-        self.awareness_pins_label.setStyleSheet("color: #5b6875;")
+        self.awareness_pins_label.setStyleSheet(label_style("muted", self._theme()))
         act_layout.addWidget(self.awareness_pins_label)
         self.awareness_pin_chip_container = QWidget()
         self.awareness_pin_chip_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -959,7 +961,7 @@ class ControlFreqTab(QWidget):
         self.more_traffic_label = QLabel("")
         self.more_traffic_label.setObjectName("controlfreqMoreTraffic")
         self.more_traffic_label.setWordWrap(True)
-        self.more_traffic_label.setStyleSheet("color: #5b6875;")
+        self.more_traffic_label.setStyleSheet(label_style("muted", self._theme()))
         act_layout.addWidget(self.more_traffic_label)
         self.activity_actions_widget = QWidget()
         self.activity_actions_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -1061,7 +1063,7 @@ class ControlFreqTab(QWidget):
         peer_filters.addWidget(self.peer_role_filter, 1, 1)
         self.peer_result_label = QLabel("0 operators")
         self.peer_result_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.peer_result_label.setStyleSheet("color: #5b6875;")
+        self.peer_result_label.setStyleSheet(label_style("muted", self._theme()))
         peer_filters.addWidget(self.peer_result_label, 1, 2)
         for column in range(3):
             peer_filters.setColumnStretch(column, 1)
@@ -1123,7 +1125,7 @@ class ControlFreqTab(QWidget):
         traffic_group_header.addWidget(self.traffic_group_title)
         traffic_group_header.addStretch(1)
         self.traffic_group_hint = QLabel("Solid = current · dashed marker = prior window")
-        self.traffic_group_hint.setStyleSheet("color: #5b6875;")
+        self.traffic_group_hint.setStyleSheet(label_style("muted", self._theme()))
         traffic_group_header.addWidget(self.traffic_group_hint)
         inbox_layout.addLayout(traffic_group_header)
         self.traffic_group_table = QTableWidget(0, 3)
@@ -1196,7 +1198,7 @@ class ControlFreqTab(QWidget):
         self.freq_state_badge.setMinimumHeight(freq_badge_h)
         self.freq_state_badge.setMaximumHeight(freq_badge_h)
         self.freq_state_badge.setStyleSheet(
-            "font-size: 12px; font-weight: 600; border-radius: 6px; padding: 0 8px;"
+            "font-weight: 600; border-radius: 6px; padding: 0 8px;"
         )
         self.freq_combo = QComboBox()
         freq_combo_h = control_height_for_font(self.freq_combo, vertical_padding=14, floor=40)
@@ -1210,20 +1212,20 @@ class ControlFreqTab(QWidget):
         self.freq_meta_label.setWordWrap(False)
         self.freq_meta_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.freq_meta_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.freq_meta_label.setStyleSheet("font-size: 12px;")
+        self.freq_meta_label.setStyleSheet("")
         self.freq_meta_label.setToolTip(self._freq_meta_full_text)
         freq_layout.addWidget(self.freq_meta_label)
         self.effective_source_label = QLabel("Active Source: --")
         self.effective_source_label.setWordWrap(False)
         self.effective_source_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.effective_source_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.effective_source_label.setStyleSheet("color: #888;")
+        self.effective_source_label.setStyleSheet(label_style("muted", self._theme()))
         freq_layout.addWidget(self.effective_source_label)
         self.next_change_label = QLabel("Next Change: --")
         self.next_change_label.setWordWrap(False)
         self.next_change_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.next_change_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.next_change_label.setStyleSheet("color: #888;")
+        self.next_change_label.setStyleSheet(label_style("muted", self._theme()))
         freq_layout.addWidget(self.next_change_label)
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(0, 0, 0, 0)
@@ -1477,7 +1479,7 @@ class ControlFreqTab(QWidget):
         self.prop_target_value_combo.currentTextChanged.connect(self._on_prop_target_value_changed)
         target_row.addWidget(self.prop_target_value_combo, 1)
         self.prop_hint = QLabel("Model uses today's schedule bands.")
-        self.prop_hint.setStyleSheet("color: #666;")
+        self.prop_hint.setStyleSheet(label_style("muted", self._theme()))
         self.prop_hint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         target_row.addWidget(self.prop_hint, 1)
         prop_detail_layout.addLayout(target_row)
@@ -1522,10 +1524,18 @@ class ControlFreqTab(QWidget):
         table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         vh = table.verticalHeader()
         vh.setVisible(False)
-        vh.setDefaultSectionSize(24)
+        # Rows and headers must follow the active text metrics. A literal 24px
+        # row clipped Large Text and indicator delegates on some platforms.
+        row_floor = font_derived_widget_height(
+            table, vertical_padding=8, floor=24, include_size_hints=False
+        )
+        vh.setDefaultSectionSize(row_floor)
         hh = table.horizontalHeader()
         hh.setSectionsMovable(False)
         hh.setHighlightSections(False)
+        header_floor = font_derived_widget_height(hh, vertical_padding=10, floor=28)
+        hh.setMinimumHeight(header_floor)
+        hh.setMaximumHeight(max(hh.maximumHeight(), header_floor))
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -2235,6 +2245,8 @@ class ControlFreqTab(QWidget):
             palette = {
                 "warning": ("#3A3015", "#FFF0BE", "#A06F18"),
                 "success": ("#173822", "#E8F6EA", "#39874D"),
+                "danger": (theme.get("surface_alt", "#202632"), theme.get("danger", "#FF8A80"), theme.get("danger", "#FF8A80")),
+                "info": (theme.get("surface_alt", "#202632"), theme.get("info", "#76B7FF"), theme.get("info", "#76B7FF")),
                 "secondary": ("#16263A", "#E8F1FF", "#2E4A68"),
                 "panel": (theme.get("surface_alt", "#202632"), theme.get("text", "#E7EBF0"), theme.get("border", "#2A313A")),
             }
@@ -2242,6 +2254,8 @@ class ControlFreqTab(QWidget):
             palette = {
                 "warning": ("#FFF4D6", "#1C1F21", "#E0B15B"),
                 "success": ("#EEF7EE", "#1C1F21", "#8DCF9E"),
+                "danger": (theme.get("surface", "#F0F2F4"), theme.get("danger", "#B71C1C"), theme.get("danger", "#B71C1C")),
+                "info": (theme.get("surface", "#F0F2F4"), theme.get("info", "#0D47A1"), theme.get("info", "#0D47A1")),
                 "secondary": ("#EAF2FF", "#1C1F21", "#B8D4E8"),
                 "panel": (theme.get("surface", "#F0F2F4"), theme.get("text", "#1C1F21"), theme.get("border", "#D3D7DD")),
             }
@@ -2306,7 +2320,7 @@ class ControlFreqTab(QWidget):
             self._update_view_chip_styles(theme)
             self._update_clear_filters_style()
             self.current_time_label.setStyleSheet(
-                f"font-size: 14px; font-weight: 600; color: {theme.get('text', '#111')};"
+                f"font-weight: 600; color: {theme.get('text', '#111')};"
             )
             if hasattr(self, "schedule_action_hint"):
                 self.schedule_action_hint.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
@@ -2385,7 +2399,7 @@ class ControlFreqTab(QWidget):
             self.freq_combo.view().setFont(popup_font)
         except Exception:
             pass
-        self.freq_meta_label.setStyleSheet(f"font-size: 12px; color: {muted_color};")
+        self.freq_meta_label.setStyleSheet(f"color: {muted_color};")
         self._apply_freq_meta_text()
         self._sync_frequency_info_row_heights()
         self._set_frequency_state_badge("unknown")
@@ -2434,19 +2448,19 @@ class ControlFreqTab(QWidget):
             "net_mode": "Net Mode Changed",
             "unknown": "Unknown",
         }
-        dark = self._is_dark_theme()
-        colors = {
-            "on": ("#1B5E20", "#D7FFD9") if dark else ("#DFF6E4", "#1B5E20"),
-            "off": ("#8A5A00", "#FFF1CC") if dark else ("#FFF3D6", "#8A5A00"),
-            "blocked": ("#8B1E1E", "#FFD6D6") if dark else ("#FFE2E2", "#8B1E1E"),
-            "net_mode": ("#0D47A1", "#D6E8FF") if dark else ("#E3F2FD", "#0D47A1"),
-            "unknown": ("#455A64", "#E6EEF2") if dark else ("#EAF2FF", "#1E3A5F"),
-        }
-        bg, fg = colors.get(key, colors["unknown"])
+        role = {
+            "on": "success",
+            "off": "warning",
+            "blocked": "danger",
+            "net_mode": "info",
+            "unknown": "panel",
+        }.get(key, "panel")
+        bg, _fg, border = self._semantic_panel_colors(role)
+        theme = self._theme()
         self.freq_state_badge.setText(labels.get(key, "Unknown"))
         self.freq_state_badge.setStyleSheet(
-            f"font-size: 12px; font-weight: 600; border-radius: 6px; "
-            f"padding: 0 8px; background: {bg}; color: {fg};"
+            f"{label_style(role if role != 'panel' else 'text', theme, weight=600)} "
+            f"border-radius: 6px; padding: 0 8px; background: {bg}; border: 1px solid {border};"
         )
 
     def apply_theme(self) -> None:
@@ -3803,11 +3817,11 @@ class ControlFreqTab(QWidget):
                 else:
                     self.next_change_label.setToolTip("")
                 if mins <= 15:
-                    self.next_change_label.setStyleSheet("font-weight: 600; color: #B71C1C;")
+                    self.next_change_label.setStyleSheet(label_style("danger", self._theme(), weight=600))
                 elif mins <= 60:
-                    self.next_change_label.setStyleSheet("font-weight: 500; color: #8A5A00;")
+                    self.next_change_label.setStyleSheet(label_style("warning", self._theme(), weight=500))
                 else:
-                    self.next_change_label.setStyleSheet(f"color: {muted};")
+                    self.next_change_label.setStyleSheet(label_style("muted", self._theme()))
                 if (
                     isinstance(schedule_gap_seconds, (int, float))
                     and schedule_gap_seconds > 60
@@ -3842,13 +3856,13 @@ class ControlFreqTab(QWidget):
                         next_text += f" {next_entry_source}"
                     self.next_change_label.setToolTip("No schedule entry is active now; this is the next planned entry.")
                     if mins <= 15:
-                        self.next_change_label.setStyleSheet("font-weight: 600; color: #B71C1C;")
+                        self.next_change_label.setStyleSheet(label_style("danger", self._theme(), weight=600))
                     elif mins <= 60:
-                        self.next_change_label.setStyleSheet("font-weight: 500; color: #8A5A00;")
+                        self.next_change_label.setStyleSheet(label_style("warning", self._theme(), weight=500))
                     else:
-                        self.next_change_label.setStyleSheet(f"color: {muted};")
+                        self.next_change_label.setStyleSheet(label_style("muted", self._theme()))
                 else:
-                    self.next_change_label.setStyleSheet(f"color: {muted};")
+                    self.next_change_label.setStyleSheet(label_style("muted", self._theme()))
                     self.next_change_label.setToolTip("")
             self.next_change_label.setText(next_text)
             self._sync_frequency_info_row_heights()
@@ -7088,7 +7102,7 @@ class ControlFreqTab(QWidget):
             mismatch = abs(scheduled - active) > 0.0005
         if theme:
             color = theme["warning"] if mismatch else theme.get("text_muted", theme["text"])
-            self.freq_meta_label.setStyleSheet(f"font-size: 12px; color: {color};")
+            self.freq_meta_label.setStyleSheet(f"color: {color};")
 
     def _qsy_feedback_target(self) -> Tuple[Optional[str], str]:
         try:

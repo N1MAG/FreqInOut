@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHeaderView,
     QHBoxLayout,
+    QBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
+    QSizePolicy,
 )
 
 from freqinout.core.fldigi_macro_parser import rewrite_macro_profile_file_reference
@@ -26,7 +28,7 @@ from freqinout.core.fldigi_macro_profile import (
     normalize_macro_mapping_source_path,
     standard_macro_mapping_source_filename,
 )
-from freqinout.gui.theme import button_style, resolve_theme
+from freqinout.gui.theme import button_style, horizontal_layout_breakpoint, resolve_theme
 
 
 @dataclass
@@ -58,8 +60,7 @@ class FldigiMacroMappingDialog(QDialog):
     def __init__(self, settings, profile_path: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle("FLDigi Macro Discovery & Mapping")
-        self.setMinimumWidth(1100)
-        self.setMinimumHeight(680)
+        self.setSizeGripEnabled(True)
 
         self.settings = settings
         self.store = FldigiMacroProfileStore(settings)
@@ -142,10 +143,12 @@ class FldigiMacroMappingDialog(QDialog):
             self.COLUMN_READ_ONLY,
         ):
             header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
-        self.table.setColumnWidth(self.COLUMN_SOURCE_FILE, 460)
+        self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         root.addWidget(self.table, stretch=1)
 
         controls = QHBoxLayout()
+        self._controls_layout = controls
         self.rescan_btn = QPushButton("Rescan")
         self.add_manual_btn = QPushButton("Add Manual Row")
         self.browse_btn = QPushButton("Browse Selected Source...")
@@ -160,6 +163,7 @@ class FldigiMacroMappingDialog(QDialog):
         root.addLayout(controls)
 
         bottom = QHBoxLayout()
+        self._bottom_layout = bottom
         bottom.addStretch()
         self.save_btn = QPushButton("Save Mappings")
         self.close_btn = QPushButton("Close")
@@ -185,6 +189,29 @@ class FldigiMacroMappingDialog(QDialog):
         self.confidence_filter_combo.currentIndexChanged.connect(lambda _idx: self._apply_confidence_filter())
         self.save_btn.clicked.connect(self._save_mappings)
         self.close_btn.clicked.connect(self.reject)
+
+        self._refresh_responsive_geometry()
+
+    def _refresh_responsive_geometry(self) -> None:
+        """Stack dialog actions when the available width is compact."""
+        compact_threshold = horizontal_layout_breakpoint(
+            self._controls_layout,
+            reserve_controls=2,
+        )
+        compact = int(self.width() or 0) < compact_threshold
+        for layout in (
+            getattr(self, "_controls_layout", None),
+            getattr(self, "_bottom_layout", None),
+        ):
+            if isinstance(layout, QBoxLayout):
+                layout.setDirection(
+                    QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight
+                )
+        self.table.updateGeometry()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._refresh_responsive_geometry()
 
     # ---------------- DATA LOAD ---------------- #
 
@@ -391,7 +418,13 @@ class FldigiMacroMappingDialog(QDialog):
         source_edit.setPlaceholderText("Enter or browse file path")
         if row.source_warning:
             source_edit.setToolTip(row.source_warning)
-            source_edit.setStyleSheet("QLineEdit { background: #fff3cd; color: #111827; border: 1px solid #d9a441; }")
+            theme = resolve_theme(self.settings)
+            source_edit.setStyleSheet(
+                "QLineEdit {"
+                f" background: {theme['surface_alt']}; color: {theme['text']};"
+                f" border: 1px solid {theme['warning']};"
+                " }"
+            )
         self.table.setCellWidget(index, self.COLUMN_SOURCE_FILE, source_edit)
 
         self.table.setItem(index, self.COLUMN_CONFIDENCE, self._read_only_item(row.confidence))

@@ -252,7 +252,10 @@ def test_settings_tab_persists_device_profile_varac_fields(monkeypatch, tmp_path
 
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
-    device = store.save_device_profile({"name": "South VarAC", "control_backend": "flrig"})
+    varac_node = store.save_varac_node({"name": "South VarAC", "install_path": ""})
+    device = store.save_device_profile(
+        {"name": "South VarAC", "control_backend": "flrig", "varac_node_id": varac_node["id"]}
+    )
 
     from freqinout.gui.settings_tab import SettingsTab
 
@@ -269,12 +272,6 @@ def test_settings_tab_persists_device_profile_varac_fields(monkeypatch, tmp_path
                 "deployment_mode": str(device.get("deployment_mode", "full") or "full"),
                 "enabled": True,
                 "device_class": str(device.get("device_class", "tx_rx") or "tx_rx"),
-                "flrig_host": "127.0.0.1",
-                "flrig_port": 12345,
-                "fldigi_host": "127.0.0.1",
-                "fldigi_port": 7362,
-                "js8_host": "127.0.0.1",
-                "js8_port": 2442,
                 "varac_install_path": "C:/VarAC/South",
                 "varac_db_path": "C:/VarAC/South/VarAC.db",
                 "varac_ini_path": "C:/VarAC/South/VarAC.ini",

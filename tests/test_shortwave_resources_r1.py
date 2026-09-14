@@ -359,6 +359,10 @@ def test_frequency_catalog_supports_multi_select_without_changing_detail_selecti
         view.resize(900, 560)
         view.show()
         app.processEvents()
+        from PySide6.QtTest import QTest
+        for _ in range(20):
+            app.processEvents()
+            QTest.qWait(5)
         assert view.table.selectionMode() == QAbstractItemView.SingleSelection
         assert view.table.horizontalHeaderItem(0).text() == "Export"
         assert view.table.item(0, 0).flags() & Qt.ItemIsUserCheckable

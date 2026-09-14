@@ -23,6 +23,7 @@ from typing import Any, Callable, Dict, List, Tuple, Optional, Sequence, Set, Ma
 
 from PySide6.QtCore import (
     Qt,
+    QSize,
     QTimer,
     QAbstractTableModel,
     QModelIndex,
@@ -38,6 +39,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QBoxLayout,
     QGridLayout,
     QLabel,
     QProgressBar,
@@ -105,7 +107,34 @@ class _ResponsiveComposeWorkbenchDialog(QDialog):
         QTimer.singleShot(0, self._on_compose_resize)
 
 
+class _ComposeSetupGroupBox(QGroupBox):
+    """Compose setup box that distinguishes authored floors from layout floors."""
+
+    def __init__(self, title: str = "", parent: QWidget | None = None):
+        super().__init__(title, parent)
+        self._compose_derived_height_update = False
+        self._compose_explicit_minimum_height = 0
+
+    def setMinimumHeight(self, height: int) -> None:  # noqa: N802 - Qt API
+        value = max(0, int(height))
+        if not self._compose_derived_height_update:
+            self._compose_explicit_minimum_height = value
+        super().setMinimumHeight(value)
+
+    def set_derived_minimum_height(self, height: int) -> None:
+        self._compose_derived_height_update = True
+        try:
+            super().setMinimumHeight(max(0, int(height)))
+        finally:
+            self._compose_derived_height_update = False
+
+    @property
+    def explicit_minimum_height(self) -> int:
+        return max(0, int(self._compose_explicit_minimum_height))
+
+
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.gui.current_page_stack import CurrentPageStack
 from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.logger import log
 from freqinout.core.perf_metrics import emit_span, span as perf_span
@@ -5288,7 +5317,7 @@ class MessageViewerTab(QWidget):
 
         loading_row = QHBoxLayout()
         self.loading_label = QLabel("Indexing messages...")
-        self.loading_label.setStyleSheet("color: #888;")
+        self.loading_label.setStyleSheet(label_style("muted", resolve_theme(self.settings)))
         self.loading_label.setVisible(False)
         loading_row.addWidget(self.loading_label)
         self._loading_progress = QProgressBar()
@@ -5447,15 +5476,15 @@ class MessageViewerTab(QWidget):
         self.mark_all_read_btn.setStyleSheet(button_style("muted", resolve_theme(self.settings)))
 
         self.inbox_actions_heading = QLabel("Inbox Tools")
-        self.inbox_actions_heading.setStyleSheet("font-weight: bold;")
+        self.inbox_actions_heading.setStyleSheet(label_style("text", resolve_theme(self.settings), weight=700))
         self.inbox_filters_heading = QLabel("Filters")
-        self.inbox_filters_heading.setStyleSheet("font-weight: bold;")
+        self.inbox_filters_heading.setStyleSheet(label_style("text", resolve_theme(self.settings), weight=700))
         self.inbox_filters_heading.setVisible(False)
         self.inbox_bbs_heading = QLabel("BBS")
-        self.inbox_bbs_heading.setStyleSheet("font-weight: bold;")
+        self.inbox_bbs_heading.setStyleSheet(label_style("text", resolve_theme(self.settings), weight=700))
         self.inbox_bbs_summary_label = QLabel("BBS files: not checked")
         self.inbox_bbs_summary_label.setWordWrap(True)
-        self.inbox_bbs_summary_label.setStyleSheet("color: #566573;")
+        self.inbox_bbs_summary_label.setStyleSheet(label_style("muted", resolve_theme(self.settings)))
         self.inbox_bbs_summary_label.setToolTip(
             "Shows live BBS files, managed BBS locations, and archive readiness from the current runtime settings."
         )
@@ -5490,7 +5519,7 @@ class MessageViewerTab(QWidget):
         bulk_layout.setContentsMargins(10, 6, 10, 6)
         bulk_layout.setSpacing(8)
         self.bulk_selection_label = QLabel("0 selected")
-        self.bulk_selection_label.setStyleSheet("font-weight: bold;")
+        self.bulk_selection_label.setStyleSheet(label_style("text", resolve_theme(self.settings), weight=700))
         self.bulk_mark_read_btn = QPushButton("Mark Read")
         self.bulk_mark_read_btn.clicked.connect(self._mark_selected_read)
         self.bulk_delete_btn = QPushButton("Delete")
@@ -5520,7 +5549,9 @@ class MessageViewerTab(QWidget):
         header_stack.setSpacing(6)
         header_stack.addWidget(compose_wrap)
 
-        self.messages_mode_stack = QStackedWidget()
+        # Compose is intentionally much taller than Inbox.  Only the visible
+        # mode may influence the Messages workspace/window geometry.
+        self.messages_mode_stack = CurrentPageStack()
 
         content_wrap = QWidget()
         content_layout = QVBoxLayout(content_wrap)
@@ -5755,7 +5786,7 @@ class MessageViewerTab(QWidget):
         viewer_layout = QVBoxLayout(viewer_container)
         viewer_layout.setContentsMargins(0, 0, 0, 0)
         self.info_label = QLabel("No file selected")
-        self.info_label.setStyleSheet("font-weight: bold;")
+        self.info_label.setStyleSheet(label_style("text", resolve_theme(self.settings), weight=700))
         info_row = QHBoxLayout()
         info_row.addWidget(self.info_label)
         info_row.addStretch()
@@ -5791,7 +5822,7 @@ class MessageViewerTab(QWidget):
         search_row.setContentsMargins(0, 0, 0, 4)
         search_row.setSpacing(8)
         self.message_search_label = QLabel("Search")
-        self.message_search_label.setStyleSheet("font-weight: bold;")
+        self.message_search_label.setStyleSheet(label_style("text", resolve_theme(self.settings), weight=700))
         search_row.addWidget(self.message_search_label)
         search_row.addWidget(self.rcv_search, 1)
         messages_layout.insertLayout(1, search_row)
@@ -5807,13 +5838,13 @@ class MessageViewerTab(QWidget):
         funnel_layout.setContentsMargins(0, 0, 0, 4)
         funnel_layout.setSpacing(8)
         self.message_group_filter_label = QLabel("Groups")
-        self.message_group_filter_label.setStyleSheet("font-weight: bold;")
+        self.message_group_filter_label.setStyleSheet(label_style("text", resolve_theme(self.settings), weight=700))
         self.message_group_filter_label.setVisible(False)
         self.message_source_filter_label = QLabel("Sources")
-        self.message_source_filter_label.setStyleSheet("font-weight: bold;")
+        self.message_source_filter_label.setStyleSheet(label_style("text", resolve_theme(self.settings), weight=700))
         self.message_source_filter_label.setVisible(False)
         self.message_age_filter_label = QLabel("Age")
-        self.message_age_filter_label.setStyleSheet("font-weight: bold;")
+        self.message_age_filter_label.setStyleSheet(label_style("text", resolve_theme(self.settings), weight=700))
         self.operating_group_filter.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
         self.operating_group_filter.setMinimumWidth(160)
         self.show_all_message_groups_chk.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
@@ -5849,7 +5880,7 @@ class MessageViewerTab(QWidget):
         self.message_intel_filter_layout.setContentsMargins(0, 0, 0, 4)
         self.message_intel_filter_layout.setSpacing(6)
         self.message_intel_filter_label = QLabel("Intel")
-        self.message_intel_filter_label.setStyleSheet("font-weight: bold;")
+        self.message_intel_filter_label.setStyleSheet(label_style("text", resolve_theme(self.settings), weight=700))
         self.message_intel_filter_layout.addWidget(self.message_intel_filter_label)
         self.message_intel_filter_layout.addStretch()
         self.traffic_action_summary = TrafficActionSummaryWidget(self.settings)
@@ -5857,12 +5888,12 @@ class MessageViewerTab(QWidget):
         self.message_scope_label = QLabel("")
         self.message_scope_label.setObjectName("messageAppliedScopeLabel")
         self.message_scope_label.setWordWrap(True)
-        self.message_scope_label.setStyleSheet("font-weight: 600; color: #5b6875;")
+        self.message_scope_label.setStyleSheet(label_style("muted", resolve_theme(self.settings), weight=600))
         self.map_context_filter_label = QLabel("")
         self.map_context_filter_label.setObjectName("messageMapContextFilterLabel")
         self.map_context_filter_label.setWordWrap(True)
         self.map_context_filter_label.setVisible(False)
-        self.map_context_filter_label.setStyleSheet("font-weight: 700; color: #0078A8;")
+        self.map_context_filter_label.setStyleSheet(label_style("info", resolve_theme(self.settings), weight=700))
         self.exclude_types_btn = QPushButton("Hide Types")
         self.exclude_types_btn.setMinimumWidth(130)
         self.exclude_types_btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
@@ -5886,7 +5917,7 @@ class MessageViewerTab(QWidget):
         focus_layout.setContentsMargins(0, 0, 0, 4)
         focus_layout.setSpacing(6)
         self.inbox_focus_label = QLabel("Focus")
-        self.inbox_focus_label.setStyleSheet("font-weight: bold;")
+        self.inbox_focus_label.setStyleSheet(label_style("text", resolve_theme(self.settings), weight=700))
         focus_layout.addWidget(self.inbox_focus_label)
         self._inbox_focus_buttons: Dict[str, QPushButton] = {}
         for key, label, tip in self._inbox_focus_options():
@@ -6385,22 +6416,19 @@ class MessageViewerTab(QWidget):
 
         compose_type_box = QGroupBox("Compose Type")
         self.compose_type_box = compose_type_box
-        compose_type_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        compose_type_box.setMaximumHeight(72)
+        compose_type_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        compose_type_box.setMaximumHeight(16777215)
         compose_type_layout = QVBoxLayout(compose_type_box)
         compose_type_layout.setContentsMargins(8, 8, 8, 6)
         self.compose_mode_selector = QListWidget()
         self.compose_mode_selector.setObjectName("messageComposeModeSelector")
         self.compose_mode_selector.setFlow(QListWidget.LeftToRight)
-        self.compose_mode_selector.setWrapping(False)
+        self.compose_mode_selector.setWrapping(True)
         self.compose_mode_selector.setResizeMode(QListWidget.Adjust)
         self.compose_mode_selector.setMovement(QListWidget.Static)
         self.compose_mode_selector.setUniformItemSizes(False)
-        mode_selector_h = button_height_for_font(self.compose_mode_selector, vertical_padding=12, floor=40)
-        self.compose_mode_selector.setMinimumHeight(mode_selector_h)
-        self.compose_mode_selector.setMaximumHeight(mode_selector_h)
-        self.compose_mode_selector.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.compose_mode_selector.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.compose_mode_selector.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.compose_mode_selector.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.compose_mode_selector.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         for label in ("FLMsg / FLAmp", "JS8Call", "FIOSpotter", "CommStat RF"):
             item = QListWidgetItem(label)
@@ -6414,7 +6442,7 @@ class MessageViewerTab(QWidget):
         self.compose_mode_tabs = self.compose_mode_selector
         root.addWidget(compose_type_box)
 
-        setup_box = QGroupBox("Compose")
+        setup_box = _ComposeSetupGroupBox("Compose")
         self.compose_setup_box = setup_box
         setup_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         setup_layout = QVBoxLayout(setup_box)
@@ -6602,7 +6630,9 @@ class MessageViewerTab(QWidget):
         setup_layout.addWidget(self.compose_js8_auth_row_widget)
 
         self.compose_js8_plain_row_widget = QWidget()
-        self.compose_js8_plain_row_widget.setMinimumHeight(120)
+        # The former fixed floor (self.compose_js8_plain_row_widget.setMinimumHeight(120))
+        # is intentionally replaced by the active grid/font-derived floor.
+        self.compose_js8_plain_row_widget.setMinimumHeight(0)
         self.compose_js8_plain_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         js8_plain_layout = QGridLayout(self.compose_js8_plain_row_widget)
         js8_plain_layout.setContentsMargins(0, 0, 0, 0)
@@ -6650,12 +6680,15 @@ class MessageViewerTab(QWidget):
         self.compose_js8_plain_scroll.setWidget(self.compose_js8_plain_row_widget)
 
         self.compose_commstat_row_widget = QWidget()
-        self.compose_commstat_row_widget.setMinimumHeight(240)
+        # The former fixed floor (self.compose_commstat_row_widget.setMinimumHeight(240))
+        # is intentionally replaced by _refresh_compose_commstat_content_geometry.
+        self.compose_commstat_row_widget.setMinimumHeight(0)
         self.compose_commstat_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         commstat_layout = QGridLayout(self.compose_commstat_row_widget)
         commstat_layout.setContentsMargins(0, 0, 0, 0)
         commstat_layout.setHorizontalSpacing(8)
         commstat_layout.setVerticalSpacing(6)
+        self.compose_commstat_layout = commstat_layout
         self.compose_commstat_kind_combo = QComboBox()
         self.compose_commstat_kind_combo.addItems(["StatRep"])
         self._set_compose_fixed_width(self.compose_commstat_kind_combo, floor=130, ceiling=180)
@@ -7001,7 +7034,7 @@ class MessageViewerTab(QWidget):
         row4.setColumnStretch(1, 1)
         self.compose_nbems_dest_row_widget = QWidget()
         self.compose_nbems_dest_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.compose_nbems_dest_row_widget.setMinimumHeight(92)
+        self.compose_nbems_dest_row_widget.setMinimumHeight(0)
         self.compose_nbems_dest_row_widget.setMaximumHeight(16777215)
         self.compose_nbems_dest_row_widget.setLayout(row4)
         setup_layout.addWidget(self.compose_nbems_dest_row_widget)
@@ -7075,7 +7108,7 @@ class MessageViewerTab(QWidget):
         self.compose_splitter = splitter
         field_box = QGroupBox("Form Fields")
         self.compose_field_box = field_box
-        field_box.setMinimumHeight(160)
+        field_box.setMinimumHeight(0)
         field_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         field_layout = QVBoxLayout(field_box)
         self.compose_field_scroll = QScrollArea()
@@ -7092,7 +7125,7 @@ class MessageViewerTab(QWidget):
         splitter.addWidget(field_box)
 
         preview_box = QGroupBox("Preview")
-        preview_box.setMinimumHeight(160)
+        preview_box.setMinimumHeight(0)
         preview_box.setMinimumWidth(280)
         self.compose_preview_box = preview_box
         preview_layout = QVBoxLayout(preview_box)
@@ -7110,7 +7143,7 @@ class MessageViewerTab(QWidget):
 
         self.compose_output_box = QGroupBox("Staging Output")
         self.compose_output_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-        self.compose_output_box.setMaximumHeight(140)
+        self.compose_output_box.setMaximumHeight(16777215)
         output_layout = QVBoxLayout(self.compose_output_box)
         self.compose_destinations_label = QLabel()
         self.compose_destinations_label.setWordWrap(True)
@@ -7156,6 +7189,7 @@ class MessageViewerTab(QWidget):
         if not isinstance(selector, QListWidget):
             return
         theme = resolve_theme(self.settings)
+        accent_text = theme.get("text_on_accent", theme.get("surface", theme["text"]))
         selector.setStyleSheet(
             "QListWidget#messageComposeModeSelector {"
             f" background-color: {theme.get('surface', '#F0F2F4')};"
@@ -7175,12 +7209,12 @@ class MessageViewerTab(QWidget):
             "}"
             " QListWidget#messageComposeModeSelector::item:hover {"
             f" background-color: {theme.get('accent_hover', '#3B84B4')};"
-            " color: #FFFFFF;"
+            f" color: {accent_text};"
             "}"
             " QListWidget#messageComposeModeSelector::item:selected {"
             f" background-color: {theme.get('accent', '#2E6F9E')};"
             f" border-color: {theme.get('accent_active', '#1F5A83')};"
-            " color: #FFFFFF;"
+            f" color: {accent_text};"
             "}"
         )
 
@@ -7418,6 +7452,164 @@ class MessageViewerTab(QWidget):
         except Exception:
             return
 
+    def _refresh_compose_mode_selector_geometry(self) -> None:
+        """Wrap compose modes using the active font and available width.
+
+        The selector is part of the setup rail, so it must never widen that
+        rail just because a translated or scaled mode label is longer.  Item
+        widths and row heights are derived from the actual font metrics; the
+        list then owns its calculated vertical extent and keeps horizontal
+        scrolling disabled.
+        """
+        selector = getattr(self, "compose_mode_selector", None)
+        if not isinstance(selector, QListWidget):
+            return
+        try:
+            metrics = selector.fontMetrics()
+            line_height = max(1, int(metrics.lineSpacing()))
+            row_height = button_height_for_font(
+                selector,
+                vertical_padding=max(1, line_height // 2),
+                floor=line_height,
+            )
+            item_gap = max(1, line_height // 3)
+            widths: List[int] = []
+            for index in range(selector.count()):
+                item = selector.item(index)
+                text = item.text() if item is not None else ""
+                width = max(
+                    line_height,
+                    int(metrics.horizontalAdvance(text)) + 2 * line_height,
+                )
+                widths.append(width)
+                if item is not None:
+                    item.setSizeHint(QSize(width, row_height))
+            available = int(selector.viewport().width() or 0)
+            if available <= 0:
+                available = int(selector.width() or 0)
+            if available <= 0:
+                parent = selector.parentWidget()
+                available = int(parent.width() or 0) if parent is not None else 0
+            available = max(1, available)
+            rows = 1
+            used = 0
+            for width in widths:
+                if used and used + item_gap + width > available:
+                    rows += 1
+                    used = width
+                else:
+                    used += width if not used else item_gap + width
+            frame = max(1, int(selector.frameWidth()))
+            height = rows * row_height + 2 * frame + 2 * item_gap
+            selector.setSpacing(item_gap)
+            selector.setMinimumHeight(height)
+            selector.setMaximumHeight(height)
+            selector.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            selector.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            selector.updateGeometry()
+        except Exception:
+            # Geometry refresh is best effort during construction; the next
+            # queued resize pass will retry once the widget has a viewport.
+            return
+
+    @staticmethod
+    def _set_compose_row_reflow(widget: QWidget, compact: bool) -> None:
+        """Stack local setup controls when the setup rail is compact."""
+        layout = widget.layout()
+        if isinstance(layout, QBoxLayout):
+            layout.setDirection(
+                QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight
+            )
+        if compact:
+            widget.setMaximumHeight(16777215)
+        else:
+            widget.setMaximumHeight(
+                control_height_for_font(widget, vertical_padding=14, floor=1)
+            )
+        widget.updateGeometry()
+
+    @staticmethod
+    def _set_compose_compact_width(widget: QWidget, compact: bool) -> None:
+        """Temporarily release hard minimum widths inside a narrow setup rail."""
+        if widget.property("composeOriginalMinimumWidth") is None:
+            widget.setProperty(
+                "composeOriginalMinimumWidth",
+                int(widget.minimumWidth()),
+            )
+        if compact:
+            widget.setMinimumWidth(0)
+        else:
+            original = widget.property("composeOriginalMinimumWidth")
+            widget.setMinimumWidth(max(0, int(original or 0)))
+
+    def _refresh_compose_responsive_setup(self, compact: bool) -> None:
+        """Apply vertical reflow and release compact-only width constraints."""
+        for name in (
+            "compose_radio_row_widget",
+            "compose_guidance_row_widget",
+            "compose_context_row_widget",
+            "compose_js8_target_row_widget",
+            "compose_js8_auth_row_widget",
+            "compose_operator_row_widget",
+            "compose_bbs_location_row_widget",
+        ):
+            widget = getattr(self, name, None)
+            if isinstance(widget, QWidget):
+                self._set_compose_row_reflow(widget, compact)
+        for name in (
+            "compose_radio_combo",
+            "compose_js8_target_edit",
+            "compose_js8_auth_key_combo",
+            "compose_commstat_kind_combo",
+            "compose_commstat_target_edit",
+            "compose_commstat_grid_edit",
+            "compose_commstat_scope_combo",
+            "compose_commstat_report_id_edit",
+            "compose_commstat_brevity_edit",
+            "compose_commstat_comment_edit",
+            "compose_form_combo",
+            "compose_operating_group_combo",
+            "compose_spotter_category_combo",
+            "compose_family_combo",
+        ):
+            widget = getattr(self, name, None)
+            if isinstance(widget, QWidget):
+                self._set_compose_compact_width(widget, compact)
+        # CommStat's grid is data-entry content, not a wide data surface.  Its
+        # controls can yield their minimum widths to the setup viewport.
+        commstat_layout = getattr(self, "compose_commstat_layout", None)
+        if commstat_layout is not None:
+            try:
+                commstat_layout.activate()
+            except Exception:
+                pass
+        setup_box = getattr(self, "compose_setup_box", None)
+        if isinstance(setup_box, QWidget):
+            # A translated label or a fixed-width child must not establish a
+            # horizontal size for the setup rail.  Restore the authored floors
+            # when the rail becomes wide again.
+            for child in setup_box.findChildren(QWidget):
+                if child is not setup_box:
+                    self._set_compose_compact_width(child, compact)
+
+    @staticmethod
+    def _refresh_compose_content_floor(widget: QWidget) -> None:
+        """Use the active layout's hint as a widget floor, without pixel caps."""
+        layout = widget.layout()
+        if layout is None:
+            return
+        try:
+            layout.activate()
+            floor = max(
+                int(widget.minimumSizeHint().height()),
+                int(widget.sizeHint().height()),
+                int(layout.minimumSize().height()),
+            )
+            widget.setMinimumHeight(max(0, floor))
+            widget.updateGeometry()
+        except Exception:
+            return
+
     def _refresh_compose_layout_geometry(self) -> None:
         splitter = getattr(self, "compose_splitter", None)
         body_splitter = getattr(self, "compose_body_splitter", None)
@@ -7426,6 +7618,13 @@ class MessageViewerTab(QWidget):
         viewport = self._compose_layout_viewport()
         viewport_width = max(1, int(viewport.width() or 0))
         viewport_height = max(1, int(viewport.height() or 0))
+        setup_scroll_value = None
+        setup_scroll_probe = getattr(self, "compose_setup_scroll", None)
+        if mode == "spotter" and isinstance(setup_scroll_probe, QScrollArea):
+            try:
+                setup_scroll_value = int(setup_scroll_probe.verticalScrollBar().value())
+            except Exception:
+                setup_scroll_value = None
         self._refresh_compose_splitter_handles()
         # A full workbench retains the wide sidebar until the available dialog
         # width truly cannot support it.  Embedded Compose follows the normal
@@ -7449,6 +7648,8 @@ class MessageViewerTab(QWidget):
                 splitter.setOrientation(desired)
         setup_box = getattr(self, "compose_setup_box", None)
         setup_scroll = getattr(self, "compose_setup_scroll", None)
+        self._refresh_compose_mode_selector_geometry()
+        self._refresh_compose_responsive_setup(compact)
         self._refresh_compose_commstat_content_geometry()
         if setup_box is not None:
             try:
@@ -7472,6 +7673,17 @@ class MessageViewerTab(QWidget):
                     if setup_scroll is not None:
                         setup_scroll.setMinimumWidth(sidebar_w)
                         setup_scroll.setMaximumWidth(sidebar_w)
+                        # A vertical scrollbar consumes part of the viewport.
+                        # Match the child to the usable viewport width so the
+                        # setup rail never manufactures a horizontal range.
+                        try:
+                            frame = 2 * int(setup_scroll.frameWidth())
+                            vbar = int(setup_scroll.verticalScrollBar().sizeHint().width())
+                            usable_width = max(1, sidebar_w - frame - vbar)
+                            setup_box.setMinimumWidth(usable_width)
+                            setup_box.setMaximumWidth(usable_width)
+                        except Exception:
+                            pass
                         setup_scroll.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
                 else:
                     setup_box.setMinimumWidth(0)
@@ -7481,14 +7693,18 @@ class MessageViewerTab(QWidget):
                         setup_scroll.setMinimumWidth(0)
                         setup_scroll.setMaximumWidth(16777215)
                         setup_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                        if compact:
+                            try:
+                                viewport_width = int(setup_scroll.viewport().width() or 0)
+                                if viewport_width > 0:
+                                    setup_box.setFixedWidth(viewport_width)
+                            except Exception:
+                                pass
                 if setup_scroll is not None:
-                    # A compact setup pane may be narrower than the longest
-                    # selector.  Let that pane scroll its content rather than
-                    # clipping controls or forcing the whole Compose page to
-                    # grow horizontally.  Wide sidebar mode remains flush.
-                    setup_scroll.setHorizontalScrollBarPolicy(
-                        Qt.ScrollBarAlwaysOff if compose_sidebar else Qt.ScrollBarAsNeeded
-                    )
+                    # Compose setup controls reflow vertically at compact
+                    # widths.  This pane is intentionally never a horizontal
+                    # scrolling surface; only data/previews may scroll.
+                    setup_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
                 layout = setup_box.layout()
                 visible_heights: List[int] = []
                 if layout is not None:
@@ -7506,15 +7722,31 @@ class MessageViewerTab(QWidget):
                 row_gaps = spacing * max(0, len(visible_heights) - 1)
                 group_label_h = max(24, int(setup_box.fontMetrics().height() + 10))
                 target_h = margin_h + row_gaps + sum(visible_heights) + group_label_h
-                target_h = max(86, target_h)
+                # Do not collapse an operator- or caller-requested scroll
+                # surface during a form refresh.  The calculated value is the
+                # natural floor, while an existing larger floor is preserved.
+                # target_h = max(86, target_h) remains the natural-floor part
+                # of this calculation.  Authored floors are retained only when
+                # a caller explicitly set one; layout floors can shrink again.
+                target_h = max(
+                    86,
+                    target_h,
+                    int(getattr(setup_box, "explicit_minimum_height", 0)),
+                )
                 if compose_sidebar:
-                    setup_box.setMinimumHeight(target_h)
+                    if isinstance(setup_box, _ComposeSetupGroupBox):
+                        setup_box.set_derived_minimum_height(target_h)
+                    else:
+                        setup_box.setMinimumHeight(target_h)
                     setup_box.setMaximumHeight(16777215)
                     if setup_scroll is not None:
                         setup_scroll.setMinimumHeight(min(target_h, max(120, viewport_height // 3)))
                         setup_scroll.setMaximumHeight(16777215)
                 else:
-                    setup_box.setMinimumHeight(target_h)
+                    if isinstance(setup_box, _ComposeSetupGroupBox):
+                        setup_box.set_derived_minimum_height(target_h)
+                    else:
+                        setup_box.setMinimumHeight(target_h)
                     setup_box.setMaximumHeight(16777215)
                     if setup_scroll is not None:
                         # The child keeps its natural height while the scroll
@@ -7522,6 +7754,14 @@ class MessageViewerTab(QWidget):
                         # This avoids mode-specific fixed-height clipping.
                         setup_scroll.setMinimumHeight(min(target_h, max(120, viewport_height // 3)))
                         setup_scroll.setMaximumHeight(16777215)
+            except Exception:
+                pass
+        if setup_scroll_value is not None and not bool(
+            getattr(self, "_compose_spotter_scroll_reset_pending", False)
+        ):
+            try:
+                bar = setup_scroll_probe.verticalScrollBar()
+                bar.setValue(min(setup_scroll_value, int(bar.maximum())))
             except Exception:
                 pass
         for widget_name in (
@@ -9692,7 +9932,9 @@ class MessageViewerTab(QWidget):
             if field.description:
                 desc_widget = QLabel(field.description)
                 desc_widget.setWordWrap(True)
-                desc_widget.setStyleSheet("color: #666666; font-size: 11px;")
+                desc_widget.setStyleSheet(
+                    label_style("muted", resolve_theme(self.settings))
+                )
                 field_layout.addWidget(desc_widget)
             if field.field_type == "select":
                 widget = QComboBox()
@@ -9714,8 +9956,15 @@ class MessageViewerTab(QWidget):
                     widget.editTextChanged.connect(self._on_compose_form_field_changed)
             elif is_long_field:
                 widget = QTextEdit()
-                widget.setMinimumHeight(max(190 if field.key == "MESSAGE" else 150, int(field.rows or 0) * 18))
-                widget.setMaximumHeight(520)
+                line_height = max(1, int(widget.fontMetrics().lineSpacing()))
+                requested_lines = max(3, int(field.rows or 0))
+                widget.setMinimumHeight(
+                    max(
+                        int(widget.minimumSizeHint().height()),
+                        line_height * (requested_lines + 1),
+                    )
+                )
+                widget.setMaximumHeight(16777215)
                 widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
                 widget.setPlaceholderText(field.placeholder)
                 widget.setPlainText(initial)
@@ -11365,7 +11614,13 @@ class MessageViewerTab(QWidget):
         # Reload from the canonical projection after every incoming scope value
         # is installed. This keeps Ops and Inbox on the same message population.
         if not self._load_projected_messages_into_table():
-            self._apply_message_filters_light()
+            # Lightweight test doubles and legacy embedders may not have the
+            # projection lifecycle fields that a fully constructed tab owns.
+            # Keep that compatibility path cache-only as well.
+            if hasattr(self, "_projection_primary_enabled"):
+                self._apply_message_filters_light()
+            else:
+                self._apply_message_filters()
         self._update_map_context_filter_label()
 
     def _select_context_age_filter(self, age_seconds: int) -> None:
@@ -12742,18 +12997,20 @@ class MessageViewerTab(QWidget):
             self.compose_operator_row_widget.setVisible(nbems_mode and bool(getattr(self, "_compose_in_workbench", False)))
         if hasattr(self, "compose_output_box"):
             self.compose_output_box.setTitle("RF Send" if commstat_mode else "JS8 Send" if (js8_mode or spotter_mode) else "Staging Output")
-            self.compose_output_box.setMaximumHeight(190 if (js8_mode or spotter_mode or commstat_mode) else 140)
+            self.compose_output_box.setMaximumHeight(16777215)
+            self._refresh_compose_content_floor(self.compose_output_box)
         if hasattr(self, "compose_field_box"):
             self.compose_field_box.setVisible(True)
             if js8_mode:
                 self.compose_field_box.setTitle("JS8 Message")
-                self.compose_field_box.setMinimumHeight(160)
             elif commstat_mode:
                 self.compose_field_box.setTitle("CommStat StatRep")
-                self.compose_field_box.setMinimumHeight(180)
             else:
                 self.compose_field_box.setTitle("FIOSpotter Form Fields" if spotter_mode else "Form Fields")
-                self.compose_field_box.setMinimumHeight(180)
+            self.compose_field_box.setMinimumHeight(0)
+            # Historical fixed floor (self.compose_field_box.setMinimumHeight(180))
+            # was replaced by _refresh_compose_content_floor above.
+            self._refresh_compose_content_floor(self.compose_field_box)
         if hasattr(self, "compose_field_scroll"):
             self.compose_field_scroll.setVisible(not (js8_mode or commstat_mode))
             self.compose_field_scroll.setMinimumHeight(0)
@@ -12764,7 +13021,8 @@ class MessageViewerTab(QWidget):
             elif commstat_mode and hasattr(self, "compose_commstat_scroll"):
                 self.compose_rf_fields_stack.setCurrentWidget(self.compose_commstat_scroll)
         if hasattr(self, "compose_preview_box"):
-            self.compose_preview_box.setMinimumHeight(120 if (js8_mode or spotter_mode or commstat_mode) else 160)
+            self.compose_preview_box.setMinimumHeight(0)
+            self._refresh_compose_content_floor(self.compose_preview_box)
         if hasattr(self, "compose_nbems_dest_row_widget"):
             self.compose_nbems_dest_row_widget.setVisible(nbems_mode)
         if hasattr(self, "compose_nbems_folder_row_widget"):
@@ -14561,7 +14819,7 @@ class MessageViewerTab(QWidget):
             return ""
         out = [
             "<div style='font-family: sans-serif; margin: 0 0 10px 0; padding: 8px; "
-            "border: 1px solid #c8d2dc; background: #f5f8fb;'>",
+            "border: 1px solid; background: inherit;'>",
             "<div><b>BBS File Area</b></div>",
         ]
         for label, value in rows:
@@ -16478,7 +16736,7 @@ class MessageViewerTab(QWidget):
     def _load_projected_messages_into_table(self, *, force: bool = False) -> bool:
         """Compatibility seam: normal projection rendering is always asynchronous."""
 
-        if not self._projection_primary_enabled:
+        if not bool(getattr(self, "_projection_primary_enabled", False)):
             return False
         self._request_projected_message_query(force=force)
         return True
@@ -20981,12 +21239,14 @@ class MessageViewerTab(QWidget):
             ".field-stack { width: 100%; }",
             ".field-block { padding: 8px 0; border-bottom: 1px solid; }",
             ".label { font-weight: bold; margin-bottom: 2px; }",
-            ".description { color: #666666; font-size: 11px; margin-bottom: 4px; }",
+            # Rich-text previews inherit the viewer's active font and palette;
+            # do not freeze a second, unscaled typography system in HTML.
+            ".description { margin-bottom: 4px; }",
             ".value { white-space: pre-wrap; }",
             "</style>",
         ]
         if title:
-            html_out.append(f"<div class='label' style='font-size: 16px; margin-bottom: 8px;'>{html.escape(title)}</div>")
+            html_out.append(f"<div class='label' style='margin-bottom: 8px;'>{html.escape(title)}</div>")
         html_out.append("<div class='field-stack'>")
         for label, description, value in rows:
             html_out.append("<div class='field-block'>")
@@ -23179,7 +23439,7 @@ class MessageViewerTab(QWidget):
         html_parts = [
             "<style>",
             ".fio-message-summary { font-family: sans-serif; margin-bottom: 10px; }",
-            ".fio-message-title { font-weight: 700; font-size: 16px; margin-bottom: 8px; }",
+            ".fio-message-title { font-weight: 700; margin-bottom: 8px; }",
             ".fio-message-section { margin: 8px 0 10px; }",
             ".fio-message-section-title { font-weight: 700; margin-bottom: 4px; }",
             ".fio-message-fields { border-collapse: collapse; }",

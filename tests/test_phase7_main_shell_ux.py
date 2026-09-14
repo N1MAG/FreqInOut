@@ -24,6 +24,28 @@ from PySide6.QtWidgets import (
 )
 
 
+def _station_command_plan_lane(
+    device_profile_id: int,
+    frequency_plan_id: int,
+    frequency_plan_name: str,
+    *,
+    current_entry: dict[str, object] | None = None,
+    next_entry: dict[str, object] | None = None,
+    hf_rows: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    """A scheduler-published lane, suitable for cache-only command-bar tests."""
+    return {
+        "device_profile_id": device_profile_id,
+        "frequency_plan_id": frequency_plan_id,
+        "frequency_plan_name": frequency_plan_name,
+        "current_entry": dict(current_entry or {}),
+        "next_entry": dict(next_entry or {}),
+        "hf_rows": [dict(row) for row in (hf_rows or [])],
+        "net_rows": [],
+        "sop_rows": [],
+    }
+
+
 def test_phase7_main_window_has_global_ledge_clock() -> None:
     source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
 
@@ -1575,7 +1597,7 @@ def test_phase7_logs_use_header_and_inline_filter_row_search() -> None:
     filter_block = build_block[build_block.index("self.refresh_btn") :]
     search_block = source[source.index("def _search") :]
 
-    assert 'title = QLabel("Logs / Diagnostics")' in header_block
+    assert 'self.title_label = QLabel("Logs / Diagnostics")' in header_block
     assert "header.addWidget(self.refresh_btn" not in header_block
     assert "self._log_filter_layout = QGridLayout()" in filter_block
     assert "(self.refresh_btn, 0, 0)" in source
@@ -2488,7 +2510,7 @@ def test_phase7_messages_workspace_filters_are_below_title_without_context_sente
     assert "def _message_source_options" in source
     assert "def _message_group_options" in source
     assert "def _update_messages_responsive_layout(self) -> None:" in source
-    assert "self.compose_splitter.setOrientation(Qt.Vertical if (compact or compose_sidebar) else Qt.Horizontal)" in source
+    assert "desired = Qt.Vertical" in source
 
 
 def test_phase7_ui_layout_standard_requires_minimized_scrollable_controls() -> None:
@@ -2920,10 +2942,10 @@ def test_phase7_station_command_bar_refresh_selects_primary_radio(monkeypatch) -
             }
 
         def list_effective_assigned_plans(self):
-            return [{"device_profile_id": 2, "frequency_plan_id": 20}]
+            raise AssertionError("station-command rendering must not read plan assignments")
 
         def list_frequency_plans(self):
-            return [{"id": 20, "name": "Net Plan", "schedule_refs_json": "[]"}]
+            raise AssertionError("station-command rendering must not read frequency plans")
 
     window = MainWindow.__new__(MainWindow)
     window.station_runtime_manager = FakeManager()
@@ -2949,7 +2971,10 @@ def test_phase7_station_command_bar_refresh_selects_primary_radio(monkeypatch) -
     window.station_command_radio_summary_layout = QHBoxLayout(window.station_command_radio_summary_widget)
     window.settings = FakeSettings()
     window.dependency_status_service = SimpleNamespace(software_status_snapshot=lambda: {})
-    window.scheduler = SimpleNamespace(current_schedule_entry={"frequency": "14.115", "group": "MAGNET", "band": "20M"})
+    window.scheduler = SimpleNamespace(
+        current_schedule_entry={"frequency": "14.115", "group": "MAGNET", "band": "20M"},
+        active_schedule_lanes=lambda force=False: [_station_command_plan_lane(2, 20, "Net Plan")],
+    )
     window._runtime_client_signature = None
     window._active_runtime_profile = {}
     window._runtime_profile_signature = None
@@ -3079,7 +3104,7 @@ def test_phase7_station_command_radio_selector_uses_hero_treatment() -> None:
 
     assert 'self.station_command_radio_combo.setObjectName("stationCommandRadioSelector")' in source
     assert "QComboBox#stationCommandRadioSelector {" in source
-    assert "font-size: 20px;" in source
+    assert "font-size: 20px;" not in source
     assert "font-weight: 800;" in source
     assert "setMaximumWidth(340)" in source
 
@@ -3621,16 +3646,10 @@ def test_phase7_station_command_selected_radio_uses_assigned_plan_before_other_r
 
     class FakeStore:
         def list_effective_assigned_plans(self):
-            return [{"device_profile_id": 2, "frequency_plan_id": 20}]
+            raise AssertionError("station-command rendering must not read plan assignments")
 
         def list_frequency_plans(self):
-            return [
-                {
-                    "id": 20,
-                    "name": "AmRRON Plan",
-                    "schedule_refs_json": '[{"day_utc":"ALL","start_utc":"00:00","end_utc":"23:59","group":"AMRRON","band":"40M"}]',
-                }
-            ]
+            raise AssertionError("station-command rendering must not read frequency plans")
 
     window = MainWindow.__new__(MainWindow)
     window.settings = SimpleNamespace(all=lambda: {"operating_groups": []})
@@ -3644,6 +3663,24 @@ def test_phase7_station_command_selected_radio_uses_assigned_plan_before_other_r
             "band": "40M",
             "mode": "Digi",
         },
+        active_schedule_lanes=lambda force=False: [
+            _station_command_plan_lane(
+                2,
+                20,
+                "AmRRON Plan",
+                current_entry={"group": "AMRRON", "band": "40M", "frequency": "7.110"},
+                hf_rows=[
+                    {
+                        "day_utc": "ALL",
+                        "start_utc": "00:00",
+                        "end_utc": "23:59",
+                        "group": "AMRRON",
+                        "band": "40M",
+                        "frequency": "7.110",
+                    }
+                ],
+            )
+        ],
     )
     window._station_command_manual_qsy_meta = None
     window._station_command_manual_qsy_profile_id = None
@@ -3668,26 +3705,36 @@ def test_phase7_station_command_ignores_legacy_string_plan_refs(monkeypatch) -> 
 
     class FakeStore:
         def list_effective_assigned_plans(self):
-            return [{"device_profile_id": 2, "frequency_plan_id": 20}]
+            raise AssertionError("station-command rendering must not read plan assignments")
 
         def list_frequency_plans(self):
-            return [
-                {
-                    "id": 20,
-                    "name": "Mixed Legacy Plan",
-                    "schedule_refs_json": (
-                        '["hf:legacy-string",'
-                        '{"day_utc":"ALL","start_utc":"00:00","end_utc":"23:59",'
-                        '"group":"AMRRON","band":"20M","frequency":"14.110"}]'
-                    ),
-                    "frequency_refs_json": '["20M:14.110"]',
-                }
-            ]
+            raise AssertionError("station-command rendering must not read frequency plans")
 
     window = MainWindow.__new__(MainWindow)
     window.settings = SimpleNamespace(all=lambda: {"operating_groups": []})
     window.multi_radio_store = FakeStore()
-    window.scheduler = SimpleNamespace(current_source="HF", current_schedule_entry={})
+    window.scheduler = SimpleNamespace(
+        current_source="HF",
+        current_schedule_entry={},
+        active_schedule_lanes=lambda force=False: [
+            _station_command_plan_lane(
+                2,
+                20,
+                "Mixed Legacy Plan",
+                current_entry={"group": "AMRRON", "band": "20M", "frequency": "14.110"},
+                hf_rows=[
+                    {
+                        "day_utc": "ALL",
+                        "start_utc": "00:00",
+                        "end_utc": "23:59",
+                        "group": "AMRRON",
+                        "band": "20M",
+                        "frequency": "14.110",
+                    }
+                ],
+            )
+        ],
+    )
     window._station_command_manual_qsy_meta = None
     window._station_command_manual_qsy_profile_id = None
     window._station_command_selected_profile_id = 2
@@ -3712,30 +3759,42 @@ def test_phase7_station_command_next_uses_selected_radio_assigned_plan(monkeypat
 
     class FakeStore:
         def list_effective_assigned_plans(self):
-            return [
-                {"device_profile_id": 1, "frequency_plan_id": 10},
-                {"device_profile_id": 2, "frequency_plan_id": 20},
-            ]
+            raise AssertionError("station-command rendering must not read plan assignments")
 
         def list_frequency_plans(self):
-            return [
-                {
-                    "id": 10,
-                    "name": "MagNet Plan",
-                    "schedule_refs_json": '[{"day_utc":"ALL","start_utc":"00:00","end_utc":"23:59","group":"MAGNET","band":"40M"}]',
-                },
-                {
-                    "id": 20,
-                    "name": "AmRRON Plan",
-                    "schedule_refs_json": (
-                        '[{"day_utc":"ALL","start_utc":"00:00","end_utc":"23:59","group":"AMRRON","band":"40M"},'
-                        f'{{"day_utc":"ALL","start_utc":"{next_start}","end_utc":"23:59","group":"AMRRON","band":"20M"}}]'
-                    ),
-                },
-            ]
+            raise AssertionError("station-command rendering must not read frequency plans")
 
     window = MainWindow.__new__(MainWindow)
     window.multi_radio_store = FakeStore()
+    window.scheduler = SimpleNamespace(
+        active_schedule_lanes=lambda force=False: [
+            _station_command_plan_lane(
+                2,
+                20,
+                "AmRRON Plan",
+                current_entry={"group": "AMRRON", "band": "40M", "frequency": "7.110"},
+                next_entry={"group": "AMRRON", "band": "20M", "frequency": "14.110"},
+                hf_rows=[
+                    {
+                        "day_utc": "ALL",
+                        "start_utc": "00:00",
+                        "end_utc": "23:59",
+                        "group": "AMRRON",
+                        "band": "40M",
+                        "frequency": "7.110",
+                    },
+                    {
+                        "day_utc": "ALL",
+                        "start_utc": next_start,
+                        "end_utc": "23:59",
+                        "group": "AMRRON",
+                        "band": "20M",
+                        "frequency": "14.110",
+                    },
+                ],
+            )
+        ]
+    )
     window._station_command_plan_cache_data = None
     window._station_command_plan_cache_expires = 0.0
     snapshot = SimpleNamespace(
@@ -3757,16 +3816,10 @@ def test_phase7_station_command_next_does_not_use_other_radio_assigned_plan(monk
 
     class FakeStore:
         def list_effective_assigned_plans(self):
-            return [{"device_profile_id": 1, "frequency_plan_id": 10}]
+            raise AssertionError("station-command rendering must not read plan assignments")
 
         def list_frequency_plans(self):
-            return [
-                {
-                    "id": 10,
-                    "name": "MagNet Plan",
-                    "schedule_refs_json": '[{"day_utc":"ALL","start_utc":"00:00","end_utc":"23:59","group":"MAGNET","band":"40M"}]',
-                }
-            ]
+            raise AssertionError("station-command rendering must not read frequency plans")
 
     window = MainWindow.__new__(MainWindow)
     window.multi_radio_store = FakeStore()
@@ -3791,13 +3844,16 @@ def test_phase7_station_command_plan_label_uses_frequency_plan_assignment(monkey
 
     class FakeStore:
         def list_effective_assigned_plans(self):
-            return [{"device_profile_id": 2, "frequency_plan_id": 20}]
+            raise AssertionError("station-command rendering must not read plan assignments")
 
         def list_frequency_plans(self):
-            return [{"id": 20, "name": "AmRRON Main Plan", "schedule_refs_json": "[]"}]
+            raise AssertionError("station-command rendering must not read frequency plans")
 
     window = MainWindow.__new__(MainWindow)
     window.multi_radio_store = FakeStore()
+    window.scheduler = SimpleNamespace(
+        active_schedule_lanes=lambda force=False: [_station_command_plan_lane(2, 20, "AmRRON Main Plan")]
+    )
     window._station_command_plan_cache_data = None
     window._station_command_plan_cache_expires = 0.0
     snapshot = SimpleNamespace(
@@ -3833,25 +3889,28 @@ def test_phase7_station_command_card_qsy_options_are_assigned_plan_scoped(monkey
 
     class FakeStore:
         def list_effective_assigned_plans(self):
-            return [{"device_profile_id": 2, "frequency_plan_id": 20}]
+            raise AssertionError("station-command rendering must not read plan assignments")
 
         def list_frequency_plans(self):
-            return [
-                {
-                    "id": 20,
-                    "name": "AmRRON Main Plan",
-                    "schedule_refs_json": (
-                        '[{"group":"AMRRON","band":"20M","frequency":"14.110"},'
-                        '{"group":"AMRRON","band":"40M","frequency":"7.110"}]'
-                    ),
-                    "frequency_refs_json": "[]",
-                }
-            ]
+            raise AssertionError("station-command rendering must not read frequency plans")
 
     window = MainWindow.__new__(MainWindow)
     window.settings = FakeSettings()
     window.multi_radio_store = FakeStore()
-    window.scheduler = SimpleNamespace(current_schedule_entry={})
+    window.scheduler = SimpleNamespace(
+        current_schedule_entry={},
+        active_schedule_lanes=lambda force=False: [
+            _station_command_plan_lane(
+                2,
+                20,
+                "AmRRON Main Plan",
+                hf_rows=[
+                    {"group": "AMRRON", "band": "20M", "frequency": "14.110"},
+                    {"group": "AMRRON", "band": "40M", "frequency": "7.110"},
+                ],
+            )
+        ],
+    )
     window._station_command_manual_qsy_meta = None
     window._station_command_manual_qsy_profile_id = None
     window._station_command_plan_cache_data = None
@@ -3909,26 +3968,32 @@ def test_phase7_station_command_bar_uses_card_for_single_active_radio(monkeypatc
             return self.list_runtime_active_device_profiles()
 
         def list_effective_assigned_plans(self):
-            return [{"device_profile_id": 2, "frequency_plan_id": 20}]
+            raise AssertionError("station-command rendering must not read plan assignments")
 
         def list_frequency_plans(self):
-            return [
-                {
-                    "id": 20,
-                    "name": "AmRRON Plan",
-                    "schedule_refs_json": (
-                        '[{"group":"AMRRON","band":"20M","frequency":"14.110","day":"ALL","start":"00:00","end":"23:59"},'
-                        '{"group":"AMRRON","band":"40M","frequency":"7.110","day":"ALL","start":"23:59","end":"00:00"}]'
-                    ),
-                    "frequency_refs_json": "[]",
-                }
-            ]
+            raise AssertionError("station-command rendering must not read frequency plans")
 
     window = MainWindow.__new__(MainWindow)
     window.settings = FakeSettings()
     window.multi_radio_store = FakeStore()
     window.station_runtime_manager = SimpleNamespace(get_runtime_snapshots=lambda force=False: [])
-    window.scheduler = SimpleNamespace(current_schedule_entry={}, current_source="")
+    window.scheduler = SimpleNamespace(
+        current_schedule_entry={},
+        current_source="",
+        active_schedule_lanes=lambda force=False: [
+            _station_command_plan_lane(
+                2,
+                20,
+                "AmRRON Plan",
+                current_entry={"group": "AMRRON", "band": "20M", "frequency": "14.110"},
+                next_entry={"group": "AMRRON", "band": "40M", "frequency": "7.110"},
+                hf_rows=[
+                    {"group": "AMRRON", "band": "20M", "frequency": "14.110", "day": "ALL", "start": "00:00", "end": "23:59"},
+                    {"group": "AMRRON", "band": "40M", "frequency": "7.110", "day": "ALL", "start": "23:59", "end": "00:00"},
+                ],
+            )
+        ],
+    )
     window.dependency_status_service = SimpleNamespace(software_status_snapshot=lambda: {})
     window.action_feedback_service = None
     window._station_command_selected_profile_id = None
@@ -4274,37 +4339,42 @@ def test_phase7_station_command_tiles_arm_first_card_and_keep_each_plan_scoped(m
 
     class FakeStore:
         def list_effective_assigned_plans(self):
-            return [
-                {"device_profile_id": 1, "frequency_plan_id": 10},
-                {"device_profile_id": 2, "frequency_plan_id": 20},
-            ]
+            raise AssertionError("station-command rendering must not read plan assignments")
 
         def list_frequency_plans(self):
-            return [
-                {
-                    "id": 10,
-                    "name": "Magnet Main Plan",
-                    "schedule_refs_json": (
-                        '[{"group":"MAGNET","band":"40M","frequency":"7.115"},'
-                        '{"group":"MAGNET","band":"20M","frequency":"14.115"}]'
-                    ),
-                    "frequency_refs_json": "[]",
-                },
-                {
-                    "id": 20,
-                    "name": "AmRRON Plan",
-                    "schedule_refs_json": (
-                        '[{"group":"AMRRON","band":"20M","frequency":"14.110","day":"ALL","start":"00:00","end":"23:59"},'
-                        '{"group":"AMRRON","band":"40M","frequency":"7.110","day":"ALL","start":"23:59","end":"00:00"}]'
-                    ),
-                    "frequency_refs_json": "[]",
-                },
-            ]
+            raise AssertionError("station-command rendering must not read frequency plans")
 
     window = MainWindow.__new__(MainWindow)
     window.settings = FakeSettings()
     window.multi_radio_store = FakeStore()
-    window.scheduler = SimpleNamespace(current_source="", current_schedule_entry={})
+    window.scheduler = SimpleNamespace(
+        current_source="",
+        current_schedule_entry={},
+        active_schedule_lanes=lambda force=False: [
+            _station_command_plan_lane(
+                1,
+                10,
+                "Magnet Main Plan",
+                current_entry={"group": "MAGNET", "band": "40M", "frequency": "7.115"},
+                next_entry={"group": "MAGNET", "band": "20M", "frequency": "14.115"},
+                hf_rows=[
+                    {"group": "MAGNET", "band": "40M", "frequency": "7.115"},
+                    {"group": "MAGNET", "band": "20M", "frequency": "14.115"},
+                ],
+            ),
+            _station_command_plan_lane(
+                2,
+                20,
+                "AmRRON Plan",
+                current_entry={"group": "AMRRON", "band": "20M", "frequency": "14.110"},
+                next_entry={"group": "AMRRON", "band": "40M", "frequency": "7.110"},
+                hf_rows=[
+                    {"group": "AMRRON", "band": "20M", "frequency": "14.110"},
+                    {"group": "AMRRON", "band": "40M", "frequency": "7.110"},
+                ],
+            ),
+        ],
+    )
     window._station_command_plan_cache_data = None
     window._station_command_plan_cache_expires = 0.0
     window._station_command_manual_qsy_meta = None
@@ -4417,55 +4487,43 @@ def test_phase7_station_command_cards_do_not_inherit_manual_state_or_unscoped_sc
 
     class FakeStore:
         def list_effective_assigned_plans(self):
-            return [
-                {"device_profile_id": 1, "frequency_plan_id": 10},
-                {"device_profile_id": 2, "frequency_plan_id": 20},
-            ]
+            raise AssertionError("station-command rendering must not read plan assignments")
 
         def list_frequency_plans(self):
-            return [
-                {
-                    "id": 10,
-                    "name": "Magnet Main Plan",
-                    "schedule_refs_json": (
-                        '[{"group":"MAGNET","band":"20M","frequency":"14.115","day":"ALL","start":"00:00","end":"23:59"},'
-                        '{"group":"MAGNET","band":"40M","frequency":"7.115","day":"ALL","start":"23:59","end":"00:00"}]'
-                    ),
-                    "frequency_refs_json": "[]",
-                },
-                {
-                    "id": 20,
-                    "name": "AmRRON Plan",
-                    "schedule_refs_json": (
-                        '[{"group":"AMRRON","band":"20M","frequency":"14.110","day":"ALL","start":"00:00","end":"23:59"},'
-                        '{"group":"AMRRON","band":"40M","frequency":"7.110","day":"ALL","start":"23:59","end":"00:00"}]'
-                    ),
-                    "frequency_refs_json": "[]",
-                },
-            ]
+            raise AssertionError("station-command rendering must not read frequency plans")
 
     window = MainWindow.__new__(MainWindow)
     window.settings = FakeSettings()
     window.multi_radio_store = FakeStore()
-    stale_lanes = [
-        {
-            "device_profile_id": 2,
-            "frequency_plan_name": "Magnet Main Plan",
-            "current_entry": {"frequency": "14.115", "group": "MAGNET", "band": "20M"},
-            "next_entry": {"frequency": "7.115", "group": "MAGNET", "band": "40M"},
-            "hf_rows": [
-                {"frequency": "14.115", "group": "MAGNET", "band": "20M"},
-                {"frequency": "7.115", "group": "MAGNET", "band": "40M"},
+    active_lanes = [
+        _station_command_plan_lane(
+            1,
+            10,
+            "Magnet Main Plan",
+            current_entry={"frequency": "14.115", "group": "MAGNET", "band": "20M"},
+            next_entry={"frequency": "7.115", "group": "MAGNET", "band": "40M"},
+            hf_rows=[
+                {"frequency": "14.115", "group": "MAGNET", "band": "20M", "day": "ALL", "start": "00:00", "end": "23:59"},
+                {"frequency": "7.115", "group": "MAGNET", "band": "40M", "day": "ALL", "start": "23:59", "end": "00:00"},
             ],
-            "net_rows": [],
-            "sop_rows": [],
-        }
+        ),
+        _station_command_plan_lane(
+            2,
+            20,
+            "AmRRON Plan",
+            current_entry={"frequency": "14.110", "group": "AMRRON", "band": "20M"},
+            next_entry={"frequency": "7.110", "group": "AMRRON", "band": "40M"},
+            hf_rows=[
+                {"frequency": "14.110", "group": "AMRRON", "band": "20M", "day": "ALL", "start": "00:00", "end": "23:59"},
+                {"frequency": "7.110", "group": "AMRRON", "band": "40M", "day": "ALL", "start": "23:59", "end": "00:00"},
+            ],
+        ),
     ]
     window.scheduler = SimpleNamespace(
         current_source="QSY",
         current_schedule_entry={"frequency": "14.115", "group": "MAGNET", "band": "20M"},
         _manual_qsy_active=True,
-        active_schedule_lanes=lambda force=False: stale_lanes,
+        active_schedule_lanes=lambda force=False: active_lanes,
     )
     window._station_command_plan_cache_data = None
     window._station_command_plan_cache_expires = 0.0
@@ -5181,8 +5239,8 @@ def test_settings_configuration_assistant_spec_tracks_next_ia_work() -> None:
     assert "self._add_settings_section(operating_group, scope=\"global\")" in settings_source
     assert "self.device_assignments_table = QTableWidget(0, 7)" in settings_source
     assert "self.schedule_assignments_table = QTableWidget(0, 7)" in settings_source
-    assert 'self._settings_nav_context = "main" if scope == "global" else "radios"' in settings_source
-    assert 'desired_scope = "radio" if context in {"radio", "radios"} else "global"' in settings_source
+    assert 'self._settings_nav_context = "software" if scope == "software" else "main" if scope == "global" else "radios"' in settings_source
+    assert 'desired_scope = "software" if context == "software" else "radio" if context in {"radio", "radios"} else "global"' in settings_source
     assert 'self.settings_compact_header.setVisible(False)' in settings_source
     assert "self.settings_section_nav_scroll.setObjectName(\"settingsSectionNavScroll\")" in settings_source
     assert "self.settings_section_nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)" in settings_source

@@ -1093,7 +1093,11 @@ def test_map_selected_detail_splitter_uses_responsive_helper() -> None:
 
     assert "def _map_selected_panel_target_width" in source
     assert "def _sync_map_canvas_splitter" in source
-    assert "self._sync_map_canvas_splitter()" in source[source.index("def resizeEvent") : source.index("def _sync_city_pop_enabled")]
+    resize_block = source[source.index("def resizeEvent") : source.index("def _sync_city_pop_enabled")]
+    assert "self._schedule_map_geometry_reflow()" in resize_block
+    assert "self._sync_map_canvas_splitter()" in source[
+        source.index("def _flush_map_geometry_reflow") : source.index("def on_first_visible_layout_ready")
+    ]
     assert "total < 760" in source
     assert "panel.setMinimumWidth(260)" in source
 
@@ -3009,6 +3013,42 @@ def test_leaflet_html_includes_regional_intelligence_heatmap_hooks() -> None:
     assert "TX" in html
 
 
+def test_leaflet_operational_marker_palette_comes_from_shared_theme() -> None:
+    """Domain severity/source colors adapt with the shared map theme."""
+    tab = _bare_tab()
+    light_html = StationsMapTab._build_leaflet_html(
+        tab,
+        markers=[],
+        links=[],
+        max_zoom=18,
+        leaflet_js="leaflet.js",
+        leaflet_css="leaflet.css",
+        geojson_urls=[],
+        cities_geojson=None,
+        city_min_pop=0,
+        show_city_labels=False,
+    )
+    assert "#C62828" in light_html  # shared light-theme danger role
+    assert "#B71C1C" not in light_html  # legacy hardcoded severe marker
+    assert "#E3F2FD" not in light_html  # legacy hardcoded weather fill
+
+    tab.settings = {"ui_theme": "dark"}
+    dark_html = StationsMapTab._build_leaflet_html(
+        tab,
+        markers=[],
+        links=[],
+        max_zoom=18,
+        leaflet_js="leaflet.js",
+        leaflet_css="leaflet.css",
+        geojson_urls=[],
+        cities_geojson=None,
+        city_min_pop=0,
+        show_city_labels=False,
+    )
+    assert "#E05252" in dark_html  # shared dark-theme danger role
+    assert "#B71C1C" not in dark_html
+
+
 def test_rf_planning_preserves_time_and_topic_filters() -> None:
     tab = _bare_tab()
     tab.recency_seconds = 7 * 24 * 60 * 60
@@ -3163,7 +3203,8 @@ def test_map_control_strip_uses_operator_first_sections() -> None:
     assert 'return "traffic items"' in source
     assert 'return "stations"' in source
     assert "} links." in source
-    assert "self._map_retry_btn.setVisible(not ready)" in source
+    assert "self._map_retry_btn.setVisible(show_support_actions)" in source
+    assert 'self._map_runtime_state in {"loading", "warming"}' in source
     assert 'id="legendToggle"' in source
     assert 'legendDock" class="collapsed"' in source
     assert "function openSelectedDetail" in source

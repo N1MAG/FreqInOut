@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QSizePolicy,
+    QScrollArea,
 )
 
 from freqinout.core.settings_manager import SettingsManager
@@ -78,7 +79,10 @@ from freqinout.gui.qsy_helper import (
     active_hold_status_text,
 )
 from freqinout.core.config_paths import get_config_dir
-from freqinout.gui.theme import resolve_theme, button_style, fit_child_combo_boxes, fit_combo_box_to_contents
+from freqinout.gui.theme import (
+    resolve_theme, button_style, fit_child_combo_boxes, fit_combo_box_to_contents,
+    font_derived_widget_height,
+)
 
 
 def _nets_db_path() -> Path:
@@ -375,7 +379,16 @@ class JS8CallNetControlTab(QWidget):
     # ---------------- UI ---------------- #
 
     def _build_ui(self):
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        self.js8_ncs_scroll_area = QScrollArea(self)
+        self.js8_ncs_scroll_area.setWidgetResizable(True)
+        self.js8_ncs_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.js8_ncs_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        content = QWidget(self.js8_ncs_scroll_area)
+        self.js8_ncs_scroll_area.setWidget(content)
+        outer_layout.addWidget(self.js8_ncs_scroll_area)
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
@@ -411,34 +424,40 @@ class JS8CallNetControlTab(QWidget):
         setup_group = QGroupBox("Net Setup")
         setup_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         controls_grid = QGridLayout()
+        self._js8_setup_grid = controls_grid
         controls_grid.setContentsMargins(12, 12, 12, 12)
         controls_grid.setHorizontalSpacing(12)
         controls_grid.setVerticalSpacing(10)
-        controls_grid.addWidget(QLabel("Role:"), 0, 0)
+        self._js8_role_label = QLabel("Role:")
+        controls_grid.addWidget(self._js8_role_label, 0, 0)
         self.role_combo = QComboBox()
         self.role_combo.addItems(["NCS", "ANCS"])
         controls_grid.addWidget(self.role_combo, 0, 1)
 
-        controls_grid.addWidget(QLabel("Net Name:"), 0, 2)
+        self._js8_net_name_label = QLabel("Net Name:")
+        controls_grid.addWidget(self._js8_net_name_label, 0, 2)
         self.net_name_edit = QLineEdit()
         self.net_name_edit.setPlaceholderText("Type net name (auto-complete from schedule)...")
         self.net_name_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         controls_grid.addWidget(self.net_name_edit, 0, 3, 1, 5)
 
-        controls_grid.addWidget(QLabel("Refresh (sec):"), 0, 8)
+        self._js8_refresh_label = QLabel("Refresh (sec):")
+        controls_grid.addWidget(self._js8_refresh_label, 0, 8)
         self.refresh_spin = QSpinBox()
         self.refresh_spin.setRange(5, 300)
         self.refresh_spin.setValue(15)
         controls_grid.addWidget(self.refresh_spin, 0, 9)
 
-        controls_grid.addWidget(QLabel("Group:"), 1, 0)
+        self._js8_group_label = QLabel("Group:")
+        controls_grid.addWidget(self._js8_group_label, 1, 0)
         self.set_group_btn = QPushButton("Set Group")
         self.group_edit = QLineEdit()
         self.group_edit.setPlaceholderText("@GROUP")
         controls_grid.addWidget(self.set_group_btn, 1, 1)
         controls_grid.addWidget(self.group_edit, 1, 2, 1, 2)
 
-        controls_grid.addWidget(QLabel("Expect:"), 1, 4)
+        self._js8_expect_label = QLabel("Expect:")
+        controls_grid.addWidget(self._js8_expect_label, 1, 4)
         self.set_spotter_btn = QPushButton("Set Expect Query")
         self.spotter_combo = QComboBox()
         self.spotter_combo.setMinimumWidth(220)
@@ -446,13 +465,15 @@ class JS8CallNetControlTab(QWidget):
         controls_grid.addWidget(self.set_spotter_btn, 1, 5)
         controls_grid.addWidget(self.spotter_combo, 1, 6, 1, 4)
 
-        controls_grid.addWidget(QLabel("QSY:"), 2, 0)
+        self._js8_qsy_label = QLabel("QSY:")
+        controls_grid.addWidget(self._js8_qsy_label, 2, 0)
         self.qsy_combo = QComboBox()
         self.qsy_combo.currentIndexChanged.connect(self._update_qsy_button_enabled)
         controls_grid.addWidget(self.qsy_combo, 2, 1, 1, 3)
         self.hold_duration_combo = QComboBox()
         self.hold_duration_combo.setToolTip("Temporary schedule hold duration after QSY.")
         self.hold_duration_combo.currentIndexChanged.connect(self._on_hold_duration_changed)
+        self._js8_hold_label = QLabel("Hold:")
         controls_grid.addWidget(self.hold_duration_combo, 2, 4)
         self.suspend_btn = QPushButton("QSY + Hold")
         controls_grid.addWidget(self.suspend_btn, 2, 5)
@@ -488,7 +509,9 @@ class JS8CallNetControlTab(QWidget):
         self.checkin_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.checkin_table.setSelectionMode(QTableWidget.SingleSelection)
         self.checkin_table.horizontalHeader().setStretchLastSection(True)
-        self.checkin_table.setMinimumHeight(260)
+        self.checkin_table.setMinimumHeight(
+            font_derived_widget_height(self.checkin_table, vertical_padding=12, floor=120, include_size_hints=False)
+        )
         self.checkin_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.checkin_empty_label = QLabel(
             "No JS8 check-ins yet. Start the net and accept mapped MCF forms as stations check in."
@@ -501,6 +524,7 @@ class JS8CallNetControlTab(QWidget):
 
         # Buttons row
         btn_row = QHBoxLayout()
+        self._js8_action_row = btn_row
         btn_row.setSpacing(8)
         self.start_btn = QPushButton("Start Net")
         self.ack_btn = QPushButton("ACK GROUP")
@@ -551,6 +575,88 @@ class JS8CallNetControlTab(QWidget):
 
         self._set_net_button_styles(active=False)
         self._refresh_ncs_session_context()
+        QTimer.singleShot(0, self._reflow_ncs_layouts)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._reflow_ncs_layouts()
+
+    def _reflow_ncs_layouts(self) -> None:
+        """Reposition existing controls only; never reload NCS state on resize."""
+        controls = (
+            self._js8_role_label,
+            self.role_combo,
+            self._js8_net_name_label,
+            self.net_name_edit,
+            self._js8_refresh_label,
+            self.refresh_spin,
+            self._js8_group_label,
+            self.group_edit,
+            self.set_group_btn,
+            self._js8_expect_label,
+            self.spotter_combo,
+            self.set_spotter_btn,
+            self._js8_qsy_label,
+            self.qsy_combo,
+            self._js8_hold_label,
+            self.hold_duration_combo,
+            self.suspend_btn,
+            self.ad_hoc_btn,
+        )
+        metrics = self.fontMetrics()
+        widest_control = max(
+            max(int(widget.minimumSizeHint().width()), int(widget.sizeHint().width()))
+            for widget in controls
+        )
+        compact = self.width() < max(1000, (widest_control * 4) + (metrics.horizontalAdvance("M") * 8))
+        grid = getattr(self, "_js8_setup_grid", None)
+        if grid is not None:
+            while grid.count():
+                grid.takeAt(0)
+            for column in range(10):
+                grid.setColumnStretch(column, 0)
+            if compact:
+                rows = (
+                    (self._js8_role_label, self.role_combo),
+                    (self._js8_net_name_label, self.net_name_edit),
+                    (self._js8_refresh_label, self.refresh_spin),
+                    (self._js8_group_label, self.group_edit),
+                    (self._js8_expect_label, self.spotter_combo),
+                    (self._js8_qsy_label, self.qsy_combo),
+                    (self._js8_hold_label, self.hold_duration_combo),
+                )
+                for row, (label, field) in enumerate(rows):
+                    grid.addWidget(label, row, 0)
+                    grid.addWidget(field, row, 1)
+                grid.addWidget(self.set_group_btn, 7, 1)
+                grid.addWidget(self.set_spotter_btn, 8, 1)
+                grid.addWidget(self.suspend_btn, 9, 0)
+                grid.addWidget(self.ad_hoc_btn, 9, 1)
+                grid.setColumnStretch(1, 1)
+            else:
+                grid.addWidget(self._js8_role_label, 0, 0)
+                grid.addWidget(self.role_combo, 0, 1)
+                grid.addWidget(self._js8_net_name_label, 0, 2)
+                grid.addWidget(self.net_name_edit, 0, 3, 1, 3)
+                grid.addWidget(self._js8_refresh_label, 0, 6)
+                grid.addWidget(self.refresh_spin, 0, 7)
+                grid.addWidget(self._js8_group_label, 1, 0)
+                grid.addWidget(self.group_edit, 1, 1, 1, 2)
+                grid.addWidget(self.set_group_btn, 1, 3)
+                grid.addWidget(self._js8_expect_label, 1, 4)
+                grid.addWidget(self.spotter_combo, 1, 5, 1, 2)
+                grid.addWidget(self.set_spotter_btn, 1, 7)
+                grid.addWidget(self._js8_qsy_label, 2, 0)
+                grid.addWidget(self.qsy_combo, 2, 1, 1, 2)
+                grid.addWidget(self._js8_hold_label, 2, 3)
+                grid.addWidget(self.hold_duration_combo, 2, 4)
+                grid.addWidget(self.suspend_btn, 2, 5)
+                grid.addWidget(self.ad_hoc_btn, 2, 6, 1, 2)
+                for column in (3, 5):
+                    grid.setColumnStretch(column, 1)
+        action_row = getattr(self, "_js8_action_row", None)
+        if action_row is not None:
+            action_row.setDirection(QHBoxLayout.TopToBottom if compact else QHBoxLayout.LeftToRight)
 
     def _on_ncs_session_context_changed(self) -> None:
         self._persist_ncs_session_snapshot()

@@ -4,7 +4,8 @@ import csv
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QEvent
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -22,6 +23,8 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QTextEdit,
     QCheckBox,
+    QBoxLayout,
+    QScrollArea,
 )
 
 from freqinout.core.logger import log
@@ -32,7 +35,15 @@ from freqinout.core.local_ops_store import (
     latest_report_summaries_for_callsigns,
     upsert_operator,
 )
-from freqinout.gui.theme import resolve_theme, button_style
+from freqinout.gui.theme import (
+    resolve_theme,
+    button_style,
+    button_height_for_font,
+    contrast_text_for_background,
+    control_height_for_font,
+    horizontal_layout_breakpoint,
+    label_style,
+)
 
 
 LOCAL_CATEGORIES = ["VHF", "UHF", "GMRS", "MURS", "FRS", "Other"]
@@ -67,11 +78,13 @@ class LocalOperatorTab(QWidget):
         layout = QVBoxLayout(self)
 
         header = QHBoxLayout()
-        header.addWidget(QLabel("<h3>Local Operators</h3>"))
+        self.title_label = QLabel("Local Operators")
+        header.addWidget(self.title_label)
         header.addStretch()
         layout.addLayout(header)
 
         filter_row = QHBoxLayout()
+        self.filter_row = filter_row
         filter_row.addWidget(QLabel("Search:"))
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Callsign, name, city/state, category, sitrep, report topic, keyword, notes")
@@ -83,6 +96,7 @@ class LocalOperatorTab(QWidget):
         layout.addLayout(filter_row)
 
         actions = QHBoxLayout()
+        self.actions_row = actions
         self.refresh_btn = QPushButton("Refresh")
         self.add_btn = QPushButton("Add")
         self.edit_btn = QPushButton("Edit Selected")
@@ -126,6 +140,8 @@ class LocalOperatorTab(QWidget):
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         layout.addWidget(self.table)
 
+        self._apply_responsive_layout()
+
         self.refresh_btn.clicked.connect(self._load_data)
         self.add_btn.clicked.connect(self._add_operator)
         self.edit_btn.clicked.connect(self._edit_selected)
@@ -138,6 +154,7 @@ class LocalOperatorTab(QWidget):
 
     def apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
+        self.title_label.setStyleSheet(label_style("text", theme, weight=700))
         self.refresh_btn.setStyleSheet(button_style("muted", theme))
         self.add_btn.setStyleSheet(button_style("eligible_success", theme))
         role = "eligible_info" if self._selected_callsigns() else "muted"
@@ -146,6 +163,45 @@ class LocalOperatorTab(QWidget):
         self.delete_btn.setStyleSheet(button_style("eligible_danger" if self._selected_callsigns() else "muted", theme))
         self.import_btn.setStyleSheet(button_style("muted", theme))
         self.export_btn.setStyleSheet(button_style("muted", theme))
+        for button in (
+            self.refresh_btn,
+            self.add_btn,
+            self.edit_btn,
+            self.view_reports_btn,
+            self.delete_btn,
+            self.import_btn,
+            self.export_btn,
+        ):
+            button.setMinimumHeight(button_height_for_font(button))
+        self.search_edit.setMinimumHeight(control_height_for_font(self.search_edit))
+        self.category_filter.setMinimumHeight(control_height_for_font(self.category_filter))
+        self.table.verticalHeader().setDefaultSectionSize(
+            max(1, self.table.fontMetrics().lineSpacing() + 10)
+        )
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, self.COL_SITREP)
+            if item is not None:
+                self._apply_sitrep_item_style(item, item.text(), theme)
+        self._apply_responsive_layout()
+
+    def _apply_responsive_layout(self) -> None:
+        """Keep the dense roster controls usable without changing cached data."""
+        compact = self.width() > 0 and self.width() < max(
+            horizontal_layout_breakpoint(self.filter_row, reserve_controls=1),
+            horizontal_layout_breakpoint(self.actions_row, reserve_controls=1),
+        )
+        direction = QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight
+        self.filter_row.setDirection(direction)
+        self.actions_row.setDirection(direction)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_responsive_layout()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange:
+            self.apply_theme()
 
     def on_settings_saved(self) -> None:
         try:
@@ -317,17 +373,22 @@ class LocalOperatorTab(QWidget):
             parts.append(f"Topics: {topics}")
         return "\n".join(part for part in parts if part)
 
-    def _apply_sitrep_item_style(self, item: QTableWidgetItem, status: str) -> None:
+    def _apply_sitrep_item_style(
+        self,
+        item: QTableWidgetItem,
+        status: str,
+        theme: Optional[Dict[str, str]] = None,
+    ) -> None:
+        theme = theme or resolve_theme(self.settings)
         key = (status or "").strip().upper()
         if key == "RED":
-            item.setBackground(Qt.red)
-            item.setForeground(Qt.white)
+            background = theme["danger"]
         elif key == "YELLOW":
-            item.setBackground(Qt.yellow)
-            item.setForeground(Qt.black)
+            background = theme["warning"]
         else:
-            item.setBackground(Qt.darkGreen)
-            item.setForeground(Qt.white)
+            background = theme["success"]
+        item.setBackground(QColor(background))
+        item.setForeground(QColor(contrast_text_for_background(background, theme)))
 
     def _selected_callsigns(self) -> List[str]:
         out: List[str] = []
@@ -345,7 +406,15 @@ class LocalOperatorTab(QWidget):
     def _dialog_profile(self, existing: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         dlg = QDialog(self)
         dlg.setWindowTitle("Edit Local Operator" if existing else "Add Local Operator")
-        form = QFormLayout(dlg)
+        dialog_layout = QVBoxLayout(dlg)
+        form_scroll = QScrollArea(dlg)
+        form_scroll.setWidgetResizable(True)
+        form_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        form_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        form_body = QWidget(form_scroll)
+        form = QFormLayout(form_body)
+        form_scroll.setWidget(form_body)
+        dialog_layout.addWidget(form_scroll)
 
         callsign_edit = QLineEdit(str((existing or {}).get("callsign", "")))
         first_name_edit = QLineEdit(str((existing or {}).get("first_name", "")))
@@ -358,7 +427,12 @@ class LocalOperatorTab(QWidget):
         if existing and str((existing or {}).get("category", "")):
             category_combo.setCurrentText(str((existing or {}).get("category", "")))
         notes_edit = QTextEdit(str((existing or {}).get("notes", "")))
-        notes_edit.setMinimumHeight(90)
+        notes_edit.setMinimumHeight(
+            max(
+                control_height_for_font(notes_edit, vertical_padding=18, floor=44) * 2,
+                notes_edit.fontMetrics().lineSpacing() * 3 + 20,
+            )
+        )
         sitrep_combo = QComboBox()
         sitrep_combo.addItems(["GREEN", "YELLOW", "RED"])
         sitrep_combo.setCurrentText(str((existing or {}).get("sitrep_status", "GREEN")).strip().upper() or "GREEN")
@@ -378,7 +452,7 @@ class LocalOperatorTab(QWidget):
         btn_row.addStretch()
         btn_row.addWidget(save_btn)
         btn_row.addWidget(cancel_btn)
-        form.addRow(btn_row)
+        dialog_layout.addLayout(btn_row)
 
         out: Dict[str, Any] = {}
 

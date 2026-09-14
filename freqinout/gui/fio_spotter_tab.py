@@ -10,7 +10,7 @@ from pathlib import Path
 import time
 from typing import Any, Callable
 
-from PySide6.QtCore import Qt, QTimer, Signal, QStringListModel
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal, QStringListModel
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFormLayout, QGridLayout, QGroupBox,
     QCompleter, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton, QFileDialog, QMessageBox, QMenu,
@@ -386,6 +386,17 @@ class FioSpotterTab(QWidget):
                 page.layout().activate()
                 page.updateGeometry()
 
+    def changeEvent(self, event) -> None:  # type: ignore[override]
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange:
+            # Font changes alter control minimums and preview line heights even
+            # when the outer viewport is unchanged. Reflow only from cached
+            # widget metrics; never activate a tab or refresh a store here.
+            self._apply_watch_responsive_layout()
+            self._apply_activity_responsive_layout()
+            self._apply_expect_responsive_layout()
+            self._fit_forms_preview_geometry()
+
     def apply_theme(self) -> None:
         """Apply shared semantic roles to Spotter actions and splitters.
 
@@ -485,13 +496,16 @@ class FioSpotterTab(QWidget):
         if split is None:
             return
         wanted = Qt.Vertical if self.width() <= 1000 else Qt.Horizontal
-        if split.orientation() == wanted:
-            return
-        split.setOrientation(wanted)
-        if wanted == Qt.Vertical:
-            split.setSizes([max(1, split.height() * 2 // 3), max(1, split.height() // 3)])
-        else:
-            split.setSizes([max(1, split.width() * 2 // 3), max(1, split.width() // 3)])
+        changed = split.orientation() != wanted
+        if changed:
+            split.setOrientation(wanted)
+        available = split.height() if wanted == Qt.Vertical else split.width()
+        # Initial lazy construction often occurs before the page is shown.  A
+        # later resize seeds the splitter from its measured viewport, while
+        # preserving any operator-adjusted sizes during same-mode resizes.
+        if available > 0 and (changed or sum(split.sizes()) <= 0):
+            first = max(1, int(available * 2 / 3))
+            split.setSizes([first, max(1, available - first)])
 
     def _apply_watch_responsive_layout(self) -> None:
         if not hasattr(self, "watches_split"):
@@ -504,15 +518,16 @@ class FioSpotterTab(QWidget):
         # Text mode; a fixed breakpoint alone would clip the editor there.
         compact = self.width() <= max(1200, (editor_min_width * 2) + 40)
         wanted = Qt.Vertical if compact else Qt.Horizontal
-        if split.orientation() == wanted:
-            return
-        split.setOrientation(wanted)
-        # Re-seed only when changing orientation so a user-adjusted splitter
-        # is not reset during ordinary resizes within the same mode.
-        if compact:
-            split.setSizes([max(1, split.height() // 2), max(1, split.height() // 2)])
-        else:
-            split.setSizes([max(1, int(split.width() * 0.75)), max(1, int(split.width() * 0.25))])
+        changed = split.orientation() != wanted
+        if changed:
+            split.setOrientation(wanted)
+        available = split.height() if compact else split.width()
+        if available > 0 and (changed or sum(split.sizes()) <= 0):
+            if compact:
+                first = max(1, available // 2)
+            else:
+                first = max(1, int(available * 0.75))
+            split.setSizes([first, max(1, available - first)])
 
     def _apply_expect_responsive_layout(self) -> None:
         compact = self.width() <= 1000
@@ -617,8 +632,41 @@ class FioSpotterTab(QWidget):
             self.expect_history_split.setOrientation(
                 Qt.Vertical if compact else Qt.Horizontal
             )
-            self.expect_history_split.setMaximumHeight(300 if compact else 190)
+            self.expect_history_split.setMaximumHeight(self._expect_history_height())
         self._update_expect_editor_minimum_height()
+
+    def _expect_history_height(self) -> int:
+        """Return a font/content-aware cap for the optional history preview."""
+
+        split = getattr(self, "expect_history_split", None)
+        if split is None:
+            return 1
+        tables = [
+            table for table in (
+                getattr(self, "expect_requests_table", None),
+                getattr(self, "expect_replies_table", None),
+            ) if table is not None
+        ]
+        line_height = max(
+            (table.fontMetrics().lineSpacing() for table in tables),
+            default=1,
+        )
+        row_height = max(
+            [
+                line_height + 8,
+                *(
+                    table.sizeHintForRow(0)
+                    for table in tables
+                    if table.rowCount() > 0 and table.sizeHintForRow(0) > 0
+                ),
+            ]
+        )
+        minimum = max(
+            control_height_for_font(split, vertical_padding=12, floor=32) * 3,
+            row_height * 3 + 12,
+        )
+        viewport = max(minimum * 2, int(self.height() or 0))
+        return max(minimum, int(viewport * 0.4))
 
     def _load_expect_access_completions(self, *, force: bool = False) -> None:
         now = time.monotonic()
@@ -883,6 +931,11 @@ class FioSpotterTab(QWidget):
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         content = QWidget(scroll)
         content.setObjectName(f"{page.objectName()}Content")
+        # The scroll viewport owns width. Ignore aggregate child size hints so
+        # a few frame pixels or a long label cannot create hidden page-level
+        # horizontal overflow; responsive child layouts handle the reflow.
+        content.setMinimumWidth(0)
+        content.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         layout = QVBoxLayout(content)
         layout.setContentsMargins(4, 8, 4, 4)
         layout.setSpacing(8)
@@ -3027,11 +3080,28 @@ class FioSpotterTab(QWidget):
         layout.addLayout(action_row)
         self.forms_preview = QTextEdit()
         self.forms_preview.setReadOnly(True)
-        self.forms_preview.setMaximumHeight(180)
         self.forms_preview.setAccessibleName("Selected Spotter form preview")
         self.forms_preview.setPlaceholderText("Select a form to review its fields and mapping.")
+        self.forms_preview.textChanged.connect(self._fit_forms_preview_geometry)
         layout.addWidget(self.forms_preview)
+        self._fit_forms_preview_geometry()
         self._refresh_forms_action_state()
+
+    def _fit_forms_preview_geometry(self) -> None:
+        """Keep the bounded form preview readable at the active text scale."""
+
+        preview = getattr(self, "forms_preview", None)
+        if preview is None:
+            return
+        line_height = max(1, preview.fontMetrics().lineSpacing())
+        minimum = max(
+            control_height_for_font(preview, vertical_padding=14, floor=44) * 2,
+            line_height * 3 + 20,
+        )
+        document_height = int(preview.document().documentLayout().documentSize().height())
+        content_height = max(minimum, document_height + 20)
+        viewport = max(minimum * 2, int(self.height() or 0))
+        preview.setMaximumHeight(max(minimum, min(content_height, int(viewport * 0.45))))
 
     def _refresh_forms_state(self) -> None:
         if not hasattr(self, "forms_state"):
@@ -3203,6 +3273,7 @@ class FioSpotterTab(QWidget):
             "Choose Preview selected to read the source, Compose selected form to prepare a guarded message, "
             "or Make available by E?… to review a disabled saved response."
         )
+        self._fit_forms_preview_geometry()
 
     def _preview_selected_form(self) -> None:
         row = self._selected_form_row()
@@ -3220,6 +3291,7 @@ class FioSpotterTab(QWidget):
             f"{_text(row.get('form_code'))} — {_text(row.get('title'))}\n"
             f"Purpose: {_text(mapping.get('purpose'))} · Routes: {', '.join(routes) or 'None'}\n\n{body}"
         )
+        self._fit_forms_preview_geometry()
 
     def _refresh_forms_action_state(self) -> None:
         theme = resolve_theme(self.settings)

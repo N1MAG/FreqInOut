@@ -370,7 +370,10 @@ from freqinout.gui.software_administration_editor import (
 from freqinout.gui.theme import (
     apply_text_size_accessibility_guards,
     button_height_for_font,
+    contrast_text_for_background,
     control_height_for_font,
+    item_view_height_for_rows,
+    multiline_height_for_font,
     resolve_theme,
     normalize_ui_text_size,
     led_style,
@@ -859,15 +862,57 @@ class _SoftwareAutofillWorker(QObject):
             self.failed.emit(self.generation, self.section, str(exc))
 
 
+class _GpgKeyProbeWorker(QObject):
+    """Run bounded GPG executable/key discovery away from the GUI thread."""
+
+    finished = Signal(int, object)
+
+    def __init__(self, generation: int, configured_path: str) -> None:
+        super().__init__()
+        self.generation = int(generation)
+        self.configured_path = str(configured_path or "").strip()
+
+    def run(self) -> None:
+        payload: Dict[str, object] = {
+            "available": False,
+            "message": "",
+            "resolved": "",
+            "public_keys": tuple(),
+            "public_error": "",
+            "secret_keys": tuple(),
+            "secret_error": "",
+        }
+        try:
+            ok, message, resolved = gpg_available(self.configured_path)
+            payload.update(available=bool(ok), message=str(message or ""), resolved=str(resolved or ""))
+            if ok:
+                public_keys, public_error = list_public_keys(configured_path=self.configured_path)
+                secret_keys, secret_error = list_secret_keys(configured_path=self.configured_path)
+                payload.update(
+                    public_keys=tuple(public_keys),
+                    public_error=str(public_error or ""),
+                    secret_keys=tuple(secret_keys),
+                    secret_error=str(secret_error or ""),
+                )
+        except Exception as exc:
+            payload["message"] = str(exc)
+        self.finished.emit(self.generation, payload)
+
+
 # A discovery operation that outlives the bounded application-shutdown wait
 # must retain its Python wrappers until Qt reports that its thread ended. This
 # prevents ``QThread: Destroyed while thread is still running`` without ever
 # extending the UI-thread wait indefinitely.
 _DETACHED_SOFTWARE_AUTOFILL_JOBS: Dict[int, Tuple[QThread, QObject]] = {}
+_DETACHED_GPG_PROBE_JOBS: Dict[int, Tuple[QThread, QObject]] = {}
 
 
 def _release_detached_software_autofill_job(job_id: int) -> None:
     _DETACHED_SOFTWARE_AUTOFILL_JOBS.pop(int(job_id), None)
+
+
+def _release_detached_gpg_probe_job(job_id: int) -> None:
+    _DETACHED_GPG_PROBE_JOBS.pop(int(job_id), None)
 
 
 class SettingsTab(QWidget):
@@ -1052,6 +1097,13 @@ class SettingsTab(QWidget):
         self._gpg_signing_keys_loading = False
         self._gpg_keys_loaded = False
         self._gpg_keys_auto_probe_attempted = False
+        self._gpg_probe_generation = 0
+        self._gpg_probe_thread: QThread | None = None
+        self._gpg_probe_worker: _GpgKeyProbeWorker | None = None
+        self._gpg_probe_pending = False
+        self._gpg_probe_pending_dialog = False
+        self._gpg_probe_show_dialog: Dict[int, bool] = {}
+        self._gpg_probe_shutdown = False
         self._gpg_trusted_fingerprints: set[str] = set()
         self._trusted_hashes_table_loading = False
         self._trusted_hash_entries: List[Dict[str, object]] = []
@@ -1085,6 +1137,7 @@ class SettingsTab(QWidget):
         self._last_running_status_refresh_ts = 0.0
         self._running_status_refresh_interval_sec = 10.0
         self._last_running_status_sig: Optional[Tuple[object, ...]] = None
+        self._last_running_status_snapshot: Dict[str, Dict[str, object]] = {}
         self._last_varac_bbs_lookup_reload_ts = 0.0
         self._varac_bbs_lookup_reload_interval_sec = 20.0
 
@@ -1399,7 +1452,7 @@ class SettingsTab(QWidget):
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
         table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        table.setMinimumHeight(220)
+        table.setMinimumHeight(item_view_height_for_rows(table, visible_rows=6))
         table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         table.horizontalHeader().setStretchLastSection(True)
         table.setColumnWidth(0, 130)
@@ -1534,7 +1587,7 @@ class SettingsTab(QWidget):
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         table.setSelectionMode(QAbstractItemView.NoSelection)
-        table.setMinimumHeight(260)
+        table.setMinimumHeight(item_view_height_for_rows(table, visible_rows=8))
         for row_idx, (change, callsign) in enumerate(rows):
             table.setItem(row_idx, 0, QTableWidgetItem(change))
             table.setItem(row_idx, 1, QTableWidgetItem(callsign))
@@ -1591,7 +1644,7 @@ class SettingsTab(QWidget):
 
         subgroup_list = QListWidget()
         subgroup_list.setSelectionMode(QAbstractItemView.NoSelection)
-        subgroup_list.setMinimumHeight(150)
+        subgroup_list.setMinimumHeight(item_view_height_for_rows(subgroup_list, visible_rows=6, include_header=False))
         layout.addWidget(subgroup_list)
 
         preview = QLabel()
@@ -1686,7 +1739,7 @@ class SettingsTab(QWidget):
             table.setEditTriggers(QAbstractItemView.NoEditTriggers)
             table.setSelectionMode(QAbstractItemView.NoSelection)
             table.setMinimumWidth(520)
-            table.setMinimumHeight(260)
+            table.setMinimumHeight(item_view_height_for_rows(table, visible_rows=8))
             for row_idx, (callsign, role, tier, state) in enumerate(rows):
                 for col_idx, value in enumerate((callsign, role, tier, state)):
                     table.setItem(row_idx, col_idx, QTableWidgetItem(str(value or "")))
@@ -2883,11 +2936,14 @@ class SettingsTab(QWidget):
         preview = QPlainTextEdit()
         preview.setReadOnly(True)
         preview.setPlainText(self._varac_bbs_vault_structure_preview_text())
-        preview.setMinimumSize(640, 420)
         layout.addWidget(preview, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(dlg.reject)
         layout.addWidget(buttons)
+        app = QApplication.instance()
+        screen = app.primaryScreen() if app is not None else None
+        available = screen.availableGeometry().size() if screen is not None else QSize(800, 600)
+        dlg.resize(min(760, max(1, available.width() - 40)), min(560, max(1, available.height() - 40)))
         dlg.exec()
 
     def _new_varac_bbs_vault_location(self) -> None:
@@ -4607,7 +4663,9 @@ class SettingsTab(QWidget):
         radio_profile_optional_layout.addRow("Amplifier Guard Group:", self.radio_profile_advanced_amplifier_edit)
         self.radio_profile_advanced_notes_edit = QPlainTextEdit()
         self.radio_profile_advanced_notes_edit.setPlaceholderText("Optional station notes for this radio")
-        self.radio_profile_advanced_notes_edit.setMaximumHeight(88)
+        self.radio_profile_advanced_notes_edit.setMaximumHeight(
+            multiline_height_for_font(self.radio_profile_advanced_notes_edit, visible_lines=4)
+        )
         radio_profile_optional_layout.addRow("Notes:", self.radio_profile_advanced_notes_edit)
         advanced_actions = QHBoxLayout()
         advanced_actions.setContentsMargins(0, 0, 0, 0)
@@ -5422,7 +5480,6 @@ class SettingsTab(QWidget):
         op_groups_browser_layout.setSpacing(10)
         op_group_list_box = QGroupBox("Groups")
         op_group_list_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        op_group_list_box.setMaximumHeight(96)
         op_group_list_layout = QVBoxLayout(op_group_list_box)
         op_group_list_layout.setContentsMargins(8, 8, 8, 6)
         self.op_group_list = QListWidget()
@@ -5432,8 +5489,20 @@ class SettingsTab(QWidget):
         self.op_group_list.setResizeMode(QListWidget.Adjust)
         self.op_group_list.setMovement(QListWidget.Static)
         self.op_group_list.setUniformItemSizes(False)
-        self.op_group_list.setMinimumHeight(42)
-        self.op_group_list.setMaximumHeight(54)
+        op_group_list_height = item_view_height_for_rows(
+            self.op_group_list,
+            visible_rows=1,
+            include_header=False,
+        )
+        self.op_group_list.setMinimumHeight(op_group_list_height)
+        self.op_group_list.setMaximumHeight(op_group_list_height)
+        op_group_list_box.setMaximumHeight(
+            op_group_list_height
+            + op_group_list_box.fontMetrics().lineSpacing()
+            + op_group_list_box.layout().contentsMargins().top()
+            + op_group_list_box.layout().contentsMargins().bottom()
+            + 18
+        )
         self.op_group_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.op_group_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.op_group_list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -5654,8 +5723,13 @@ class SettingsTab(QWidget):
         self.local_net_group_list.setResizeMode(QListWidget.Adjust)
         self.local_net_group_list.setMovement(QListWidget.Static)
         self.local_net_group_list.setUniformItemSizes(False)
-        self.local_net_group_list.setMinimumHeight(42)
-        self.local_net_group_list.setMaximumHeight(54)
+        local_net_group_height = item_view_height_for_rows(
+            self.local_net_group_list,
+            visible_rows=1,
+            include_header=False,
+        )
+        self.local_net_group_list.setMinimumHeight(local_net_group_height)
+        self.local_net_group_list.setMaximumHeight(local_net_group_height)
         self.local_net_group_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.local_net_group_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.local_net_group_list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -5714,7 +5788,9 @@ class SettingsTab(QWidget):
         self.local_net_target_edit.setPlaceholderText("e.g., 146.520, Ch 16, repeater pair/tone")
         self.local_net_notes_edit = QPlainTextEdit()
         self.local_net_notes_edit.setPlaceholderText("Optional notes for SOP reminder context")
-        self.local_net_notes_edit.setMinimumHeight(88)
+        self.local_net_notes_edit.setMinimumHeight(
+            multiline_height_for_font(self.local_net_notes_edit, visible_lines=3)
+        )
         self.local_net_add_config_btn = QPushButton("Add Configuration")
         self.local_net_add_config_btn.clicked.connect(self._add_local_net_profile_inline)
         self.local_net_save_btn = QPushButton("Save Changes")
@@ -6426,8 +6502,12 @@ class SettingsTab(QWidget):
         watch_hdr.setSectionResizeMode(2, QHeaderView.Stretch)
         watch_hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         watch_hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        self.js8spotter_watch_table.setMinimumHeight(110)
-        self.js8spotter_watch_table.setMaximumHeight(180)
+        self.js8spotter_watch_table.setMinimumHeight(
+            item_view_height_for_rows(self.js8spotter_watch_table, visible_rows=3)
+        )
+        self.js8spotter_watch_table.setMaximumHeight(
+            item_view_height_for_rows(self.js8spotter_watch_table, visible_rows=6)
+        )
         self.js8spotter_watch_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         js8_v.addWidget(self.js8spotter_watch_table)
 
@@ -6453,8 +6533,12 @@ class SettingsTab(QWidget):
         activity_hdr.setSectionResizeMode(2, QHeaderView.Stretch)
         activity_hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         activity_hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        self.js8spotter_activity_table.setMinimumHeight(120)
-        self.js8spotter_activity_table.setMaximumHeight(190)
+        self.js8spotter_activity_table.setMinimumHeight(
+            item_view_height_for_rows(self.js8spotter_activity_table, visible_rows=3)
+        )
+        self.js8spotter_activity_table.setMaximumHeight(
+            item_view_height_for_rows(self.js8spotter_activity_table, visible_rows=6)
+        )
         self.js8spotter_activity_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         js8_v.addWidget(self.js8spotter_activity_table)
 
@@ -6622,8 +6706,12 @@ class SettingsTab(QWidget):
         expect_hdr.setSectionResizeMode(3, QHeaderView.Stretch)
         expect_hdr.setSectionResizeMode(4, QHeaderView.Stretch)
         expect_hdr.setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        self.js8_expect_policies_table.setMinimumHeight(150)
-        self.js8_expect_policies_table.setMaximumHeight(220)
+        self.js8_expect_policies_table.setMinimumHeight(
+            item_view_height_for_rows(self.js8_expect_policies_table, visible_rows=4)
+        )
+        self.js8_expect_policies_table.setMaximumHeight(
+            item_view_height_for_rows(self.js8_expect_policies_table, visible_rows=7)
+        )
         self.js8_expect_policies_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         js8_v.addWidget(self.js8_expect_policies_table)
 
@@ -6706,8 +6794,12 @@ class SettingsTab(QWidget):
         entry_hdr.setSectionResizeMode(6, QHeaderView.ResizeToContents)
         entry_hdr.setSectionResizeMode(7, QHeaderView.ResizeToContents)
         entry_hdr.setSectionResizeMode(8, QHeaderView.ResizeToContents)
-        self.js8_expect_entries_table.setMinimumHeight(170)
-        self.js8_expect_entries_table.setMaximumHeight(260)
+        self.js8_expect_entries_table.setMinimumHeight(
+            item_view_height_for_rows(self.js8_expect_entries_table, visible_rows=5)
+        )
+        self.js8_expect_entries_table.setMaximumHeight(
+            item_view_height_for_rows(self.js8_expect_entries_table, visible_rows=8)
+        )
         self.js8_expect_entries_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         js8_v.addWidget(self.js8_expect_entries_table)
 
@@ -6734,8 +6826,12 @@ class SettingsTab(QWidget):
         audit_hdr.setSectionResizeMode(3, QHeaderView.Stretch)
         audit_hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         audit_hdr.setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        self.js8_expect_audit_table.setMinimumHeight(110)
-        self.js8_expect_audit_table.setMaximumHeight(180)
+        self.js8_expect_audit_table.setMinimumHeight(
+            item_view_height_for_rows(self.js8_expect_audit_table, visible_rows=3)
+        )
+        self.js8_expect_audit_table.setMaximumHeight(
+            item_view_height_for_rows(self.js8_expect_audit_table, visible_rows=6)
+        )
         self.js8_expect_audit_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         js8_v.addWidget(self.js8_expect_audit_table)
 
@@ -6763,8 +6859,12 @@ class SettingsTab(QWidget):
         request_hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         request_hdr.setSectionResizeMode(5, QHeaderView.ResizeToContents)
         request_hdr.setSectionResizeMode(6, QHeaderView.Stretch)
-        self.js8_expect_requests_table.setMinimumHeight(120)
-        self.js8_expect_requests_table.setMaximumHeight(190)
+        self.js8_expect_requests_table.setMinimumHeight(
+            item_view_height_for_rows(self.js8_expect_requests_table, visible_rows=3)
+        )
+        self.js8_expect_requests_table.setMaximumHeight(
+            item_view_height_for_rows(self.js8_expect_requests_table, visible_rows=6)
+        )
         self.js8_expect_requests_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         js8_v.addWidget(self.js8_expect_requests_table)
 
@@ -7296,7 +7396,9 @@ class SettingsTab(QWidget):
             "GROUP, *, Shared group key, KEYVALUE\n"
             "GROUP, CALLSIGN, Sender key, KEYVALUE"
         )
-        self.js8_msg_auth_bulk_import_edit.setFixedHeight(92)
+        self.js8_msg_auth_bulk_import_edit.setMinimumHeight(
+            multiline_height_for_font(self.js8_msg_auth_bulk_import_edit, visible_lines=4)
+        )
         self.js8_msg_auth_bulk_import_btn = QPushButton("Import Pasted Keys")
         self.js8_msg_auth_bulk_import_btn.setToolTip("Import multiple trusted verification keys from pasted rows.")
         self.js8_msg_auth_bulk_import_status_label = QLabel("")
@@ -7496,7 +7598,9 @@ class SettingsTab(QWidget):
         self.gpg_key_detail_label = QLabel("Select a key to view details.")
         self.gpg_key_detail_label.setWordWrap(True)
         self.gpg_key_detail_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.gpg_key_detail_label.setMaximumHeight(72)
+        self.gpg_key_detail_label.setMaximumHeight(
+            multiline_height_for_font(self.gpg_key_detail_label, visible_lines=3, vertical_padding=12)
+        )
         gpg_keys_v.addWidget(self.gpg_key_detail_label)
         gpg_v.addWidget(_make_message_auth_subsection("GPG Keys", gpg_keys_tab, checked=True))
 
@@ -7962,7 +8066,9 @@ class SettingsTab(QWidget):
         bbs_callsigns_layout.addLayout(bbs_roster_actions_row)
         self.varac_bbs_callsigns_list = QListWidget()
         self.varac_bbs_callsigns_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.varac_bbs_callsigns_list.setMaximumHeight(108)
+        self.varac_bbs_callsigns_list.setMaximumHeight(
+            item_view_height_for_rows(self.varac_bbs_callsigns_list, visible_rows=4, include_header=False)
+        )
         bbs_callsigns_layout.addWidget(self.varac_bbs_callsigns_list)
         bbs_callsigns_hint = QLabel(
             "Lookup uses known operators when available. Manual callsign entry is still allowed."
@@ -8187,7 +8293,9 @@ class SettingsTab(QWidget):
         vault_locations_actions.addStretch()
         vault_locations_layout.addLayout(vault_locations_actions)
         self.varac_bbs_vault_locations_list = QListWidget()
-        self.varac_bbs_vault_locations_list.setMaximumHeight(132)
+        self.varac_bbs_vault_locations_list.setMaximumHeight(
+            item_view_height_for_rows(self.varac_bbs_vault_locations_list, visible_rows=5, include_header=False)
+        )
         self.varac_bbs_vault_locations_list.itemSelectionChanged.connect(self._on_varac_bbs_vault_location_selected)
         vault_locations_layout.addWidget(self.varac_bbs_vault_locations_list)
         vault_editor_grid = QGridLayout()
@@ -8310,7 +8418,13 @@ class SettingsTab(QWidget):
         preview_v.addWidget(preview_note)
         self.varac_bbs_vault_structure_preview_edit = QPlainTextEdit()
         self.varac_bbs_vault_structure_preview_edit.setReadOnly(True)
-        self.varac_bbs_vault_structure_preview_edit.setMinimumHeight(260)
+        self.varac_bbs_vault_structure_preview_edit.setMinimumHeight(
+            multiline_height_for_font(
+                self.varac_bbs_vault_structure_preview_edit,
+                visible_lines=8,
+                vertical_padding=20,
+            )
+        )
         self.varac_bbs_vault_structure_preview_edit.setToolTip(
             "Operator preview of the managed VarAC BBS root menu, helper files, locations, and visible source files."
         )
@@ -8331,7 +8445,9 @@ class SettingsTab(QWidget):
         self.varac_bbs_sweeper_rules_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.varac_bbs_sweeper_rules_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.varac_bbs_sweeper_rules_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.varac_bbs_sweeper_rules_table.setMaximumHeight(150)
+        self.varac_bbs_sweeper_rules_table.setMaximumHeight(
+            item_view_height_for_rows(self.varac_bbs_sweeper_rules_table, visible_rows=4)
+        )
         self.varac_bbs_sweeper_rules_table.setToolTip(
             "Read-only summary of the BBS sweeper JSON below. Review Rules validates and normalizes the saved rule list."
         )
@@ -8411,7 +8527,9 @@ class SettingsTab(QWidget):
             '[{"name":"Weather to Intel","enabled":false,"sources":["varac_bbs","flmsg","flamp"],'
             '"from_calls":["CALLSIGN"],"subject_contains":["weather"],"target_location_ids":["intel"]}]'
         )
-        self.varac_bbs_sweeper_rules_edit.setMaximumHeight(104)
+        self.varac_bbs_sweeper_rules_edit.setMaximumHeight(
+            multiline_height_for_font(self.varac_bbs_sweeper_rules_edit, visible_lines=4)
+        )
         self.varac_bbs_sweeper_rules_edit.setToolTip(
             "Paste or edit a JSON list of BBS sweeper rules. Rules are saved with the selected radio profile."
         )
@@ -8771,8 +8889,12 @@ class SettingsTab(QWidget):
         condition_alert_header.setSectionResizeMode(11, QHeaderView.ResizeToContents)
         for hidden_col in (4, 5, 6, 7, 8, 9):
             self.condition_alert_rules_table.setColumnHidden(hidden_col, True)
-        self.condition_alert_rules_table.setMinimumHeight(132)
-        self.condition_alert_rules_table.setMaximumHeight(240)
+        self.condition_alert_rules_table.setMinimumHeight(
+            item_view_height_for_rows(self.condition_alert_rules_table, visible_rows=3)
+        )
+        self.condition_alert_rules_table.setMaximumHeight(
+            item_view_height_for_rows(self.condition_alert_rules_table, visible_rows=6)
+        )
         self.condition_alert_rules_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.condition_alert_rules_table.itemChanged.connect(self._on_condition_alert_table_item_changed)
         self.condition_alert_rules_table.itemSelectionChanged.connect(self._refresh_condition_alert_detail)
@@ -8911,8 +9033,12 @@ class SettingsTab(QWidget):
         launch_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         launch_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         launch_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        self.launch_control_table.setMinimumHeight(150)
-        self.launch_control_table.setMaximumHeight(260)
+        self.launch_control_table.setMinimumHeight(
+            item_view_height_for_rows(self.launch_control_table, visible_rows=4)
+        )
+        self.launch_control_table.setMaximumHeight(
+            item_view_height_for_rows(self.launch_control_table, visible_rows=7)
+        )
         self.launch_control_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         launch_v.addWidget(self.launch_control_table)
 
@@ -8987,7 +9113,9 @@ class SettingsTab(QWidget):
             "This SOP is effective as of {{as_of_local}} for {{operator_callsign}}."
         )
         self.sop_export_preamble_edit.setTabChangesFocus(True)
-        self.sop_export_preamble_edit.setMinimumHeight(110)
+        self.sop_export_preamble_edit.setMinimumHeight(
+            multiline_height_for_font(self.sop_export_preamble_edit, visible_lines=4)
+        )
         sop_export_v.addWidget(sop_preamble_label)
         sop_export_v.addWidget(self.sop_export_preamble_edit)
 
@@ -8997,7 +9125,9 @@ class SettingsTab(QWidget):
             "Optional closing notes, reminders, or document handling instructions."
         )
         self.sop_export_postamble_edit.setTabChangesFocus(True)
-        self.sop_export_postamble_edit.setMinimumHeight(110)
+        self.sop_export_postamble_edit.setMinimumHeight(
+            multiline_height_for_font(self.sop_export_postamble_edit, visible_lines=4)
+        )
         sop_export_v.addWidget(sop_postamble_label)
         sop_export_v.addWidget(self.sop_export_postamble_edit)
 
@@ -10806,7 +10936,10 @@ class SettingsTab(QWidget):
             row_h = 28
         frame = self.sections_nav_list.frameWidth()
         target = (row_h * count) + (frame * 2) + 6
-        self.sections_nav_list.setFixedHeight(max(120, target))
+        self.sections_nav_list.setMinimumHeight(
+            item_view_height_for_rows(self.sections_nav_list, visible_rows=4, include_header=False)
+        )
+        self.sections_nav_list.setMaximumHeight(target)
         try:
             col_hint = int(self.sections_nav_list.sizeHintForColumn(0))
         except Exception:
@@ -11228,8 +11361,15 @@ class SettingsTab(QWidget):
                     extra = margins.top() + margins.bottom()
                 target_height = content.sizeHint().height() + header_height + extra
                 group.setMinimumHeight(target_height)
-                group.setMaximumHeight(target_height)
-                group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred if stacked_mode else QSizePolicy.Fixed)
+                if stacked_mode:
+                    # A fit-content hint is a floor, not a permanent exact
+                    # height. Fonts, wrapping, validation text, and async
+                    # results can increase the live content after selection.
+                    group.setMaximumHeight(16777215)
+                    group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+                else:
+                    group.setMaximumHeight(target_height)
+                    group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             else:
                 group.setMinimumHeight(0)
                 group.setMaximumHeight(16777215)
@@ -12284,6 +12424,25 @@ class SettingsTab(QWidget):
     def shutdown(self) -> None:
         """Cancel Settings-owned device work before QObject teardown."""
 
+        self._gpg_probe_shutdown = True
+        self._gpg_probe_pending = False
+        gpg_thread = getattr(self, "_gpg_probe_thread", None)
+        gpg_worker = getattr(self, "_gpg_probe_worker", None)
+        if isinstance(gpg_thread, QThread) and gpg_thread.isRunning():
+            gpg_thread.requestInterruption()
+            gpg_thread.quit()
+            if not gpg_thread.wait(1200):
+                # A GPG process has its own timeout, but retain Qt wrappers if
+                # OS process teardown exceeds the bounded UI shutdown wait.
+                gpg_thread.setParent(None)
+                job_id = id(gpg_thread)
+                _DETACHED_GPG_PROBE_JOBS[job_id] = (gpg_thread, gpg_worker)
+                gpg_thread.finished.connect(
+                    lambda ident=job_id: _release_detached_gpg_probe_job(ident)
+                )
+        self._gpg_probe_thread = None
+        self._gpg_probe_worker = None
+        self._gpg_probe_show_dialog.clear()
         self._software_autofill_shutdown = True
         self._software_autofill_pending_request = None
         software_worker = getattr(self, "_software_autofill_worker", None)
@@ -22556,7 +22715,9 @@ class SettingsTab(QWidget):
         form.addRow("", enabled_chk)
 
         description_edit = QPlainTextEdit(str((existing or {}).get("description", "") or ""))
-        description_edit.setFixedHeight(80)
+        description_edit.setMinimumHeight(
+            multiline_height_for_font(description_edit, visible_lines=3)
+        )
         form.addRow("Description:", description_edit)
 
         scheduler_enabled_chk = QCheckBox("Enable scheduler automation when primary")
@@ -23233,7 +23394,7 @@ class SettingsTab(QWidget):
         dlg.setWindowTitle(dlg_title)
         dlg.setAccessibleName(dlg_title)
         dlg.setSizeGripEnabled(True)
-        dlg.setMinimumSize(640, 520)
+        dlg.setMinimumSize(0, 0)
 
         def _guided_dialog_initial_size() -> QSize:
             preferred = QSize(760, 720)
@@ -23243,8 +23404,8 @@ class SettingsTab(QWidget):
                 return preferred
             available = screen.availableGeometry().size()
             return QSize(
-                max(640, min(preferred.width(), available.width() - 80)),
-                max(520, min(preferred.height(), available.height() - 80)),
+                min(preferred.width(), max(1, available.width() - 40)),
+                min(preferred.height(), max(1, available.height() - 40)),
             )
 
         dlg.resize(_guided_dialog_initial_size())
@@ -23288,17 +23449,18 @@ class SettingsTab(QWidget):
                 help_btn = QPushButton("i", wrap)
                 help_btn.setCheckable(False)
                 help_btn.setText("?")
-                help_btn.setFixedSize(18, 18)
+                help_side = button_height_for_font(help_btn, vertical_padding=4, floor=20)
+                help_btn.setFixedSize(help_side, help_side)
                 help_btn.setToolTip(help_text)
                 help_btn.setCursor(Qt.PointingHandCursor)
                 help_btn.setStyleSheet(
                     "QPushButton {"
                     " border: 1px solid palette(mid);"
-                    " border-radius: 9px;"
+                    f" border-radius: {max(1, help_side // 2)}px;"
                     " padding: 0px;"
                     " font-weight: bold;"
-                    " min-width: 18px;"
-                    " min-height: 18px;"
+                    f" min-width: {help_side}px;"
+                    f" min-height: {help_side}px;"
                     "}"
                     "QPushButton:hover {"
                     " background: palette(base);"
@@ -24421,7 +24583,7 @@ class SettingsTab(QWidget):
         )
 
         notes_edit = QPlainTextEdit(str((existing or {}).get("notes", "") or ""))
-        notes_edit.setMaximumHeight(96)
+        notes_edit.setMaximumHeight(multiline_height_for_font(notes_edit, visible_lines=4))
         _add_form_row(optional_form, "Notes:", notes_edit, "Optional operator notes about this radio profile.")
 
         flrig_field_widgets = [flrig_wrap, flrig_path_wrap]
@@ -28860,6 +29022,26 @@ class SettingsTab(QWidget):
             snapshot = self._status_service.software_status_snapshot()
         self._last_running_status_sig = status_sig
         self._last_running_status_refresh_ts = now_ts
+        self._last_running_status_snapshot = {
+            str(name): dict(value or {})
+            for name, value in dict(snapshot or {}).items()
+        }
+        self._paint_running_status_snapshot(self._last_running_status_snapshot, theme)
+        emit_span(
+            "settings.refresh_running_status",
+            (time.perf_counter() - _perf_t0) * 1000.0,
+            settings=self.settings,
+            min_ms=5.0,
+        )
+
+    def _paint_running_status_snapshot(
+        self,
+        snapshot: Dict[str, Dict[str, object]],
+        theme: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """Repaint the last coherent status projection without scheduling probes."""
+
+        theme = theme or resolve_theme(self.settings)
         for program_name, lbl in self.status_labels.items():
             info = snapshot.get(program_name, {})
             state = str(info.get("state", "idle"))
@@ -28880,12 +29062,6 @@ class SettingsTab(QWidget):
         if hasattr(self, "varac_path_edit"):
             varac_info = snapshot.get("VarAC", {})
             self.varac_path_edit.setToolTip(str(varac_info.get("tooltip", "Not running")))
-        emit_span(
-            "settings.refresh_running_status",
-            (time.perf_counter() - _perf_t0) * 1000.0,
-            settings=self.settings,
-            min_ms=5.0,
-        )
 
     @staticmethod
     def _int_override_from_text(text: str) -> Optional[int]:
@@ -28945,7 +29121,10 @@ class SettingsTab(QWidget):
                     f"padding: 2px 6px; border-radius: 4px; background: {bg}; color: {fg}; border: 1px solid {border};"
                 )
                 self.loading_label.setVisible(False)
-            self._refresh_running_status_compat(force=True)
+            snapshot = dict(getattr(self, "_last_running_status_snapshot", {}) or {})
+            if not snapshot:
+                snapshot = self._status_service.software_status_snapshot()
+            self._paint_running_status_snapshot(snapshot, theme)
             self._update_launch_selected_state()
             self._update_device_profile_action_buttons()
             self._update_op_group_action_buttons()
@@ -29975,6 +30154,8 @@ class SettingsTab(QWidget):
         if not isinstance(selector, QListWidget):
             return
         theme = resolve_theme(self.settings)
+        hover_text = contrast_text_for_background(theme.get("accent_hover", "#3B84B4"), theme)
+        selected_text = contrast_text_for_background(theme.get("accent", "#2E6F9E"), theme)
         selector.setStyleSheet(
             "QListWidget#hfOperatingGroupList {"
             f" background-color: {theme.get('surface', '#F0F2F4')};"
@@ -29994,12 +30175,12 @@ class SettingsTab(QWidget):
             "}"
             " QListWidget#hfOperatingGroupList::item:hover {"
             f" background-color: {theme.get('accent_hover', '#3B84B4')};"
-            " color: #FFFFFF;"
+            f" color: {hover_text};"
             "}"
             " QListWidget#hfOperatingGroupList::item:selected {"
             f" background-color: {theme.get('accent', '#2E6F9E')};"
             f" border-color: {theme.get('accent_active', '#1F5A83')};"
-            " color: #FFFFFF;"
+            f" color: {selected_text};"
             "}"
         )
 
@@ -30853,6 +31034,8 @@ class SettingsTab(QWidget):
         if not isinstance(selector, QListWidget):
             return
         theme = resolve_theme(self.settings)
+        hover_text = contrast_text_for_background(theme.get("accent_hover", "#3B84B4"), theme)
+        selected_text = contrast_text_for_background(theme.get("accent", "#2E6F9E"), theme)
         selector.setStyleSheet(
             "QListWidget#localCommsGroupList {"
             f" background-color: {theme.get('surface', '#F0F2F4')};"
@@ -30872,12 +31055,12 @@ class SettingsTab(QWidget):
             "}"
             " QListWidget#localCommsGroupList::item:hover {"
             f" background-color: {theme.get('accent_hover', '#3B84B4')};"
-            " color: #FFFFFF;"
+            f" color: {hover_text};"
             "}"
             " QListWidget#localCommsGroupList::item:selected {"
             f" background-color: {theme.get('accent', '#2E6F9E')};"
             f" border-color: {theme.get('accent_active', '#1F5A83')};"
-            " color: #FFFFFF;"
+            f" color: {selected_text};"
             "}"
         )
 
@@ -31264,47 +31447,88 @@ class SettingsTab(QWidget):
         uid_text = uid_item.text() if uid_item else "(no user id)"
         self.gpg_key_detail_label.setText(f"{trust_text} | Fingerprint: {fpr} | User IDs: {uid_text}")
 
-    def _refresh_gpg_keys_table(self, *, show_dialog_on_error: bool = True) -> None:
+    def _refresh_gpg_keys_table(self, _checked: bool = False, *, show_dialog_on_error: bool = True) -> None:
         if not hasattr(self, "gpg_keys_table"):
             return
         self._gpg_keys_auto_probe_attempted = True
-        with perf_span("settings.refresh_gpg_keys_table", settings=self.settings, min_ms=10.0):
-            configured = self._current_gpg_path()
-            ok, msg, resolved = gpg_available(configured)
-            if not ok:
-                self._gpg_keys_loaded = False
-                self._set_gpg_status(f"GPG unavailable: {msg}", error=True)
-                self._gpg_keys_table_loading = True
-                try:
-                    self.gpg_keys_table.setRowCount(0)
-                finally:
-                    self._gpg_keys_table_loading = False
-                self._refresh_gpg_key_detail()
-                self._update_gpg_sign_button_state()
-                if show_dialog_on_error:
-                    QMessageBox.warning(
-                        self,
-                        "GPG",
-                        f"{msg}\n\nInstall GPG or set the executable path in Settings.",
-                    )
-                return
+        self._request_gpg_probe(show_dialog_on_error=show_dialog_on_error)
 
-            if resolved:
-                self._set_gpg_status(f"GPG ready: {resolved}")
-            else:
-                self._set_gpg_status("GPG ready.")
-            keys, err = list_public_keys(configured_path=configured)
-            if err:
-                self._gpg_keys_loaded = False
-                self._set_gpg_status(f"GPG key list failed: {err}", error=True)
-                if show_dialog_on_error:
-                    QMessageBox.warning(self, "GPG", err)
-                return
+    def _refresh_gpg_signing_keys(self, _checked: bool = False, *, show_dialog_on_error: bool = True) -> None:
+        if not hasattr(self, "gpg_signing_key_combo") or not hasattr(self, "gpg_keys_table"):
+            return
+        self._gpg_keys_auto_probe_attempted = True
+        self._request_gpg_probe(show_dialog_on_error=show_dialog_on_error)
+
+    def _request_gpg_probe(self, *, show_dialog_on_error: bool) -> None:
+        """Coalesce GPG discovery and publish only the newest complete result."""
+
+        if self._gpg_probe_shutdown:
+            return
+        self._gpg_probe_generation += 1
+        generation = self._gpg_probe_generation
+        self._gpg_probe_show_dialog[generation] = bool(show_dialog_on_error)
+        thread = self._gpg_probe_thread
+        if isinstance(thread, QThread) and thread.isRunning():
+            self._gpg_probe_pending = True
+            self._gpg_probe_pending_dialog = self._gpg_probe_pending_dialog or bool(show_dialog_on_error)
+            self._set_gpg_status("Refreshing GPG keys… Current results remain available.")
+            return
+        self._gpg_probe_pending = False
+        self._set_gpg_status("Refreshing GPG keys… Current results remain available.")
+        thread = QThread(self)
+        worker = _GpgKeyProbeWorker(generation, self._current_gpg_path())
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_gpg_probe_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._on_gpg_probe_thread_finished)
+        thread.finished.connect(thread.deleteLater)
+        self._gpg_probe_thread = thread
+        self._gpg_probe_worker = worker
+        thread.start()
+
+    def _on_gpg_probe_finished(self, generation: int, payload: object) -> None:
+        if self._gpg_probe_shutdown or int(generation) != self._gpg_probe_generation:
+            return
+        show_dialog = bool(self._gpg_probe_show_dialog.pop(int(generation), False))
+        if not isinstance(payload, Mapping):
+            payload = {"available": False, "message": "GPG discovery returned an invalid result."}
+        if not bool(payload.get("available", False)):
+            message = str(payload.get("message", "GPG is unavailable.") or "GPG is unavailable.")
+            self._gpg_keys_loaded = False
+            self._set_gpg_status(f"GPG unavailable: {message}", error=True)
+            self._gpg_keys_table_loading = True
+            try:
+                self.gpg_keys_table.setRowCount(0)
+            finally:
+                self._gpg_keys_table_loading = False
+            self._populate_gpg_signing_keys(tuple(), error=message, show_dialog=False)
+            self._refresh_gpg_key_detail()
+            self._update_gpg_sign_button_state()
+            if show_dialog:
+                QMessageBox.warning(
+                    self,
+                    "GPG",
+                    f"{message}\n\nInstall GPG or set the executable path in Settings.",
+                )
+            return
+
+        resolved = str(payload.get("resolved", "") or "")
+        public_error = str(payload.get("public_error", "") or "")
+        public_keys = tuple(payload.get("public_keys", ()) or ())
+        self._set_gpg_status(f"GPG ready: {resolved}" if resolved else "GPG ready.")
+        if public_error:
+            self._gpg_keys_loaded = False
+            self._set_gpg_status(f"GPG key list failed: {public_error}", error=True)
+            if show_dialog:
+                QMessageBox.warning(self, "GPG", public_error)
+        else:
             self._gpg_keys_loaded = True
             self._gpg_keys_table_loading = True
             try:
                 self.gpg_keys_table.setRowCount(0)
-                for row_idx, key in enumerate(keys):
+                for row_idx, key in enumerate(public_keys):
                     self.gpg_keys_table.insertRow(row_idx)
                     fpr = normalize_fingerprint(key.fingerprint)
                     trusted = fpr in self._gpg_trusted_fingerprints
@@ -31313,11 +31537,9 @@ class SettingsTab(QWidget):
                     trusted_item.setCheckState(Qt.Checked if trusted else Qt.Unchecked)
                     trusted_item.setData(Qt.UserRole, fpr)
                     self.gpg_keys_table.setItem(row_idx, 0, trusted_item)
-
                     fpr_item = QTableWidgetItem(fpr)
                     fpr_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                     self.gpg_keys_table.setItem(row_idx, 1, fpr_item)
-
                     uid_text = "; ".join([u for u in key.user_ids if str(u).strip()]) or "(no user id)"
                     uid_item = QTableWidgetItem(uid_text)
                     uid_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
@@ -31326,16 +31548,38 @@ class SettingsTab(QWidget):
                 self._gpg_keys_table_loading = False
             self._apply_gpg_key_filter()
             self._update_gpg_sign_button_state()
-            self._refresh_gpg_signing_keys(show_dialog_on_error=False)
+        self._populate_gpg_signing_keys(
+            tuple(payload.get("secret_keys", ()) or ()),
+            error=str(payload.get("secret_error", "") or ""),
+            show_dialog=show_dialog,
+        )
 
-    def _refresh_gpg_signing_keys(self, *, show_dialog_on_error: bool = True) -> None:
-        if not hasattr(self, "gpg_signing_key_combo"):
+    def _on_gpg_probe_thread_finished(self) -> None:
+        self._gpg_probe_thread = None
+        self._gpg_probe_worker = None
+        self._gpg_probe_show_dialog = {
+            generation: enabled
+            for generation, enabled in self._gpg_probe_show_dialog.items()
+            if generation >= self._gpg_probe_generation
+        }
+        if self._gpg_probe_shutdown:
             return
-        configured = self._current_gpg_path()
+        if self._gpg_probe_pending:
+            show_dialog = self._gpg_probe_pending_dialog
+            self._gpg_probe_pending = False
+            self._gpg_probe_pending_dialog = False
+            self._request_gpg_probe(show_dialog_on_error=show_dialog)
+
+    def _populate_gpg_signing_keys(
+        self,
+        keys: Sequence[object],
+        *,
+        error: str = "",
+        show_dialog: bool = True,
+    ) -> None:
         saved = normalize_fingerprint(str(self.settings.get("gpg_compose_signing_key_fingerprint", "") or ""))
         current = normalize_fingerprint(str(self.gpg_signing_key_combo.currentData() or ""))
         preferred = current or saved
-        keys, err = list_secret_keys(configured_path=configured)
         self._gpg_signing_keys_loading = True
         try:
             self.gpg_signing_key_combo.clear()
@@ -31351,12 +31595,12 @@ class SettingsTab(QWidget):
             self.gpg_signing_key_combo.setCurrentIndex(selected_index)
         finally:
             self._gpg_signing_keys_loading = False
-        if err:
-            text = f"Signing keys unavailable: {err}"
+        if error:
+            text = f"Signing keys unavailable: {error}"
             if hasattr(self, "gpg_signing_status_label"):
                 self.gpg_signing_status_label.setText(text)
-            if show_dialog_on_error:
-                QMessageBox.warning(self, "GPG Signing Keys", err)
+            if show_dialog:
+                QMessageBox.warning(self, "GPG Signing Keys", error)
             return
         count = self.gpg_signing_key_combo.count() - 1
         if hasattr(self, "gpg_signing_status_label"):

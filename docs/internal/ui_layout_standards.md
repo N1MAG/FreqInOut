@@ -77,6 +77,67 @@ FIO must remain usable when `Settings > Main > Text Size` is set to `Large`.
 This is a design rule, not a cosmetic preference. Operators with poor vision
 must not be forced to choose between readable text and usable controls.
 
+### Font-Derived Vertical Geometry Contract
+
+Every text-bearing widget must publish vertical geometry from the font and
+content it is actually rendering. A numeric pixel value is not a compliance
+threshold: `48px` can be excessive for one non-text indicator and insufficient
+for a multiline editor, Large Text combo box, wrapped status, or platform-native
+step control.
+
+The contract applies to buttons, tool buttons, chips, tabs, combo boxes, line
+edits, spin/date/time controls, check/radio controls, one-line and wrapping
+labels, group-box titles, table/tree headers and rows, banners, cards containing
+text, and single- or multiline editors. For a one-line control, its effective
+minimum height must be at least the greatest of:
+
+- the widget's current `sizeHint()` and `minimumSizeHint()`;
+- active `QFontMetrics` line spacing plus semantic vertical padding;
+- the active icon/indicator/subcontrol height plus its required padding; and
+- the shared minimum hit-target treatment for that control role.
+
+Multiline and wrapping content derives its natural height from the intended
+readable line count, document/layout height, and current width. It may use a
+bounded local scroll area when the governing workflow intentionally limits its
+height, but a fixed or maximum height may not clip a line, hide a scrollbar,
+or remain unchanged when the application font changes. A wrapped label must
+occupy its own natural-height row; it may not share a fixed-height row with
+actions that prevent it from growing.
+
+Tables and trees derive header and default row heights from their active fonts,
+icons, indicators, and cell padding. Per-row content may increase that floor.
+An arbitrary default such as `24px` is not valid merely because the item view
+scrolls. Tab bars likewise retain full label, icon, focus, and selected-state
+paint bounds at every supported text scale.
+
+Geometry must be recomputed after construction of a lazy page and after an
+application font/theme change. Recalculation is cache-only, idempotent, and
+coalesced: it must not perform discovery, filesystem/database work, endpoint
+I/O, or create a resize/layout feedback loop. A global accessibility guard may
+raise a clearly undersized control as a safety net, but it does not replace the
+owning screen's semantic layout, local scroll ownership, or responsive stacking.
+
+Do not copy a transient viewport or child `sizeHint()` into matching minimum
+and maximum heights on a shared page, stack, splitter, or resizable editor. A
+fixed/capped text-bearing height is allowed only when all of the following are
+true:
+
+- the height is derived from current font/content metrics or the widget is a
+  genuinely non-text visual;
+- the owning specification records why fixed geometry is required;
+- the widget is marked with the shared text-size-guard opt-out property when
+  applicable; and
+- focused Normal/Medium/Large Text and Light/Dark geometry tests prove that
+  text, indicators, focus rings, scrollbars, and actions remain complete at
+  `1920x1080`, approximately `1000x700`, and approximately `900x560`.
+
+The automated source audit must classify candidates rather than assume that a
+literal value below one threshold is the only risk. Runtime widget-tree tests
+must compare effective minimum/maximum/current geometry with font-derived
+requirements, including dynamically created and lazy-loaded pages. Exceptions
+are explicit and testable; variable-name heuristics or a passing global guard
+are not sufficient evidence.
+
 Required behavior:
 
 - Large text must not clip inside buttons, chips, combo boxes, line edits,
@@ -283,7 +344,11 @@ Current remediation gates from the responsiveness audit:
    traffic, and topic changes update the existing WebEngine page through a
    payload push. Full HTML/page reload is reserved for base-map or structural
    configuration changes. Asynchronous JavaScript payloads carry a generation
-   guard so stale map updates cannot overwrite a newer view.
+   guard so stale map updates cannot overwrite a newer view. macOS and Windows
+   start the page-only WebEngine prewarm before first Map navigation; warm Map
+   re-entry never manufactures a refresh. Routine busy feedback stays in a
+   font-derived fixed-height strip so lifecycle status cannot shift the native
+   map viewport.
 2. Message Inbox and Message Compose build file, database, and mesh projections
    from immutable snapshots. Results are applied only when their request or
    generation id is current; older results are discarded without clearing the

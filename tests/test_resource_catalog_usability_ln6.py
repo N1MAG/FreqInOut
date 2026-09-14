@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import os
 import re
+import time
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,18 @@ def _app():
 
     app = QApplication.instance()
     return app or QApplication([])
+
+
+def _settle_catalog_snapshot(app, *views) -> None:
+    """Allow the bounded Resources snapshot worker to deliver its GUI update."""
+    from PySide6.QtTest import QTest
+
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        app.processEvents()
+        QTest.qWait(5)
+        if all((getattr(view, "table", None) or getattr(view, "entry_table", None)).rowCount() > 0 for view in views):
+            return
 
 
 def _catalog(tmp_path: Path):
@@ -174,6 +187,7 @@ def test_frequency_display_uses_decimal_mhz_without_thousands_separator(tmp_path
     try:
         view.show()
         app.processEvents()
+        _settle_catalog_snapshot(app, view)
         assert view.table.item(0, 3).text() == "7.115 MHz"
     finally:
         view.close()
@@ -193,6 +207,7 @@ def test_normal_catalog_views_hide_source_keys_and_version_hashes(tmp_path: Path
         for view in (frequency_view, net_view):
             view.show()
         app.processEvents()
+        _settle_catalog_snapshot(app, frequency_view, net_view)
 
         frequency_text = " ".join(_visible_text(frequency_view))
         assert "source_internal" not in frequency_text
@@ -288,6 +303,7 @@ def test_net_directory_uses_region_listing_and_net_terminology(tmp_path: Path) -
     try:
         view.show()
         app.processEvents()
+        _settle_catalog_snapshot(app, view)
         headers = _table_headers(view.entry_table)
         assert "Region" in headers
         assert "Scope" not in headers

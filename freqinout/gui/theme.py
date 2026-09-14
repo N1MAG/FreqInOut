@@ -6,12 +6,20 @@ from PySide6.QtGui import QColor, QFont, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractButton,
+    QAbstractItemView,
+    QAbstractSpinBox,
     QComboBox,
+    QGroupBox,
+    QHeaderView,
+    QLayout,
     QLabel,
     QLineEdit,
     QPlainTextEdit,
     QSplitter,
+    QTabBar,
+    QTableView,
     QTextEdit,
+    QTreeView,
     QWidget,
 )
 
@@ -115,6 +123,17 @@ def resolve_theme(settings) -> Dict[str, str]:
     return get_theme(key)
 
 
+def active_app_theme(default: Dict[str, str] | None = None) -> Dict[str, str]:
+    """Return the last applied shared theme without reading configuration."""
+
+    app = QApplication.instance()
+    if app is not None:
+        value = app.property("fio_active_theme")
+        if isinstance(value, dict) and value:
+            return dict(value)
+    return dict(default or THEMES["light"])
+
+
 def normalize_ui_text_size(value: object) -> str:
     txt = str(value or "normal").strip().lower()
     aliases = {
@@ -201,6 +220,15 @@ def _best_contrast_text(bg_hex: str, candidates: Tuple[str, ...]) -> str:
             best = cand
             best_ratio = ratio
     return best
+
+
+def contrast_text_for_background(bg_hex: str, theme: Dict[str, str]) -> str:
+    """Return readable text for a theme-owned filled surface."""
+
+    return _best_contrast_text(
+        bg_hex,
+        (theme.get("text", "#111111"), "#111111", "#FFFFFF"),
+    )
 
 
 def _dual_button_rules(
@@ -483,8 +511,134 @@ def button_height_for_font(widget: QWidget | None, *, vertical_padding: int = 12
     return control_height_for_font(widget, vertical_padding=vertical_padding, floor=floor)
 
 
+def horizontal_layout_breakpoint(layout: QLayout | None, *, reserve_controls: int = 1) -> int:
+    """Return a font/content-derived width at which a control row should stack.
+
+    The calculation is independent of the layout's current direction, so repeated
+    compact/wide transitions cannot create a breakpoint feedback loop.  A small
+    reserve expressed in live control widths leaves room for translated labels,
+    focus rings, and platform-native subcontrols.
+    """
+
+    if layout is None:
+        return 0
+    widths = []
+    try:
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            widget = item.widget() if item is not None else None
+            if widget is None or widget.isHidden():
+                continue
+            hint = widget.sizeHint().width()
+            widths.append(max(int(widget.minimumSizeHint().width()), int(hint), 0))
+        margins = layout.contentsMargins()
+        spacing = max(0, int(layout.spacing()))
+        natural = sum(widths) + spacing * max(0, len(widths) - 1)
+        natural += int(margins.left()) + int(margins.right())
+        return natural + max(widths, default=0) * max(0, int(reserve_controls))
+    except Exception:
+        return 0
+
+
 def single_line_label_height(widget: QWidget | None, *, vertical_padding: int = 6, floor: int = 24) -> int:
     return control_height_for_font(widget, vertical_padding=vertical_padding, floor=floor)
+
+
+def font_derived_widget_height(
+    widget: QWidget | None,
+    *,
+    vertical_padding: int = 10,
+    floor: int = 28,
+    include_size_hints: bool = True,
+) -> int:
+    """Return a readable one-line floor for the widget's active style/font.
+
+    ``sizeHint`` carries platform style, indicator, icon, and subcontrol needs;
+    font metrics protect text when a style reports an undersized hint.  This
+    helper is deliberately geometry-only so it is safe during lazy-page theme
+    publication and repeated accessibility passes.
+    """
+    target = control_height_for_font(
+        widget,
+        vertical_padding=vertical_padding,
+        floor=floor,
+    )
+    if widget is None or not include_size_hints:
+        return target
+    # QHeaderView.minimumSizeHint() is the generic scroll-area viewport floor
+    # (often about 88 px high), not the painted header-line requirement.  Its
+    # sizeHint carries the actual orientation-specific header thickness.
+    hint_names = ("sizeHint",) if isinstance(widget, QHeaderView) else ("minimumSizeHint", "sizeHint")
+    for hint_name in hint_names:
+        try:
+            hint = getattr(widget, hint_name)()
+            if hint is not None and hint.isValid():
+                target = max(target, int(hint.height()))
+        except Exception:
+            continue
+    return target
+
+
+def multiline_height_for_font(
+    widget: QWidget | None,
+    *,
+    visible_lines: int = 3,
+    vertical_padding: int = 16,
+) -> int:
+    """Return a font-derived height for a bounded multiline text surface."""
+
+    if widget is None:
+        return max(1, int(visible_lines)) * 16 + int(vertical_padding)
+    try:
+        line_h = max(1, int(widget.fontMetrics().lineSpacing()))
+    except Exception:
+        line_h = 16
+    frame_h = 0
+    try:
+        frame_h = max(0, int(widget.frameWidth()) * 2)
+    except Exception:
+        pass
+    return max(
+        font_derived_widget_height(
+            widget,
+            vertical_padding=vertical_padding,
+            floor=0,
+            include_size_hints=False,
+        ),
+        max(1, int(visible_lines)) * line_h + int(vertical_padding) + frame_h,
+    )
+
+
+def item_view_height_for_rows(
+    view: QWidget | None,
+    *,
+    visible_rows: int,
+    include_header: bool = True,
+) -> int:
+    """Return a font/style-derived height for a bounded table or list viewport."""
+
+    if view is None:
+        return max(1, int(visible_rows)) * 24
+    try:
+        row_h = max(
+            int(view.fontMetrics().lineSpacing()) + 10,
+            int(view.sizeHintForRow(0)) if hasattr(view, "sizeHintForRow") else 0,
+        )
+    except Exception:
+        row_h = max(24, int(view.fontMetrics().lineSpacing()) + 10)
+    header_h = 0
+    if include_header:
+        try:
+            header = view.horizontalHeader()
+            header_h = font_derived_widget_height(header, vertical_padding=10, floor=0)
+        except Exception:
+            pass
+    frame_h = 0
+    try:
+        frame_h = max(0, int(view.frameWidth()) * 2)
+    except Exception:
+        pass
+    return header_h + max(1, int(visible_rows)) * row_h + frame_h
 
 
 def _iter_text_size_guard_widgets(root) -> list[QWidget]:
@@ -550,20 +704,71 @@ def _widget_has_visible_text(widget: QWidget) -> bool:
     return False
 
 
+def _apply_item_view_font_geometry(widget: QAbstractItemView) -> None:
+    """Raise table/tree header and row floors from current font/style metrics."""
+    # An item view's own size hint describes the entire viewport, never one row.
+    row_h = font_derived_widget_height(
+        widget,
+        vertical_padding=8,
+        floor=24,
+        include_size_hints=False,
+    )
+    try:
+        vertical_header = widget.verticalHeader() if isinstance(widget, QTableView) else None
+        if vertical_header is not None:
+            vertical_header.setMinimumSectionSize(max(vertical_header.minimumSectionSize(), row_h))
+            if vertical_header.defaultSectionSize() < row_h:
+                vertical_header.setDefaultSectionSize(row_h)
+    except Exception:
+        pass
+    try:
+        horizontal_header = widget.header() if isinstance(widget, QTreeView) else widget.horizontalHeader()
+        if isinstance(horizontal_header, QHeaderView):
+            header_h = font_derived_widget_height(horizontal_header, vertical_padding=10, floor=28)
+            _raise_widget_height_to_font(horizontal_header, header_h)
+            horizontal_header.setMinimumSectionSize(
+                max(horizontal_header.minimumSectionSize(), header_h)
+            )
+    except Exception:
+        pass
+
+
 def apply_text_size_accessibility_guards(root, *, include_widths: bool = True) -> None:
-    """Raise undersized text controls so the active app font does not clip."""
+    """Apply the shared font-derived safety floor to an existing widget tree.
+
+    The pass is geometry-only and idempotent, so callers may run it after lazy
+    construction and font/theme changes.  It remains a safety net: owning
+    screens must still provide responsive task layout and scroll ownership.
+    """
     for widget in _iter_text_size_guard_widgets(root):
         if _has_text_size_guard_opt_out(widget):
             continue
-        if not _widget_has_visible_text(widget):
+        if isinstance(widget, QAbstractItemView):
+            _apply_item_view_font_geometry(widget)
+        if isinstance(widget, QTabBar) and widget.count() > 0:
+            _raise_widget_height_to_font(
+                widget,
+                font_derived_widget_height(widget, vertical_padding=12, floor=32),
+            )
             continue
         if isinstance(widget, (QPlainTextEdit, QTextEdit)):
             _raise_widget_height_to_font(widget, control_height_for_font(widget, vertical_padding=16, floor=48))
         elif isinstance(widget, QAbstractButton):
-            _raise_widget_height_to_font(widget, button_height_for_font(widget))
-        elif isinstance(widget, (QComboBox, QLineEdit)):
-            _raise_widget_height_to_font(widget, control_height_for_font(widget))
-        elif isinstance(widget, QLabel) and not widget.wordWrap():
+            _raise_widget_height_to_font(
+                widget,
+                font_derived_widget_height(widget, vertical_padding=12, floor=30),
+            )
+        elif isinstance(widget, (QComboBox, QLineEdit, QAbstractSpinBox)):
+            _raise_widget_height_to_font(
+                widget,
+                font_derived_widget_height(widget, vertical_padding=10, floor=28),
+            )
+        elif isinstance(widget, QGroupBox) and str(widget.title() or "").strip():
+            _raise_widget_height_to_font(
+                widget,
+                font_derived_widget_height(widget, vertical_padding=12, floor=32),
+            )
+        elif isinstance(widget, QLabel) and not widget.wordWrap() and _widget_has_visible_text(widget):
             _raise_widget_height_to_font(widget, single_line_label_height(widget))
         if not include_widths:
             continue
@@ -764,6 +969,7 @@ def apply_app_theme(app, theme: Dict[str, str], *, ui_text_scale: float = 1.00) 
     global _APP_BASE_FONT
     if app is None:
         return
+    app.setProperty("fio_active_theme", dict(theme))
     if _APP_BASE_FONT is None:
         _APP_BASE_FONT = QFont(app.font())
     scaled_font = QFont(_APP_BASE_FONT)

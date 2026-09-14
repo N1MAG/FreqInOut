@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
-from PySide6.QtCore import Qt, Signal, QTimer, QRect, QPoint, QDateTime
+from PySide6.QtCore import Qt, Signal, QTimer, QRect, QPoint, QDateTime, QEvent
 from PySide6.QtGui import QColor, QPainter, QCursor
 from PySide6.QtWidgets import (
     QWidget,
@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QCompleter,
     QDateTimeEdit,
+    QBoxLayout,
 )
 
 from freqinout.core.settings_manager import SettingsManager
@@ -61,7 +62,15 @@ from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.sitrep_metadata import source_family_label, source_short_label, transport_label
 from freqinout.core.varac_callsign_tags import sync_varac_callsign_tags_from_db
 from freqinout.core.varac_runtime_ingest import ingest_varac_for_runtime_sources
-from freqinout.gui.theme import resolve_theme, button_style
+from freqinout.gui.theme import (
+    resolve_theme,
+    button_style,
+    button_height_for_font,
+    contrast_text_for_background,
+    control_height_for_font,
+    horizontal_layout_breakpoint,
+    label_style,
+)
 
 ALLOWED_GROUP_ROLES = {"", "HUB", "HUB-ALT", "ALT-HUB", "NCS", "ANCS", "PEER"}
 GROUP_ROLE_ALIASES = {"ALT-HUB": "HUB-ALT"}
@@ -97,10 +106,11 @@ class OperatorHeaderWithCheckbox(QHeaderView):
         super().__init__(orientation, parent)
         self._checkbox_state = Qt.Unchecked
         self._checkbox_enabled = False
-        self._cb_bg = QColor("#ffffff")
-        self._cb_border = QColor("#777777")
-        self._cb_accent = QColor("#2d8cf0")
-        self._cb_mark = QColor("#ffffff")
+        palette = self.palette()
+        self._cb_bg = palette.base().color()
+        self._cb_border = palette.mid().color()
+        self._cb_accent = palette.highlight().color()
+        self._cb_mark = palette.highlightedText().color()
         self.setSectionsClickable(True)
 
     def set_checkbox_state(self, state: Qt.CheckState, enabled: Optional[bool] = None) -> None:
@@ -255,10 +265,10 @@ class OperatorHistoryTab(QWidget):
         layout = QVBoxLayout(self)
 
         header = QHBoxLayout()
-        header.addWidget(QLabel("<h3>Operator History</h3>"))
+        self.title_label = QLabel("Operator History")
+        header.addWidget(self.title_label)
         header.addSpacing(8)
         self.loading_label = QLabel("Brewing it fresh...")
-        self.loading_label.setStyleSheet("color: #888;")
         self.loading_label.setVisible(False)
         header.addWidget(self.loading_label)
         self._loading_progress = QProgressBar()
@@ -271,6 +281,7 @@ class OperatorHistoryTab(QWidget):
 
         # Search + actions row
         search_row = QHBoxLayout()
+        self.search_row = search_row
         search_row.addWidget(QLabel("Search:"))
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Any column...")
@@ -363,6 +374,8 @@ class OperatorHistoryTab(QWidget):
         hv.checkboxToggled.connect(self._on_header_checkbox_toggled)
 
         layout.addWidget(self.table)
+
+        self._apply_responsive_layout()
 
         # Signals
         self.search_edit.textChanged.connect(self._apply_filter)
@@ -775,44 +788,30 @@ class OperatorHistoryTab(QWidget):
         return "\n".join(lines)
 
     def _apply_sitrep_button_style(self, btn: QPushButton, status_key: str) -> None:
-        key = (status_key or "").strip().lower()
-        if key == "red":
-            bg = "#D32F2F"
-            fg = "#FFFFFF"
-            border = "#8E0000"
-        elif key == "yellow":
-            bg = "#FBC02D"
-            fg = "#111111"
-            border = "#8D6E00"
-        elif key == "green":
-            bg = "#43A047"
-            fg = "#FFFFFF"
-            border = "#1B5E20"
-        else:
-            bg = "#4FC3F7"
-            fg = "#111111"
-            border = "#1976D2"
-        btn.setStyleSheet(
-            f"QPushButton {{ background: {bg}; color: {fg}; border: 1px solid {border}; border-radius: 9px; padding: 1px 8px; font-weight: 700; }}"
-            f"QPushButton:hover {{ border: 1px solid {fg}; }}"
-        )
+        theme = resolve_theme(self.settings)
+        role = {
+            "red": "eligible_danger",
+            "yellow": "eligible_warning",
+            "green": "eligible_success",
+        }.get((status_key or "").strip().lower(), "eligible_info")
+        btn.setStyleSheet(button_style(role, theme))
+        btn.setMinimumHeight(button_height_for_font(btn, vertical_padding=8, floor=28))
 
-    def _apply_sitrep_item_style(self, item: QTableWidgetItem, status_key: str) -> None:
+    def _apply_sitrep_item_style(
+        self,
+        item: QTableWidgetItem,
+        status_key: str,
+        theme: Optional[Dict[str, str]] = None,
+    ) -> None:
+        theme = theme or resolve_theme(self.settings)
         key = (status_key or "").strip().lower()
-        if key == "red":
-            bg = QColor("#D32F2F")
-            fg = QColor("#FFFFFF")
-        elif key == "yellow":
-            bg = QColor("#FBC02D")
-            fg = QColor("#111111")
-        elif key == "green":
-            bg = QColor("#43A047")
-            fg = QColor("#FFFFFF")
-        else:
-            bg = QColor("#4FC3F7")
-            fg = QColor("#111111")
-        item.setBackground(bg)
-        item.setForeground(fg)
+        background = {
+            "red": theme["danger"],
+            "yellow": theme["warning"],
+            "green": theme["success"],
+        }.get(key, theme["info"])
+        item.setBackground(QColor(background))
+        item.setForeground(QColor(contrast_text_for_background(background, theme)))
 
     def _show_sitrep_status_menu(self, callsign: str, anchor_or_pos=None) -> None:
         cs = (callsign or "").strip().upper()
@@ -943,6 +942,7 @@ class OperatorHistoryTab(QWidget):
             if sitrep_item is None:
                 continue
             sitrep_item.setText(self._sitrep_display_text(row_data or {"sitrep_status_key": status_key}))
+            sitrep_item.setData(Qt.UserRole, status_key)
             self._apply_sitrep_item_style(sitrep_item, status_key)
             if row_data is not None:
                 sitrep_item.setToolTip(self._sitrep_tooltip(row_data))
@@ -1585,7 +1585,8 @@ class OperatorHistoryTab(QWidget):
                 self.table.setRowCount(len(rows))
                 # rebuild group filter options
                 groups = set()
-                untrusted_color = QColor("#D55E00")
+                theme = resolve_theme(self.settings)
+                untrusted_color = QColor(theme["warning"])
                 for row_idx, r in enumerate(rows):
                     row_untrusted = not bool(r.get("trusted"))
 
@@ -1612,6 +1613,7 @@ class OperatorHistoryTab(QWidget):
                     sitrep_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                     sitrep_item.setTextAlignment(Qt.AlignCenter)
                     sitrep_item.setToolTip(self._sitrep_tooltip(r))
+                    sitrep_item.setData(Qt.UserRole, sitrep_key)
                     self._apply_sitrep_item_style(sitrep_item, sitrep_key)
                     if row_untrusted:
                         sitrep_item.setForeground(untrusted_color)
@@ -1682,15 +1684,33 @@ class OperatorHistoryTab(QWidget):
 
     def apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
+        self.title_label.setStyleSheet(label_style("text", theme, weight=700))
         self._update_clear_filters_button_style()
         self._update_action_button_styles(theme)
         if self.loading_label:
-            bg = theme.get("surface_alt", theme.get("surface", "#f2f2f2"))
-            fg = theme.get("accent", theme.get("text", "#222"))
-            border = theme.get("border", "#ccc")
+            bg = theme["surface_alt"]
+            fg = theme["accent"]
+            border = theme["border"]
             self.loading_label.setStyleSheet(
                 f"padding: 2px 6px; border-radius: 4px; background: {bg}; color: {fg}; border: 1px solid {border};"
             )
+            self.loading_label.setMinimumHeight(control_height_for_font(self.loading_label, vertical_padding=6, floor=24))
+        for button in (
+            self.clear_filters_btn,
+            self.manage_btn,
+            self.export_group_btn,
+            self.import_btn,
+        ):
+            button.setMinimumHeight(button_height_for_font(button))
+        self.search_edit.setMinimumHeight(control_height_for_font(self.search_edit))
+        self.group_filter.setMinimumHeight(control_height_for_font(self.group_filter))
+        self.table.verticalHeader().setDefaultSectionSize(
+            max(1, self.table.fontMetrics().lineSpacing() + 10)
+        )
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, self.COL_SITREP)
+            if item is not None:
+                self._apply_sitrep_item_style(item, item.data(Qt.UserRole) or "unknown", theme)
         grid = theme["border"]
         table_style = (
             f"QTableWidget {{ gridline-color: {grid}; }}"
@@ -1708,18 +1728,33 @@ class OperatorHistoryTab(QWidget):
         header = self.table.horizontalHeader()
         if isinstance(header, OperatorHeaderWithCheckbox):
             accent = QColor(theme["accent"])
-            luminance = (
-                0.299 * accent.redF()
-                + 0.587 * accent.greenF()
-                + 0.114 * accent.blueF()
-            )
-            mark = QColor("#111111") if luminance >= 0.62 else QColor("#ffffff")
+            mark = QColor(contrast_text_for_background(theme["accent"], theme))
             header.set_checkbox_colors(
                 bg=QColor(theme.get("surface_alt", theme["surface"])),
                 border=QColor(theme.get("accent", theme["border"])),
                 accent=accent,
                 mark=mark,
             )
+        self._apply_responsive_layout()
+
+    def _apply_responsive_layout(self) -> None:
+        """Reflow the filter band without loading data or changing table selection."""
+        compact = self.width() > 0 and self.width() < horizontal_layout_breakpoint(
+            self.search_row,
+            reserve_controls=1,
+        )
+        self.search_row.setDirection(
+            QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight
+        )
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_responsive_layout()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange:
+            self.apply_theme()
 
     def on_settings_saved(self) -> None:
         """Refresh settings-backed presentation without rebuilding the data table."""
@@ -1869,7 +1904,12 @@ class OperatorHistoryTab(QWidget):
         layout.addWidget(label)
         text = QTextEdit()
         text.setPlainText("\n".join(groups))
-        text.setMinimumHeight(220)
+        text.setMinimumHeight(
+            max(
+                control_height_for_font(text, vertical_padding=18, floor=48) * 2,
+                text.fontMetrics().lineSpacing() * max(3, min(len(groups), 8)) + 20,
+            )
+        )
         layout.addWidget(text)
         btn_row = QHBoxLayout()
         btn_row.addStretch()
@@ -2069,7 +2109,7 @@ class OperatorHistoryTab(QWidget):
         combo.setCompleter(completer)
         form.addRow("Operating Group:", combo)
         hint = QLabel("Choose a configured group or type a group name for this roster.")
-        hint.setStyleSheet("color: #666;")
+        hint.setStyleSheet(label_style("muted", resolve_theme(self.settings)))
         form.addRow("", hint)
 
         btn_row = QHBoxLayout()
@@ -2093,7 +2133,7 @@ class OperatorHistoryTab(QWidget):
         layout.setSpacing(8)
         review_scroll = QScrollArea(dlg)
         review_scroll.setWidgetResizable(True)
-        review_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        review_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         review_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         review_body = QWidget(review_scroll)
         review_layout = QVBoxLayout(review_body)
@@ -2101,10 +2141,13 @@ class OperatorHistoryTab(QWidget):
         review_layout.setSpacing(10)
         review_scroll.setWidget(review_body)
         layout.addWidget(review_scroll)
-        dlg.resize(860, 520)
+        dlg.resize(
+            max(700, int(self.width() * 0.80)),
+            max(420, int(self.height() * 0.80)),
+        )
 
         title = QLabel("Review detected operators before importing.")
-        title.setStyleSheet("font-weight: 700;")
+        title.setStyleSheet(label_style("text", resolve_theme(self.settings), weight=700))
         review_layout.addWidget(title)
 
         regions = ", ".join(result.child_groups[:10])
@@ -2139,7 +2182,7 @@ class OperatorHistoryTab(QWidget):
         review_layout.addWidget(summary)
 
         sample_label = QLabel("Sample operators")
-        sample_label.setStyleSheet("font-weight: 700;")
+        sample_label.setStyleSheet(label_style("text", resolve_theme(self.settings), weight=700))
         review_layout.addWidget(sample_label)
 
         sample_rows = result.entries[:8]
@@ -2153,8 +2196,10 @@ class OperatorHistoryTab(QWidget):
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         table.setSelectionMode(QAbstractItemView.NoSelection)
-        table.setMinimumHeight(120)
-        table.setMaximumHeight(180)
+        sample_row_height = max(1, table.fontMetrics().lineSpacing() + 8)
+        sample_header_height = table.horizontalHeader().sizeHint().height()
+        table.setMinimumHeight(sample_header_height + sample_row_height * max(1, min(len(sample_rows), 3)))
+        table.setMaximumHeight(sample_header_height + sample_row_height * max(3, min(len(sample_rows), 8)))
         for row_idx, entry in enumerate(sample_rows):
             groups = entry.get("groups_json") or []
             if not isinstance(groups, list):
@@ -2190,7 +2235,7 @@ class OperatorHistoryTab(QWidget):
             f"Row diagnostics — first {len(diagnostics)} of {len(result.diagnostics)}"
             if len(diagnostics) < len(result.diagnostics) else "Row diagnostics"
         )
-        diagnostics_label.setStyleSheet("font-weight: 700;")
+        diagnostics_label.setStyleSheet(label_style("text", resolve_theme(self.settings), weight=700))
         diagnostics_label.setVisible(bool(diagnostics))
         review_layout.addWidget(diagnostics_label)
         diagnostics_table = QTableWidget(len(diagnostics), 5, dlg)
@@ -2199,8 +2244,14 @@ class OperatorHistoryTab(QWidget):
         diagnostics_table.verticalHeader().setVisible(False)
         diagnostics_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         diagnostics_table.setSelectionMode(QAbstractItemView.NoSelection)
-        diagnostics_table.setMinimumHeight(100)
-        diagnostics_table.setMaximumHeight(160)
+        diagnostic_row_height = max(1, diagnostics_table.fontMetrics().lineSpacing() + 8)
+        diagnostic_header_height = diagnostics_table.horizontalHeader().sizeHint().height()
+        diagnostics_table.setMinimumHeight(
+            diagnostic_header_height + diagnostic_row_height * max(1, min(len(diagnostics), 3))
+        )
+        diagnostics_table.setMaximumHeight(
+            diagnostic_header_height + diagnostic_row_height * max(3, min(len(diagnostics), 8))
+        )
         diagnostics_table.setVisible(bool(diagnostics))
         for row_idx, item in enumerate(diagnostics):
             for col_idx, value in enumerate((item.line, item.classification, item.callsign_text, item.field, item.reason)):
@@ -2215,7 +2266,7 @@ class OperatorHistoryTab(QWidget):
         else:
             note = QLabel("Importing updates existing callsigns and adds new ones to HF Operators.")
         note.setWordWrap(True)
-        note.setStyleSheet("color: #666;")
+        note.setStyleSheet(label_style("muted", resolve_theme(self.settings)))
         review_layout.addWidget(note)
 
         btn_row = QHBoxLayout()

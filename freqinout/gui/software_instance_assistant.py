@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from freqinout.gui.current_page_stack import CurrentPageStack
+from freqinout.gui.theme import active_app_theme, label_style
 
 
 SUPPORTED_INSTANCE_FAMILIES: tuple[tuple[str, str], ...] = (
@@ -518,7 +519,7 @@ class SoftwareInstanceAssistant(QWidget):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(7)
         self.title_label = QLabel("Add a software instance")
-        self.title_label.setStyleSheet("font-size: 16pt; font-weight: 700;")
+        self.title_label.setStyleSheet(label_style("text", active_app_theme(), weight=700))
         root.addWidget(self.title_label)
         self.guidance_label = QLabel("Set up one distinct application instance. Nothing is saved until you review and confirm.")
         self.guidance_label.setWordWrap(True)

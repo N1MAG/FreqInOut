@@ -73,7 +73,12 @@ from freqinout.core.sop_manager import SOPManager
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.help_registry import resolve_help_host
 from freqinout.gui.plan_context_label import PlanContextLabel
-from freqinout.gui.theme import resolve_theme, button_style, font_css
+from freqinout.gui.theme import (
+    resolve_theme,
+    button_style,
+    font_css,
+    item_view_height_for_rows,
+)
 from freqinout.gui.qsy_helper import (
     load_operating_groups as qsy_load_operating_groups,
     snapshot_operating_groups as qsy_snapshot_operating_groups,
@@ -524,7 +529,7 @@ class DailyScheduleTab(QWidget):
         self.sop_indicator_layout.setContentsMargins(0, 0, 0, 0)
         self.sop_indicator_layout.setSpacing(4)
         sop_layout.addWidget(self.sop_indicator_container)
-        self.sop_runtime_box.setMaximumHeight(150)
+        self.sop_runtime_box.setMaximumHeight(max(0, self.fontMetrics().lineSpacing() * 6 + 36))
         self.sop_runtime_box.setVisible(False)
         layout.addWidget(self.sop_runtime_box)
 
@@ -552,8 +557,10 @@ class DailyScheduleTab(QWidget):
 
         hv = self.table.horizontalHeader()
         hv.setSectionResizeMode(self.COL_SELECT, QHeaderView.ResizeToContents)
-        hv.setMinimumSectionSize(50)
-        hv.setDefaultSectionSize(100)
+        hv.setMinimumSectionSize(self.fontMetrics().horizontalAdvance("Mode") + 20)
+        hv.setDefaultSectionSize(  # uia-0: ignore[fixed-table-row-height] horizontal column width derives from live font content
+            self.fontMetrics().horizontalAdvance("Wednesday schedule") + 20
+        )
         for col in (
             self.COL_DAY,
             self.COL_SOURCE,
@@ -850,6 +857,10 @@ class DailyScheduleTab(QWidget):
             self._clear_grid_layout(grid)
 
         if compact:
+            # Grid reflow owns the compact width; release wide desktop floors
+            # so Large Text can use the page's vertical scroll surface.
+            self.schedule_source_combo.setMinimumWidth(0)
+            self.resources_set_combo.setMinimumWidth(0)
             action_placements = [
                 (self.time_toggle_btn, 0, 0),
                 (self.schedule_source_label, 0, 1),
@@ -874,6 +885,8 @@ class DailyScheduleTab(QWidget):
                 (self.resources_refresh_btn, 1, 1),
             ]
         else:
+            self.schedule_source_combo.setMinimumWidth(360)
+            self.resources_set_combo.setMinimumWidth(260)
             action_placements = [
                 (self.time_toggle_btn, 0, 0),
                 (self.schedule_source_label, 0, 1),
@@ -910,11 +923,15 @@ class DailyScheduleTab(QWidget):
         try:
             row_count = max(1, int(self.table.rowCount()))
             visible_rows = max(4, min(row_count, 10))
-            row_h = int(self.table.verticalHeader().defaultSectionSize() or 32)
-            header_h = int(self.table.horizontalHeader().height() or 32)
-            height = header_h + (visible_rows * row_h) + 22
-            self.table.setMaximumHeight(max(190, min(height, 430)))
-            self.resources_table.setMinimumHeight(240 if self.resources_table.isVisible() else 160)
+            self.table.setMaximumHeight(
+                item_view_height_for_rows(self.table, visible_rows=visible_rows)
+            )
+            self.resources_table.setMinimumHeight(
+                item_view_height_for_rows(
+                    self.resources_table,
+                    visible_rows=4 if self.resources_table.isVisible() else 3,
+                )
+            )
         except Exception:
             pass
 
@@ -2687,7 +2704,7 @@ class DailyScheduleTab(QWidget):
             hint = QLabel("No HF SOP configured.")
             hint.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
             self.sop_indicator_layout.addWidget(hint)
-            self.sop_runtime_box.setMaximumHeight(120)
+            self.sop_runtime_box.setMaximumHeight(max(0, self.fontMetrics().lineSpacing() * 5 + 32))
             return
 
         for row in rows[:2]:
@@ -2718,7 +2735,7 @@ class DailyScheduleTab(QWidget):
             extra = QLabel(f"+{len(rows) - 2} more HF SOP set(s)")
             extra.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
             self.sop_indicator_layout.addWidget(extra)
-        self.sop_runtime_box.setMaximumHeight(150)
+        self.sop_runtime_box.setMaximumHeight(max(0, self.fontMetrics().lineSpacing() * 6 + 36))
 
     def _on_toggle_sop_profile_active(self, profile_id: int, active: bool) -> None:
         try:

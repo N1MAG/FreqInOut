@@ -65,7 +65,7 @@ from freqinout.core.sop_action_model import SopActionDraftCollection
 from freqinout.gui.freq_planner_tab import FreqPlannerTab
 from freqinout.gui.help_registry import resolve_help_host
 from freqinout.gui.plan_context_label import PlanContextLabel
-from freqinout.gui.theme import apply_text_size_accessibility_guards, resolve_theme, button_style
+from freqinout.gui.theme import apply_text_size_accessibility_guards, resolve_theme, button_style, label_style
 from freqinout.utils.timezones import get_timezone
 
 
@@ -462,7 +462,9 @@ class _LegacySOPTab(QWidget):
         self.sop_scroll = QScrollArea(self)
         self.sop_scroll.setObjectName("sopBuilderScroll")
         self.sop_scroll.setWidgetResizable(True)
-        self.sop_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        # The SOP page is a vertical owner.  Wide data tables retain their
+        # own local surface policy; the normal builder form must reflow.
+        self.sop_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.sop_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.sop_scroll_content = QWidget()
         root = QVBoxLayout(self.sop_scroll_content)
@@ -924,10 +926,12 @@ class _LegacySOPTab(QWidget):
         timing = " - ".join(part for part in (start_text, end_text) if part)
         route = " | ".join(part for part in (resource, bandfreq) if part)
         details = " | ".join(part for part in (route, timing, conflict) if part)
+        theme = resolve_theme(self.settings)
         return (
-            "<div style='border:1px solid #c8d3df; border-radius:6px; padding:6px; margin:4px 0; background:#eef4fa;'>"
+            f"<div style='border:1px solid {theme['border']}; border-radius:6px; padding:6px; "
+            f"margin:4px 0; background:{theme['surface_alt']}; color:{theme['text']}'>"
             f"<b>{html.escape(group)}</b>: {html.escape(action)}"
-            + (f"<br><span style='color:#4f6272'>{html.escape(details)}</span>" if details else "")
+            + (f"<br><span style='color:{theme['text_muted']}'>{html.escape(details)}</span>" if details else "")
             + (f"<br>{html.escape(desc)}" if desc else "")
             + "</div>"
         )
@@ -3635,19 +3639,24 @@ class _LegacySOPTab(QWidget):
             "<html><head><meta charset='utf-8'>",
             "<style>"
             "@page { size: Letter; margin: 0.55in; }"
-            "body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 10.5pt; color: #111; }"
+            # uia-0: ignore[raw-font-size] offline print/export HTML rendering surface, not an app screen
+            "body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 10.5pt; color: #111; }"  # uia-0: ignore[raw-literal-color] offline print/export HTML uses a stable white-paper palette
+            # uia-0: ignore[raw-font-size] offline print/export HTML rendering surface, not an app screen
             "h1 { font-size: 18pt; margin: 0 0 6pt 0; }"
+            # uia-0: ignore[raw-font-size] offline print/export HTML rendering surface, not an app screen
             "h2 { font-size: 13pt; margin: 16pt 0 6pt 0; }"
-            ".meta { font-size: 9.5pt; color: #333; margin: 0 0 3pt 0; }"
+            # uia-0: ignore[raw-font-size] offline print/export HTML rendering surface, not an app screen
+            ".meta { font-size: 9.5pt; color: #333; margin: 0 0 3pt 0; }"  # uia-0: ignore[raw-literal-color] offline print/export HTML uses a stable white-paper palette
             ".section { margin-top: 8pt; }"
             ".page-break { page-break-before: always; }"
             "p { margin: 5pt 0 8pt 0; }"
             "table { width: 100%; border-collapse: collapse; table-layout: fixed; margin: 6pt 0 14pt 0; }"
             "th, td { border: 1px solid #6f7682; padding: 5px 6px; vertical-align: top; word-wrap: break-word; }"
-            "th { background: #edf1f5; font-weight: 700; }"
+            "th { background: #edf1f5; font-weight: 700; }"  # uia-0: ignore[raw-literal-color] offline print/export HTML uses a stable white-paper palette
+            # uia-0: ignore[raw-font-size] offline print/export HTML rendering surface, not an app screen
             ".planner-grid { font-size: 7.4pt; }"
             ".planner-grid th, .planner-grid td { padding: 2px 3px; }"
-            ".empty { font-style: italic; color: #444; margin: 6pt 0 10pt 0; }"
+            ".empty { font-style: italic; color: #444; margin: 6pt 0 10pt 0; }"  # uia-0: ignore[raw-literal-color] offline print/export HTML uses a stable white-paper palette
             "</style></head><body>",
             "<h1>SOP Export</h1>",
             f"<div class='meta'><b>As Of:</b> {html.escape(as_of_local)} Local</div>",
@@ -4323,14 +4332,14 @@ class _LegacySOPTab(QWidget):
     def apply_theme(self) -> None:
         try:
             theme = resolve_theme(self.settings)
-            self.alignment_label.setStyleSheet(f"color: {theme.get('warning', '#B71C1C')}; font-weight: 600;")
-            self.layer_validation_label.setStyleSheet(f"color: {theme.get('warning', '#B71C1C')}; font-weight: 600;")
-            self.terms_hint_label.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
+            self.alignment_label.setStyleSheet(label_style("warning", theme, weight=600))
+            self.layer_validation_label.setStyleSheet(label_style("warning", theme, weight=600))
+            self.terms_hint_label.setStyleSheet(label_style("muted", theme))
             if hasattr(self, "activation_defaults_hint_label"):
-                self.activation_defaults_hint_label.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
+                self.activation_defaults_hint_label.setStyleSheet(label_style("muted", theme))
             if hasattr(self, "activation_conflict_summary_label"):
                 self.activation_conflict_summary_label.setStyleSheet(
-                    f"color: {theme.get('text', '#e5e7eb')}; font-weight: 600;"
+                    label_style("text", theme, weight=600)
                 )
             self._update_time_toggle_style(theme)
             self._update_profile_action_styles(theme)
@@ -4668,7 +4677,7 @@ class SOPTab(_LegacySOPTab):
         action_builder_layout.setSpacing(8)
         action_builder_header = QHBoxLayout()
         action_builder_title = QLabel("Action Rows")
-        action_builder_title.setStyleSheet("font-weight: 700;")
+        action_builder_title.setStyleSheet(label_style("text", resolve_theme(self.settings), weight=700))
         action_builder_header.addWidget(action_builder_title)
         action_builder_header.addStretch()
         self.hidden_rows_label = QLabel("")
@@ -4750,7 +4759,7 @@ class SOPTab(_LegacySOPTab):
         self.actions_table.setColumnWidth(self.COL_BANDFREQ, 180)
         self.actions_table.setColumnWidth(self.COL_INTERVAL, 110)
         self.actions_table.setColumnWidth(self.COL_CONTACT_TARGET, 170)
-        self.actions_table.setMinimumHeight(220)
+        self.actions_table.setMinimumHeight(0)
         self.actions_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.advanced_table_toggle_btn = QToolButton()
         self.advanced_table_toggle_btn.setObjectName("sopAdvancedBulkEditorToggle")
@@ -4771,7 +4780,7 @@ class SOPTab(_LegacySOPTab):
         self.advanced_table_hint.setWordWrap(True)
         advanced_table_layout.addWidget(self.advanced_table_hint)
         advanced_table_layout.addWidget(self.actions_table)
-        self.advanced_table_box.setMinimumHeight(300)
+        self.advanced_table_box.setMinimumHeight(0)
         self.advanced_table_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         cfg_layout.addWidget(self.advanced_table_box)
         self._set_advanced_table_expanded(False)
@@ -4790,7 +4799,7 @@ class SOPTab(_LegacySOPTab):
 
         self.conflict_workbench_box = QGroupBox("Conflict Workbench")
         conflict_workbench_layout = QVBoxLayout(self.conflict_workbench_box)
-        self.conflict_workbench_box.setMinimumHeight(260)
+        self.conflict_workbench_box.setMinimumHeight(0)
         self.conflict_workbench_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.conflict_workbench_hint_label = QLabel(
             "Resolve conflict policy choices here before Save. Rows that still need timing changes will be flagged and handled in the Save-time conflict dialog."
@@ -4870,8 +4879,8 @@ class SOPTab(_LegacySOPTab):
         self.conflict_workbench_table.horizontalHeader().setSectionResizeMode(self.WB_COL_SUGGESTED, QHeaderView.ResizeToContents)
         self.conflict_workbench_table.horizontalHeader().setSectionResizeMode(self.WB_COL_APPLY, QHeaderView.ResizeToContents)
         self.conflict_workbench_table.horizontalHeader().setSectionResizeMode(self.WB_COL_DETAILS, QHeaderView.ResizeToContents)
-        self.conflict_workbench_table.setMinimumHeight(170)
-        self.conflict_workbench_table.setMaximumHeight(260)
+        self.conflict_workbench_table.setMinimumHeight(0)
+        self.conflict_workbench_table.setMaximumHeight(16777215)
         conflict_workbench_layout.addWidget(self.conflict_workbench_table)
         cfg_layout.addWidget(self.conflict_workbench_box)
         self._conflict_workbench_total_conflicts = 0
@@ -9632,22 +9641,22 @@ class SOPTab(_LegacySOPTab):
     def apply_theme(self) -> None:
         try:
             theme = resolve_theme(self.settings)
-            self.terms_hint_label.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
+            self.terms_hint_label.setStyleSheet(label_style("muted", theme))
             if hasattr(self, "operating_plan_inputs_label"):
-                self.operating_plan_inputs_label.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
+                self.operating_plan_inputs_label.setStyleSheet(label_style("muted", theme))
             if hasattr(self, "activation_defaults_hint_label"):
-                self.activation_defaults_hint_label.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
+                self.activation_defaults_hint_label.setStyleSheet(label_style("muted", theme))
             if hasattr(self, "activation_conflict_summary_label"):
                 self.activation_conflict_summary_label.setStyleSheet(
-                    f"color: {theme.get('text', '#e5e7eb')}; font-weight: 600;"
+                    label_style("text", theme, weight=600)
                 )
             if hasattr(self, "conflict_workbench_hint_label"):
-                self.conflict_workbench_hint_label.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
+                self.conflict_workbench_hint_label.setStyleSheet(label_style("muted", theme))
             if hasattr(self, "conflict_workbench_filter_label"):
-                self.conflict_workbench_filter_label.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
+                self.conflict_workbench_filter_label.setStyleSheet(label_style("muted", theme))
             if hasattr(self, "conflict_workbench_status_label"):
                 self.conflict_workbench_status_label.setStyleSheet(
-                    f"color: {theme.get('text', '#e5e7eb')}; font-weight: 600;"
+                    label_style("text", theme, weight=600)
                 )
             if hasattr(self, "sop_workflow_status_label"):
                 self.sop_workflow_status_label.setStyleSheet(

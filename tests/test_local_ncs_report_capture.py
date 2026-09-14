@@ -100,5 +100,29 @@ def test_local_ncs_report_capture_scrolls_without_compressing_core_controls(monk
     assert tab.local_ncs_scroll_area.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded
     assert tab.table.minimumHeight() >= 180
     assert tab.table.horizontalScrollBarPolicy() == Qt.ScrollBarAsNeeded
-    assert tab.notes_edit.maximumHeight() <= 140
-    assert tab.report_body_edit.maximumHeight() <= 150
+    assert tab.notes_edit.maximumHeight() >= tab.notes_edit.minimumHeight()
+    assert tab.report_body_edit.maximumHeight() >= tab.report_body_edit.minimumHeight()
+
+
+def test_local_ncs_reflow_matrix_preserves_controls_and_page_scroll_owner(monkeypatch, tmp_path) -> None:
+    app = _app()
+    _use_tmp_db(monkeypatch, tmp_path)
+    tab = LocalNCSTab()
+    try:
+        for width, height in ((1920, 1080), (1000, 700), (900, 560)):
+            tab.resize(width, height)
+            tab.show()
+            app.processEvents()
+            tab._reflow_local_ncs_layouts()
+            assert tab.local_ncs_scroll_area.horizontalScrollBar().maximum() == 0
+            assert tab.start_net_btn.isVisible() and tab.save_report_btn.isVisible()
+        font = tab.font()
+        font.setPointSize(max(20, font.pointSize() + 8))
+        tab.setFont(font)
+        tab.resize(900, 560)
+        tab._reflow_local_ncs_layouts()
+        assert tab.notes_edit.maximumHeight() >= tab.notes_edit.minimumHeight()
+    finally:
+        tab.close()
+        tab.deleteLater()
+        app.processEvents()

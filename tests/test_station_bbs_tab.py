@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -8,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QScrollArea
 
 from freqinout.core.sqlite_utils import connect_sqlite
 from freqinout.core.multi_radio_store import MultiRadioStore
@@ -35,6 +36,18 @@ def _qapplication_or_skip():
     if app is not None and not isinstance(app, QApplication):
         pytest.skip("A non-GUI QCoreApplication already exists in this test process.")
     return app or QApplication([])
+
+
+def _wait_for_catalog(tab: StationBbsTab, app: QApplication, timeout: float = 3.0) -> None:
+    """Wait only at the test boundary for the production async snapshot."""
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if getattr(tab, "_catalog_thread", None) is None:
+            return
+        time.sleep(0.005)
+    raise AssertionError("Managed BBS catalog snapshot did not finish")
 
 
 def _seed_catalog(tmp_path):
@@ -101,6 +114,7 @@ def test_station_bbs_checkbox_replaces_membership_without_deleting_source(tmp_pa
             set_bbs_location_artifact(conn, location_id="public", artifact_id=artifact_id, publish_enabled=True)
             set_bbs_location_artifact(conn, location_id="restricted", artifact_id=artifact_id, publish_enabled=True)
     tab = StationBbsTab(settings=settings)
+    _wait_for_catalog(tab, app)
     try:
         tab.location_tree.setCurrentItem(_location_item(tab, "public"))
         app.processEvents()
@@ -156,6 +170,7 @@ def test_station_bbs_reads_are_bounded_and_compact_layout_stacks(monkeypatch, tm
 
     monkeypatch.setattr(station_bbs_module, "list_bbs_admin_rows", _bounded)
     tab = StationBbsTab(settings=settings)
+    _wait_for_catalog(tab, app)
     try:
         tab.location_tree.setCurrentItem(_location_item(tab, "public"))
         app.processEvents()
@@ -181,6 +196,32 @@ def test_station_bbs_reads_are_bounded_and_compact_layout_stacks(monkeypatch, tm
         assert tab.splitter.orientation() == Qt.Horizontal
         assert tab.detail_toggle_btn.isHidden()
         assert not tab.detail_group.isHidden()
+    finally:
+        tab.close()
+        tab.deleteLater()
+        app.processEvents()
+
+
+def test_station_bbs_uses_shared_splitter_and_font_derived_chips(tmp_path):
+    app = _qapplication_or_skip()
+    settings, _source, _artifact_id = _seed_catalog(tmp_path)
+    tab = StationBbsTab(settings=settings)
+    _wait_for_catalog(tab, app)
+    try:
+        assert tab.splitter.handleWidth() >= 12
+        assert "transparent" not in tab.splitter.styleSheet().lower()
+        assert "font-size" not in tab.bbs_title.styleSheet()
+        tab.service_tabs.setCurrentWidget(tab.publishing_page)
+        app.processEvents()
+        chips = [
+            tab.publishing_chips_layout.itemAt(index).widget()
+            for index in range(tab.publishing_chips_layout.count())
+            if tab.publishing_chips_layout.itemAt(index).widget() is not None
+        ]
+        assert chips
+        assert all(chip.minimumHeight() > 0 for chip in chips)
+        chip_scroll = tab.publishing_page.findChild(QScrollArea)
+        assert chip_scroll is not None and chip_scroll.minimumHeight() > 0
     finally:
         tab.close()
         tab.deleteLater()
@@ -226,6 +267,8 @@ def test_station_location_editor_saves_shared_catalog_and_second_tab_sees_it(tmp
     settings, _source, _artifact_id = _seed_catalog(tmp_path)
     first = StationBbsTab(settings=settings)
     second = StationBbsTab(settings=settings)
+    _wait_for_catalog(first, app)
+    _wait_for_catalog(second, app)
     try:
         first._begin_new_location()
         first.location_name_edit.setText("Field Intel")
@@ -245,6 +288,7 @@ def test_station_location_editor_saves_shared_catalog_and_second_tab_sees_it(tmp
         assert location.retention_days == 21
 
         second.refresh_catalog()
+        _wait_for_catalog(second, app)
         assert _location_item(second, "field-intel").text(0).startswith("Field Intel")
     finally:
         first.deleteLater()
@@ -256,12 +300,13 @@ def test_station_location_disable_is_non_destructive_and_remains_visible(tmp_pat
     app = _qapplication_or_skip()
     settings, _source, _artifact_id = _seed_catalog(tmp_path)
     tab = StationBbsTab(settings=settings)
+    _wait_for_catalog(tab, app)
     try:
         tab.location_tree.setCurrentItem(_location_item(tab, "restricted"))
         tab.location_edit_btn.setChecked(True)
         app.processEvents()
         tab._disable_location()
-        app.processEvents()
+        _wait_for_catalog(tab, app)
 
         with connect_sqlite(settings.db_path) as conn:
             location = next(row for row in list_bbs_locations(conn) if row.location_id == "restricted")
@@ -280,6 +325,7 @@ def test_artifact_details_display_source_kind(tmp_path):
         with conn:
             set_bbs_location_artifact(conn, location_id="public", artifact_id=_artifact_id, publish_enabled=True)
     tab = StationBbsTab(settings=settings)
+    _wait_for_catalog(tab, app)
     try:
         tab.location_tree.setCurrentItem(_location_item(tab, "public"))
         app.processEvents()
@@ -303,6 +349,7 @@ def test_visitor_preview_filters_tree_and_is_read_only(tmp_path):
         with conn:
             set_bbs_location_artifact(conn, location_id="public", artifact_id=artifact_id, publish_enabled=True)
     tab = StationBbsTab(settings=settings)
+    _wait_for_catalog(tab, app)
     try:
         tab.service_tabs.setCurrentWidget(tab.visitor_preview_page)
         app.processEvents()
@@ -342,6 +389,7 @@ def test_location_access_code_is_hashed_and_not_stored_as_plaintext(tmp_path):
     app = _qapplication_or_skip()
     settings, _source, _artifact_id = _seed_catalog(tmp_path)
     tab = StationBbsTab(settings=settings)
+    _wait_for_catalog(tab, app)
     try:
         tab._begin_new_location()
         tab.location_name_edit.setText("Secure")
@@ -375,6 +423,7 @@ def test_bbs_guided_tabs_and_visitor_helpers_are_separate_from_publishing(tmp_pa
             set_bbs_location_artifact(conn, location_id="public", artifact_id=helper_id, publish_enabled=True)
 
     tab = StationBbsTab(settings=settings)
+    _wait_for_catalog(tab, app)
     try:
         assert tab.service_tabs.count() == 5
         assert [tab.service_tabs.tabText(index) for index in range(tab.service_tabs.count())] == [
@@ -411,6 +460,7 @@ def test_location_chips_have_width_without_waiting_for_a_window_resize(tmp_path)
     app = _qapplication_or_skip()
     settings, _source, _artifact_id = _seed_catalog(tmp_path)
     tab = StationBbsTab(settings=settings)
+    _wait_for_catalog(tab, app)
     try:
         tab.resize(900, 560)
         tab.show()
@@ -456,6 +506,7 @@ def test_radio_service_saves_bbs_fields_without_changing_native_varac_paths(tmp_
         }
     )
     tab = StationBbsTab(settings=settings)
+    _wait_for_catalog(tab, app)
     try:
         assert tab.radio_service_selector.count() == 1
         tab.radio_publish_enabled_chk.setChecked(True)
@@ -494,6 +545,7 @@ def test_station_bbs_radio_service_rejects_enabling_without_live_folder(tmp_path
         }
     )
     tab = StationBbsTab(settings=settings)
+    _wait_for_catalog(tab, app)
     try:
         assert tab.radio_service_selector.count() == 1
         tab.radio_service_enabled_chk.setChecked(True)
@@ -515,11 +567,12 @@ def test_disabled_location_is_not_a_publishing_target(tmp_path):
     app = _qapplication_or_skip()
     settings, _source, _artifact_id = _seed_catalog(tmp_path)
     tab = StationBbsTab(settings=settings)
+    _wait_for_catalog(tab, app)
     try:
         tab.location_tree.setCurrentItem(_location_item(tab, "restricted"))
         tab.location_edit_btn.setChecked(True)
         tab._disable_location()
-        app.processEvents()
+        _wait_for_catalog(tab, app)
         chip_texts = [
             tab.publishing_chips_layout.itemAt(index).widget().text()
             for index in range(tab.publishing_chips_layout.count())

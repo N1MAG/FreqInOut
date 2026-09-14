@@ -3,7 +3,8 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QEvent
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -18,13 +19,22 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QBoxLayout,
 )
 
 from freqinout.core.local_ops_store import delete_local_reports, list_local_reports
 from freqinout.core.logger import log
 from freqinout.core.message_intelligence import TOPIC_TAXONOMY
 from freqinout.core.settings_manager import SettingsManager
-from freqinout.gui.theme import button_style, resolve_theme
+from freqinout.gui.theme import (
+    button_style,
+    resolve_theme,
+    button_height_for_font,
+    contrast_text_for_background,
+    control_height_for_font,
+    horizontal_layout_breakpoint,
+    label_style,
+)
 
 
 class LocalReportHistoryTab(QWidget):
@@ -57,13 +67,15 @@ class LocalReportHistoryTab(QWidget):
         layout = QVBoxLayout(self)
 
         header = QHBoxLayout()
-        header.addWidget(QLabel("<h3>Local Report History</h3>"))
+        self.title_label = QLabel("Local Report History")
+        header.addWidget(self.title_label)
         header.addStretch()
         self.refresh_btn = QPushButton("Refresh")
         header.addWidget(self.refresh_btn)
         layout.addLayout(header)
 
         filter_row = QHBoxLayout()
+        self.filter_row = filter_row
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Search reports: callsign, topic, subject, location, keyword...")
         self.search_edit.setToolTip("Search local reports by callsign, operator name, subject, body text, city/county/state, or grid.")
@@ -98,6 +110,7 @@ class LocalReportHistoryTab(QWidget):
         layout.addLayout(summary_row)
 
         actions_row = QHBoxLayout()
+        self.actions_row = actions_row
         self.view_local_map_btn = QPushButton("View Local Reports Map")
         self.copy_selected_btn = QPushButton("Copy Selected")
         self.copy_filtered_btn = QPushButton("Copy Filtered Summary")
@@ -134,8 +147,15 @@ class LocalReportHistoryTab(QWidget):
         layout.addWidget(self.detail_title)
         self.detail_text = QTextEdit()
         self.detail_text.setReadOnly(True)
-        self.detail_text.setMinimumHeight(150)
+        self.detail_text.setMinimumHeight(
+            max(
+                control_height_for_font(self.detail_text, vertical_padding=18, floor=48) * 2,
+                self.detail_text.fontMetrics().lineSpacing() * 3 + 18,
+            )
+        )
         layout.addWidget(self.detail_text, stretch=1)
+
+        self._apply_responsive_layout()
 
         self.refresh_btn.clicked.connect(self.refresh_reports)
         self.view_local_map_btn.clicked.connect(self.local_reports_map_requested)
@@ -151,10 +171,69 @@ class LocalReportHistoryTab(QWidget):
 
     def apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
+        self.title_label.setStyleSheet(label_style("text", theme, weight=700))
         self.refresh_btn.setStyleSheet(button_style("primary", theme))
         self.view_local_map_btn.setStyleSheet(button_style("secondary", theme))
         self.clear_filters_btn.setStyleSheet(button_style("muted", theme))
+        for button in (
+            self.refresh_btn,
+            self.view_local_map_btn,
+            self.clear_filters_btn,
+            self.copy_selected_btn,
+            self.copy_filtered_btn,
+            self.delete_selected_btn,
+        ):
+            button.setMinimumHeight(button_height_for_font(button))
+        for control in (
+            self.search_edit,
+            self.callsign_edit,
+            self.topic_combo,
+            self.status_combo,
+        ):
+            control.setMinimumHeight(control_height_for_font(control))
+        self.detail_text.setMinimumHeight(
+            max(
+                control_height_for_font(self.detail_text, vertical_padding=18, floor=48) * 2,
+                self.detail_text.fontMetrics().lineSpacing() * 3 + 18,
+            )
+        )
+        self.table.verticalHeader().setDefaultSectionSize(
+            max(1, self.table.fontMetrics().lineSpacing() + 10)
+        )
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, self.COL_STATUS)
+            if item is None:
+                continue
+            key = item.text().strip().upper()
+            background = {
+                "EMERGENCY": theme["danger"],
+                "PRIORITY": theme["warning"],
+                "WATCH": theme["info"],
+            }.get(key)
+            if background:
+                item.setBackground(QColor(background))
+                item.setForeground(QColor(contrast_text_for_background(background, theme)))
+        self._apply_responsive_layout()
         self._update_copy_actions()
+
+    def _apply_responsive_layout(self) -> None:
+        """Reflow control bands only; table/detail retain their own bounded scrollbars."""
+        compact = self.width() > 0 and self.width() < max(
+            horizontal_layout_breakpoint(self.filter_row, reserve_controls=1),
+            horizontal_layout_breakpoint(self.actions_row, reserve_controls=1),
+        )
+        direction = QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight
+        self.filter_row.setDirection(direction)
+        self.actions_row.setDirection(direction)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_responsive_layout()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange:
+            self.apply_theme()
 
     def on_settings_saved(self) -> None:
         try:
@@ -206,6 +285,7 @@ class LocalReportHistoryTab(QWidget):
 
     def _populate_table(self, rows: List[Dict[str, Any]]) -> None:
         sorting_enabled = self.table.isSortingEnabled()
+        theme = resolve_theme(self.settings)
         self.table.setSortingEnabled(False)
         try:
             self.table.setRowCount(0)
@@ -225,6 +305,16 @@ class LocalReportHistoryTab(QWidget):
                     item = QTableWidgetItem(value)
                     if c == self.COL_STATUS:
                         item.setData(Qt.UserRole, report_id)
+                        background = {
+                            "EMERGENCY": theme["danger"],
+                            "PRIORITY": theme["warning"],
+                            "WATCH": theme["info"],
+                        }.get(value.strip().upper())
+                        if background:
+                            item.setBackground(QColor(background))
+                            item.setForeground(
+                                QColor(contrast_text_for_background(background, theme))
+                            )
                     item.setToolTip(value)
                     self.table.setItem(r, c, item)
             if self.table.rowCount() > 0:

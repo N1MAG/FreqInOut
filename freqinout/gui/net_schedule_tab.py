@@ -79,7 +79,7 @@ from freqinout.core.legacy_resource_projection import (
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.help_registry import resolve_help_host
 from freqinout.gui.plan_context_label import PlanContextLabel
-from freqinout.gui.theme import resolve_theme, button_style, font_css
+from freqinout.gui.theme import resolve_theme, button_style, font_css, item_view_height_for_rows
 
 
 # ---- Band / Mode metadata (keep in sync with HF tab) ----
@@ -611,6 +611,8 @@ class NetScheduleTab(QWidget):
             self._clear_grid_layout(grid)
 
         if compact:
+            self.schedule_source_combo.setMinimumWidth(0)
+            self.resource_set_combo.setMinimumWidth(0)
             action_placements = [
                 (self.time_toggle_btn, 0, 0),
                 (self.schedule_source_label, 0, 1),
@@ -638,6 +640,8 @@ class NetScheduleTab(QWidget):
                 (self.delete_resource_btn, 1, 3),
             ]
         else:
+            self.schedule_source_combo.setMinimumWidth(360)
+            self.resource_set_combo.setMinimumWidth(260)
             action_placements = [
                 (self.time_toggle_btn, 0, 0),
                 (self.schedule_source_label, 0, 1),
@@ -677,11 +681,12 @@ class NetScheduleTab(QWidget):
         try:
             row_count = max(1, int(self.table.rowCount()))
             visible_rows = max(4, min(row_count, 10))
-            row_h = int(self.table.verticalHeader().defaultSectionSize() or 32)
-            header_h = int(self.table.horizontalHeader().height() or 32)
-            height = header_h + (visible_rows * row_h) + 22
-            self.table.setMaximumHeight(max(190, min(height, 430)))
-            self.resources_table.setMinimumHeight(240)
+            self.table.setMaximumHeight(
+                item_view_height_for_rows(self.table, visible_rows=visible_rows)
+            )
+            self.resources_table.setMinimumHeight(
+                item_view_height_for_rows(self.resources_table, visible_rows=4)
+            )
         except Exception:
             pass
 

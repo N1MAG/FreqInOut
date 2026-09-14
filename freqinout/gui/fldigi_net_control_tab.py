@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QBoxLayout,
     QLabel,
     QCheckBox,
     QLineEdit,
@@ -81,7 +82,14 @@ from freqinout.gui.qsy_helper import (
     active_hold_button_text,
     active_hold_status_text,
 )
-from freqinout.gui.theme import button_height_for_font, resolve_theme, button_style, style_splitter_handles
+from freqinout.gui.theme import (
+    button_height_for_font,
+    contrast_text_for_background,
+    resolve_theme,
+    button_style,
+    horizontal_layout_breakpoint,
+    style_splitter_handles,
+)
 
 CURRENT_CHECKIN_FILE_NAMES = {
     "TFC": "CheckIns_TFC.txt",
@@ -360,11 +368,12 @@ class FldigiNetControlTab(QWidget):
         title_row.addWidget(self.utc_label)
         title_row.addWidget(self.local_label)
         self.total_checkins_label = QLabel("Total Check-ins: 0")
-        self.total_checkins_label.setStyleSheet("QLabel { border: 1px solid #888888; padding: 2px 6px; border-radius: 3px; }")
+        self.total_checkins_label.setStyleSheet(self._count_chip_style(resolve_theme(self.settings)))
         self.total_checkins_label.setVisible(False)
         session_layout.addLayout(title_row)
 
         session_context_row = QHBoxLayout()
+        self._session_context_row = session_context_row
         session_context_row.setSpacing(8)
         session_context_row.addWidget(QLabel("Radio:"))
         self.ncs_session_chip_layout = QHBoxLayout()
@@ -383,6 +392,7 @@ class FldigiNetControlTab(QWidget):
         session_layout.addWidget(self.ncs_session_summary_label)
 
         context_row = QHBoxLayout()
+        self._session_context_details_row = context_row
         context_row.addWidget(QLabel("Role:"))
         self.role_combo = QComboBox()
         self.role_combo.addItems(["NCS", "ANCS", "Joiner"])
@@ -414,6 +424,7 @@ class FldigiNetControlTab(QWidget):
         session_layout.addLayout(context_row)
 
         partner_row = QHBoxLayout()
+        self._session_partner_row = partner_row
         self.partner_primary_label = QLabel("ANCS Callsign:")
         self.partner_primary_edit = QLineEdit()
         self.partner_primary_edit.setMaximumWidth(150)
@@ -497,6 +508,7 @@ class FldigiNetControlTab(QWidget):
         macro_setup_controls_layout.setSpacing(4)
 
         summary_row = QHBoxLayout()
+        self._macro_summary_row = summary_row
         summary_row.addWidget(QLabel("Macro Set:"))
         self.macro_profile_combo = QComboBox()
         self.macro_profile_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
@@ -511,6 +523,7 @@ class FldigiNetControlTab(QWidget):
         macro_setup_controls_layout.addLayout(summary_row)
 
         path_row = QHBoxLayout()
+        self._macro_path_row = path_row
         path_row.addWidget(QLabel("Macro File:"))
         self.macro_profile_edit = QLineEdit()
         self.macro_profile_edit.setPlaceholderText("Select an FLDigi macro profile (.mdf)")
@@ -545,6 +558,17 @@ class FldigiNetControlTab(QWidget):
 
         layout.addWidget(setup_frame)
         self._set_setup_details_expanded(False)
+
+    @staticmethod
+    def _count_chip_style(theme: Dict[str, str]) -> str:
+        return (
+            "QLabel {"
+            f" border: 1px solid {theme['border']};"
+            f" color: {theme['text']};"
+            f" background-color: {theme['surface_alt']};"
+            " padding: 2px 6px; border-radius: 3px;"
+            " }"
+        )
 
     def _make_status_chip(self, text: str) -> QLabel:
         chip = QLabel(text)
@@ -626,6 +650,7 @@ class FldigiNetControlTab(QWidget):
 
     def _build_operator_action_band(self, layout: QVBoxLayout) -> None:
         known_row = QHBoxLayout()
+        self._known_operator_layout = known_row
         known_row.addWidget(QLabel("Operator Lookup/Add:"))
         self.known_op_edit = QLineEdit()
         self.known_op_edit.setPlaceholderText("Enter Callsign Name State...")
@@ -637,6 +662,7 @@ class FldigiNetControlTab(QWidget):
         layout.addLayout(known_row)
 
         known_btn_row = QHBoxLayout()
+        self._known_buttons_layout = known_btn_row
         self.add_known_tfc_btn = QPushButton("Add to TFC")
         self.add_known_qru_btn = QPushButton("Add to QRU")
         self.add_known_late_btn = QPushButton("Add to LATE")
@@ -657,12 +683,12 @@ class FldigiNetControlTab(QWidget):
         }
         self._known_add_button_targets = {button: target for target, button in self._known_add_buttons.items()}
         self.roster_total_label = QLabel("Total Check-ins: 0")
-        self.roster_total_label.setStyleSheet("QLabel { border: 1px solid #888888; padding: 2px 6px; border-radius: 3px; }")
+        self.roster_total_label.setStyleSheet(self._count_chip_style(resolve_theme(self.settings)))
         self.roster_tfc_label = QLabel("TFC: 0")
         self.roster_qru_label = QLabel("QRU: 0")
         self.roster_late_label = QLabel("LATE: 0")
         for label in (self.roster_total_label, self.roster_tfc_label, self.roster_qru_label, self.roster_late_label):
-            label.setStyleSheet("QLabel { border: 1px solid #888888; padding: 2px 6px; border-radius: 3px; }")
+            label.setStyleSheet(self._count_chip_style(resolve_theme(self.settings)))
             known_btn_row.addWidget(label)
         known_btn_row.addStretch(1)
         layout.addLayout(known_btn_row)
@@ -680,6 +706,7 @@ class FldigiNetControlTab(QWidget):
         outer_layout.addWidget(self._ncs_scroll_area, 1)
 
         self._ncs_scroll_content = QWidget()
+        self._ncs_scroll_content.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         layout = QVBoxLayout(self._ncs_scroll_content)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(10)
@@ -709,6 +736,7 @@ class FldigiNetControlTab(QWidget):
         roster_layout.setSpacing(6)
 
         roster_header = QHBoxLayout()
+        self._roster_header_layout = roster_header
         roster_header.addWidget(QLabel("<h3>Net Roster</h3>"))
         roster_header.addStretch()
         self.roster_compare_status_btn = QPushButton("Compare Rosters")
@@ -726,6 +754,7 @@ class FldigiNetControlTab(QWidget):
         roster_layout.addLayout(roster_header)
 
         roster_scope_row = QHBoxLayout()
+        self._roster_scope_layout = roster_scope_row
         roster_scope_row.addWidget(QLabel("Managed By:"))
         self.roster_scope_group = QButtonGroup(self)
         self.roster_scope_group.setExclusive(True)
@@ -747,6 +776,7 @@ class FldigiNetControlTab(QWidget):
         roster_actions = QVBoxLayout()
         roster_actions.setSpacing(6)
         roster_primary_actions = QHBoxLayout()
+        self._roster_primary_actions_layout = roster_primary_actions
         roster_primary_actions.addWidget(QLabel("Actions:"))
         self.next_tfc_btn = QPushButton("Next TFC")
         self.copy_tfc_btn = QPushButton("TFC")
@@ -780,6 +810,7 @@ class FldigiNetControlTab(QWidget):
         self.relay_compare_btn.setVisible(False)
         self.copy_relays_btn.setVisible(False)
         roster_secondary_actions = QHBoxLayout()
+        self._roster_secondary_actions_layout = roster_secondary_actions
         self.roster_action_status = QLabel("")
         self.roster_action_status.setWordWrap(True)
         self.roster_action_status.setMaximumWidth(520)
@@ -789,6 +820,7 @@ class FldigiNetControlTab(QWidget):
         roster_actions.addLayout(roster_primary_actions)
         roster_actions.addLayout(roster_secondary_actions)
         roster_post_net_actions = QHBoxLayout()
+        self._roster_post_net_actions_layout = roster_post_net_actions
         self.post_net_actions_label = QLabel("Post-net:")
         roster_post_net_actions.addWidget(self.post_net_actions_label)
         roster_post_net_actions.addWidget(self.copy_state_summary_btn)
@@ -830,7 +862,7 @@ class FldigiNetControlTab(QWidget):
         self.roster_table.setColumnHidden(self.COL_ROLE, True)
         self.roster_table.setStyleSheet(self._roster_table_style(resolve_theme(self.settings)))
         self.roster_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.roster_table.setMinimumHeight(300)
+        self.roster_table.setMinimumHeight(0)
         self.roster_empty_label = QLabel(
             "No roster entries yet. Start a net, add an operator, or paste/import check-ins when traffic begins."
         )
@@ -909,13 +941,13 @@ class FldigiNetControlTab(QWidget):
         compare_workspace_layout.addLayout(compare_header)
 
         self.compare_workspace_body = QWidget()
-        self.compare_workspace_body.setMinimumHeight(260)
+        self.compare_workspace_body.setMinimumHeight(0)
         compare_workspace_body_layout = QVBoxLayout(self.compare_workspace_body)
         compare_workspace_body_layout.setContentsMargins(0, 0, 0, 0)
         compare_workspace_body_layout.setSpacing(6)
         self.compare_workspace_tabs = QTabWidget()
         self.compare_workspace_tabs.setDocumentMode(True)
-        self.compare_workspace_tabs.setMinimumHeight(240)
+        self.compare_workspace_tabs.setMinimumHeight(0)
         self.compare_workspace_tabs.addTab(self.reference_card, "Reference")
         self.compare_workspace_tabs.addTab(self.compare_results_card, "Compare Results")
         self.compare_workspace_tabs.addTab(self.review_card, "Review")
@@ -1008,6 +1040,76 @@ class FldigiNetControlTab(QWidget):
         self._refresh_partner_controls()
         self._refresh_ncs_session_context()
         self._ncs_scroll_area.setWidget(self._ncs_scroll_content)
+        self._refresh_responsive_geometry()
+
+    @staticmethod
+    def _set_responsive_layout_direction(layout, compact: bool) -> None:
+        if isinstance(layout, QBoxLayout):
+            layout.setDirection(
+                QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight
+            )
+
+    @staticmethod
+    def _set_responsive_min_width(widget: QWidget, compact: bool) -> None:
+        if widget.property("fldigiOriginalMinimumWidth") is None:
+            widget.setProperty("fldigiOriginalMinimumWidth", int(widget.minimumWidth()))
+        if compact:
+            widget.setMinimumWidth(0)
+        else:
+            original = widget.property("fldigiOriginalMinimumWidth")
+            widget.setMinimumWidth(max(0, int(original or 0)))
+
+    def _refresh_responsive_geometry(self) -> None:
+        """Stack task actions and release child width floors on compact rails."""
+        if not hasattr(self, "_ncs_scroll_content"):
+            return
+        try:
+            width = int(self._ncs_scroll_area.viewport().width() or self.width() or 0)
+        except Exception:
+            width = int(self.width() or 0)
+        compact_threshold = max(
+            horizontal_layout_breakpoint(
+                getattr(self, name, None), reserve_controls=1
+            )
+            for name in (
+                "_session_context_row",
+                "_session_context_details_row",
+                "_session_partner_row",
+                "_macro_summary_row",
+                "_macro_path_row",
+                "_known_operator_layout",
+                "_known_buttons_layout",
+                "_roster_header_layout",
+                "_roster_scope_layout",
+                "_roster_primary_actions_layout",
+                "_roster_secondary_actions_layout",
+                "_roster_post_net_actions_layout",
+            )
+        )
+        compact = width < compact_threshold
+        for name in (
+            "_session_context_row",
+            "_session_context_details_row",
+            "_session_partner_row",
+            "_macro_summary_row",
+            "_macro_path_row",
+            "_known_operator_layout",
+            "_known_buttons_layout",
+            "_roster_header_layout",
+            "_roster_scope_layout",
+            "_roster_primary_actions_layout",
+            "_roster_secondary_actions_layout",
+            "_roster_post_net_actions_layout",
+            "ncs_session_chip_layout",
+        ):
+            self._set_responsive_layout_direction(getattr(self, name, None), compact)
+        for child in self._ncs_scroll_content.findChildren(QWidget):
+            self._set_responsive_min_width(child, compact)
+        self._ncs_scroll_content.updateGeometry()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._refresh_responsive_geometry)
 
     def _on_ncs_session_context_changed(self) -> None:
         self._persist_ncs_session_snapshot()
@@ -1309,7 +1411,7 @@ class FldigiNetControlTab(QWidget):
             border = theme.get("accent", "#2E6F9E")
         else:
             bg = theme.get("success", "#2E7D32")
-            fg = "#FFFFFF"
+            fg = contrast_text_for_background(bg, theme)
             border = bg
         self.roster_action_status.setStyleSheet(
             "QLabel {"
@@ -1576,7 +1678,7 @@ class FldigiNetControlTab(QWidget):
             button.setToolTip(f"Manage roster changes as {label}.")
             checked_bg = accent if scope in {"NCS", "ANCS"} else surface_alt
             checked_border = accent_active if scope in {"NCS", "ANCS"} else accent
-            checked_text = "#FFFFFF" if scope in {"NCS", "ANCS"} else text
+            checked_text = contrast_text_for_background(checked_bg, theme)
             button.setStyleSheet(
                 "QToolButton {"
                 f" background-color: {surface}; color: {muted}; border: 1px solid {border};"
@@ -1625,11 +1727,11 @@ class FldigiNetControlTab(QWidget):
         text = theme.get("text", "#1C1F21")
         border = theme.get("border", "#D3D7DD")
         selected_bg = theme.get("accent_active") or theme.get("accent", "#1F5A83")
-        selected_fg = "#FFFFFF" if selected_bg != theme.get("info") else "#FFFFFF"
+        selected_fg = contrast_text_for_background(selected_bg, theme)
         return (
             "QTableWidget#fldigiRosterTable {"
             f" background-color: {surface}; color: {text}; border: 1px solid {border};"
-            " gridline-color: rgba(127, 127, 127, 0.45);"
+            f" gridline-color: {border};"
             " selection-background-color: "
             f"{selected_bg}; selection-color: {selected_fg};"
             "}"
@@ -2248,11 +2350,11 @@ class FldigiNetControlTab(QWidget):
         muted = theme.get("text_muted", "#5B6570")
         if status == "Now":
             background = theme.get("accent", "#2E6F9E")
-            text = "#FFFFFF"
+            text = contrast_text_for_background(background, theme)
             border = theme.get("accent_active", background)
         elif status == "Called":
             background = theme.get("success", "#2E7D32")
-            text = "#FFFFFF"
+            text = contrast_text_for_background(background, theme)
             border = background
         else:
             background = theme.get("warning_bg", "#FFF3CD")
@@ -2331,7 +2433,7 @@ class FldigiNetControlTab(QWidget):
         focus = theme.get("focus", accent)
         checked_bg = accent
         checked_border = accent_active
-        checked_text = "#FFFFFF"
+        checked_text = contrast_text_for_background(checked_bg, theme)
         if column == self.COL_HEARD and role and role != self._current_net_control_role():
             checked_bg = surface_alt
             checked_border = accent
@@ -2350,7 +2452,7 @@ class FldigiNetControlTab(QWidget):
             " padding: 1px 6px;"
             " }"
             " QToolButton:checked:hover {"
-            f" background-color: {checked_border}; color: #FFFFFF;"
+            f" background-color: {checked_border}; color: {contrast_text_for_background(checked_border, theme)};"
             " }"
             " QToolButton:focus {"
             f" border: 2px solid {focus}; padding: 1px 6px;"
@@ -4066,6 +4168,15 @@ class FldigiNetControlTab(QWidget):
 
     def _apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
+        count_style = self._count_chip_style(theme)
+        for label in (
+            self.total_checkins_label,
+            self.roster_total_label,
+            self.roster_tfc_label,
+            self.roster_qru_label,
+            self.roster_late_label,
+        ):
+            label.setStyleSheet(count_style)
         self.start_btn.setStyleSheet(button_style("success", theme))
         self.end_btn.setStyleSheet(button_style("danger", theme))
         self._start_btn_default_style = self.start_btn.styleSheet()
@@ -5130,7 +5241,7 @@ class FldigiNetControlTab(QWidget):
         if ready:
             style += (
                 " QPushButton:focus {"
-                f" background-color: {role_color}; color: #FFFFFF; border: 2px solid {role_color};"
+                f" background-color: {role_color}; color: {contrast_text_for_background(role_color, theme)}; border: 2px solid {role_color};"
                 " padding: 3px 9px;"
                 " }"
             )

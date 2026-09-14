@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import datetime
 from typing import Callable, Iterable, Mapping, Optional
 
@@ -21,8 +22,9 @@ from PySide6.QtWidgets import (
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.station_health_summary import ScopeResolver, summarize_station_health
+from freqinout.gui.bounded_snapshot_worker import SnapshotWorkerController
 from freqinout.gui.help_registry import resolve_help_host
-from freqinout.gui.theme import button_style, resolve_theme
+from freqinout.gui.theme import active_app_theme, button_style, resolve_theme
 
 
 class StationHealthTab(QWidget):
@@ -40,13 +42,44 @@ class StationHealthTab(QWidget):
         self._issue_row_height_signature: tuple[object, ...] = ()
         self._runtime_source_row_height_signature: tuple[object, ...] = ()
         self._scheduler_row_height_signature: tuple[object, ...] = ()
+        self._snapshot_generation = 0
+        self._last_coherent_summary: Mapping[str, object] = {
+            "issue_count": 0,
+            "severity": "ok",
+            "items": [],
+            "recent_scheduler_events": [],
+        }
+        self._theme_cache = resolve_theme(self.settings)
         self._pending_focus_scope = ""
         self._pending_focus_radio_id: Optional[int] = None
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(10000)
         self._refresh_timer.timeout.connect(self.refresh_from_registry)
         self._build_ui()
-        self.refresh_from_registry()
+        self._snapshot_worker: SnapshotWorkerController | None = None
+        self.destroyed.connect(self._stop_snapshot_worker)
+
+    def _ensure_snapshot_worker(self) -> SnapshotWorkerController:
+        worker = self._snapshot_worker
+        if worker is None:
+            worker = SnapshotWorkerController(self, self._on_snapshot_ready)
+            self._snapshot_worker = worker
+        return worker
+
+    def _stop_snapshot_worker(self) -> None:
+        worker = getattr(self, "_snapshot_worker", None)
+        if worker is not None:
+            worker.stop()
+            self._snapshot_worker = None
+
+    def shutdown(self) -> None:
+        """Stop the bounded refresh worker before an owning window exits."""
+
+        self._stop_snapshot_worker()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt virtual
+        self._stop_snapshot_worker()
+        super().closeEvent(event)
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -55,7 +88,7 @@ class StationHealthTab(QWidget):
 
         header = QHBoxLayout()
         title = QLabel("Station Health")
-        title.setStyleSheet("font-size: 16px; font-weight: 700;")
+        title.setStyleSheet("font-weight: 700;")
         header.addWidget(title, 1)
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self.refresh_from_registry)
@@ -89,7 +122,7 @@ class StationHealthTab(QWidget):
         issues_layout.setSpacing(8)
 
         issues_label = QLabel("Current Issues")
-        issues_label.setStyleSheet("font-size: 14px; font-weight: 700;")
+        issues_label.setStyleSheet("font-weight: 700;")
         issues_layout.addWidget(issues_label)
 
         self.table = QTableWidget(0, 5, issues_tab)
@@ -147,7 +180,7 @@ class StationHealthTab(QWidget):
         runtime_layout.setSpacing(8)
 
         runtime_label = QLabel("Runtime Sources")
-        runtime_label.setStyleSheet("font-size: 14px; font-weight: 700;")
+        runtime_label.setStyleSheet("font-weight: 700;")
         runtime_layout.addWidget(runtime_label)
 
         self.runtime_sources_table = QTableWidget(0, 4, runtime_tab)
@@ -203,7 +236,7 @@ class StationHealthTab(QWidget):
         scheduler_layout.setContentsMargins(8, 8, 8, 8)
         scheduler_layout.setSpacing(8)
         recent_label = QLabel("Latest Scheduler Success and Issue Log")
-        recent_label.setStyleSheet("font-size: 14px; font-weight: 700;")
+        recent_label.setStyleSheet("font-weight: 700;")
         scheduler_layout.addWidget(recent_label)
 
         self.scheduler_table = QTableWidget(0, 6, scheduler_tab)
@@ -235,25 +268,25 @@ class StationHealthTab(QWidget):
 
     def set_scope_resolver(self, resolver: Optional[ScopeResolver]) -> None:
         self._scope_resolver = resolver
-        self.refresh_from_registry()
+        self._refresh_registry_seed()
 
     def set_runtime_item_provider(self, provider: Optional[Callable[[], Iterable[Mapping[str, object]]]]) -> None:
         self._runtime_item_provider = provider
-        self.refresh_from_registry()
+        self._refresh_registry_seed()
 
     def set_runtime_source_provider(self, provider: Optional[Callable[[], Iterable[Mapping[str, object]]]]) -> None:
         self._runtime_source_provider = provider
-        self.refresh_from_registry()
+        self._refresh_registry_seed()
 
     def focus_scope(self, *, device_profile_id: Optional[int] = None, scope_name: str = "") -> None:
         self._pending_focus_radio_id = device_profile_id if device_profile_id not in (None, 0) else None
         self._pending_focus_scope = str(scope_name or "").strip()
-        self.refresh_from_registry()
+        self._request_registry_refresh()
 
     def set_tab_active(self, active: bool) -> None:
         self._tab_active = bool(active)
         if active:
-            self.refresh_from_registry()
+            self._request_registry_refresh()
             if not self._refresh_timer.isActive():
                 self._refresh_timer.start()
         else:
@@ -269,25 +302,81 @@ class StationHealthTab(QWidget):
         return str(self._last_summary.get("severity", "ok") or "ok")
 
     def refresh_from_registry(self) -> None:
-        runtime_items = []
-        if self._runtime_item_provider is not None:
+        self._request_registry_refresh()
+
+    def _refresh_registry_seed(self) -> None:
+        """Synchronously seed explicit provider changes for legacy callers.
+
+        Provider setters are setup operations, not timer/render/selection
+        paths.  Runtime polling and all later refreshes use the worker below.
+        """
+
+        generation = self._snapshot_generation + 1
+        self._snapshot_generation = generation
+        summary, rows = self._read_registry_snapshot(
+            self._scope_resolver,
+            self._runtime_item_provider,
+            self._runtime_source_provider,
+        )
+        self._accept_registry_snapshot(generation, (summary, rows))
+
+    def _request_registry_refresh(self) -> None:
+        self._snapshot_generation += 1
+        generation = self._snapshot_generation
+        resolver = self._scope_resolver
+        item_provider = self._runtime_item_provider
+        source_provider = self._runtime_source_provider
+
+        def read_snapshot() -> tuple[Mapping[str, object], tuple[Mapping[str, object], ...]]:
+            return StationHealthTab._read_registry_snapshot(resolver, item_provider, source_provider)
+
+        self._ensure_snapshot_worker().request(generation, read_snapshot)
+
+    @staticmethod
+    def _read_registry_snapshot(
+        scope_resolver: Optional[ScopeResolver],
+        runtime_item_provider: Optional[Callable[[], Iterable[Mapping[str, object]]]],
+        runtime_source_provider: Optional[Callable[[], Iterable[Mapping[str, object]]]],
+    ) -> tuple[Mapping[str, object], tuple[Mapping[str, object], ...]]:
+        runtime_items: list[Mapping[str, object]] = []
+        if runtime_item_provider is not None:
             try:
-                runtime_items = list(self._runtime_item_provider() or [])
+                runtime_items = [item for item in list(runtime_item_provider() or []) if isinstance(item, Mapping)]
             except Exception:
                 runtime_items = []
-        self._runtime_source_rows = []
-        if self._runtime_source_provider is not None:
+        runtime_source_rows: tuple[Mapping[str, object], ...] = tuple()
+        if runtime_source_provider is not None:
             try:
-                self._runtime_source_rows = [
-                    row for row in list(self._runtime_source_provider() or []) if isinstance(row, Mapping)
-                ]
+                runtime_source_rows = tuple(
+                    copy.deepcopy(row)
+                    for row in list(runtime_source_provider() or [])
+                    if isinstance(row, Mapping)
+                )
             except Exception:
-                self._runtime_source_rows = []
-        self._last_summary = summarize_station_health(
+                runtime_source_rows = tuple()
+        summary = summarize_station_health(
             include_scheduler_events=True,
-            scope_resolver=self._scope_resolver,
+            scope_resolver=scope_resolver,
             extra_items=runtime_items,
         )
+        return copy.deepcopy(summary), runtime_source_rows
+
+    def _on_snapshot_ready(self, generation: int, payload: object, error: object) -> None:
+        if int(generation) != self._snapshot_generation or error is not None:
+            return
+        if not isinstance(payload, tuple) or len(payload) != 2:
+            return
+        self._accept_registry_snapshot(generation, payload)
+
+    def _accept_registry_snapshot(self, generation: int, payload: object) -> None:
+        if int(generation) != self._snapshot_generation:
+            return
+        summary, rows = payload
+        if not isinstance(summary, Mapping):
+            return
+        self._last_coherent_summary = copy.deepcopy(summary)
+        self._last_summary = dict(self._last_coherent_summary)
+        self._runtime_source_rows = [dict(row) for row in rows if isinstance(row, Mapping)]
         self._render_summary()
         self._render_runtime_sources()
         self._render_table()
@@ -295,7 +384,10 @@ class StationHealthTab(QWidget):
         self._update_tab_labels()
 
     def apply_theme(self) -> None:
-        theme = resolve_theme(self.settings)
+        # Theme changes repaint current evidence; they never re-read the
+        # health registry or invoke provider callbacks.
+        theme = active_app_theme(self._theme_cache)
+        self._theme_cache = dict(theme)
         self.refresh_btn.setStyleSheet(button_style("muted", theme))
         self.help_btn.setStyleSheet(button_style("secondary", theme))
         if hasattr(self, "health_open_related_btn"):
@@ -315,7 +407,7 @@ class StationHealthTab(QWidget):
                 pass
 
     def _render_summary(self) -> None:
-        theme = resolve_theme(self.settings)
+        theme = dict(self._theme_cache)
         issue_count = self.current_issue_count()
         severity = self.current_severity()
         if issue_count <= 0:
@@ -337,7 +429,7 @@ class StationHealthTab(QWidget):
         item = QTableWidgetItem(str(text or ""))
         item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
         if severity:
-            theme = resolve_theme(self.settings)
+            theme = dict(self._theme_cache)
             if severity == "danger":
                 item.setForeground(QBrush(QColor(theme.get("danger", "#C62828"))))
             elif severity == "warning":

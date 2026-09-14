@@ -4,6 +4,7 @@ import os
 import shutil
 import sqlite3
 import json
+import datetime
 from pathlib import Path
 
 from freqinout.core.ingest_source_model import (
@@ -29,6 +30,15 @@ from freqinout.core import sitrep_ingest
 from freqinout.core.sitrep_ingest import ingest_sitreps
 from freqinout.core.varac_ingest import _get_last_id, _scoped_table_key, _set_last_id, ensure_varac_local_tables, ingest_varac
 from freqinout.core.varac_runtime_ingest import ingest_varac_for_runtime_sources
+
+
+def _recent_js8_utc(*, minute_offset: int = 0) -> str:
+    """Return a stable in-window timestamp for age-filtered ingest fixtures."""
+    value = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+        days=1,
+        minutes=minute_offset,
+    )
+    return value.strftime("%Y-%m-%d %H:%M:%S")
 
 
 class DictSettings:
@@ -871,8 +881,8 @@ def test_js8_inbox_ingest_keeps_same_native_id_from_two_sources(monkeypatch, tmp
     inbox_b = tmp_path / "b" / "inbox.db3"
     inbox_a.parent.mkdir()
     inbox_b.parent.mkdir()
-    payload_a = {"params": {"TEXT": "HELLO A", "FROM": "K1AAA", "TO": "@MAGNET", "UTC": "2026-08-12 10:00:00"}}
-    payload_b = {"params": {"TEXT": "HELLO B", "FROM": "K2BBB", "TO": "@MR08", "UTC": "2026-08-12 10:01:00"}}
+    payload_a = {"params": {"TEXT": "HELLO A", "FROM": "K1AAA", "TO": "@MAGNET", "UTC": _recent_js8_utc()}}
+    payload_b = {"params": {"TEXT": "HELLO B", "FROM": "K2BBB", "TO": "@MR08", "UTC": _recent_js8_utc(minute_offset=1)}}
     for path, payload in ((inbox_a, payload_a), (inbox_b, payload_b)):
         conn = sqlite3.connect(path)
         try:
@@ -932,7 +942,7 @@ def test_js8_runtime_message_ingest_uses_explicit_profile_inbox(monkeypatch, tmp
         conn.execute("CREATE TABLE inbox_v1 (id INTEGER PRIMARY KEY, json TEXT, type TEXT, value TEXT)")
         conn.execute(
             "INSERT INTO inbox_v1 (id, json, type, value) VALUES (1, ?, 'UNREAD', '')",
-            (json.dumps({"params": {"TEXT": "EXPLICIT INBOX", "FROM": "K1AAA", "TO": "@MAGNET", "UTC": "2026-08-12 10:00:00"}}),),
+            (json.dumps({"params": {"TEXT": "EXPLICIT INBOX", "FROM": "K1AAA", "TO": "@MAGNET", "UTC": _recent_js8_utc()}}),),
         )
         conn.commit()
     finally:
@@ -975,8 +985,8 @@ def test_js8_runtime_message_ingest_uses_all_runtime_sources(monkeypatch, tmp_pa
     directed_b.write_text("", encoding="utf-8")
     inbox_a = directed_a.parent / "inbox.db3"
     inbox_b = directed_b.parent / "inbox.db3"
-    payload_a = {"params": {"TEXT": "HELLO A", "FROM": "K1AAA", "TO": "@MAGNET", "UTC": "2026-08-12 10:00:00"}}
-    payload_b = {"params": {"TEXT": "HELLO B", "FROM": "K2BBB", "TO": "@MR08", "UTC": "2026-08-12 10:01:00"}}
+    payload_a = {"params": {"TEXT": "HELLO A", "FROM": "K1AAA", "TO": "@MAGNET", "UTC": _recent_js8_utc()}}
+    payload_b = {"params": {"TEXT": "HELLO B", "FROM": "K2BBB", "TO": "@MR08", "UTC": _recent_js8_utc(minute_offset=1)}}
     for path, payload in ((inbox_a, payload_a), (inbox_b, payload_b)):
         conn = sqlite3.connect(path)
         try:
@@ -1069,8 +1079,8 @@ def test_js8_source_scoped_delete_removes_only_matching_native_source(monkeypatc
     inbox_b = tmp_path / "b" / "inbox.db3"
     inbox_a.parent.mkdir()
     inbox_b.parent.mkdir()
-    payload_a = {"params": {"TEXT": "DELETE A", "FROM": "K1AAA", "TO": "@MAGNET", "UTC": "2026-08-12 10:00:00"}}
-    payload_b = {"params": {"TEXT": "KEEP B", "FROM": "K2BBB", "TO": "@MR08", "UTC": "2026-08-12 10:01:00"}}
+    payload_a = {"params": {"TEXT": "DELETE A", "FROM": "K1AAA", "TO": "@MAGNET", "UTC": _recent_js8_utc()}}
+    payload_b = {"params": {"TEXT": "KEEP B", "FROM": "K2BBB", "TO": "@MR08", "UTC": _recent_js8_utc(minute_offset=1)}}
     for path, payload in ((inbox_a, payload_a), (inbox_b, payload_b)):
         conn = sqlite3.connect(path)
         try:

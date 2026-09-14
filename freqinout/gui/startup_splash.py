@@ -6,6 +6,8 @@ from PySide6.QtCore import QEventLoop, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QSplashScreen, QWidget
 
+from freqinout.gui.theme import active_app_theme
+
 
 class StartupSplash:
     """Small, early startup status surface for slow first-window builds."""
@@ -23,40 +25,51 @@ class StartupSplash:
         self._splash.setAccessibleDescription(
             f"{self.DEDICATION} {self.SUPPORT_MESSAGE} Buy Me a Coffee: {self.SUPPORT_URL}"
         )
+        self._theme = active_app_theme()
         self._last_message = ""
 
     @staticmethod
     def _build_pixmap(version: str) -> QPixmap:
-        pixmap = QPixmap(540, 270)
-        pixmap.fill(QColor("#f4f7fb"))
+        app = QApplication.instance()
+        base_font = QFont(app.font()) if app is not None else QFont()
+        base_size = max(9.0, float(base_font.pointSizeF() or 9.0))
+        scale = max(1.0, base_size / 10.0)
+        pixmap = QPixmap(int(540 * scale), int(270 * scale))
+        theme = active_app_theme()
+        pixmap.fill(QColor(theme["surface"]))
 
         painter = QPainter(pixmap)
         try:
             painter.setRenderHint(QPainter.Antialiasing, True)
-            painter.setPen(QColor("#2f3a45"))
-            title_font = QFont()
-            title_font.setPointSize(24)
+            painter.scale(scale, scale)
+            # Coordinates and canvas scale together.  Font point sizes stay in
+            # logical units so the painter transform does not apply text scale
+            # twice when Large Text is enabled.
+            logical_base_size = base_size / scale
+            painter.setPen(QColor(theme["text"]))
+            title_font = QFont(base_font)
+            title_font.setPointSizeF(logical_base_size * 2.4)
             title_font.setBold(True)
             painter.setFont(title_font)
             painter.drawText(30, 54, "Starting FIO")
 
-            subtitle_font = QFont()
-            subtitle_font.setPointSize(10)
+            subtitle_font = QFont(base_font)
+            subtitle_font.setPointSizeF(logical_base_size)
             painter.setFont(subtitle_font)
-            painter.setPen(QColor("#5a6673"))
+            painter.setPen(QColor(theme["text_muted"]))
             subtitle = "FreqInOut"
             if version:
                 subtitle = f"{subtitle} {version}"
             painter.drawText(32, 82, subtitle)
 
-            painter.setPen(QColor("#c8d2dc"))
+            painter.setPen(QColor(theme["border"]))
             painter.drawLine(32, 102, 508, 102)
 
-            dedication_font = QFont()
-            dedication_font.setPointSize(10)
+            dedication_font = QFont(base_font)
+            dedication_font.setPointSizeF(logical_base_size)
             dedication_font.setItalic(True)
             painter.setFont(dedication_font)
-            painter.setPen(QColor("#465463"))
+            painter.setPen(QColor(theme["text"]))
             painter.drawText(
                 32,
                 116,
@@ -66,10 +79,10 @@ class StartupSplash:
                 StartupSplash.DEDICATION,
             )
 
-            support_font = QFont()
-            support_font.setPointSize(9)
+            support_font = QFont(base_font)
+            support_font.setPointSizeF(logical_base_size * 0.9)
             painter.setFont(support_font)
-            painter.setPen(QColor("#465463"))
+            painter.setPen(QColor(theme["text"]))
             painter.drawText(
                 32,
                 166,
@@ -81,10 +94,10 @@ class StartupSplash:
 
             support_font.setBold(True)
             painter.setFont(support_font)
-            painter.setPen(QColor("#1769aa"))
+            painter.setPen(QColor(theme["info"]))
             painter.drawText(32, 218, f"Buy Me a Coffee  ·  {StartupSplash.SUPPORT_URL}")
 
-            painter.setPen(QColor("#c8d2dc"))
+            painter.setPen(QColor(theme["border"]))
             painter.drawLine(32, 232, 508, 232)
         finally:
             painter.end()
@@ -100,7 +113,7 @@ class StartupSplash:
         self._splash.showMessage(
             text,
             int(Qt.AlignLeft | Qt.AlignBottom),
-            QColor("#24313d"),
+            QColor(self._theme["text"]),
         )
         self._process_events()
 

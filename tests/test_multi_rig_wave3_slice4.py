@@ -18,6 +18,18 @@ from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.sop_manager import SOPManager
 
 
+def _prime_active_schedule_lane_cache(engine: SchedulerEngine) -> None:
+    """Publish the async projection explicitly before testing its read API."""
+    rows = engine._load_active_schedule_lane_rows(
+        force=False,
+        settings_snapshot=dict(engine.settings.all()),
+    )
+    engine._active_schedule_lane_rows_cache = {
+        "checked_ts": 0.0,
+        "data": tuple(rows),
+    }
+
+
 def test_db_initializer_and_schema_include_schedule_target_columns(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
@@ -312,11 +324,12 @@ def test_scheduler_projects_assigned_schedule_lanes_for_all_active_radios(monkey
             ],
         )
         monkeypatch.setattr(engine, "_load_net_schedule_from_db", lambda: [])
-        monkeypatch.setattr(engine, "_load_sop_schedule_layer_from_db", lambda: [])
+        monkeypatch.setattr(engine, "_load_sop_schedule_layer_from_db", lambda **_kwargs: [])
         monkeypatch.setattr(engine, "_load_sop_net_conflict_policies_from_db", lambda: [])
 
+        _prime_active_schedule_lane_cache(engine)
         lanes = engine.active_schedule_lanes(
-            force=True,
+            request_refresh=False,
             now_utc=datetime.datetime(2026, 8, 10, 12, 0, tzinfo=datetime.timezone.utc),
         )
 
@@ -399,7 +412,7 @@ def test_scheduler_active_schedule_lanes_filter_sop_rows_by_radio(monkeypatch, t
         monkeypatch.setattr(
             engine,
             "_load_sop_schedule_layer_from_db",
-            lambda: [
+            lambda **_kwargs: [
                 {
                     "day_utc": "ALL",
                     "recurrence": "Daily",
@@ -417,8 +430,9 @@ def test_scheduler_active_schedule_lanes_filter_sop_rows_by_radio(monkeypatch, t
         )
         monkeypatch.setattr(engine, "_load_sop_net_conflict_policies_from_db", lambda: [])
 
+        _prime_active_schedule_lane_cache(engine)
         lanes = engine.active_schedule_lanes(
-            force=True,
+            request_refresh=False,
             now_utc=datetime.datetime(2026, 8, 10, 12, 0, tzinfo=datetime.timezone.utc),
         )
 
@@ -481,12 +495,13 @@ def test_scheduler_active_schedule_lanes_cache_rows_without_extra_status_polling
     try:
         monkeypatch.setattr(engine, "_load_daily_schedule_from_db", load_daily)
         monkeypatch.setattr(engine, "_load_net_schedule_from_db", lambda: [])
-        monkeypatch.setattr(engine, "_load_sop_schedule_layer_from_db", lambda: [])
+        monkeypatch.setattr(engine, "_load_sop_schedule_layer_from_db", lambda **_kwargs: [])
         monkeypatch.setattr(engine, "_load_sop_net_conflict_policies_from_db", lambda: [])
 
         now = datetime.datetime(2026, 8, 10, 12, 0, tzinfo=datetime.timezone.utc)
-        first = engine.active_schedule_lanes(force=True, now_utc=now)
-        second = engine.active_schedule_lanes(now_utc=now + datetime.timedelta(minutes=1))
+        _prime_active_schedule_lane_cache(engine)
+        first = engine.active_schedule_lanes(request_refresh=False, now_utc=now)
+        second = engine.active_schedule_lanes(request_refresh=False, now_utc=now + datetime.timedelta(minutes=1))
 
         assert first[0]["current_entry"]["group_name"] == "MAGNET"
         assert second[0]["current_entry"]["group_name"] == "MAGNET"

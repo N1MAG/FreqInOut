@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QEvent
 from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
@@ -19,6 +19,8 @@ from PySide6.QtWidgets import (
     QToolButton,
     QVBoxLayout,
     QWidget,
+    QScrollArea,
+    QBoxLayout,
 )
 
 from freqinout.core.known_operating_groups import net_resources_db_path
@@ -36,6 +38,13 @@ from freqinout.core.resource_catalog_transfer import (
 from freqinout.gui.frequency_catalog_view import FrequencyCatalogView
 from freqinout.gui.help_registry import resolve_help_host
 from freqinout.gui.net_directory_view import NetDirectoryView
+from freqinout.gui.theme import (
+    active_app_theme,
+    button_height_for_font,
+    button_style,
+    control_height_for_font,
+    label_style,
+)
 
 
 class ResourceImportExportView(QWidget):
@@ -44,11 +53,18 @@ class ResourceImportExportView(QWidget):
     def __init__(self, store: ResourceCatalogStore, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.store = store
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        self.content_scroll = QScrollArea(self)
+        self.content_scroll.setWidgetResizable(True)
+        self.content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.content_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        body = QWidget(self.content_scroll)
+        layout = QVBoxLayout(body)
+        self.content_scroll.setWidget(body)
+        outer_layout.addWidget(self.content_scroll)
         layout.setContentsMargins(10, 10, 10, 10)
-        title = QLabel("Resource Import / Export")
-        title.setStyleSheet("font-weight: 700; font-size: 17px;")
-        layout.addWidget(title)
+        self.title_label = QLabel("Resource Import / Export")
+        layout.addWidget(self.title_label)
         copy = QLabel(
             "Choose an export file or preview an import before it can change the catalog. "
             "Imports never overwrite bundled read-only records and apply only after confirmation."
@@ -58,14 +74,15 @@ class ResourceImportExportView(QWidget):
         self.summary = QLabel("")
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
-        refresh = QPushButton("Refresh Catalog Summary", self)
-        refresh.clicked.connect(self.refresh_summary)
-        layout.addWidget(refresh)
+        self.refresh_summary_btn = QPushButton("Refresh Catalog Summary", self)
+        self.refresh_summary_btn.clicked.connect(self.refresh_summary)
+        layout.addWidget(self.refresh_summary_btn)
         self.export_selection_summary = QLabel("Select frequencies in the Frequency Catalog, then review the export.", self)
         self.export_selection_summary.setWordWrap(True)
         self.export_selection_summary.setAccessibleName("Resource export selection summary")
         layout.addWidget(self.export_selection_summary)
         export_actions = QHBoxLayout()
+        self.export_actions_row = export_actions
         self.review_export_btn = QPushButton("Review export…", self)
         self.review_export_btn.setAccessibleName("Review selected resources for export")
         self.review_export_btn.setToolTip("Show selected resources and required dependencies before any file can be written.")
@@ -98,6 +115,7 @@ class ResourceImportExportView(QWidget):
         exchange.setVisible(False)
         layout.addWidget(exchange)
         import_actions = QHBoxLayout()
+        self.import_actions_row = import_actions
         self.preview_btn = QPushButton("Preview import…", self)
         self.cancel_preview_btn = QPushButton("Cancel import preview", self)
         self.apply_btn = QPushButton("Apply import preview", self)
@@ -130,7 +148,66 @@ class ResourceImportExportView(QWidget):
         self.save_reviewed_export_btn.setEnabled(False)
         self.cancel_export_preview_btn.setEnabled(False)
         layout.addStretch(1)
+        self.apply_theme()
         self.refresh_summary()
+
+    def apply_theme(self) -> None:
+        theme = active_app_theme()
+        self.title_label.setStyleSheet(label_style("text", theme, weight=700))
+        self.summary.setStyleSheet(label_style("muted", theme))
+        self.export_selection_summary.setStyleSheet(label_style("text", theme))
+        self.diagnostics.setStyleSheet(f"QPlainTextEdit {{ border: 1px solid {theme['border']}; }}")
+        for button in (
+            self.help_btn if hasattr(self, "help_btn") else None,
+            self.return_btn if hasattr(self, "return_btn") else None,
+            self.review_export_btn,
+            self.refresh_summary_btn,
+            self.save_reviewed_export_btn,
+            self.cancel_export_preview_btn,
+            self.preview_btn,
+            self.cancel_preview_btn,
+            self.apply_btn,
+        ):
+            if button is not None:
+                button.setMinimumHeight(button_height_for_font(button))
+        for button, role in (
+            (self.refresh_summary_btn, "muted"),
+            (self.review_export_btn, "primary"),
+            (self.save_reviewed_export_btn, "primary"),
+            (self.cancel_export_preview_btn, "muted"),
+            (self.preview_btn, "primary"),
+            (self.cancel_preview_btn, "muted"),
+            (self.apply_btn, "primary"),
+        ):
+            button.setStyleSheet(button_style(role, theme))
+        for control in (
+            self.export_frequency_keys,
+            self.export_net_entry_keys,
+            self.import_source_key,
+        ):
+            control.setMinimumHeight(control_height_for_font(control))
+        self.diagnostics.setMinimumHeight(
+            max(
+                control_height_for_font(self.diagnostics, vertical_padding=18, floor=48) * 3,
+                self.diagnostics.fontMetrics().lineSpacing() * 4 + 20,
+            )
+        )
+        self._apply_responsive_layout()
+
+    def _apply_responsive_layout(self) -> None:
+        compact = self.width() > 0 and self.width() < max(900, self.fontMetrics().horizontalAdvance("Resource Import / Export") * 25)
+        direction = QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight
+        self.export_actions_row.setDirection(direction)
+        self.import_actions_row.setDirection(direction)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_responsive_layout()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange:
+            self.apply_theme()
 
     def refresh_summary(self) -> None:
         frequency_count = len(self.store.list_frequencies(active=None, limit=MAX_RESULTS))
@@ -326,10 +403,9 @@ class ResourcesTab(QWidget):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
         header = QHBoxLayout()
-        title = QLabel("Tools & Resources")
-        title.setStyleSheet("font-weight: 700; font-size: 18px;")
-        title.setAccessibleName("Tools and Resources")
-        header.addWidget(title)
+        self.title_label = QLabel("Tools & Resources")
+        self.title_label.setAccessibleName("Tools and Resources")
+        header.addWidget(self.title_label)
         header.addStretch(1)
         self.help_btn = QPushButton("Help", self)
         self.help_btn.setToolTip("Open Tools and Resources help.")
@@ -363,6 +439,26 @@ class ResourcesTab(QWidget):
             self.tabs.addTab(placeholder, title)
         self.tabs.currentChanged.connect(self._ensure_page)
         layout.addWidget(self.tabs, 1)
+        self.apply_theme()
+
+    def apply_theme(self) -> None:
+        theme = active_app_theme()
+        self.title_label.setStyleSheet(label_style("text", theme, weight=700))
+        self.help_label.setStyleSheet(label_style("muted", theme))
+        self.context_label.setStyleSheet(label_style("info", theme))
+        self.help_btn.setStyleSheet(button_style("muted", theme))
+        self.return_btn.setStyleSheet(button_style("secondary", theme))
+        self.help_btn.setMinimumHeight(button_height_for_font(self.help_btn))
+        self.return_btn.setMinimumHeight(button_height_for_font(self.return_btn))
+        for page in self._pages.values():
+            apply_theme = getattr(page, "apply_theme", None)
+            if callable(apply_theme):
+                apply_theme()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange:
+            self.apply_theme()
 
     def _ensure_page(self, index: int) -> None:
         if index in self._pages or index < 0:

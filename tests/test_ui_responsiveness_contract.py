@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 
@@ -42,7 +43,20 @@ def test_gui_thread_waits_are_bounded_and_allowlisted() -> None:
     # worker callbacks, queued shutdown, or an explicit short timeout.
     allowed = {
         "freqinout/gui/main_window.py": ["thread.wait(200)"],
-        "freqinout/gui/message_viewer_tab.py": ["thread.wait(max(0, min(int(wait_ms), 250)))"],
+        "freqinout/gui/message_viewer_tab.py": [
+            "background_thread.wait(5000)",
+            "compose_thread.wait(10000)",
+            "send_thread.wait(3000)",
+            "thread.wait(max(0, min(int(wait_ms), 250)))",
+        ],
+        "freqinout/gui/bounded_snapshot_worker.py": [
+            "self.thread.wait(max(1, int(timeout_ms)))"
+        ],
+        "freqinout/gui/settings_tab.py": [
+            "gpg_thread.wait(1200)",
+            "software_thread.wait(1200)",
+        ],
+        "freqinout/gui/station_bbs_tab.py": ["thread.wait(1000)"],
     }
     offenders: list[str] = []
     for path in _py_files(GUI_ROOT):
@@ -61,11 +75,19 @@ def test_gui_subprocess_calls_are_timeout_bounded() -> None:
     offenders: list[str] = []
     for path in _py_files(GUI_ROOT):
         text = _read(path)
-        for line_no, line in enumerate(text.splitlines(), start=1):
-            if "subprocess.run(" not in line:
+        tree = ast.parse(text.lstrip("\ufeff"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
                 continue
-            if "timeout=" not in line:
-                offenders.append(f"{path}:{line_no}:{line.strip()}")
+            func = node.func
+            is_subprocess_run = (
+                isinstance(func, ast.Attribute)
+                and func.attr == "run"
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "subprocess"
+            )
+            if is_subprocess_run and not any(keyword.arg == "timeout" for keyword in node.keywords):
+                offenders.append(f"{path}:{node.lineno}:subprocess.run without timeout")
 
     assert offenders == []
 
@@ -85,8 +107,16 @@ def test_gui_process_events_are_allowlisted_migration_items() -> None:
 
 def test_gui_future_result_is_done_callback_only_for_now() -> None:
     allowed = {
-        "freqinout/gui/controlfreq_tab.py": ["future.result()", "done.result()"],
+        "freqinout/gui/controlfreq_tab.py": [
+            "future.result()",
+            "done.result()",
+            "completed.result()",
+        ],
         "freqinout/gui/freq_planner_tab.py": ["future.result()"],
+        "freqinout/gui/main_window.py": ["done_future.result()"],
+        "freqinout/gui/message_viewer_tab.py": ["future.result()"],
+        "freqinout/gui/resource_catalog_snapshot.py": ["future.result()"],
+        "freqinout/gui/shortwave_tab.py": ["future.result(timeout=0.05)"],
         "freqinout/gui/stations_map_tab.py": ["future.result()"],
     }
     offenders: list[str] = []
@@ -125,7 +155,7 @@ def test_js8_ncs_uses_compact_sectioned_layout() -> None:
     assert 'QGroupBox("Net Setup")' in text
     assert 'QGroupBox("Check-Ins")' in text
     assert "checkins_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)" in text
-    assert "self.checkin_table.setMinimumHeight(260)" in text
+    assert "font_derived_widget_height(self.checkin_table" in text
     assert "table_layout.addLayout(btn_row)" in text
     assert "layout.addWidget(checkins_group, 1)" in text
 

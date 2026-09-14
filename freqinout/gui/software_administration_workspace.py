@@ -29,7 +29,14 @@ from freqinout.core.software_administration_model import (
     SoftwareAdministrationSnapshot,
     SoftwareFamilySummary,
 )
-from freqinout.gui.theme import get_theme, resolve_theme, resolve_ui_text_scale
+from freqinout.gui.theme import (
+    button_height_for_font,
+    contrast_text_for_background,
+    get_theme,
+    label_style,
+    resolve_theme,
+    resolve_ui_text_scale,
+)
 from freqinout.gui.current_page_stack import CurrentPageStack
 from freqinout.gui.software_instance_assistant import SoftwareInstanceAssistant
 
@@ -296,8 +303,13 @@ class SoftwareAdministrationWorkspace(QWidget):
         selected_radio = self._radio_id is not None
         self.task_prompt_label.setVisible(not compact and selected_radio)
         self.task_strip.setVisible(selected_radio)
+        strip_height = button_height_for_font(
+            self.assign_button,
+            vertical_padding=14 if compact else 18,
+            floor=30,
+        )
         for strip in (self.family_strip, self.radio_strip, self.task_strip):
-            strip.setMaximumHeight(42 if compact else 52)
+            strip.setMaximumHeight(strip_height)
         self.unassigned_label.setVisible(not compact)
         self.assign_button.setVisible(not compact or not selected_radio)
         # Adding an instance remains available in compact mode; the guided
@@ -514,6 +526,7 @@ class SoftwareAdministrationWorkspace(QWidget):
             font.setPointSizeF(max(8.0, font.pointSizeF() * self._text_scale))
         self.setFont(font)
         theme = self._theme
+        accent_text = contrast_text_for_background(theme["accent"], theme)
         self.setStyleSheet(
             "QWidget { background: %(bg)s; color: %(text)s; }"
             "QLabel { color: %(text)s; }"
@@ -523,20 +536,20 @@ class SoftwareAdministrationWorkspace(QWidget):
             " border: 1px solid %(border)s; border-radius: 6px; }"
             "QToolButton { background: %(surface_alt)s; border: 1px solid %(border)s;"
             " border-radius: 6px; padding: 6px 9px; }"
-            "QToolButton:checked { background: %(accent)s; color: white; border-color: %(accent_active)s; }"
+            "QToolButton:checked { background: %(accent)s; color: %(accent_text)s; border-color: %(accent_active)s; }"
             "QToolButton:hover { border-color: %(accent)s; }"
-            "QPushButton { background: %(accent)s; color: white; border: 1px solid %(accent_active)s;"
+            "QPushButton { background: %(accent)s; color: %(accent_text)s; border: 1px solid %(accent_active)s;"
             " border-radius: 6px; padding: 6px 10px; font-weight: 600; }"
             "QPushButton#softwareAdministrationSaveAllButton { background: %(surface_alt)s; color: %(text)s;"
             " border-color: %(accent)s; }"
             "QPushButton:disabled { background: %(surface_alt)s; color: %(text_muted)s; border-color: %(border)s; }"
-            % theme
+            % {**theme, "accent_text": accent_text}
         )
-        self.heading_label.setStyleSheet("font-size: 16pt; font-weight: 700;")
+        self.heading_label.setStyleSheet(label_style("text", theme, weight=700))
         self._apply_minimum_hit_heights()
 
     def _apply_minimum_hit_heights(self) -> None:
-        height = int(32 * self._text_scale)
+        height = button_height_for_font(self.assign_button, vertical_padding=12, floor=30)
         for button in (*self._family_buttons.values(), *self._radio_buttons.values(), *self._task_buttons.values()):
             button.setMinimumHeight(height)
         self.assign_button.setMinimumHeight(height)
@@ -649,7 +662,7 @@ class SoftwareAdministrationWorkspace(QWidget):
         button.setToolButtonStyle(Qt.ToolButtonTextOnly)
         button.setAccessibleName(text)
         button.setToolTip(tooltip)
-        button.setMinimumHeight(int(32 * self._text_scale))
+        button.setMinimumHeight(button_height_for_font(button, vertical_padding=12, floor=30))
         return button
 
     def _choose_family(self, key: str) -> None:

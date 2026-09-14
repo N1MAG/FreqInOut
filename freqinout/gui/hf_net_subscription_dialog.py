@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -25,6 +25,8 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
+    QScrollArea,
+    QBoxLayout,
 )
 
 from freqinout.core.resource_catalog_models import CatalogValidationError, FrequencyResource, NetDirectoryEntry, NetDirectorySession, ReadOnlyResourceError
@@ -33,6 +35,7 @@ from freqinout.gui.net_directory_view import new_net_entry_key, new_net_session_
 from freqinout.core.resource_catalog_store import MAX_RESULTS, ResourceCatalogStore
 from freqinout.core.schedule_source_sets import HF_NET_SOURCE_CATEGORY, HF_NET_SOURCE_SETS_KEY, source_sets_for_category
 from freqinout.gui.resource_picker import frequency_where_text, session_when_text
+from freqinout.gui.theme import active_app_theme, button_height_for_font, button_style, control_height_for_font, font_derived_widget_height, label_style
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,21 +70,22 @@ class HfNetSubscriptionDialog(QDialog):
 
     def _build_ui(self) -> None:
         self.setWindowTitle("Add HF Net")
-        self.setMinimumSize(760, 500)
         layout = QVBoxLayout(self)
         title = QLabel("Add HF Net from Net Directory")
-        title.setStyleSheet("font-weight: 700; font-size: 17px;")
+        self.title_label = title
         layout.addWidget(title)
         copy = QLabel("Select published sessions, choose the named HF Net schedule that will receive them, then review the draft. Saving remains an explicit HF Nets action.")
         copy.setWordWrap(True)
         layout.addWidget(copy)
         destination_row = QHBoxLayout()
+        self.destination_row = destination_row
         destination_row.addWidget(QLabel("Destination schedule:"))
         self.destination_combo = QComboBox(self)
         self.destination_combo.setAccessibleName("Named HF Net schedule destination")
         destination_row.addWidget(self.destination_combo, 1)
         layout.addLayout(destination_row)
         search_row = QHBoxLayout()
+        self.search_row = search_row
         self.search_edit = QLineEdit(self)
         self.search_edit.setPlaceholderText("Search known nets")
         self.search_edit.returnPressed.connect(self._load_entries)
@@ -122,6 +126,39 @@ class HfNetSubscriptionDialog(QDialog):
         self.review_btn.clicked.connect(self._accept_draft)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        self.apply_theme()
+
+    def apply_theme(self) -> None:
+        theme = active_app_theme()
+        self.title_label.setStyleSheet(label_style("text", theme, weight=700))
+        self.review_label.setStyleSheet(label_style("muted", theme))
+        self.entry_table.setStyleSheet(f"QTableWidget {{ gridline-color: {theme['border']}; }}")
+        self.session_table.setStyleSheet(f"QTableWidget {{ gridline-color: {theme['border']}; }}")
+        for control in (self.destination_combo, self.search_edit):
+            control.setMinimumHeight(control_height_for_font(control))
+        for button in (self.review_btn, self.create_net_btn, self.private_net_btn):
+            button.setMinimumHeight(button_height_for_font(button))
+        self.review_btn.setStyleSheet(button_style("primary", theme))
+        self.create_net_btn.setStyleSheet(button_style("secondary", theme))
+        self.private_net_btn.setStyleSheet(button_style("muted", theme))
+        for table in (self.entry_table, self.session_table):
+            table.verticalHeader().setDefaultSectionSize(font_derived_widget_height(table))
+        self._apply_responsive_layout()
+
+    def _apply_responsive_layout(self) -> None:
+        compact = self.width() > 0 and self.width() < max(900, self.fontMetrics().horizontalAdvance("Add HF Net") * 24)
+        direction = QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight
+        self.destination_row.setDirection(direction)
+        self.search_row.setDirection(direction)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_responsive_layout()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange:
+            self.apply_theme()
 
     def _load_destinations(self) -> None:
         self.destination_combo.clear()
@@ -204,7 +241,15 @@ class HfNetSubscriptionDialog(QDialog):
     def _create_net(self, *, private_one_time: bool) -> None:
         dialog = QDialog(self)
         dialog.setWindowTitle("Station-private one-time net" if private_one_time else "Create Net Directory Entry")
-        form = QFormLayout(dialog)
+        dialog_layout = QVBoxLayout(dialog)
+        form_scroll = QScrollArea(dialog)
+        form_scroll.setWidgetResizable(True)
+        form_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        form_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        form_body = QWidget(form_scroll)
+        form = QFormLayout(form_body)
+        form_scroll.setWidget(form_body)
+        dialog_layout.addWidget(form_scroll)
         name = QLineEdit(dialog); name.setPlaceholderText("Net name")
         frequency_key = QLineEdit(dialog); frequency_key.setPlaceholderText("Existing frequency resource key (optional)")
         frequency_hz = QLineEdit(dialog); frequency_hz.setPlaceholderText("Create station frequency in integer Hz if no key")

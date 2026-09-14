@@ -41,7 +41,7 @@ from freqinout.core.message_intelligence import TOPIC_TAXONOMY
 from freqinout.core.logger import log
 from freqinout.core.ncs_session_contract import NcsSessionSnapshot, write_ncs_session_snapshot
 from freqinout.core.settings_manager import SettingsManager
-from freqinout.gui.theme import resolve_theme, button_style
+from freqinout.gui.theme import resolve_theme, button_style, font_derived_widget_height
 from freqinout.utils.timezones import get_timezone
 
 
@@ -177,6 +177,7 @@ class LocalNCSTab(QWidget):
         session_layout.addWidget(self.ncs_session_summary_label)
 
         info_row = QHBoxLayout()
+        self._local_ncs_info_row = info_row
         info_row.addWidget(QLabel("Role:"))
         self.role_combo = QComboBox()
         self.role_combo.addItems(["NCS"])
@@ -195,6 +196,7 @@ class LocalNCSTab(QWidget):
         session_layout.addLayout(info_row)
 
         session_row = QHBoxLayout()
+        self._local_ncs_session_row = session_row
         self.start_net_btn = QPushButton("Start Net")
         self.join_net_btn = QPushButton("Join Net")
         self.end_net_btn = QPushButton("End Net")
@@ -209,6 +211,7 @@ class LocalNCSTab(QWidget):
         layout.addWidget(session_group)
 
         lookup_row = QHBoxLayout()
+        self._local_ncs_lookup_row = lookup_row
         lookup_row.addWidget(QLabel("Operator Lookup/Add:"))
         self.lookup_edit = QLineEdit()
         self.lookup_edit.setPlaceholderText("CALL / Name / State (or callsign only)")
@@ -223,6 +226,7 @@ class LocalNCSTab(QWidget):
         layout.addLayout(lookup_row)
 
         filter_row = QHBoxLayout()
+        self._local_ncs_filter_row = filter_row
         filter_row.addWidget(QLabel("Search:"))
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Callsign, name, city, state, category, notes")
@@ -267,6 +271,7 @@ class LocalNCSTab(QWidget):
         editor_row.addWidget(self.editor_target_label)
 
         editor_top = QHBoxLayout()
+        self._local_ncs_editor_row = editor_top
         editor_top.addWidget(QLabel("SitRep:"))
         self.status_combo = QComboBox()
         self.status_combo.addItems(STATUS_OPTIONS)
@@ -283,8 +288,9 @@ class LocalNCSTab(QWidget):
         self.notes_edit.setPlaceholderText(
             "Persistent notes for this check-in. Update as new local information arrives."
         )
-        self.notes_edit.setMinimumHeight(90)
-        self.notes_edit.setMaximumHeight(140)
+        notes_floor = font_derived_widget_height(self.notes_edit, vertical_padding=12, floor=72)
+        self.notes_edit.setMinimumHeight(notes_floor)
+        self.notes_edit.setMaximumHeight(max(notes_floor, self.notes_edit.fontMetrics().lineSpacing() * 5 + 20))
         editor_row.addWidget(self.notes_edit)
         layout.addLayout(editor_row)
 
@@ -317,6 +323,7 @@ class LocalNCSTab(QWidget):
         report_grid.addWidget(self.report_topics_label, 1, 1, 1, 5)
 
         topic_grid = QGridLayout()
+        self._local_ncs_topic_grid = topic_grid
         topic_columns = 3
         for idx, topic in enumerate(TOPIC_TAXONOMY):
             btn = QPushButton(str(topic))
@@ -338,11 +345,13 @@ class LocalNCSTab(QWidget):
         self.report_body_edit.setPlaceholderText(
             "Capture the field report in plain language. FIO will classify useful terms for message intelligence."
         )
-        self.report_body_edit.setMinimumHeight(88)
-        self.report_body_edit.setMaximumHeight(150)
+        report_floor = font_derived_widget_height(self.report_body_edit, vertical_padding=12, floor=72)
+        self.report_body_edit.setMinimumHeight(report_floor)
+        self.report_body_edit.setMaximumHeight(max(report_floor, self.report_body_edit.fontMetrics().lineSpacing() * 6 + 20))
         report_panel.addWidget(self.report_body_edit)
 
         report_actions = QHBoxLayout()
+        self._local_ncs_report_actions = report_actions
         self.save_report_btn = QPushButton("Save Report")
         self.clear_report_btn = QPushButton("Clear Report")
         self.report_save_label = QLabel("")
@@ -479,6 +488,49 @@ class LocalNCSTab(QWidget):
             pass
         self.apply_theme()
         self._update_clock_labels()
+        QTimer.singleShot(0, self._reflow_local_ncs_layouts)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._reflow_local_ncs_layouts()
+
+    def _reflow_local_ncs_layouts(self) -> None:
+        """Stack existing compact controls without changing Local NCS data/state."""
+        layouts = tuple(
+            layout
+            for name in (
+                "_local_ncs_info_row", "_local_ncs_session_row", "_local_ncs_lookup_row",
+                "_local_ncs_filter_row", "_local_ncs_editor_row", "_local_ncs_report_actions",
+            )
+            if (layout := getattr(self, name, None)) is not None
+        )
+
+        def required_width(layout) -> int:
+            widths = []
+            for index in range(layout.count()):
+                item = layout.itemAt(index)
+                widget = item.widget() if item is not None else None
+                if widget is not None:
+                    widths.append(max(widget.minimumWidth(), widget.minimumSizeHint().width()))
+            return sum(widths) + max(0, len(widths) - 1) * max(0, layout.spacing())
+
+        viewport = self.local_ncs_scroll_area.viewport()
+        available = max(1, int(viewport.width() or self.width()))
+        compact = available < max((required_width(layout) for layout in layouts), default=available)
+        direction = QHBoxLayout.TopToBottom if compact else QHBoxLayout.LeftToRight
+        for layout in layouts:
+            layout.setDirection(direction)
+        grid = getattr(self, "_local_ncs_topic_grid", None)
+        if grid is not None:
+            buttons = [grid.itemAt(index).widget() for index in range(grid.count())]
+            buttons = [button for button in buttons if button is not None]
+            while grid.count():
+                grid.takeAt(0)
+            columns = 2 if compact else 3
+            for index, button in enumerate(buttons):
+                grid.addWidget(button, index // columns, index % columns)
+            for column in range(columns):
+                grid.setColumnStretch(column, 1)
 
     def set_tab_active(self, active: bool) -> None:
         if active:

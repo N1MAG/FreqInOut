@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from freqinout.gui.theme import button_height_for_font
 
 
 @dataclass(frozen=True)
@@ -289,17 +290,17 @@ class SoftwareTaskEditor(QWidget):
         self.discover_button.setAccessibleName("Find installed software for this task")
         self.discover_button.setToolTip("Search common local installation and data locations only when requested")
         self.discover_button.clicked.connect(lambda: self.action_requested.emit("discover"))
-        self.discover_button.setMinimumHeight(32)
+        self.discover_button.setMinimumHeight(button_height_for_font(self.discover_button))
         self.discover_button.hide()
         self.task_action_button = QPushButton()
         self.task_action_button.clicked.connect(self._emit_action)
-        self.task_action_button.setMinimumHeight(32)
+        self.task_action_button.setMinimumHeight(button_height_for_font(self.task_action_button))
         self.task_action_button.hide()
         self.dirty_label = QLabel("No unsaved changes")
         self.dirty_label.setAccessibleName("Software draft state")
         self.save_button = QPushButton("Save selected software")
         self.save_button.clicked.connect(self._emit_save)
-        self.save_button.setMinimumHeight(32)
+        self.save_button.setMinimumHeight(button_height_for_font(self.save_button))
         self._layout_actions(compact=True)
         root.addLayout(actions)
         self.setAccessibleName("Software task editor")
@@ -317,13 +318,12 @@ class SoftwareTaskEditor(QWidget):
         if self._compact_actions is compact:
             return
         self._compact_actions = compact
-        action_height = 28 if compact else 32
         for widget in (
             self.discover_button,
             self.task_action_button,
             self.save_button,
         ):
-            widget.setMinimumHeight(action_height)
+            widget.setMinimumHeight(button_height_for_font(widget, vertical_padding=10 if compact else 12))
         for widget in (
             self.discover_button,
             self.task_action_button,

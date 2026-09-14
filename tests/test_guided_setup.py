@@ -1483,7 +1483,8 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
 
     assert 'setup_type_combo.setObjectName("guidedSetupType")' in dialog_block
     assert "dlg.setSizeGripEnabled(True)" in dialog_block
-    assert "dlg.setMinimumSize(640, 520)" in dialog_block
+    assert "dlg.setMinimumSize(0, 0)" in dialog_block
+    assert "availableGeometry().size()" in dialog_block
     assert "def _guided_dialog_initial_size() -> QSize:" in dialog_block
     assert "screen.availableGeometry().size()" in dialog_block
     assert "dlg.resize(_guided_dialog_initial_size())" in dialog_block

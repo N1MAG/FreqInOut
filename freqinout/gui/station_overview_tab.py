@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from typing import Callable, Iterable, Mapping, Optional
 
 from PySide6.QtCore import Qt, Signal
@@ -22,7 +23,8 @@ from freqinout.core.busy_state_service import BusyStateService
 from freqinout.core.scheduler_manual_control_service import SchedulerManualControlService
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.station_runtime_manager import DeviceRuntimeSnapshot, StationRuntimeManager
-from freqinout.gui.theme import led_style, resolve_theme
+from freqinout.gui.bounded_snapshot_worker import SnapshotWorkerController
+from freqinout.gui.theme import active_app_theme, led_style, resolve_theme
 
 
 def _state_badge_style(state: str, theme: dict[str, str]) -> str:
@@ -57,7 +59,37 @@ class StationOverviewTab(QWidget):
         self._refresh_dirty = False
         self._last_render_signature: tuple[object, ...] = tuple()
         self._control_center_snapshots: list[DeviceRuntimeSnapshot] = []
+        self._last_coherent_snapshots: tuple[DeviceRuntimeSnapshot, ...] = tuple()
+        self._snapshot_aux: dict[int, Mapping[str, object]] = {}
+        self._snapshot_generation = 0
+        # Theme resolution is a construction-time read.  Render and theme
+        # paths reuse this cache and never consult SettingsManager.
+        self._theme_cache = resolve_theme(self.settings)
         self._build_ui()
+        self._snapshot_worker: SnapshotWorkerController | None = None
+        self.destroyed.connect(self._stop_snapshot_worker)
+
+    def _ensure_snapshot_worker(self) -> SnapshotWorkerController:
+        worker = self._snapshot_worker
+        if worker is None:
+            worker = SnapshotWorkerController(self, self._on_snapshot_ready)
+            self._snapshot_worker = worker
+        return worker
+
+    def _stop_snapshot_worker(self) -> None:
+        worker = getattr(self, "_snapshot_worker", None)
+        if worker is not None:
+            worker.stop()
+            self._snapshot_worker = None
+
+    def shutdown(self) -> None:
+        """Stop the bounded refresh worker before an owning window exits."""
+
+        self._stop_snapshot_worker()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt virtual
+        self._stop_snapshot_worker()
+        super().closeEvent(event)
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -135,7 +167,19 @@ class StationOverviewTab(QWidget):
         self._busy_state_service = BusyStateService(store) if store is not None else None
         self._manual_control_service = SchedulerManualControlService(store) if store is not None else None
         self._refresh_dirty = True
-        self.refresh_from_manager(force=True)
+        self._snapshot_generation += 1
+        # A cache-only runtime snapshot is safe during initial attachment and
+        # preserves the existing eager-empty-state behavior.  Subsequent
+        # refreshes (including provider reads) run through the worker.
+        try:
+            payload = self._read_runtime_snapshot(
+                manager,
+                self._endpoint_summary_provider,
+                force=True,
+            )
+        except Exception:
+            payload = (tuple(), {})
+        self._accept_snapshot_payload(self._snapshot_generation, payload)
 
     def set_endpoint_summary_provider(
         self,
@@ -143,33 +187,71 @@ class StationOverviewTab(QWidget):
     ) -> None:
         self._endpoint_summary_provider = provider
         self._refresh_dirty = True
+        self._request_snapshot_refresh(force=False)
 
     def set_tab_active(self, active: bool) -> None:
         self._tab_active = bool(active)
         if active:
-            self.refresh_from_manager(force=self._refresh_dirty)
+            self._request_snapshot_refresh(force=self._refresh_dirty)
 
     def apply_theme(self) -> None:
-        self._refresh_dirty = True
-        self.refresh_from_manager(force=True)
+        # MainWindow already applied the application palette.  Repaint from
+        # the last coherent snapshot; no provider/store reads are allowed here.
+        self._theme_cache = active_app_theme(self._theme_cache)
+        self._render_cached_snapshots(self._last_coherent_snapshots, force=True)
 
     def refresh_from_manager(self, *, force: bool = False) -> None:
         if not force and not self._tab_active:
             return
+        self._request_snapshot_refresh(force=force)
+
+    def _request_snapshot_refresh(self, *, force: bool = False) -> None:
         manager = self._runtime_manager
         if manager is None:
-            self._rebuild_cards([])
+            self._last_coherent_snapshots = tuple()
+            self._snapshot_aux = {}
+            self._render_cached_snapshots(tuple(), force=True)
             return
+        self._snapshot_generation += 1
+        generation = self._snapshot_generation
+        provider = self._endpoint_summary_provider
+        manual_control_service = self._manual_control_service
+        busy_state_service = self._busy_state_service
+        self._ensure_snapshot_worker().request(
+            generation,
+            lambda manager=manager, provider=provider, manual_control_service=manual_control_service,
+            busy_state_service=busy_state_service, force=force: StationOverviewTab._read_runtime_snapshot(
+                manager,
+                provider,
+                manual_control_service=manual_control_service,
+                busy_state_service=busy_state_service,
+                force=force,
+            ),
+        )
+
+    @staticmethod
+    def _read_runtime_snapshot(
+        manager: Optional[StationRuntimeManager],
+        endpoint_provider: Optional[Callable[[], Mapping[int, Mapping[str, object]]]],
+        *,
+        manual_control_service: object = None,
+        busy_state_service: object = None,
+        force: bool = False,
+    ) -> tuple[tuple[DeviceRuntimeSnapshot, ...], dict[int, Mapping[str, object]]]:
+        if manager is None:
+            return tuple(), {}
         try:
             snapshots = manager.get_runtime_snapshots(force=force, cache_only=True)
         except TypeError:
             snapshots = manager.get_runtime_snapshots(force=force)
         summaries: Mapping[int, Mapping[str, object]] = {}
-        if callable(self._endpoint_summary_provider):
+        if callable(endpoint_provider):
             try:
-                summaries = self._endpoint_summary_provider() or {}
+                summaries = endpoint_provider() or {}
             except Exception:
                 summaries = {}
+        snapshots = [copy.deepcopy(snapshot) for snapshot in snapshots]
+        aux: dict[int, Mapping[str, object]] = {}
         for snapshot in snapshots:
             summary = summaries.get(int(snapshot.device_profile_id or 0))
             if not isinstance(summary, Mapping):
@@ -189,10 +271,59 @@ class StationOverviewTab(QWidget):
                     "control_state": state_code,
                     "label": label,
                 }
+            device_id = int(snapshot.device_profile_id or 0)
+            aux_row: dict[str, object] = {}
+            if manual_control_service is not None:
+                try:
+                    state = manual_control_service.get_state(device_id)
+                    aux_row["manual_state"] = {
+                        "state": str(getattr(state, "state", "on_schedule") or "on_schedule"),
+                        "suffix": str(getattr(state, "hold_until_utc", "") or "")
+                        .replace("T", " ")
+                        .replace("Z", "Z"),
+                    }
+                except Exception:
+                    pass
+            if busy_state_service is not None:
+                try:
+                    busy = busy_state_service.state_for_radio(device_id)
+                    aux_row["busy_state"] = {
+                        "busy": bool(getattr(busy, "busy", False)),
+                        "summary": str(getattr(busy, "summary", "") or ""),
+                        "reason_code": str(getattr(busy, "reason_code", "") or ""),
+                    }
+                except Exception:
+                    pass
+            if aux_row:
+                aux[device_id] = aux_row
+        return tuple(snapshots), aux
+
+    def _on_snapshot_ready(self, generation: int, payload: object, error: object) -> None:
+        if int(generation) != self._snapshot_generation:
+            return
+        if error is not None or not isinstance(payload, tuple) or len(payload) != 2:
+            return
+        self._accept_snapshot_payload(generation, payload)
+
+    def _accept_snapshot_payload(self, generation: int, payload: object) -> None:
+        if int(generation) != self._snapshot_generation:
+            return
+        snapshots, aux = payload
+        self._last_coherent_snapshots = tuple(copy.deepcopy(snapshots))
+        self._snapshot_aux = dict(aux)
+        self._refresh_dirty = False
+        self._render_cached_snapshots(self._last_coherent_snapshots, force=False)
+
+    def _render_cached_snapshots(
+        self,
+        snapshots: Iterable[DeviceRuntimeSnapshot],
+        *,
+        force: bool = False,
+    ) -> None:
+        snapshots = tuple(snapshots)
         signature = self._overview_signature(snapshots)
         if not force and signature == self._last_render_signature:
             return
-        self._refresh_dirty = False
         self._last_render_signature = signature
         self._rebuild_cards(snapshots)
 
@@ -278,7 +409,7 @@ class StationOverviewTab(QWidget):
             self._last_render_signature = tuple()
             return
 
-        theme = resolve_theme(self.settings)
+        theme = dict(self._theme_cache)
         primary = next((snap for snap in snaps if snap.runtime_primary), None)
         primary_name = primary.name if primary is not None else "none"
         observer_count = len([snap for snap in snaps if snap.device_class == "observer"])
@@ -384,34 +515,26 @@ class StationOverviewTab(QWidget):
         return labels.get(state, "On Schedule")
 
     def _manual_state_for(self, snapshot: DeviceRuntimeSnapshot) -> tuple[str, str]:
-        service = self._manual_control_service
-        if service is None:
-            return ("on_schedule", "")
-        try:
-            state = service.get_state(int(snapshot.device_profile_id or 0))
-        except Exception:
-            return ("on_schedule", "")
-        suffix = ""
-        if state.hold_until_utc:
-            suffix = str(state.hold_until_utc or "").replace("T", " ").replace("Z", "Z")
-        return (state.state, suffix)
+        cached = self._snapshot_aux.get(int(snapshot.device_profile_id or 0), {})
+        manual = cached.get("manual_state") if isinstance(cached, Mapping) else None
+        if isinstance(manual, Mapping):
+            return (
+                str(manual.get("state", "on_schedule") or "on_schedule"),
+                str(manual.get("suffix", "") or ""),
+            )
+        return ("on_schedule", "")
 
     def _busy_label_for(self, snapshot: DeviceRuntimeSnapshot) -> str:
         if snapshot.ptt_active or snapshot.shared_ptt_blocked:
             return "Busy: PTT"
-        service = self._busy_state_service
-        if service is None:
-            return ""
-        try:
-            busy = service.state_for_radio(int(snapshot.device_profile_id or 0))
-        except Exception:
-            return ""
-        if not busy.busy:
-            return ""
-        summary = str(busy.summary or busy.reason_code or "Busy").strip()
-        if summary.lower().startswith("busy"):
-            return summary
-        return f"Busy: {summary}"
+        cached = self._snapshot_aux.get(int(snapshot.device_profile_id or 0), {})
+        busy = cached.get("busy_state") if isinstance(cached, Mapping) else None
+        if isinstance(busy, Mapping):
+            if not bool(busy.get("busy", False)):
+                return ""
+            summary = str(busy.get("summary") or busy.get("reason_code") or "Busy").strip()
+            return summary if summary.lower().startswith("busy") else f"Busy: {summary}"
+        return ""
 
     def _control_state_text(self, snapshot: DeviceRuntimeSnapshot) -> str:
         busy_label = self._busy_label_for(snapshot)
@@ -537,7 +660,7 @@ class StationOverviewTab(QWidget):
 
         header = QHBoxLayout()
         title = QLabel(snapshot.name or f"Device {snapshot.device_profile_id}")
-        title.setStyleSheet("font-size: 15px; font-weight: 700;")
+        title.setStyleSheet("font-weight: 700;")
         header.addWidget(title, 1)
         if snapshot.device_class == "observer":
             role_badge = QLabel("Observer / SDR")

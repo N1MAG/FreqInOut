@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QToolButton,
     QMenu,
     QStyle,
+    QSizePolicy,
     QHeaderView,
     QTableWidget,
     QTableWidgetItem,
@@ -106,6 +107,7 @@ from freqinout.gui.qsy_helper import current_scheduler_freq
 from freqinout.gui.help_registry import resolve_help_host
 from freqinout.gui.plan_context_label import PlanContextLabel
 from freqinout.gui.theme import (
+    contrast_text_for_background,
     resolve_theme,
     resolve_ui_text_scale,
     BAND_COLORS_DARK,
@@ -871,6 +873,24 @@ class StationsMapTab(QWidget):
         self._prop_target_syncing: bool = False
         self._map_stack: Optional[QStackedWidget] = None
         self._map_loading_label: Optional[QLabel] = None
+        self._map_loading_overlay: Optional[QFrame] = None
+        self._map_loading_overlay_label: Optional[QLabel] = None
+        self._map_surface_ready: bool = False
+        self._map_surface_payload_applied: bool = False
+        self._map_first_load_isolated: bool = False
+        self._map_surface_presented: bool = False
+        self._map_detached_page = None
+        self._map_attached_page = None
+        self._map_surface_reveal_generation: int = 0
+        self._map_surface_reveal_probe_pending: bool = False
+        self._map_surface_presentation_started_at: float = 0.0
+        self._map_surface_lifecycle_state: str = "idle"
+        self._map_surface_prepare_retry_count: int = 0
+        self._map_surface_reveal_retry_count: int = 0
+        self._map_surface_geometry_phase: str = ""
+        self._map_surface_geometry_signature_value: Optional[tuple] = None
+        self._map_surface_geometry_changed_at: float = 0.0
+        self._map_surface_geometry_stable_samples: int = 0
         self._map_canvas_splitter: Optional[QSplitter] = None
         self._map_selected_panel: Optional[QFrame] = None
         self._map_selected_title: Optional[QLabel] = None
@@ -893,6 +913,12 @@ class StationsMapTab(QWidget):
         self._controls_drawer_open: bool = False
         self._controls_drawer_threshold: int = 1280
         self._drawer_mode: bool = True
+        self._applied_controls_drawer_open: Optional[bool] = None
+        self._map_filter_columns: Optional[int] = None
+        self._map_canvas_layout_signature: Optional[tuple[bool, int, int]] = None
+        self._map_has_leaflet_page: bool = False
+        self._last_leaflet_viewport_signature: Optional[tuple[int, int, int]] = None
+        self._leaflet_viewport_retry_count: int = 0
         self._main_splitter: Optional[QSplitter] = None
         self._controls_panel: Optional[QWidget] = None
         self._controls_handle_button: Optional[QToolButton] = None
@@ -921,6 +947,18 @@ class StationsMapTab(QWidget):
         self._map_search_timer.setSingleShot(True)
         self._map_search_timer.setInterval(260)
         self._map_search_timer.timeout.connect(self._on_map_search_timeout)
+        self._map_geometry_timer = QTimer(self)
+        self._map_geometry_timer.setSingleShot(True)
+        self._map_geometry_timer.setInterval(0)
+        self._map_geometry_timer.timeout.connect(self._flush_map_geometry_reflow)
+        self._map_surface_prepare_timer = QTimer(self)
+        self._map_surface_prepare_timer.setSingleShot(True)
+        self._map_surface_prepare_timer.setInterval(75)
+        self._map_surface_prepare_timer.timeout.connect(self._on_map_visible_deferred)
+        self._leaflet_viewport_timer = QTimer(self)
+        self._leaflet_viewport_timer.setSingleShot(True)
+        self._leaflet_viewport_timer.setInterval(0)
+        self._leaflet_viewport_timer.timeout.connect(self._flush_leaflet_viewport_settle)
 
         self._build_ui()
         self._refresh_group_filter_options()
@@ -1186,6 +1224,8 @@ class StationsMapTab(QWidget):
         payload = {
             "event": str(event or "").strip(),
             "state": getattr(self, "_map_runtime_state", "cold"),
+            "surface_lifecycle": getattr(self, "_map_surface_lifecycle_state", "idle"),
+            "surface_generation": int(getattr(self, "_map_surface_reveal_generation", 0) or 0),
             "visible": bool(getattr(self, "_map_visible", False)),
             "initialized": bool(getattr(self, "_map_initialized", False)),
             "loading": bool(getattr(self, "_map_page_loading", False)),
@@ -1271,6 +1311,12 @@ class StationsMapTab(QWidget):
         self._map_runtime_detail = str(detail or "").strip()
         self._map_last_error = str(error or "").strip()
         self._update_map_support_card()
+        overlay_label = getattr(self, "_map_loading_overlay_label", None)
+        if overlay_label is not None and normalized in {"cold", "warming", "loading", "degraded"}:
+            if normalized == "degraded":
+                overlay_label.setText(self._map_runtime_detail or "Map preview is unavailable.")
+            else:
+                overlay_label.setText(self._map_runtime_detail or "Preparing map...")
 
     def _request_map_refresh(self, *, level: str = "medium", reason: str = "", preserve_view: object = True) -> None:
         if getattr(self, "_is_shutting_down", False):
@@ -1411,6 +1457,8 @@ class StationsMapTab(QWidget):
         return f"Refreshing {label}."
 
     def _enter_map_degraded(self, detail: str, *, reason: str = "", exc: Exception | None = None) -> None:
+        if not getattr(self, "_map_surface_ready", False):
+            self._map_surface_lifecycle_state = "degraded"
         error_text = str(exc or "").strip()
         self._set_map_runtime_state("degraded", detail, error=error_text)
         self._emit_map_event("degraded", reason=reason, error=error_text or detail)
@@ -1462,6 +1510,15 @@ class StationsMapTab(QWidget):
         if card is None:
             return
         ready = self._map_runtime_state == "ready"
+        # Once a usable map is on screen, background refresh feedback must stay
+        # in the compact strip. Expanding and collapsing this card shifts the
+        # native WebEngine viewport and presents as a screen swipe.
+        routine_busy = bool(
+            self._map_runtime_state in {"loading", "warming"}
+            and getattr(self, "_map_initialized", False)
+            and getattr(self, "_map_load_ok", False)
+        )
+        compact = ready or routine_busy
         label = getattr(self, "_map_support_label", None)
         if label is not None:
             text = self._map_runtime_detail or "Map is standing by."
@@ -1477,12 +1534,17 @@ class StationsMapTab(QWidget):
             label.setToolTip(self._map_support_summary())
         support_layout = getattr(self, "_map_support_layout", None)
         if support_layout is not None:
-            if ready:
+            if compact:
                 support_layout.setContentsMargins(8, 3, 8, 3)
             else:
                 support_layout.setContentsMargins(10, 8, 10, 8)
+        compact_height = 34
         try:
-            card.setMaximumHeight(34 if ready else 16777215)
+            compact_height = max(compact_height, int(self.fontMetrics().height()) + 14)
+        except Exception:
+            pass
+        try:
+            card.setMaximumHeight(compact_height if compact else 16777215)
         except Exception:
             pass
         theme = self._theme_snapshot()
@@ -1511,18 +1573,21 @@ class StationsMapTab(QWidget):
             " background: transparent;"
             "}"
         )
+        show_support_actions = not compact
         if getattr(self, "_map_retry_btn", None) is not None:
             self._map_retry_btn.setStyleSheet(button_style("warning" if role in {"warning", "danger"} else "secondary", theme))
-            self._map_retry_btn.setVisible(not ready)
+            self._map_retry_btn.setVisible(show_support_actions)
         if getattr(self, "_map_reload_btn", None) is not None:
             self._map_reload_btn.setStyleSheet(button_style("secondary", theme))
-            self._map_reload_btn.setVisible(not ready)
+            self._map_reload_btn.setVisible(show_support_actions)
         if getattr(self, "_map_copy_summary_btn", None) is not None:
             self._map_copy_summary_btn.setStyleSheet(button_style("secondary", theme))
-            self._map_copy_summary_btn.setVisible(self._map_runtime_state in {"loading", "warming", "degraded"})
+            self._map_copy_summary_btn.setVisible(
+                show_support_actions and self._map_runtime_state in {"loading", "warming", "degraded"}
+            )
         if getattr(self, "_map_support_help_btn", None) is not None:
             self._map_support_help_btn.setStyleSheet(button_style("muted", theme))
-            self._map_support_help_btn.setVisible(not ready)
+            self._map_support_help_btn.setVisible(show_support_actions)
 
     def _map_marker_noun(self) -> str:
         try:
@@ -1569,10 +1634,13 @@ class StationsMapTab(QWidget):
         if not self._map_visible:
             if self._js8_timer is not None:
                 self._js8_timer.stop()
+            prepare_timer = getattr(self, "_map_surface_prepare_timer", None)
+            if isinstance(prepare_timer, QTimer):
+                prepare_timer.stop()
             return
         if not self._app_active:
-            self._map_dirty = True
-            self._set_map_runtime_state("warming", "Preparing the map view.")
+            if not self._map_initialized or not self._map_load_ok:
+                self._set_map_runtime_state("warming", "Preparing the map view.")
             self._emit_map_event("activation_deferred_inactive")
             return
         if self._map_visible and not self._ingest_started:
@@ -1580,16 +1648,27 @@ class StationsMapTab(QWidget):
             self._maybe_start_map_ingest()
         elif self._map_visible and self._js8_timer is not None and self._ingest_started and not self._js8_timer.isActive():
             self._js8_timer.start()
-        if self._map_visible:
-            self._set_map_runtime_state("warming", "Preparing the map view and refreshing station data.")
-            self._emit_map_event("activation_started")
-            self._map_dirty = True
-            QTimer.singleShot(0, self._on_map_visible_deferred)
+        if self._map_initialized and self._map_load_ok and not self._map_dirty and not self._pending_refresh_level:
+            # Warm re-entry reuses the live page. Do not manufacture a dirty
+            # refresh or expand the status card when no source changed.
+            self._set_map_runtime_state("ready", self._map_ready_detail_text())
+            self._emit_map_event("activation_ready")
+            self._schedule_leaflet_viewport_settle()
+            return
+        self._set_map_runtime_state("warming", "Preparing the map view and refreshing station data.")
+        self._emit_map_event("activation_started")
+        begin_settle = getattr(self, "_begin_map_surface_geometry_settle", None)
+        if callable(begin_settle):
+            begin_settle("precreate" if getattr(self, "web", None) is None else "attached")
+        schedule_prepare = getattr(self, "_schedule_map_surface_prepare", None)
+        if callable(schedule_prepare):
+            schedule_prepare(25)
+        else:
+            QTimer.singleShot(25, self._on_map_visible_deferred)
 
     def set_app_active(self, active: bool) -> None:
         self._app_active = bool(active)
         if not self._app_active:
-            self._map_dirty = True
             if self._js8_timer is not None:
                 self._js8_timer.stop()
             self._emit_map_event("ui_paused_inactive")
@@ -1597,9 +1676,21 @@ class StationsMapTab(QWidget):
         if self._map_visible and not self._is_shutting_down:
             if self._js8_timer is not None and self._ingest_started and not self._js8_timer.isActive():
                 self._js8_timer.start()
+            if self._map_initialized and self._map_load_ok and not self._map_dirty and not self._pending_refresh_level:
+                self._set_map_runtime_state("ready", self._map_ready_detail_text())
+                self._emit_map_event("ui_resumed_ready")
+                self._schedule_leaflet_viewport_settle()
+                return
             self._set_map_runtime_state("warming", "Resuming map view.")
             self._emit_map_event("ui_resumed")
-            QTimer.singleShot(0, self._on_map_visible_deferred)
+            begin_settle = getattr(self, "_begin_map_surface_geometry_settle", None)
+            if callable(begin_settle):
+                begin_settle("precreate" if getattr(self, "web", None) is None else "attached")
+            schedule_prepare = getattr(self, "_schedule_map_surface_prepare", None)
+            if callable(schedule_prepare):
+                schedule_prepare(25)
+            else:
+                QTimer.singleShot(25, self._on_map_visible_deferred)
 
     def _on_js8_rx_messages(self, messages: List[dict]) -> None:
         """
@@ -1953,7 +2044,9 @@ class StationsMapTab(QWidget):
             )
         for group_label, labels in quick_groups:
             group_title = QLabel(group_label, popover)
-            group_title.setStyleSheet("color: #5f6b76; font-weight: 700;")
+            group_title.setStyleSheet(
+                f"color: {self._theme_snapshot().get('text_muted', '#5f6b76')}; font-weight: 700;"
+            )
             layout.addWidget(group_title)
             row = QGridLayout()
             row.setContentsMargins(0, 0, 0, 0)
@@ -1979,7 +2072,7 @@ class StationsMapTab(QWidget):
         if path_limited:
             note = QLabel("Paths use the last 24h or less; older contacts are shown as station history.", popover)
             note.setWordWrap(True)
-            note.setStyleSheet("color: #5f6b76;")
+            note.setStyleSheet(f"color: {self._theme_snapshot().get('text_muted', '#5f6b76')};")
             layout.addWidget(note)
         else:
             custom_row = QHBoxLayout()
@@ -2057,11 +2150,40 @@ class StationsMapTab(QWidget):
         except Exception:
             pass
         try:
+            self._map_surface_prepare_timer.stop()
+        except Exception:
+            pass
+        try:
             if self._js8_rx_hub and self._js8_rx_registered:
                 self._js8_rx_hub.unregister_listener(self._on_js8_rx_messages)
                 self._js8_rx_registered = False
         except Exception:
             pass
+        detached_page = getattr(self, "_map_detached_page", None)
+        if detached_page is not None:
+            try:
+                detached_page.loadFinished.disconnect(self._on_map_load_finished)
+            except Exception:
+                pass
+            try:
+                detached_page.titleChanged.disconnect(self._on_map_page_title_changed)
+            except Exception:
+                pass
+            try:
+                detached_page.deleteLater()
+            except Exception:
+                pass
+            self._map_detached_page = None
+        attached_page = getattr(self, "_map_attached_page", None)
+        if attached_page is not None:
+            try:
+                attached_page.loadFinished.disconnect(self._on_map_load_finished)
+            except Exception:
+                pass
+            try:
+                attached_page.titleChanged.disconnect(self._on_map_page_title_changed)
+            except Exception:
+                pass
         try:
             if self.web is not None:
                 try:
@@ -2104,6 +2226,7 @@ class StationsMapTab(QWidget):
                 except Exception:
                     pass
                 self.web = None
+                self._map_attached_page = None
         except Exception:
             pass
         try:
@@ -2161,7 +2284,7 @@ class StationsMapTab(QWidget):
         return resolve_theme(self.settings)
 
     def apply_theme(self) -> None:
-        theme = self._theme_snapshot(force_reload=True)
+        theme = self._theme_snapshot()
         if self._controls_button is not None:
             self._controls_button.setStyleSheet(button_style("muted", theme))
         if getattr(self, "_help_button", None) is not None:
@@ -2179,6 +2302,7 @@ class StationsMapTab(QWidget):
         self._update_map_view_status_label(theme=theme)
         self._sync_map_control_button_widths()
         self._update_splitter_indicator_state(theme=theme)
+        self._reflow_map_filter_bar()
         try:
             if self.prop_overlay_enabled:
                 target_label, best_band, best_score = getattr(
@@ -2470,6 +2594,8 @@ class StationsMapTab(QWidget):
         prop_layout.addWidget(self.prop_badge)
 
         map_container = QWidget(self)
+        self._map_container = map_container
+        map_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         map_layout = QVBoxLayout(map_container)
         map_layout.setContentsMargins(0, 0, 0, 0)
         map_layout.setSpacing(4)
@@ -2763,30 +2889,21 @@ class StationsMapTab(QWidget):
         self._map_traffic_subtype_field = filter_field("Type", self._map_traffic_subtype_combo, 130, 180)
         self._map_path_scope_field = filter_field("Paths", self._map_path_scope_combo, 150, 220)
         filter_grid = QGridLayout(filter_bar)
+        self._map_filter_grid = filter_grid
         filter_grid.setContentsMargins(0, 0, 0, 0)
         filter_grid.setHorizontalSpacing(10)
         filter_grid.setVerticalSpacing(6)
-        filter_grid.addWidget(filter_field("View", self._map_mode_combo, 210, 280), 0, 0, 1, 2)
-        filter_grid.addWidget(self._map_traffic_subtype_field, 0, 2)
-        filter_grid.addWidget(filter_field("Group", self.group_filter_combo, 170, 230), 0, 3, 1, 2)
-        filter_grid.addWidget(filter_field("Age", self._map_since_button, 118, 150), 0, 5)
-        filter_grid.addWidget(filter_field("Topic", self._map_topic_filter_combo, 185, 260), 0, 6, 1, 2)
-        filter_grid.addWidget(self._map_intel_sensitivity_field, 0, 8)
-        filter_grid.addWidget(self._map_path_scope_field, 0, 9)
-        filter_grid.addWidget(filter_field("Search", self._map_search_edit), 1, 0, 1, 8)
-        filter_grid.addWidget(self._map_clear_filters_button, 1, 8, alignment=Qt.AlignBottom)
-        filter_grid.addWidget(self._map_clear_layers_button, 1, 9, alignment=Qt.AlignBottom)
-        filter_grid.addWidget(self._now_reachable_label, 2, 0, 1, 10, alignment=Qt.AlignLeft)
-        filter_grid.setColumnStretch(0, 0)
-        filter_grid.setColumnStretch(1, 0)
-        filter_grid.setColumnStretch(2, 0)
-        filter_grid.setColumnStretch(3, 0)
-        filter_grid.setColumnStretch(4, 0)
-        filter_grid.setColumnStretch(5, 0)
-        filter_grid.setColumnStretch(6, 0)
-        filter_grid.setColumnStretch(7, 1)
-        filter_grid.setColumnStretch(8, 1)
-        filter_grid.setColumnStretch(9, 1)
+        self._map_filter_fields = (
+            filter_field("View", self._map_mode_combo, 210, 280),
+            self._map_traffic_subtype_field,
+            filter_field("Group", self.group_filter_combo, 170, 230),
+            filter_field("Age", self._map_since_button, 118, 150),
+            filter_field("Topic", self._map_topic_filter_combo, 185, 260),
+            self._map_intel_sensitivity_field,
+            self._map_path_scope_field,
+        )
+        self._map_search_field = filter_field("Search", self._map_search_edit)
+        self._reflow_map_filter_bar()
         map_layout.addWidget(filter_bar)
 
         self._map_canvas_splitter = QSplitter(Qt.Horizontal, map_container)
@@ -2795,6 +2912,11 @@ class StationsMapTab(QWidget):
 
         if _ensure_webengine_imported():
             self._map_stack = QStackedWidget(self._map_canvas_splitter)
+            # The browser's dynamic content hint must never redistribute the
+            # surrounding Map workspace or the top-level window. The splitter
+            # owns this viewport's size.
+            self._map_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+            self._map_stack.setMinimumSize(0, 0)
             loading_widget = QWidget(self._map_stack)
             loading_layout = QVBoxLayout(loading_widget)
             loading_layout.setContentsMargins(0, 0, 0, 0)
@@ -3003,11 +3125,13 @@ class StationsMapTab(QWidget):
             return
         panel = getattr(self, "_map_selected_panel", None)
         try:
-            total = max(1, sum(splitter.sizes()) or splitter.width())
-            if panel is None or not panel.isVisible():
-                splitter.setSizes([total, 0])
+            total = max(1, int(splitter.width() or sum(splitter.sizes()) or 1))
+            visible = bool(panel is not None and panel.isVisible())
+            side = self._map_selected_panel_target_width(total) if visible else 0
+            signature = (visible, total, side)
+            if signature == getattr(self, "_map_canvas_layout_signature", None):
                 return
-            side = self._map_selected_panel_target_width(total)
+            self._map_canvas_layout_signature = signature
             splitter.setSizes([max(1, total - side), max(0, side)])
         except Exception:
             pass
@@ -3848,19 +3972,23 @@ class StationsMapTab(QWidget):
                 return selected
         return values[0] if values else ""
 
-    @staticmethod
-    def _map_detail_shell_html(heading: str, rows: List[tuple[str, object]], *, note: str = "") -> str:
+    def _map_detail_shell_html(self, heading: str, rows: List[tuple[str, object]], *, note: str = "") -> str:
+        theme = resolve_theme(self.settings)
+        detail_text = theme["text"]
+        detail_muted = theme["text_muted"]
+        detail_info = theme["info"]
+        detail_surface = theme["surface_alt"]
         css = """
         <style>
           body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-          .fio-detail-card { color: #1f2933; }
+          .fio-detail-card { color: %s; }
           .fio-detail-heading { font-weight: 800; margin: 0 0 8px 0; }
           .fio-detail-row { margin: 4px 0; }
-          .fio-detail-label { color: #5d6b78; font-weight: 700; }
-          .fio-detail-value { color: #1f2933; white-space: normal; }
-          .fio-note { margin-top: 8px; padding: 8px; border-left: 3px solid #0b7fab; background: #f3f8fb; white-space: pre-line; }
+          .fio-detail-label { color: %s; font-weight: 700; }
+          .fio-detail-value { color: %s; white-space: normal; }
+          .fio-note { margin-top: 8px; padding: 8px; border-left: 3px solid %s; background: %s; white-space: pre-line; }
         </style>
-        """
+        """ % (detail_text, detail_muted, detail_text, detail_info, detail_surface)
         parts = [css, "<div class='fio-detail-card'>", f"<div class='fio-detail-heading'>{html.escape(heading)}</div>"]
         row_count = 0
         for label, value in rows:
@@ -4181,23 +4309,38 @@ class StationsMapTab(QWidget):
             multiline=True,
         )
 
+        theme = resolve_theme(self.settings)
+        detail_text = theme["text"]
+        detail_muted = theme["text_muted"]
+        detail_info = theme["info"]
+        detail_surface = theme["surface_alt"]
         css = """
         <style>
           body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-          .fio-detail-card { color: #1f2933; }
+          .fio-detail-card { color: %s; }
           .fio-detail-section { margin: 0 0 10px 0; }
           .fio-detail-heading { font-weight: 700; margin: 0 0 4px 0; }
           .fio-detail-row { margin: 4px 0; }
-          .fio-detail-label { color: #5d6b78; font-weight: 700; }
-          .fio-detail-value { color: #1f2933; white-space: normal; }
+          .fio-detail-label { color: %s; font-weight: 700; }
+          .fio-detail-value { color: %s; white-space: normal; }
           .fio-chip-row { margin: 4px 0 6px 0; }
-          .fio-chip { display: inline-block; margin: 0 4px 4px 0; padding: 2px 7px; border-radius: 8px; background: #d8edf8; color: #07344d; font-weight: 700; }
-          .fio-chip.muted { background: #e3e8ee; color: #5d6b78; }
-          .fio-summary { margin-top: 6px; padding: 8px; border-left: 3px solid #0b7fab; background: #f3f8fb; white-space: pre-line; }
+          .fio-chip { display: inline-block; margin: 0 4px 4px 0; padding: 2px 7px; border-radius: 8px; background: %s; color: %s; font-weight: 700; }
+          .fio-chip.muted { background: %s; color: %s; }
+          .fio-summary { margin-top: 6px; padding: 8px; border-left: 3px solid %s; background: %s; white-space: pre-line; }
           .fio-evidence-list { margin: 6px 0 0 0; padding-left: 18px; }
           .fio-evidence-list li { margin: 3px 0; }
         </style>
-        """
+        """ % (
+            detail_text,
+            detail_muted,
+            detail_text,
+            self._hex_to_rgba(detail_info, 0.16),
+            detail_info,
+            self._hex_to_rgba(detail_surface, 0.85),
+            detail_muted,
+            detail_info,
+            self._hex_to_rgba(detail_info, 0.10),
+        )
         parts: List[str] = [css, "<div class='fio-detail-card'>"]
         if kind == "regional_intelligence":
             source_mix = payload.get("source_mix")
@@ -4399,7 +4542,9 @@ class StationsMapTab(QWidget):
                 f"window._leafletMap.setView([{lat:.6f}, {lon:.6f}], Math.max(window._leafletMap.getZoom(), 6));"
                 "}"
             )
-            self.web.page().runJavaScript(js)
+            page = self._map_script_page()
+            if page is not None:
+                page.runJavaScript(js)
         except Exception:
             pass
 
@@ -5533,20 +5678,90 @@ class StationsMapTab(QWidget):
             return
         self._controls_top_spacer.setFixedHeight(0)
 
+    def _reflow_map_filter_bar(self) -> None:
+        """Lay out principal map filters from measured available width only.
+
+        This intentionally owns no data refresh: resize, theme, and text-scale
+        changes only move already-created controls and keep Search/Clear visible.
+        """
+        grid = getattr(self, "_map_filter_grid", None)
+        fields = tuple(getattr(self, "_map_filter_fields", ()) or ())
+        search = getattr(self, "_map_search_field", None)
+        clear = getattr(self, "_map_clear_filters_button", None)
+        clear_layers = getattr(self, "_map_clear_layers_button", None)
+        reachable = getattr(self, "_now_reachable_label", None)
+        if grid is None or not fields or search is None or clear is None or clear_layers is None:
+            return
+        bar = getattr(self, "_map_filter_bar", None)
+        available = int(bar.width() if bar is not None else self.width())
+        if available <= 1:
+            return
+        # Derive responsive breakpoints from the controls' live font/content
+        # widths instead of assuming a particular desktop scale.
+        field_width = max(
+            max(
+                int(field.minimumWidth() or 0),
+                int(field.minimumSizeHint().width() or 0),
+                int(field.sizeHint().width() or 0),
+            )
+            for field in fields
+        )
+        field_width = max(
+            field_width,
+            int(clear.sizeHint().width() or 0),
+            int(clear_layers.sizeHint().width() or 0),
+        )
+        spacing = max(0, int(grid.horizontalSpacing() or 0))
+        columns = 4 if available >= (field_width * 4) + (spacing * 3) else (
+            2 if available >= (field_width * 2) + spacing else 1
+        )
+        previous_columns = getattr(self, "_map_filter_columns", None)
+        if columns == previous_columns:
+            return
+        self._map_filter_columns = columns
+        while grid.count():
+            grid.takeAt(0)
+        if previous_columns is not None:
+            for column in range(int(grid.columnCount())):
+                grid.setColumnStretch(column, 0)
+        for column in range(columns):
+            grid.setColumnStretch(column, 1)
+        for index, field in enumerate(fields):
+            grid.addWidget(field, index // columns, index % columns)
+        action_row = (len(fields) + columns - 1) // columns
+        if columns == 1:
+            grid.addWidget(search, action_row, 0)
+            grid.addWidget(clear, action_row + 1, 0)
+            grid.addWidget(clear_layers, action_row + 2, 0)
+            info_row = action_row + 3
+        elif columns == 2:
+            grid.addWidget(search, action_row, 0, 1, 2)
+            grid.addWidget(clear, action_row + 1, 0, alignment=Qt.AlignBottom)
+            grid.addWidget(clear_layers, action_row + 1, 1, alignment=Qt.AlignBottom)
+            info_row = action_row + 2
+        else:
+            grid.addWidget(search, action_row, 0, 1, 2)
+            grid.addWidget(clear, action_row, 2, alignment=Qt.AlignBottom)
+            grid.addWidget(clear_layers, action_row, 3, alignment=Qt.AlignBottom)
+            info_row = action_row + 1
+        grid.addWidget(reachable, info_row, 0, 1, columns, alignment=Qt.AlignLeft)
+
     def _set_controls_drawer_open(self, open_drawer: bool) -> None:
         if self._main_splitter is None:
             return
         self._controls_drawer_open = bool(open_drawer)
         total = max(1, self.width())
         panel_width = min(300, max(220, int(total * 0.27)))
-        if self._controls_drawer_open:
+        state_changed = self._applied_controls_drawer_open is not self._controls_drawer_open
+        self._applied_controls_drawer_open = self._controls_drawer_open
+        if self._controls_drawer_open and state_changed:
             controls_scroll = getattr(self, "_controls_scroll", None)
             if controls_scroll is not None:
                 controls_scroll.setMinimumWidth(300)
                 controls_scroll.setMaximumWidth(520)
                 controls_scroll.setVisible(True)
             self._main_splitter.setSizes([panel_width, max(1, total - panel_width)])
-        else:
+        elif not self._controls_drawer_open and state_changed:
             controls_scroll = getattr(self, "_controls_scroll", None)
             if controls_scroll is not None:
                 controls_scroll.setMinimumWidth(0)
@@ -5566,15 +5781,38 @@ class StationsMapTab(QWidget):
                 self._controls_button.setVisible(True)
         self._sync_controls_top_alignment()
         self._set_controls_drawer_open(self._controls_drawer_open)
-        self._update_splitter_indicator_state()
-        self._position_splitter_indicator()
+
+    def _schedule_map_geometry_reflow(self) -> None:
+        if self._is_shutting_down:
+            return
+        invalidate_settle = getattr(self, "_invalidate_map_surface_geometry_settle", None)
+        if callable(invalidate_settle):
+            invalidate_settle()
+        timer = getattr(self, "_map_geometry_timer", None)
+        if isinstance(timer, QTimer):
+            timer.start(0)
+            return
+        self._flush_map_geometry_reflow()
+
+    def _flush_map_geometry_reflow(self) -> None:
+        if self._is_shutting_down or self.width() <= 1 or self.height() <= 1:
+            return
+        self._reflow_map_filter_bar()
+        self._update_drawer_mode()
+        self._sync_map_canvas_splitter()
+        self._sync_map_loading_overlay_geometry()
+        self._schedule_leaflet_viewport_settle()
+
+    def on_first_visible_layout_ready(self) -> None:
+        """Settle responsive geometry after the page has its real stack viewport."""
+        self._flush_map_geometry_reflow()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        self._update_drawer_mode()
-        self._position_splitter_indicator()
-        self._sync_controls_top_alignment()
-        self._sync_map_canvas_splitter()
+        # Splitter and grid writes can cause another resize, especially around a
+        # native QWebEngineView.  Coalesce a resize storm into one idempotent
+        # geometry pass after Qt has delivered the final viewport.
+        self._schedule_map_geometry_reflow()
 
     def _sync_city_pop_enabled(self) -> None:
         enabled = bool(self.show_cities or self.show_states)
@@ -13137,8 +13375,29 @@ class StationsMapTab(QWidget):
             log.error("StationsMap: failed writing map html: %s", e)
             return None
 
+    def _map_script_page(self):
+        """Return the page that owns the current Map document."""
+        detached_page = getattr(self, "_map_detached_page", None)
+        if detached_page is not None:
+            return detached_page
+        web = getattr(self, "web", None)
+        if web is None:
+            return None
+        try:
+            return web.page()
+        except Exception:
+            return None
+
+    def _map_navigation_target(self):
+        """Keep macOS cold navigation detached from the native view."""
+        detached_page = getattr(self, "_map_detached_page", None)
+        if detached_page is not None:
+            return detached_page
+        return getattr(self, "web", None)
+
     def _load_web_map_file(self, path: Path, *, detail: str = "") -> bool:
-        if self.web is None:
+        target = self._map_navigation_target()
+        if target is None:
             return False
         try:
             url = QUrl.fromLocalFile(str(path))
@@ -13147,8 +13406,12 @@ class StationsMapTab(QWidget):
             self._map_page_loading = True
             self._map_load_ok = False
             self._set_map_runtime_state("loading", detail or self._map_runtime_detail or "Loading the map surface.")
-            self._emit_map_event("page_load_started", source="file")
-            self.web.setUrl(url)
+            self._emit_map_event(
+                "page_load_started",
+                source="file",
+                detached=bool(target is getattr(self, "_map_detached_page", None)),
+            )
+            target.setUrl(url)
             return True
         except Exception as e:
             log.error("StationsMap: failed loading map html in webview: %s", e)
@@ -13157,7 +13420,8 @@ class StationsMapTab(QWidget):
             return False
 
     def _load_map_html_into_webview(self, html: str, path: Optional[Path] = None, *, detail: str = "") -> bool:
-        if self.web is None:
+        target = self._map_navigation_target()
+        if target is None:
             return False
         if path is not None and self._load_web_map_file(path, detail=detail):
             return True
@@ -13165,14 +13429,439 @@ class StationsMapTab(QWidget):
             self._map_page_loading = True
             self._map_load_ok = False
             self._set_map_runtime_state("loading", detail or self._map_runtime_detail or "Loading the map surface.")
-            self._emit_map_event("page_load_started", source="inline")
-            self.web.setHtml(html)
+            self._emit_map_event(
+                "page_load_started",
+                source="inline",
+                detached=bool(target is getattr(self, "_map_detached_page", None)),
+            )
+            target.setHtml(html)
             return True
         except Exception as e:
             log.error("StationsMap: failed loading inline map html in webview: %s", e)
             self._map_page_loading = False
             self._enter_map_degraded("Inline map preview load failed before the preview was ready.", reason="inline_load", exc=e)
             return False
+
+    def _map_canvas_geometry_ready(self) -> bool:
+        """Return whether the final embedded surface parent has usable geometry."""
+        candidates = [
+            getattr(self, "_map_canvas_splitter", None),
+            getattr(self, "_map_stack", None),
+        ]
+        web = getattr(self, "web", None)
+        if web is not None:
+            candidates.append(web)
+        found = False
+        for widget in candidates:
+            if widget is None:
+                continue
+            found = True
+            try:
+                size = widget.size()
+                if int(size.width()) <= 1 or int(size.height()) <= 1:
+                    return False
+            except Exception:
+                return False
+        return found
+
+    @staticmethod
+    def _should_isolate_cold_web_load() -> bool:
+        """Keep macOS first-page navigation off the visible native surface."""
+        return sys.platform == "darwin"
+
+    @staticmethod
+    def _map_widget_geometry_signature(widget: object) -> tuple[int, int, int, int]:
+        if widget is None:
+            return (0, 0, 0, 0)
+        try:
+            rect = widget.geometry()
+            return (int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height()))
+        except Exception:
+            try:
+                size = widget.size()
+                return (0, 0, int(size.width()), int(size.height()))
+            except Exception:
+                return (0, 0, 0, 0)
+
+    def _map_surface_geometry_signature(self) -> tuple:
+        """Capture every geometry owner relevant to the embedded native surface."""
+        top_level = self.window()
+        screen_name = ""
+        try:
+            screen = top_level.screen()
+            screen_name = str(screen.name() if screen is not None else "")
+        except Exception:
+            pass
+
+        def _splitter_sizes(splitter: object) -> tuple[int, ...]:
+            try:
+                return tuple(int(value) for value in splitter.sizes())
+            except Exception:
+                return ()
+
+        return (
+            self._map_widget_geometry_signature(top_level),
+            str(top_level.windowState()),
+            bool(top_level.isFullScreen()),
+            bool(top_level.isMaximized()),
+            screen_name,
+            self._map_widget_geometry_signature(self),
+            self._map_widget_geometry_signature(getattr(self, "_map_container", None)),
+            self._map_widget_geometry_signature(getattr(self, "_map_filter_bar", None)),
+            self._map_widget_geometry_signature(getattr(self, "_main_splitter", None)),
+            _splitter_sizes(getattr(self, "_main_splitter", None)),
+            self._map_widget_geometry_signature(getattr(self, "_map_canvas_splitter", None)),
+            _splitter_sizes(getattr(self, "_map_canvas_splitter", None)),
+            self._map_widget_geometry_signature(getattr(self, "_map_stack", None)),
+            self._map_widget_geometry_signature(getattr(self, "web", None)),
+            int(getattr(self, "_map_filter_columns", 0) or 0),
+        )
+
+    def _begin_map_surface_geometry_settle(self, phase: str) -> None:
+        self._map_surface_geometry_phase = str(phase or "")
+        self._map_surface_geometry_signature_value = None
+        self._map_surface_geometry_changed_at = time.monotonic()
+        self._map_surface_geometry_stable_samples = 0
+
+    def _invalidate_map_surface_geometry_settle(self) -> None:
+        if getattr(self, "_map_surface_ready", False):
+            return
+        self._map_surface_geometry_signature_value = None
+        self._map_surface_geometry_changed_at = time.monotonic()
+        self._map_surface_geometry_stable_samples = 0
+        if getattr(self, "_map_surface_presented", False):
+            # Presentation owns the only remaining settle phase. Invalidate any
+            # in-flight paint acknowledgement and let a new generation settle;
+            # never restart the attachment/preparation state machine.
+            self._map_surface_geometry_phase = "present"
+            self._map_surface_reveal_generation = int(
+                getattr(self, "_map_surface_reveal_generation", 0) or 0
+            ) + 1
+            self._map_surface_reveal_probe_pending = False
+            if getattr(self, "_map_visible", False) and getattr(self, "_app_active", True):
+                QTimer.singleShot(75, self._schedule_map_surface_reveal)
+            return
+        timer = getattr(self, "_map_surface_prepare_timer", None)
+        if (
+            isinstance(timer, QTimer)
+            and getattr(self, "_map_visible", False)
+            and getattr(self, "_app_active", True)
+        ):
+            timer.start(75)
+
+    def _map_surface_geometry_is_quiet(self, phase: str) -> bool:
+        """Require two samples and 150 ms without a relevant geometry change."""
+        phase = str(phase or "")
+        now = time.monotonic()
+        signature = self._map_surface_geometry_signature()
+        if phase != getattr(self, "_map_surface_geometry_phase", ""):
+            self._begin_map_surface_geometry_settle(phase)
+        if signature != getattr(self, "_map_surface_geometry_signature_value", None):
+            self._map_surface_geometry_signature_value = signature
+            self._map_surface_geometry_changed_at = now
+            self._map_surface_geometry_stable_samples = 0
+            self._emit_map_event("surface_geometry_changed", phase=phase)
+            return False
+        self._map_surface_geometry_stable_samples = int(
+            getattr(self, "_map_surface_geometry_stable_samples", 0) or 0
+        ) + 1
+        quiet_ms = max(
+            0.0,
+            (now - float(getattr(self, "_map_surface_geometry_changed_at", now) or now)) * 1000.0,
+        )
+        return self._map_surface_geometry_stable_samples >= 2 and quiet_ms >= 150.0
+
+    def _schedule_map_surface_prepare(self, delay_ms: int = 75) -> None:
+        timer = getattr(self, "_map_surface_prepare_timer", None)
+        if isinstance(timer, QTimer):
+            timer.start(max(25, int(delay_ms or 75)))
+            return
+        QTimer.singleShot(max(25, int(delay_ms or 75)), self._on_map_visible_deferred)
+
+    def _sync_map_loading_overlay_geometry(self) -> bool:
+        overlay = getattr(self, "_map_loading_overlay", None)
+        stack = getattr(self, "_map_stack", None)
+        if overlay is None or stack is None:
+            return False
+        try:
+            rect = stack.contentsRect()
+            if int(rect.width()) <= 1 or int(rect.height()) <= 1:
+                return False
+            overlay.setGeometry(rect)
+            if overlay.isVisible():
+                overlay.raise_()
+            return True
+        except Exception:
+            return False
+
+    def _show_map_loading_overlay(self, detail: str = "") -> None:
+        stack = getattr(self, "_map_stack", None)
+        if stack is None:
+            return
+        overlay = getattr(self, "_map_loading_overlay", None)
+        if overlay is None:
+            overlay = QFrame(stack)
+            overlay.setObjectName("mapLoadingOverlay")
+            overlay_layout = QVBoxLayout(overlay)
+            overlay_layout.setContentsMargins(20, 20, 20, 20)
+            overlay_layout.addStretch(1)
+            overlay_label = QLabel(overlay)
+            overlay_label.setAlignment(Qt.AlignCenter)
+            overlay_label.setWordWrap(True)
+            overlay_layout.addWidget(overlay_label)
+            overlay_layout.addStretch(1)
+            self._map_loading_overlay = overlay
+            self._map_loading_overlay_label = overlay_label
+        theme = self._theme_snapshot()
+        overlay.setStyleSheet(
+            "QFrame#mapLoadingOverlay {"
+            f" background: {theme.get('surface', theme.get('bg', '#ffffff'))};"
+            " border: none;"
+            "}"
+            "QFrame#mapLoadingOverlay QLabel {"
+            f" color: {theme.get('text', '#222222')};"
+            " background: transparent; border: none;"
+            "}"
+        )
+        if self._map_loading_overlay_label is not None:
+            self._map_loading_overlay_label.setText(
+                str(detail or self._map_runtime_detail or "Preparing map...")
+            )
+        self._sync_map_loading_overlay_geometry()
+        overlay.show()
+        overlay.raise_()
+
+    def _finish_map_surface_reveal(self, generation: Optional[int] = None) -> None:
+        if generation is not None and int(generation) != int(
+            getattr(self, "_map_surface_reveal_generation", 0) or 0
+        ):
+            return
+        if (
+            getattr(self, "_is_shutting_down", False)
+            or getattr(self, "_map_surface_ready", False)
+            or not getattr(self, "_map_visible", False)
+            or not getattr(self, "_app_active", True)
+        ):
+            return
+        if (
+            not getattr(self, "_map_initialized", False)
+            or not getattr(self, "_map_load_ok", False)
+            or not getattr(self, "_map_surface_payload_applied", False)
+            or not StationsMapTab._map_canvas_geometry_ready(self)
+        ):
+            self._schedule_map_surface_reveal()
+            return
+        overlay = getattr(self, "_map_loading_overlay", None)
+        if overlay is not None:
+            self._sync_map_loading_overlay_geometry()
+            overlay.hide()
+        if self.web is not None:
+            # The surface may accept keyboard focus only after it is genuinely
+            # ready; first attachment must not compete with the navigation
+            # click or ask the window system to activate another native view.
+            self.web.setFocusPolicy(Qt.StrongFocus)
+        self._map_surface_ready = True
+        self._map_first_load_isolated = False
+        self._map_surface_lifecycle_state = "ready"
+        self._map_surface_reveal_probe_pending = False
+        self._map_surface_presentation_started_at = 0.0
+        self._map_surface_reveal_retry_count = 0
+        telemetry = {}
+        try:
+            top_level = self.window()
+            top_geometry = top_level.geometry()
+            telemetry = {
+                "canvas_width": int(self._map_stack.width()) if self._map_stack is not None else 0,
+                "canvas_height": int(self._map_stack.height()) if self._map_stack is not None else 0,
+                "window_x": int(top_geometry.x()),
+                "window_y": int(top_geometry.y()),
+                "window_width": int(top_geometry.width()),
+                "window_height": int(top_geometry.height()),
+                "window_state": str(top_level.windowState()),
+                "window_fullscreen": bool(top_level.isFullScreen()),
+                "window_maximized": bool(top_level.isMaximized()),
+                "window_screen": str(top_level.screen().name()) if top_level.screen() is not None else "",
+            }
+        except Exception:
+            # Test doubles and teardown paths may not expose a top-level shell.
+            telemetry = {}
+        self._emit_map_event(
+            "surface_revealed",
+            width=int(self.web.width()) if self.web is not None else 0,
+            height=int(self.web.height()) if self.web is not None else 0,
+            **telemetry,
+        )
+        self._schedule_leaflet_viewport_settle()
+
+    def _on_map_surface_reveal_timeout(self) -> None:
+        if (
+            getattr(self, "_is_shutting_down", False)
+            or getattr(self, "_map_surface_ready", False)
+            or not getattr(self, "_map_surface_presented", False)
+        ):
+            return
+        started_at = float(getattr(self, "_map_surface_presentation_started_at", 0.0) or 0.0)
+        if started_at <= 0.0 or (time.monotonic() - started_at) < 8.0:
+            return
+        self._map_surface_reveal_probe_pending = False
+        self._map_surface_lifecycle_state = "degraded"
+        self._enter_map_degraded(
+            "The embedded map loaded but did not finish painting. You can retry without restarting FIO.",
+            reason="surface_reveal_timeout",
+        )
+
+    def _schedule_map_surface_reveal(self) -> None:
+        if (
+            getattr(self, "_is_shutting_down", False)
+            or getattr(self, "web", None) is None
+            or getattr(self, "_map_surface_ready", False)
+        ):
+            return
+
+        if not getattr(self, "_map_visible", False) or not getattr(self, "_app_active", True):
+            return
+        started_at = float(getattr(self, "_map_surface_presentation_started_at", 0.0) or 0.0)
+        if (
+            getattr(self, "_map_surface_presented", False)
+            and started_at > 0.0
+            and (time.monotonic() - started_at) >= 8.0
+        ):
+            self._on_map_surface_reveal_timeout()
+            return
+        if (
+            not getattr(self, "_map_initialized", False)
+            or not getattr(self, "_map_load_ok", False)
+            or not getattr(self, "_map_surface_payload_applied", False)
+            or not StationsMapTab._map_canvas_geometry_ready(self)
+        ):
+            self._map_surface_reveal_retry_count = int(
+                getattr(self, "_map_surface_reveal_retry_count", 0) or 0
+            ) + 1
+            if self._map_surface_reveal_retry_count <= 24:
+                QTimer.singleShot(40, self._schedule_map_surface_reveal)
+            return
+        if (
+            getattr(self, "_map_first_load_isolated", False)
+            and not getattr(self, "_map_surface_presented", False)
+        ):
+            self._present_loaded_map_surface()
+            return
+        if (
+            getattr(self, "_map_first_load_isolated", False)
+            and getattr(self, "_map_surface_presented", False)
+        ):
+            quiet_check = getattr(self, "_map_surface_geometry_is_quiet", None)
+            if callable(quiet_check) and not quiet_check("present"):
+                QTimer.singleShot(75, self._schedule_map_surface_reveal)
+                return
+        if getattr(self, "_map_surface_reveal_probe_pending", False):
+            return
+
+        reveal_generation = int(getattr(self, "_map_surface_reveal_generation", 0) or 0)
+
+        def _after_probe(result) -> None:
+            if reveal_generation != int(getattr(self, "_map_surface_reveal_generation", 0) or 0):
+                return
+            if bool(result):
+                return
+            self._map_surface_reveal_probe_pending = False
+            self._map_surface_reveal_retry_count += 1
+            if self._map_surface_reveal_retry_count <= 24:
+                QTimer.singleShot(40, self._schedule_map_surface_reveal)
+
+        try:
+            # loadFinished is not a paint-complete signal. Let Chromium produce
+            # two frames in the final visible geometry, then use the existing
+            # title bridge to release the opaque Qt loading surface.
+            page = self._map_script_page()
+            if page is None:
+                raise RuntimeError("Map page is unavailable")
+            self._map_surface_reveal_probe_pending = True
+            page.runJavaScript(
+                "(function(){"
+                "if(!window._mapReady || !window._leafletMap) return false;"
+                "window._leafletMap.invalidateSize(false);"
+                "requestAnimationFrame(function(){requestAnimationFrame(function(){"
+                f"document.title='fio-map-ready:{reveal_generation}';"
+                "});});"
+                "return true;"
+                "})();",
+                _after_probe,
+            )
+        except Exception:
+            self._map_surface_reveal_probe_pending = False
+            self._map_surface_reveal_retry_count += 1
+            if self._map_surface_reveal_retry_count <= 24:
+                QTimer.singleShot(40, self._schedule_map_surface_reveal)
+
+    def _present_loaded_map_surface(self) -> None:
+        """Present a fully loaded cold surface once, behind the opaque overlay."""
+        if (
+            getattr(self, "_is_shutting_down", False)
+            or getattr(self, "web", None) is None
+            or getattr(self, "_map_stack", None) is None
+            or getattr(self, "_map_surface_presented", False)
+        ):
+            return
+        top_level = self.window()
+        before_geometry = top_level.geometry()
+        before_screen = top_level.screen()
+        before_state = str(top_level.windowState())
+        before_fullscreen = bool(top_level.isFullScreen())
+        self._show_map_loading_overlay("Preparing map...")
+        prepare_timer = getattr(self, "_map_surface_prepare_timer", None)
+        if isinstance(prepare_timer, QTimer):
+            prepare_timer.stop()
+        detached_page = getattr(self, "_map_detached_page", None)
+        if detached_page is not None:
+            try:
+                old_page = self.web.page()
+                self.web.setPage(detached_page)
+                self._map_attached_page = detached_page
+                self._map_detached_page = None
+                if old_page is not None and old_page is not detached_page:
+                    old_page.deleteLater()
+            except Exception as exc:
+                self._enter_map_degraded(
+                    "The prepared map could not be attached to its display. You can retry without restarting FIO.",
+                    reason="surface_attach",
+                    exc=exc,
+                )
+                return
+        self._map_stack.setCurrentWidget(self.web)
+        self._sync_map_loading_overlay_geometry()
+        overlay = getattr(self, "_map_loading_overlay", None)
+        if overlay is not None:
+            overlay.raise_()
+        self._map_surface_presented = True
+        self._map_surface_lifecycle_state = "presenting"
+        self._map_surface_reveal_generation = int(
+            getattr(self, "_map_surface_reveal_generation", 0) or 0
+        ) + 1
+        self._map_surface_reveal_probe_pending = False
+        self._map_surface_presentation_started_at = time.monotonic()
+        self._begin_map_surface_geometry_settle("present")
+        after_geometry = top_level.geometry()
+        after_screen = top_level.screen()
+        self._emit_map_event(
+            "surface_presented_behind_overlay",
+            window_before_x=int(before_geometry.x()),
+            window_before_y=int(before_geometry.y()),
+            window_before_width=int(before_geometry.width()),
+            window_before_height=int(before_geometry.height()),
+            window_before_state=before_state,
+            window_before_fullscreen=before_fullscreen,
+            window_before_screen=str(before_screen.name()) if before_screen is not None else "",
+            window_x=int(after_geometry.x()),
+            window_y=int(after_geometry.y()),
+            window_width=int(after_geometry.width()),
+            window_height=int(after_geometry.height()),
+            window_state=str(top_level.windowState()),
+            window_fullscreen=bool(top_level.isFullScreen()),
+            window_screen=str(after_screen.name()) if after_screen is not None else "",
+        )
+        QTimer.singleShot(8000, self._on_map_surface_reveal_timeout)
+        QTimer.singleShot(75, self._schedule_map_surface_reveal)
 
     def _ensure_web_view(self) -> bool:
         """
@@ -13186,15 +13875,106 @@ class StationsMapTab(QWidget):
             return False
         if not _ensure_webengine_imported() or QWebEngineView is None:
             return False
+        if not StationsMapTab._map_canvas_geometry_ready(self):
+            self._emit_map_event("webview_prepare_deferred", reason="canvas_geometry")
+            return False
         try:
+            top_level = self.window()
+            before_geometry = top_level.geometry()
+            before_screen = top_level.screen()
+            before_window = {
+                "window_before_x": int(before_geometry.x()),
+                "window_before_y": int(before_geometry.y()),
+                "window_before_width": int(before_geometry.width()),
+                "window_before_height": int(before_geometry.height()),
+                "window_before_state": str(top_level.windowState()),
+                "window_before_fullscreen": bool(top_level.isFullScreen()),
+                "window_before_maximized": bool(top_level.isMaximized()),
+                "window_before_screen": str(before_screen.name()) if before_screen is not None else "",
+            }
             web = QWebEngineView(self._map_stack)
-            web.loadFinished.connect(self._on_map_load_finished)
-            web.titleChanged.connect(self._on_map_page_title_changed)
+            web.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+            web.setMinimumSize(0, 0)
+            web.setFocusPolicy(Qt.NoFocus)
             self.web = web
             self._map_stack.addWidget(web)
+            # The WebEngine compositor must attach only after its real parent
+            # hierarchy owns final geometry. Keep it current/visible in that
+            # final parent and cover it with an opaque Qt surface until the map
+            # reports two completed animation frames.
+            self._map_surface_ready = False
+            self._map_surface_payload_applied = False
+            self._map_first_load_isolated = StationsMapTab._should_isolate_cold_web_load()
+            self._map_surface_presented = not self._map_first_load_isolated
+            self._map_surface_reveal_generation = int(
+                getattr(self, "_map_surface_reveal_generation", 0) or 0
+            ) + 1
+            self._map_surface_reveal_probe_pending = False
+            self._map_surface_presentation_started_at = 0.0
+            if self._map_first_load_isolated:
+                if QWebEnginePage is None:
+                    raise RuntimeError("Qt WebEngine page support is unavailable")
+                # A non-current QWebEngineView still cleared macOS native
+                # full-screen state when setUrl() performed its first real
+                # navigation. Load the document on a retained page-only object
+                # and attach that already-loaded page at final presentation.
+                detached_page = QWebEnginePage(self)
+                detached_page.loadFinished.connect(self._on_map_load_finished)
+                detached_page.titleChanged.connect(self._on_map_page_title_changed)
+                self._map_detached_page = detached_page
+                self._map_attached_page = None
+                self._map_surface_lifecycle_state = "loading_detached"
+            else:
+                web.loadFinished.connect(self._on_map_load_finished)
+                web.titleChanged.connect(self._on_map_page_title_changed)
+                self._map_detached_page = None
+                self._map_attached_page = web.page()
+                self._map_surface_lifecycle_state = "loading_attached"
+            self._show_map_loading_overlay("Preparing map...")
+            if self._map_first_load_isolated:
+                self._map_stack.setCurrentIndex(0)
+            else:
+                self._map_stack.setCurrentWidget(web)
+            self._sync_map_loading_overlay_geometry()
+            top_geometry = top_level.geometry()
+            top_screen = top_level.screen()
+            self._emit_map_event(
+                "webview_created",
+                canvas_width=int(self._map_stack.width()),
+                canvas_height=int(self._map_stack.height()),
+                web_width=int(web.width()),
+                web_height=int(web.height()),
+                window_x=int(top_geometry.x()),
+                window_y=int(top_geometry.y()),
+                window_width=int(top_geometry.width()),
+                window_height=int(top_geometry.height()),
+                window_state=str(top_level.windowState()),
+                window_fullscreen=bool(top_level.isFullScreen()),
+                window_maximized=bool(top_level.isMaximized()),
+                window_screen=str(top_screen.name()) if top_screen is not None else "",
+                **before_window,
+            )
             return True
         except Exception as e:
             log.error("StationsMap: failed creating WebEngine view lazily: %s", e)
+            failed_web = getattr(self, "web", None)
+            failed_page = getattr(self, "_map_detached_page", None)
+            self._map_detached_page = None
+            self._map_attached_page = None
+            if failed_page is not None:
+                try:
+                    failed_page.deleteLater()
+                except Exception:
+                    pass
+            if failed_web is not None:
+                try:
+                    self._map_stack.removeWidget(failed_web)
+                except Exception:
+                    pass
+                try:
+                    failed_web.deleteLater()
+                except Exception:
+                    pass
             self.web = None
             if self._map_loading_label is not None:
                 self._map_loading_label.setText("Map preview unavailable.")
@@ -13203,6 +13983,23 @@ class StationsMapTab(QWidget):
     def _on_map_page_title_changed(self, title: str) -> None:
         prefix = "fio-map-action:"
         title_text = str(title or "")
+        if title_text == "fio-map-ready" or title_text.startswith("fio-map-ready:"):
+            generation = int(getattr(self, "_map_surface_reveal_generation", 0) or 0)
+            if ":" in title_text:
+                try:
+                    generation = int(title_text.rsplit(":", 1)[-1])
+                except Exception:
+                    generation = -1
+            if generation == int(getattr(self, "_map_surface_reveal_generation", 0) or 0):
+                self._map_surface_reveal_probe_pending = False
+                self._finish_map_surface_reveal(generation)
+            try:
+                page = self._map_script_page()
+                if page is not None:
+                    page.runJavaScript("document.title = 'Stations Map';")
+            except Exception:
+                pass
+            return
         if not title_text.startswith(prefix):
             return
         payload: Dict[str, object] = {}
@@ -13215,8 +14012,9 @@ class StationsMapTab(QWidget):
             log.debug("StationsMap: ignored malformed map action title %r: %s", title_text, e)
         finally:
             try:
-                if self.web is not None:
-                    self.web.page().runJavaScript("document.title = 'Stations Map';")
+                page = self._map_script_page()
+                if page is not None:
+                    page.runJavaScript("document.title = 'Stations Map';")
             except Exception:
                 pass
         if payload:
@@ -13268,6 +14066,9 @@ class StationsMapTab(QWidget):
             self._map_dirty = True
             self._emit_map_event("webview_prepare_deferred", reason="inactive_or_hidden")
             return False
+        if not StationsMapTab._map_canvas_geometry_ready(self):
+            self._emit_map_event("webview_prepare_deferred", reason="canvas_geometry")
+            return False
         return self._ensure_web_view()
 
     # ------------- Map rendering ------------- #
@@ -13318,6 +14119,7 @@ class StationsMapTab(QWidget):
             and self._effective_map_observation_focus_mode() == "regional_intelligence"
         )
         if not self.stations and not report_view_without_roster and not regional_view_without_roster:
+            self._map_has_leaflet_page = False
             self._map_marker_count = 0
             self._map_link_count = 0
             self._map_link_status_detail = "No station data available for paths."
@@ -14148,6 +14950,7 @@ class StationsMapTab(QWidget):
         bootstrap_weather_events = weather_events if self.web is None else []
         bootstrap_alert_events = alert_events if self.web is None else []
         bootstrap_infrastructure_events = infrastructure_events if self.web is None else []
+        self._map_has_leaflet_page = True
         html = self._build_leaflet_html(
             bootstrap_markers,
             links=bootstrap_links,
@@ -14181,15 +14984,24 @@ class StationsMapTab(QWidget):
                 # a disruptive blank/loading flash between updates.
                 if had_visible_map:
                     self._map_stack.setCurrentIndex(1)
-                else:
+                elif self._map_first_load_isolated and not self._map_surface_presented:
+                    # On macOS, loading the first page while the native child
+                    # is visible can normalize a full-screen top-level window.
+                    # Keep the fully sized final-parent child non-current until
+                    # the page and first payload are ready.
                     self._map_stack.setCurrentIndex(0)
-                    if self._map_loading_label is not None:
-                        self._map_loading_label.setText("Loading map...")
+                    self._show_map_loading_overlay("Loading map...")
+                else:
+                    # Other platforms attach the final-parent surface behind
+                    # the opaque loading overlay.
+                    self._map_stack.setCurrentWidget(self.web)
+                    self._show_map_loading_overlay("Loading map...")
             # New page context: force first payload push even if content hash matches
             # the prior page's payload.
             self._last_map_payload_sig = None
             self._last_map_render_input_sig = None
             self._map_payload_generation += 1
+            self._map_surface_payload_applied = False
             self._pending_map_payload = {
                 "markers": display_markers,
                 "links": display_links,
@@ -14224,12 +15036,50 @@ class StationsMapTab(QWidget):
         self._map_initialized = bool(ok)
         self._map_load_ok = bool(ok)
         self._map_js_ready_retry_count = 0
-        self._emit_map_event("page_load_finished", ok=bool(ok))
+        load_meta = {}
+        try:
+            top_level = self.window()
+            top_geometry = top_level.geometry()
+            top_screen = top_level.screen()
+            load_meta = {
+                "window_x": int(top_geometry.x()),
+                "window_y": int(top_geometry.y()),
+                "window_width": int(top_geometry.width()),
+                "window_height": int(top_geometry.height()),
+                "window_state": str(top_level.windowState()),
+                "window_fullscreen": bool(top_level.isFullScreen()),
+                "window_maximized": bool(top_level.isMaximized()),
+                "window_screen": str(top_screen.name()) if top_screen is not None else "",
+                "surface_presented": bool(getattr(self, "_map_surface_presented", False)),
+                "document_detached": bool(getattr(self, "_map_detached_page", None) is not None),
+            }
+        except Exception:
+            load_meta = {}
+        self._emit_map_event("page_load_finished", ok=bool(ok), **load_meta)
+        if ok and getattr(self, "_map_detached_page", None) is not None:
+            self._map_surface_lifecycle_state = "payload_pending"
         if self._map_stack is not None:
             if ok:
-                self._map_stack.setCurrentIndex(1)
+                try:
+                    rect = self._map_stack.contentsRect()
+                    reveal_immediately = bool(
+                        not getattr(self, "_map_first_load_isolated", False)
+                        or getattr(self, "_map_surface_presented", False)
+                    )
+                    if (
+                        reveal_immediately
+                        and self.web is not None
+                        and int(rect.width()) > 1
+                        and int(rect.height()) > 1
+                    ):
+                        self._map_stack.setCurrentWidget(self.web)
+                except Exception:
+                    pass
             else:
                 self._map_stack.setCurrentIndex(0)
+                overlay = getattr(self, "_map_loading_overlay", None)
+                if overlay is not None:
+                    overlay.hide()
                 if self._map_loading_label is not None:
                     self._map_loading_label.setText("Map failed to load.")
         if not ok:
@@ -14241,12 +15091,20 @@ class StationsMapTab(QWidget):
             )
         if not ok or self.web is None:
             return
+        self._schedule_leaflet_viewport_settle()
         self._maybe_start_map_ingest()
         if self._pending_map_payload:
             # WebEngine loadFinished can fire before the embedded Leaflet
             # bootstrap has exposed updateMapData. Probe readiness and retry
             # briefly instead of dropping the first real payload.
             self._push_pending_map_payload_when_ready()
+        else:
+            # A bootstrap page with no deferred data is itself the complete
+            # first surface payload.
+            self._map_surface_payload_applied = True
+        reveal = getattr(self, "_schedule_map_surface_reveal", None)
+        if callable(reveal):
+            reveal()
         if getattr(self, "_map_visible", False) and (
             getattr(self, "_map_dirty", False) or getattr(self, "_render_requested_during_load", False)
         ):
@@ -14287,6 +15145,7 @@ class StationsMapTab(QWidget):
                     city_min_pop=int(payload.get("city_min_pop") or 0),
                     auto_fit=bool(payload.get("auto_fit")),
                 )
+                self._schedule_leaflet_viewport_settle()
                 return
             self._map_js_ready_retry_count += 1
             if self._map_js_ready_retry_count <= 10:
@@ -14298,7 +15157,10 @@ class StationsMapTab(QWidget):
             )
 
         try:
-            self.web.page().runJavaScript(
+            page = self._map_script_page()
+            if page is None:
+                raise RuntimeError("Map page is unavailable")
+            page.runJavaScript(
                 "Boolean(window._mapReady && window.updateMapData && window._leafletMap)",
                 _after_probe,
             )
@@ -14309,16 +15171,119 @@ class StationsMapTab(QWidget):
                 exc=exc,
             )
 
+    def _schedule_leaflet_viewport_settle(self) -> None:
+        """Coalesce Leaflet sizing after the native web viewport has settled."""
+        if (
+            self._is_shutting_down
+            or not self._map_visible
+            or not bool(getattr(self, "_app_active", True))
+            or (
+                getattr(self, "_map_first_load_isolated", False)
+                and not getattr(self, "_map_surface_presented", False)
+            )
+            or not self._map_load_ok
+            or not getattr(self, "_map_has_leaflet_page", False)
+            or self.web is None
+        ):
+            return
+        timer = getattr(self, "_leaflet_viewport_timer", None)
+        if isinstance(timer, QTimer):
+            timer.start(0)
+
+    def _flush_leaflet_viewport_settle(self) -> None:
+        if (
+            self._is_shutting_down
+            or not self._map_visible
+            or not bool(getattr(self, "_app_active", True))
+            or (
+                getattr(self, "_map_first_load_isolated", False)
+                and not getattr(self, "_map_surface_presented", False)
+            )
+            or not self._map_load_ok
+            or not getattr(self, "_map_has_leaflet_page", False)
+            or self.web is None
+        ):
+            return
+        size = self.web.size()
+        width = int(size.width())
+        height = int(size.height())
+        if width <= 1 or height <= 1:
+            if self._leaflet_viewport_retry_count < 8:
+                self._leaflet_viewport_retry_count += 1
+                self._leaflet_viewport_timer.start(75)
+            return
+        signature = (int(getattr(self, "_map_payload_generation", 0)), width, height)
+        if signature == getattr(self, "_last_leaflet_viewport_signature", None):
+            self._leaflet_viewport_retry_count = 0
+            return
+
+        def _after_invalidate(result) -> None:
+            if bool(result):
+                self._last_leaflet_viewport_signature = signature
+                self._leaflet_viewport_retry_count = 0
+                return
+            if self._leaflet_viewport_retry_count < 8 and self._map_visible and not self._is_shutting_down:
+                self._leaflet_viewport_retry_count += 1
+                self._leaflet_viewport_timer.start(75)
+
+        try:
+            page = self._map_script_page()
+            if page is None:
+                raise RuntimeError("Map page is unavailable")
+            page.runJavaScript(
+                "Boolean(window._leafletMap && "
+                "(window._leafletMap.invalidateSize(false), true))",
+                _after_invalidate,
+            )
+        except Exception:
+            log.debug("StationsMap: deferred Leaflet viewport settlement failed", exc_info=True)
+
     def _on_map_visible_deferred(self) -> None:
         if not self._map_visible or self._is_shutting_down:
             return
         if not self._app_active:
-            self._map_dirty = True
-            self._set_map_runtime_state("warming", "Preparing the map view.")
+            if not self._map_initialized or not self._map_load_ok:
+                self._set_map_runtime_state("warming", "Preparing the map view.")
+            return
+        if self._map_initialized and self._map_load_ok:
+            # Once the page load has completed, preparation is finished.
+            # Payload/presentation callbacks exclusively own the remaining
+            # lifecycle so their settle phase cannot be reset to "attached".
+            self._schedule_map_surface_reveal()
+            return
+        if not self._map_canvas_geometry_ready():
+            self._map_surface_prepare_retry_count += 1
+            if self._map_surface_prepare_retry_count <= 24:
+                self._emit_map_event(
+                    "webview_prepare_deferred",
+                    reason="canvas_geometry",
+                    attempt=self._map_surface_prepare_retry_count,
+                )
+                self._schedule_map_surface_prepare(75)
+                return
+            self._enter_map_degraded(
+                "The map canvas did not reach a stable display size. You can retry without restarting FIO.",
+                reason="canvas_geometry",
+            )
+            return
+        self._map_surface_prepare_retry_count = 0
+        phase = "precreate" if self.web is None else "attached"
+        if not self._map_surface_geometry_is_quiet(phase):
+            self._schedule_map_surface_prepare(75)
             return
         self._ensure_initial_data_loaded()
-        if not self._ensure_web_view():
+        web_was_missing = self.web is None
+        if not self.prepare_webview_for_first_show():
             self._enter_map_degraded("Qt WebEngine is not available for the embedded map preview.", reason="webengine_missing")
+            return
+        if web_was_missing:
+            # Attaching the native WebEngine child can trigger another layout
+            # negotiation. Let that geometry settle before loading Chromium;
+            # the opaque Qt overlay remains the only visible surface.
+            self._begin_map_surface_geometry_settle("attached")
+            self._schedule_map_surface_prepare(75)
+            return
+        if self._map_page_loading:
             return
         if not self._map_initialized:
             # First visible render: build/load the map HTML before waiting on loadFinished.
@@ -14330,6 +15295,9 @@ class StationsMapTab(QWidget):
         if self._map_dirty:
             self._map_dirty = False
             self._request_map_refresh(level="medium", reason="visible_dirty", preserve_view=True)
+            return
+        self._set_map_runtime_state("ready", self._map_ready_detail_text())
+        self._schedule_leaflet_viewport_settle()
 
     def _map_auto_fit_requested(
         self,
@@ -14554,6 +15522,8 @@ class StationsMapTab(QWidget):
             outcome = str(result or "").strip()
             if outcome == "ok":
                 self._last_map_payload_sig = sig
+                self._map_surface_payload_applied = True
+                self._schedule_map_surface_reveal()
                 return
             self._last_map_payload_sig = None
             if outcome == "not_ready":
@@ -14567,7 +15537,10 @@ class StationsMapTab(QWidget):
             )
 
         try:
-            self.web.page().runJavaScript(js, _after_update)
+            page = self._map_script_page()
+            if page is None:
+                raise RuntimeError("Map page is unavailable")
+            page.runJavaScript(js, _after_update)
         except Exception as exc:
             self._last_map_payload_sig = None
             self._pending_map_payload = pending_payload
@@ -14628,6 +15601,7 @@ class StationsMapTab(QWidget):
         except Exception:
             ui_theme = ""
         is_dark = theme.get("bg") == "#0F1216" or ui_theme == "dark"
+        ui_text_scale = resolve_ui_text_scale(self.settings)
         grid_color = "#5F6B7A" if is_dark else "#666"
         grid_opacity = "0.3" if is_dark else "0.3"
         now_reachable_enabled = str(bool(getattr(self, "_now_reachable_enabled", False))).lower()
@@ -14831,6 +15805,31 @@ function addGridLabels(res, level, bounds, maxLabels) {
         tooltip_border = "#3A4452" if is_dark else "#444"
         legend_bg = "rgba(26,31,38,0.92)" if is_dark else "rgba(255,255,255,0.92)"
         legend_text = "#C6CBD4" if is_dark else "#000"
+        # Operational marker colors are semantic (severity, source and layer),
+        # but their palette still belongs to the active shared theme.  Keep the
+        # distinctions while deriving fills/outlines from the shared roles so
+        # Dark and Large-text map HTML does not carry a second hardcoded theme.
+        marker_text = theme["text"]
+        marker_muted = theme["text_muted"]
+        marker_surface = theme["surface_alt"]
+        marker_info = theme["info"]
+        marker_success = theme["success"]
+        marker_warning = theme["warning"]
+        marker_danger = theme["danger"]
+        marker_accent = theme["accent"]
+        marker_inverse = contrast_text_for_background(marker_text, theme)
+        marker_shadow = to_rgba(marker_text, 0.35)
+        marker_surface_faint = to_rgba(marker_surface, 0.85)
+        marker_info_faint = to_rgba(marker_info, 0.16)
+        marker_success_faint = to_rgba(marker_success, 0.16)
+        marker_warning_faint = to_rgba(marker_warning, 0.18)
+        marker_danger_faint = to_rgba(marker_danger, 0.18)
+        marker_accent_faint = to_rgba(marker_accent, 0.24)
+        marker_surface_transparent = to_rgba(marker_surface, 0.74)
+        marker_text_shadow = to_rgba(marker_text, 0.18)
+        marker_hover = to_rgba(marker_text, 0.12)
+        marker_hover_strong = to_rgba(marker_text, 0.14)
+        marker_count_font_px = max(10.0, 10.0 * float(ui_text_scale))
         state_border = "#8A93A6" if is_dark else "#666"
         state_border_opacity = "0.7" if is_dark else "0.5"
         region_fill_opacity = "0.05" if is_dark else "0.08"
@@ -15121,7 +16120,6 @@ function addGridLabels(res, level, bounds, maxLabels) {
     updateCityVisibility();
             """
         dark_map_filter = "filter: brightness(0.75) saturate(0.85) contrast(1.05);" if is_dark else ""
-        ui_text_scale = resolve_ui_text_scale(self.settings)
         label_font_px = max(10.0, 10.0 * float(ui_text_scale))
         state_label_font_px = max(10.0, 10.0 * float(ui_text_scale))
         callsign_label_font_px = max(11.0, 11.0 * float(ui_text_scale))
@@ -15151,20 +16149,20 @@ function addGridLabels(res, level, bounds, maxLabels) {
     .state-label {{ color: {state_label_color}; font-size: {state_label_font_px:.1f}px; font-weight: 600; opacity: 0.88; text-transform: uppercase; }}
     .region-label {{ color: {region_label_color}; font-size: {region_label_font_px:.1f}px; font-weight: 800; pointer-events: auto; }}
     .callsign-label {{ color: {callsign_label_color}; font-size: {callsign_label_font_px:.1f}px; font-weight: 700; padding: 1px 4px; border: 1px solid {callsign_chip_border}; border-radius: 3px; background: {callsign_chip_bg}; box-shadow: 0 1px 2px rgba(0,0,0,0.18); pointer-events: auto; }}
-    .place-label {{ color: {label_color}; font-size: {label_font_px:.1f}px; font-weight: 650; padding: 1px 4px; border-radius: 3px; background: rgba(255,255,255,0.74); box-shadow: 0 1px 2px rgba(0,0,0,0.18); pointer-events: none; }}
+    .place-label {{ color: {label_color}; font-size: {label_font_px:.1f}px; font-weight: 650; padding: 1px 4px; border-radius: 3px; background: {marker_surface_transparent}; box-shadow: 0 1px 2px {marker_text_shadow}; pointer-events: none; }}
     .region-band-label {{ color: {region_band_label_color}; font-size: {region_band_label_font_px:.1f}px; font-weight: 600; pointer-events: none; }}
     .cs-tooltip {{ background: {tooltip_bg}; color: {tooltip_text}; border: 1px solid {tooltip_border}; padding: 5px 7px; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.4); z-index: 10000; }}
     .leaflet-tooltip.cs-tooltip {{ z-index: 10000; pointer-events: none; }}
     .leaflet-popup.cs-tooltip {{ z-index: 10001; }}
-    .fio-link-arrow {{ display: flex; align-items: center; justify-content: center; width: 18px; height: 18px; font-size: 15px; font-weight: 900; line-height: 18px; text-shadow: 0 1px 2px rgba(255,255,255,0.95), 0 -1px 2px rgba(255,255,255,0.95); pointer-events: none; }}
+    .fio-link-arrow {{ display: flex; align-items: center; justify-content: center; width: 18px; height: 18px; font-size: {callsign_label_font_px:.1f}px; font-weight: 900; line-height: {callsign_label_font_px:.1f}px; text-shadow: {label_halo}; pointer-events: none; }}
     .detail-panel {{ background: {legend_bg}; color: {legend_text}; padding: 6px 8px; border: 1px solid {tooltip_border}; border-radius: 4px; width: 260px; max-width: calc(100vw - 34px); box-sizing: border-box; font-size: {panel_font_px:.1f}px; line-height: 1.35; white-space: normal; overflow-wrap: anywhere; word-break: normal; }}
     .zoom-display {{ position: relative; padding: 0; font-size: {panel_font_px:.1f}px; background: {legend_bg}; color: {legend_text}; border: 1px solid {tooltip_border}; }}
     .zoom-chip {{ display: block; min-width: 108px; border: 0; background: transparent; color: inherit; padding: 6px 9px; font: inherit; font-weight: 700; text-align: left; cursor: pointer; }}
-    .zoom-chip:hover {{ background: rgba(127, 127, 127, 0.12); }}
+    .zoom-chip:hover {{ background: {marker_hover}; }}
     .zoom-menu {{ display: none; position: absolute; right: 0; top: calc(100% + 4px); min-width: 156px; padding: 5px; border: 1px solid {tooltip_border}; border-radius: 4px; background: {legend_bg}; color: {legend_text}; box-shadow: 0 2px 8px rgba(0,0,0,0.28); z-index: 1200; }}
     .zoom-display.open .zoom-menu {{ display: block; }}
     .zoom-menu button {{ display: block; width: 100%; border: 0; border-radius: 3px; background: transparent; color: inherit; padding: 6px 8px; font: inherit; text-align: left; cursor: pointer; }}
-    .zoom-menu button:hover {{ background: rgba(127, 127, 127, 0.14); }}
+    .zoom-menu button:hover {{ background: {marker_hover_strong}; }}
     .legend-box {{ background: {legend_bg}; color: {legend_text}; padding: 8px 12px; border: 1px solid {tooltip_border}; border-radius: 4px; font-size: {legend_font_px:.1f}px; line-height: 1.35; max-width: min(100%, 860px); box-sizing: border-box; }}
     .summary-panel {{ background: {legend_bg}; color: {legend_text}; padding: 6px 8px; border: 1px solid {tooltip_border}; border-radius: 4px; font-size: {panel_font_px:.1f}px; line-height: 1.35; min-width: 180px; max-width: 240px; }}
     .summary-region {{ margin-top: 6px; }}
@@ -15181,19 +16179,19 @@ function addGridLabels(res, level, bounds, maxLabels) {
     .regional-summary-panel {{ background: {legend_bg}; color: {legend_text}; padding: 7px 8px; border: 1px solid {tooltip_border}; border-radius: 4px; font-size: {panel_font_px:.1f}px; line-height: 1.3; width: 245px; max-width: calc(100vw - 34px); box-sizing: border-box; }}
     .regional-summary-heading {{ display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-weight: 800; margin-bottom: 5px; }}
     .regional-summary-heading-button {{ width: 100%; border: 0; border-radius: 3px; background: transparent; color: inherit; padding: 3px 4px; font: inherit; cursor: pointer; }}
-    .regional-summary-heading-button:hover {{ background: rgba(127,127,127,0.14); }}
+    .regional-summary-heading-button:hover {{ background: {marker_hover_strong}; }}
     .regional-summary-meta {{ color: {legend_text}; opacity: 0.78; font-weight: 600; }}
     .regional-summary-section {{ margin-top: 6px; }}
     .regional-summary-section-title {{ color: {legend_text}; opacity: 0.85; font-weight: 700; margin-bottom: 3px; }}
     .regional-summary-row {{ width: 100%; border: 0; border-radius: 3px; background: transparent; color: inherit; display: grid; grid-template-columns: auto 1fr; gap: 6px; align-items: start; text-align: left; padding: 4px; font: inherit; cursor: pointer; }}
-    .regional-summary-row:hover {{ background: rgba(127,127,127,0.14); }}
+    .regional-summary-row:hover {{ background: {marker_hover_strong}; }}
     .regional-summary-chip {{ width: 9px; height: 9px; border-radius: 2px; display: inline-block; margin-top: 5px; }}
     .regional-summary-area {{ font-weight: 800; white-space: nowrap; }}
     .regional-summary-detail {{ margin-top: 1px; opacity: 0.92; overflow-wrap: anywhere; }}
     .regional-summary-count {{ margin-top: 1px; opacity: 0.78; font-size: 0.93em; }}
     .regional-summary-overflow {{ margin: 4px 4px 0 19px; color: {legend_text}; opacity: 0.72; font-size: 0.92em; }}
     .regional-summary-toggle {{ width: 100%; border: 0; border-radius: 3px; background: transparent; color: inherit; display: flex; justify-content: space-between; gap: 8px; padding: 3px 4px; font: inherit; font-weight: 800; cursor: pointer; }}
-    .regional-summary-toggle:hover {{ background: rgba(127,127,127,0.14); }}
+    .regional-summary-toggle:hover {{ background: {marker_hover_strong}; }}
     .regional-summary-panel.collapsed {{ width: auto; min-width: 150px; }}
     .regional-summary-panel.collapsed .regional-summary-body {{ display: none; }}
     .legend-rows {{ display: flex; flex-direction: column; align-items: center; gap: 8px; }}
@@ -15202,52 +16200,52 @@ function addGridLabels(res, level, bounds, maxLabels) {
     .legend-sep {{ display: inline-block; width: 0; height: 12px; border-left: 1px solid {tooltip_border}; opacity: 0.55; }}
     .legend-item {{ display: inline-flex; align-items: center; justify-content: center; gap: 5px; white-space: nowrap; }}
     .legend-swatch {{ display: inline-block; min-width: 12px; text-align: center; }}
-    .wx-marker {{ width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 2px solid #455A64; background: #ECEFF1; box-shadow: 0 2px 6px rgba(0,0,0,0.35); position: relative; box-sizing: border-box; }}
+    .wx-marker {{ width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 2px solid {marker_muted}; background: {marker_surface_faint}; box-shadow: 0 2px 6px {marker_shadow}; position: relative; box-sizing: border-box; }}
     .wx-marker svg {{ width: 21px; height: 21px; display: block; }}
-    .wx-severe {{ border-color: #B71C1C; }}
-    .wx-caution {{ border-color: #E65100; }}
-    .wx-routine {{ border-color: #1565C0; }}
-    .wx-unknown {{ border-color: #546E7A; }}
-    .wx-kind-general {{ background: #ECEFF1; color: #455A64; }}
-    .wx-kind-rain {{ background: #E3F2FD; color: #1565C0; }}
-    .wx-kind-storm {{ background: #F3E5F5; color: #6A1B9A; }}
-    .wx-kind-wind {{ background: #E0F7FA; color: #00838F; }}
-    .wx-kind-snow {{ background: #E1F5FE; color: #0277BD; }}
-    .wx-kind-flood {{ background: #E0F2F1; color: #00695C; }}
-    .wx-kind-fire {{ background: #FFF3E0; color: #E65100; }}
-    .wx-kind-heat {{ background: #FFEBEE; color: #C62828; }}
-    .wx-count {{ position: absolute; right: -7px; top: -7px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: #263238; color: white; font-size: 10px; line-height: 16px; text-align: center; font-weight: 700; border: 1px solid rgba(255,255,255,0.85); box-sizing: border-box; }}
-    .op-marker {{ width: 34px; height: 34px; border-radius: 7px; display: flex; align-items: center; justify-content: center; border: 2px solid #455A64; background: #ECEFF1; box-shadow: 0 2px 6px rgba(0,0,0,0.35); position: relative; box-sizing: border-box; }}
+    .wx-severe {{ border-color: {marker_danger}; }}
+    .wx-caution {{ border-color: {marker_warning}; }}
+    .wx-routine {{ border-color: {marker_info}; }}
+    .wx-unknown {{ border-color: {marker_muted}; }}
+    .wx-kind-general {{ background: {marker_surface_faint}; color: {marker_muted}; }}
+    .wx-kind-rain {{ background: {marker_info_faint}; color: {marker_info}; }}
+    .wx-kind-storm {{ background: {marker_danger_faint}; color: {marker_danger}; }}
+    .wx-kind-wind {{ background: {marker_success_faint}; color: {marker_success}; }}
+    .wx-kind-snow {{ background: {marker_info_faint}; color: {marker_info}; }}
+    .wx-kind-flood {{ background: {marker_info_faint}; color: {marker_info}; }}
+    .wx-kind-fire {{ background: {marker_danger_faint}; color: {marker_danger}; }}
+    .wx-kind-heat {{ background: {marker_warning_faint}; color: {marker_warning}; }}
+    .wx-count {{ position: absolute; right: -7px; top: -7px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: {marker_text}; color: {marker_inverse}; font-size: {marker_count_font_px:.1f}px; line-height: {marker_count_font_px:.1f}px; text-align: center; font-weight: 700; border: 1px solid {marker_surface}; box-sizing: border-box; }}
+    .op-marker {{ width: 34px; height: 34px; border-radius: 7px; display: flex; align-items: center; justify-content: center; border: 2px solid {marker_muted}; background: {marker_surface_faint}; box-shadow: 0 2px 6px {marker_shadow}; position: relative; box-sizing: border-box; }}
     .op-marker svg {{ width: 21px; height: 21px; display: block; }}
-    .op-source-hf {{ border-radius: 7px; outline: 2px solid rgba(0,105,92,0.28); }}
-    .op-source-commstat {{ border-radius: 5px 12px 5px 12px; outline: 2px solid rgba(0,131,143,0.28); }}
-    .op-source-local {{ border-radius: 50% 50% 50% 8px; outline: 2px solid rgba(94,53,177,0.32); transform: rotate(-45deg); }}
+    .op-source-hf {{ border-radius: 7px; outline: 2px solid {marker_success_faint}; }}
+    .op-source-commstat {{ border-radius: 5px 12px 5px 12px; outline: 2px solid {marker_info_faint}; }}
+    .op-source-local {{ border-radius: 50% 50% 50% 8px; outline: 2px solid {marker_accent_faint}; transform: rotate(-45deg); }}
     .op-source-local svg, .op-source-local .wx-count {{ transform: rotate(45deg); }}
-    .op-source-pin {{ border-radius: 5px; outline: 2px solid rgba(245,127,23,0.42); background: #FFF8E1; border-color: #F57F17; }}
-    .op-source-mixed {{ border-radius: 50%; outline: 2px solid rgba(69,90,100,0.35); }}
-    .op-severe {{ border-color: #B71C1C; }}
-    .op-caution {{ border-color: #E65100; }}
-    .op-routine {{ border-color: #1565C0; }}
-    .op-unknown {{ border-color: #546E7A; }}
-    .op-layer-alert {{ background: #FFF8E1; color: #F57F17; }}
-    .op-layer-infrastructure {{ background: #E8F5E9; color: #2E7D32; }}
-    .op-kind-power {{ background: #FFFDE7; color: #F9A825; }}
-    .op-kind-water {{ background: #E3F2FD; color: #1565C0; }}
-    .op-kind-comms {{ background: #E0F7FA; color: #00838F; }}
-    .op-kind-transport {{ background: #EFEBE9; color: #5D4037; }}
-    .op-kind-warning {{ background: #FFF8E1; color: #F57F17; }}
-    .op-kind-evacuation {{ background: #FFEBEE; color: #C62828; }}
-    .op-kind-rfi {{ background: #EDE7F6; color: #5E35B1; }}
-    .op-kind-fire {{ background: #FFF3E0; color: #E65100; }}
-    .op-kind-medical {{ background: #FFEBEE; color: #C62828; }}
-    .op-kind-security {{ background: #EDE7F6; color: #4527A0; }}
-    .op-kind-shelter {{ background: #E8EAF6; color: #283593; }}
-    .op-kind-food {{ background: #F1F8E9; color: #558B2F; }}
-    .op-kind-fuel {{ background: #FFF8E1; color: #F57F17; }}
-    .op-kind-logistics {{ background: #ECEFF1; color: #37474F; }}
-    .op-kind-utility {{ background: #E8F5E9; color: #2E7D32; }}
-    .op-kind-storm {{ background: #F3E5F5; color: #6A1B9A; }}
-    .op-kind-general {{ background: #ECEFF1; color: #455A64; }}
+    .op-source-pin {{ border-radius: 5px; outline: 2px solid {marker_warning_faint}; background: {marker_warning_faint}; border-color: {marker_warning}; }}
+    .op-source-mixed {{ border-radius: 50%; outline: 2px solid {marker_accent_faint}; }}
+    .op-severe {{ border-color: {marker_danger}; }}
+    .op-caution {{ border-color: {marker_warning}; }}
+    .op-routine {{ border-color: {marker_info}; }}
+    .op-unknown {{ border-color: {marker_muted}; }}
+    .op-layer-alert {{ background: {marker_warning_faint}; color: {marker_warning}; }}
+    .op-layer-infrastructure {{ background: {marker_success_faint}; color: {marker_success}; }}
+    .op-kind-power {{ background: {marker_warning_faint}; color: {marker_warning}; }}
+    .op-kind-water {{ background: {marker_info_faint}; color: {marker_info}; }}
+    .op-kind-comms {{ background: {marker_info_faint}; color: {marker_info}; }}
+    .op-kind-transport {{ background: {marker_surface_faint}; color: {marker_muted}; }}
+    .op-kind-warning {{ background: {marker_warning_faint}; color: {marker_warning}; }}
+    .op-kind-evacuation {{ background: {marker_danger_faint}; color: {marker_danger}; }}
+    .op-kind-rfi {{ background: {marker_accent_faint}; color: {marker_accent}; }}
+    .op-kind-fire {{ background: {marker_danger_faint}; color: {marker_danger}; }}
+    .op-kind-medical {{ background: {marker_danger_faint}; color: {marker_danger}; }}
+    .op-kind-security {{ background: {marker_danger_faint}; color: {marker_danger}; }}
+    .op-kind-shelter {{ background: {marker_info_faint}; color: {marker_info}; }}
+    .op-kind-food {{ background: {marker_success_faint}; color: {marker_success}; }}
+    .op-kind-fuel {{ background: {marker_warning_faint}; color: {marker_warning}; }}
+    .op-kind-logistics {{ background: {marker_surface_faint}; color: {marker_muted}; }}
+    .op-kind-utility {{ background: {marker_success_faint}; color: {marker_success}; }}
+    .op-kind-storm {{ background: {marker_danger_faint}; color: {marker_danger}; }}
+    .op-kind-general {{ background: {marker_surface_faint}; color: {marker_muted}; }}
   </style>
 </head>
 <body>

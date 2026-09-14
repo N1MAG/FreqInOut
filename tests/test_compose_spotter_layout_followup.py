@@ -84,7 +84,9 @@ def test_spotter_compact_setup_stacks_and_owns_overflow(monkeypatch, tmp_path) -
         app.processEvents()
 
         assert tab.compose_body_splitter.orientation() == Qt.Vertical
-        assert tab.compose_setup_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAsNeeded
+        # Setup controls reflow vertically; horizontal scrolling is reserved
+        # for genuinely wide data surfaces, not forms.
+        assert tab.compose_setup_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
         assert tab.compose_setup_scroll.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded
         assert tab.compose_setup_scroll.isVisible()
         assert tab.compose_spotter_source_row_widget.isVisible()

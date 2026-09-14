@@ -596,6 +596,9 @@ class StubSettingsTab(StubTab):
     def _update_launch_control_buttons(self) -> None:
         return
 
+    def set_receiver_control_test_service_ready(self, _ready: bool) -> None:
+        return
+
 
 class StubScheduler(QObject):
     active_entry_changed = Signal(dict, str)
@@ -633,6 +636,13 @@ class StubScheduler(QObject):
 
     def force_refresh(self) -> None:
         return
+
+    def shared_endpoint_lane_registry(self):
+        from freqinout.core.scheduler_endpoint_lane import EndpointLaneRegistry
+
+        if not hasattr(self, "_endpoint_lanes"):
+            self._endpoint_lanes = EndpointLaneRegistry()
+        return self._endpoint_lanes
 
     def set_runtime_scheduler_enabled(self, enabled: bool | None) -> None:
         self.runtime_enabled = True if enabled is None else bool(enabled)
@@ -696,11 +706,12 @@ class StubStationRuntimeManager:
     active_profile: dict[str, object] = {}
     active_policy: dict[str, object] = {}
 
-    def __init__(self, store=None, settings=None) -> None:
+    def __init__(self, store=None, settings=None, receiver_client_factory=None) -> None:
         self.store = store
         self.settings = settings
+        self.receiver_client_factory = receiver_client_factory
 
-    def sync_with_store(self) -> None:
+    def sync_with_store(self, **_kwargs) -> None:
         return
 
     def get_primary_runtime(self):

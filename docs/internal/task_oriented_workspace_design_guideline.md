@@ -238,6 +238,17 @@ controls.
 - Status text changes must not produce repeated size oscillation, swipe/vanish
   behavior, or loss of the current selection.
 
+### Font-Derived Height Requirement
+
+All redesigned workspaces follow the complete Font-Derived Vertical Geometry
+Contract in `ui_layout_standards.md`. Text-bearing controls, tabs, item-view
+headers/rows, banners, chips, and wrapped or multiline content derive their
+vertical floors from the active font, content, indicators/icons, and shared
+padding/hit-target treatment. Lazy construction and font/theme changes must
+republish those floors through coalesced cache-only geometry work. A global
+guard or a literal pixel threshold is only a safety net and is not evidence that
+the task surface, scroll owner, or responsive reading order is compliant.
+
 ## Visual Language
 
 - Use the application-wide theme and shared component layer for primary,

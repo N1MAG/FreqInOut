@@ -719,8 +719,10 @@ def test_settings_fit_content_applies_in_stacked_mode_by_default() -> None:
         collapsed_block.index("if fit_content:") : collapsed_block.index("else:\n                group.setMinimumHeight(0)")
     ]
     assert "group.setMaximumHeight(target_height)" in fit_content_branch
-    assert "group.setMaximumHeight(16777215)" not in fit_content_branch
-    assert "QSizePolicy.Preferred if stacked_mode else QSizePolicy.Fixed" in fit_content_branch
+    assert "group.setMaximumHeight(16777215)" in fit_content_branch
+    assert "if stacked_mode:" in fit_content_branch
+    assert "group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)" in fit_content_branch
+    assert "group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)" in fit_content_branch
 
 
 def test_settings_nav_group_toggle_role_distinguishes_expanded_groups() -> None:
@@ -1105,7 +1107,8 @@ def test_settings_fit_content_group_geometry_refreshes_without_page_stretch(monk
             (tab.local_net_section_group, tab.local_net_table),
         ):
             assert group.minimumHeight() == expanded_heights[group]
-            assert group.maximumHeight() == expanded_heights[group]
+            assert group.maximumHeight() == 16777215
+            assert group.sizePolicy().verticalPolicy() == QSizePolicy.Preferred
             assert expanded_heights[group] >= table.maximumHeight()
             assert table.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded
             assert table.maximumHeight() < table.horizontalHeader().height() + (table.rowCount() * max(table.rowHeight(0), 24))

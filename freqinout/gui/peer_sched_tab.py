@@ -33,7 +33,7 @@ from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.help_registry import resolve_help_host
-from freqinout.gui.theme import resolve_theme, button_style
+from freqinout.gui.theme import active_app_theme, resolve_theme, button_style, label_style
 
 
 # Simple FEMA region mapping for filtering
@@ -382,7 +382,7 @@ class ManualPeerScheduleDialog(QDialog):
 
         self.error_label = QLabel("")
         self.error_label.setWordWrap(True)
-        self.error_label.setStyleSheet("color: #b22222;")
+        self.error_label.setStyleSheet(label_style("danger", active_app_theme(), weight=600))
         layout.addWidget(self.error_label)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
@@ -610,6 +610,13 @@ class PeerSchedTab(QWidget):
             self._clear_grid_layout(grid)
 
         if compact:
+            for combo in (
+                self.delete_callsign_combo,
+                self.callsign_filter,
+                self.region_filter,
+                self.group_filter,
+            ):
+                combo.setMinimumWidth(0)
             action_placements = [
                 (self.schedule_source_label, 0, 0),
                 (self.add_btn, 0, 1),
@@ -638,6 +645,10 @@ class PeerSchedTab(QWidget):
                 (self.tz_toggle_btn, 1, 6),
             ]
         else:
+            self.delete_callsign_combo.setMinimumWidth(150)
+            self.callsign_filter.setMinimumWidth(150)
+            self.region_filter.setMinimumWidth(120)
+            self.group_filter.setMinimumWidth(150)
             action_placements = [
                 (self.schedule_source_label, 0, 0),
                 (self.add_btn, 0, 1),

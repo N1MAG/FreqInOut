@@ -131,7 +131,7 @@ def test_api_directed_ingest_uses_current_and_historical_operator_callsigns(
     settings.close()
 
 
-def test_inbox_and_directed_adapters_collapse_same_semantic_message(
+def test_inbox_and_directed_adapters_preserve_same_semantic_message_per_source(
     monkeypatch, tmp_path: Path
 ) -> None:
     settings = _settings(monkeypatch, tmp_path)
@@ -150,7 +150,7 @@ def test_inbox_and_directed_adapters_collapse_same_semantic_message(
         2, "K1AAA", "N1MAG", "MSG", utc, timestamp, "SAME MESSAGE", "SAME MESSAGE",
         "UNREAD", 0.0, source_key="directed:fio-a", source_id=2,
         source_radio_id="7", js8_instance_id="fio-a",
-    ) is False
+    ) is True
     with sqlite3.connect(settings.config_dir / "freqinout_nets.db") as conn:
-        assert conn.execute("SELECT COUNT(*) FROM js8_messages").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM js8_messages").fetchone()[0] == 2
     settings.close()

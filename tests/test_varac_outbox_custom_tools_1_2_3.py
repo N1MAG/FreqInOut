@@ -144,6 +144,6 @@ def test_settings_and_compose_source_include_outbox_and_custom_tools() -> None:
     assert 'data["custom_tool_items"] = [dict(item) for item in self._custom_tool_items_cache]' in settings_text
     assert "def normalize_custom_tools(raw_items: Any) -> List[Dict[str, str]]:" in launch_text
     assert 'return self.normalize_custom_tools(self.settings.get("custom_tool_items", []))' in launch_text
-    assert 'return self._finalize_launch_command(name, cmd), "configured custom tool"' in launch_text
+    assert 'return self._finalize_launch_command(name, cmd, launch_arguments), "configured custom tool"' in launch_text
     assert 'configured = self._compose_profile_text(profile, "varac_outbox_dir")' in messages_text
     assert 'or str(self.settings.get("varac_outbox_dir", "") or "").strip()' in messages_text

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 import uuid
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal, QEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -23,6 +23,8 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
+    QScrollArea,
+    QBoxLayout,
 )
 
 from freqinout.core.resource_catalog_models import CatalogValidationError, FrequencyResource, ReadOnlyResourceError, ReferencedResourceError
@@ -31,12 +33,20 @@ from freqinout.core.resource_catalog_store import (
     STATION_MANUAL_SOURCE_KEY,
     ResourceCatalogStore,
 )
-from freqinout.gui.resource_picker import (
-    frequency_where_text,
-    populate_source_combo,
-    resource_status_text,
-    source_display_label,
-    source_display_labels,
+from freqinout.gui.resource_catalog_snapshot import (
+    ResourceCatalogSnapshot,
+    ResourceCatalogSnapshotService,
+    filter_frequencies,
+    source_label,
+)
+from freqinout.gui.resource_picker import frequency_where_text, resource_status_text
+from freqinout.gui.theme import (
+    active_app_theme,
+    button_height_for_font,
+    button_style,
+    control_height_for_font,
+    label_style,
+    style_splitter_handles,
 )
 
 
@@ -55,13 +65,18 @@ class FrequencyCatalogView(QWidget):
 
     review_export_requested = Signal(object)
 
-    def __init__(self, store: ResourceCatalogStore, parent: QWidget | None = None) -> None:
+    def __init__(self, store: ResourceCatalogStore, parent: QWidget | None = None, *, snapshot_service: ResourceCatalogSnapshotService | None = None) -> None:
         super().__init__(parent)
         self.store = store
         self._selected: FrequencyResource | None = None
         self._editing_key: str | None = None
         self._export_selected_keys: set[str] = set()
         self._populating_results = False
+        self._snapshot: ResourceCatalogSnapshot | None = None
+        self._snapshot_service = snapshot_service or ResourceCatalogSnapshotService(store)
+        self._snapshot_timer = QTimer(self)
+        self._snapshot_timer.setInterval(10)
+        self._snapshot_timer.timeout.connect(self._take_snapshot)
         self._build_ui()
         self.refresh_results()
 
@@ -69,29 +84,30 @@ class FrequencyCatalogView(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
-        title = QLabel("Frequency Catalog")
-        title.setStyleSheet("font-weight: 700; font-size: 17px;")
-        layout.addWidget(title)
+        self.title_label = QLabel("Frequency Catalog")
+        layout.addWidget(self.title_label)
         why = QLabel("Reusable station and reference frequency data. Reference guidance is advisory; it does not assess transmit authorization.")
         why.setWordWrap(True)
         layout.addWidget(why)
         filters = QHBoxLayout()
+        self.filters_row = filters
         self.search_edit = QLineEdit(self)
         self.search_edit.setPlaceholderText("Search label, channel, frequency, locality, or coverage")
         self.search_edit.setAccessibleName("Frequency catalog search")
+        self.search_edit.textChanged.connect(self._render_cached_results)
         self.search_edit.returnPressed.connect(self.refresh_results)
         filters.addWidget(self.search_edit, 1)
         self.service_filter = QComboBox(self)
         self.service_filter.addItem("Service: All", None)
         self.service_filter.addItem("Amateur", "AMATEUR")
         self.service_filter.addItem("GMRS", "GMRS")
-        self.service_filter.currentIndexChanged.connect(self.refresh_results)
+        self.service_filter.currentIndexChanged.connect(self._render_cached_results)
         filters.addWidget(self.service_filter)
         self.status_filter = QComboBox(self)
         self.status_filter.addItem("Listing: Listed", True)
         self.status_filter.addItem("Retired", False)
         self.status_filter.addItem("All listings", None)
-        self.status_filter.currentIndexChanged.connect(self.refresh_results)
+        self.status_filter.currentIndexChanged.connect(self._render_cached_results)
         filters.addWidget(self.status_filter)
         refresh = QPushButton("Refresh", self)
         refresh.clicked.connect(self.refresh_results)
@@ -124,7 +140,12 @@ class FrequencyCatalogView(QWidget):
         self.table.itemSelectionChanged.connect(self._selection_changed)
         self.table.itemChanged.connect(self._export_item_changed)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        detail = QWidget(self.splitter)
+        self.detail_scroll = QScrollArea(self.splitter)
+        self.detail_scroll.setWidgetResizable(True)
+        self.detail_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.detail_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        detail = QWidget(self.detail_scroll)
+        self.detail_scroll.setWidget(detail)
         detail_layout = QVBoxLayout(detail)
         detail_layout.setContentsMargins(8, 0, 0, 0)
         self.detail_label = QLabel("Select a frequency resource to review its catalog source and station impact.")
@@ -190,17 +211,107 @@ class FrequencyCatalogView(QWidget):
         self.save_btn.clicked.connect(self.save_editor)
         self.cancel_btn.clicked.connect(self.cancel_editor)
         self.editor_frame.setVisible(False)
+        self.apply_theme()
         self._set_action_state()
 
+    def apply_theme(self) -> None:
+        theme = active_app_theme()
+        self.title_label.setStyleSheet(label_style("text", theme, weight=700))
+        self.table.setStyleSheet(f"QTableWidget {{ gridline-color: {theme['border']}; }}")
+        self.detail_label.setStyleSheet(label_style("text", theme))
+        self.usage_label.setStyleSheet(label_style("muted", theme))
+        self.status_label.setStyleSheet(label_style("muted", theme))
+        for button in (
+            self.clear_export_selection_btn,
+            self.review_export_btn,
+            self.new_btn,
+            self.edit_btn,
+            self.clone_btn,
+            self.retire_btn,
+            self.delete_btn,
+            self.save_btn,
+            self.cancel_btn,
+        ):
+            button.setMinimumHeight(button_height_for_font(button))
+        for button, role in (
+            (self.clear_export_selection_btn, "muted"),
+            (self.review_export_btn, "primary"),
+            (self.new_btn, "primary"),
+            (self.edit_btn, "secondary"),
+            (self.clone_btn, "secondary"),
+            (self.retire_btn, "eligible_warning"),
+            (self.delete_btn, "eligible_danger"),
+            (self.save_btn, "primary"),
+            (self.cancel_btn, "muted"),
+        ):
+            button.setStyleSheet(button_style(role, theme))
+        self.search_edit.setMinimumHeight(control_height_for_font(self.search_edit))
+        for combo in (self.service_filter, self.status_filter, self.source_edit, self.kind_edit, self.editor_service):
+            combo.setMinimumHeight(control_height_for_font(combo))
+        for field in (
+            self.label_edit,
+            self.center_hz_edit,
+            self.lower_hz_edit,
+            self.upper_hz_edit,
+            self.receive_hz_edit,
+            self.transmit_hz_edit,
+            self.band_edit,
+            self.channel_edit,
+            self.mode_edit,
+            self.notes_edit,
+        ):
+            field.setMinimumHeight(control_height_for_font(field))
+        self.table.verticalHeader().setDefaultSectionSize(
+            control_height_for_font(self.table, vertical_padding=10, floor=1)
+        )
+        style_splitter_handles(self.splitter, theme, width=12)
+        self._apply_responsive_layout()
+
+    def _apply_responsive_layout(self) -> None:
+        compact = self.width() > 0 and self.width() < max(900, self.fontMetrics().horizontalAdvance("Frequency Catalog") * 25)
+        self.filters_row.setDirection(QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight)
+        self.splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_responsive_layout()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange:
+            self.apply_theme()
+
     def refresh_results(self) -> None:
-        rows = self.store.list_frequencies(
-            search=self.search_edit.text(), service=self.service_filter.currentData(),
-            active=self.status_filter.currentData(), limit=MAX_RESULTS,
+        """Request an off-thread snapshot; existing rows stay visible until it arrives."""
+        self._snapshot_service.request()
+        self._snapshot_timer.start()
+
+    def _take_snapshot(self) -> None:
+        completion = self._snapshot_service.take_latest()
+        if completion is None:
+            if not self._snapshot_service.has_pending():
+                self._snapshot_timer.stop()
+            return
+        if completion.snapshot is not None:
+            self._snapshot = completion.snapshot
+            self._render_cached_results()
+        elif completion.error is not None:
+            self.status_label.setText(f"Catalog refresh unavailable; showing the last coherent results. {completion.error}")
+        if not self._snapshot_service.has_pending():
+            self._snapshot_timer.stop()
+
+    def _render_cached_results(self, *_: object) -> None:
+        snapshot = self._snapshot
+        if snapshot is None:
+            return
+        selected_key = self._selected.frequency_resource_key if self._selected else None
+        rows = filter_frequencies(
+            snapshot, search=self.search_edit.text(), service=self.service_filter.currentData(),
+            active=self.status_filter.currentData(),
         )
         self._populating_results = True
         try:
             self.table.setRowCount(len(rows))
-            source_labels = source_display_labels(self.store, (row.source_key for row in rows))
             for row_index, resource in enumerate(rows):
                 export_item = QTableWidgetItem()
                 export_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
@@ -213,7 +324,7 @@ class FrequencyCatalogView(QWidget):
                     resource.label,
                     resource.service,
                     frequency_where_text(resource),
-                    source_labels[resource.source_key],
+                    source_label(snapshot, resource.source_key),
                     resource_status_text(resource),
                 )
                 for column, value in enumerate(values, start=1):
@@ -226,7 +337,8 @@ class FrequencyCatalogView(QWidget):
         self.status_label.setText(f"Showing {len(rows)} bounded result{'s' if len(rows) != 1 else ''} (maximum {MAX_RESULTS}).")
         self._update_export_selection_state()
         if rows:
-            self.table.selectRow(0)
+            selected_index = next((index for index, row in enumerate(rows) if row.frequency_resource_key == selected_key), 0)
+            self.table.selectRow(selected_index)
         else:
             self._selected = None
             self.detail_label.setText("No matching frequency resources. Create a station-owned resource when a new local reference is needed.")
@@ -241,11 +353,16 @@ class FrequencyCatalogView(QWidget):
         resource = resource_item.data(Qt.UserRole) if resource_item is not None else None
         if isinstance(resource, FrequencyResource):
             self._selected = resource
-            usage = self.store.frequency_usage(resource.frequency_resource_key)
+            snapshot = self._snapshot
+            if snapshot is None:
+                return
+            usage = snapshot.frequency_usage.get(resource.frequency_resource_key)
+            if usage is None:
+                return
             fields = [
                 f"{resource.label} · {resource.service} · {resource.resource_kind}",
                 frequency_where_text(resource),
-                f"Catalog source: {source_display_label(self.store, resource.source_key)} · {resource_status_text(resource)}",
+                f"Catalog source: {source_label(snapshot, resource.source_key)} · {resource_status_text(resource)}",
                 f"Mode: {resource.mode or '—'} · Tone: {resource.tone or '—'}",
                 f"Notes: {resource.notes or '—'}",
             ]
@@ -280,7 +397,7 @@ class FrequencyCatalogView(QWidget):
         if not self._export_selected_keys:
             return
         self._export_selected_keys.clear()
-        self.refresh_results()
+        self._render_cached_results()
 
     def request_export_review(self) -> None:
         if self._export_selected_keys:
@@ -311,7 +428,7 @@ class FrequencyCatalogView(QWidget):
         self._editing_key = None
         self._fill_editor(self._selected)
         self.key_edit.setText(new_frequency_resource_key())
-        populate_source_combo(self.source_edit, self.store)
+        self._populate_source_combo()
         self.editor_frame.setVisible(True)
         self.status_label.setText("Clone creates a new station-owned resource. The catalog source defaults to Station Resources.")
 
@@ -320,13 +437,13 @@ class FrequencyCatalogView(QWidget):
         if resource is None:
             for field in (self.key_edit, self.label_edit, self.center_hz_edit, self.lower_hz_edit, self.upper_hz_edit, self.receive_hz_edit, self.transmit_hz_edit, self.band_edit, self.channel_edit, self.mode_edit, self.notes_edit):
                 field.clear()
-            populate_source_combo(self.source_edit, self.store)
+            self._populate_source_combo()
             self.kind_edit.setCurrentText("simplex")
             self.editor_service.setCurrentText("AMATEUR")
             return
         self.key_edit.setText(resource.frequency_resource_key)
         self.key_edit.setReadOnly(self._editing_key is not None)
-        populate_source_combo(self.source_edit, self.store, resource.source_key)
+        self._populate_source_combo(resource.source_key)
         self.label_edit.setText(resource.label)
         self.kind_edit.setCurrentText(resource.resource_kind)
         self.editor_service.setCurrentText(resource.service)
@@ -339,6 +456,27 @@ class FrequencyCatalogView(QWidget):
         self.channel_edit.setText(resource.channel or "")
         self.mode_edit.setText(resource.mode or "")
         self.notes_edit.setText(resource.notes or "")
+
+    def _populate_source_combo(self, selected_key: str | None = None) -> None:
+        """Populate the editor from the current snapshot; opening an editor never reads SQLite."""
+        key = str(selected_key or STATION_MANUAL_SOURCE_KEY).strip()
+        sources = () if self._snapshot is None else tuple(
+            source for source in self._snapshot.sources.values()
+            if source.source_kind == "station" and not source.read_only
+        )
+        choices = [(source.label, source.source_key) for source in sources]
+        if selected_key and key not in {choice_key for _label, choice_key in choices}:
+            choices.append((source_label(self._snapshot, key) if self._snapshot else "Catalog source unavailable", key))
+        if key == STATION_MANUAL_SOURCE_KEY and key not in {choice_key for _label, choice_key in choices}:
+            choices.append(("Station Resources", key))
+        prior = self.source_edit.blockSignals(True)
+        try:
+            self.source_edit.clear()
+            for label, source_key in sorted(choices, key=lambda choice: (choice[0].casefold(), choice[1])):
+                self.source_edit.addItem(label, source_key)
+            self.source_edit.setCurrentIndex(self.source_edit.findData(key))
+        finally:
+            self.source_edit.blockSignals(prior)
 
     def _editor_resource(self) -> FrequencyResource:
         existing = self._selected if self._editing_key else None
