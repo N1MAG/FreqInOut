@@ -609,57 +609,33 @@ window state, and assigned monitor. Constructing, warming, showing, hiding,
 loading, or resizing the embedded map must never call top-level move, resize,
 normalize, maximize, or screen-placement operations.
 
-- On macOS and Windows, WebEngine helper startup is prewarmed before first Map
-  navigation. Warm-up is page-only: it must not create, resize, or show a
-  native `QWebEngineView` parented to the main window. Linux remains opt-in
-  because its startup behavior varies by desktop and WebEngine package.
+- On Windows, WebEngine helper startup may use the established hidden
+  `QWebEngineView` warm-up before first Map navigation. macOS and Linux do not
+  prewarm by default. Platform-specific warm-up must not be generalized without
+  passing a real native qualification gate on every affected platform.
 - The real WebEngine view is created only inside the already-laid-out Map
   canvas. Cold activation may show one stable loading state and one transition
   to the map; adjacent FIO pages must never become visible during lazy-page
   replacement.
-- First Map activation settles the current page, its parent layouts, and both
-  Map splitters synchronously before `set_map_visible(True)` may queue native
-  WebEngine construction. Positive geometry alone is not sufficient: the full
-  relevant signature (top-level rectangle/state/screen, Map page and container,
-  filter bar, splitters and sizes, stack and browser viewport) must remain
-  unchanged for at least two samples and 150 ms before attachment. A resize or
-  responsive reflow invalidates the pending settlement. A zero-sized or
-  provisional canvas defers creation through a bounded retry; it must never be
-  treated as a WebEngine failure.
-- The Map stack and WebEngine child ignore dynamic content size hints so
-  browser initialization cannot redistribute the Map workspace or influence
-  the top-level shell. Geometry preparation and final presentation are distinct
-  lifecycle states; they must never compete for or reset one shared settle
-  phase.
+- First Map activation follows the established direct lifecycle: make the Map
+  workspace current, lazily create one `QWebEngineView` in its permanent Map
+  stack, navigate that view directly, and select it when `loadFinished`
+  succeeds. Responsive reflow remains coalesced and idempotent, but it must not
+  gate navigation or presentation through a timer-driven geometry state machine.
 - The WebEngine view is always constructed in its permanent stack parent with
-  layout-owned geometry. On macOS, loading the first real document through
-  `QWebEngineView.setUrl()` or `setHtml()` is forbidden while the operator's
-  top-level window is full-screen: production telemetry proved that a
-  non-current view can still clear the native full-screen state. The cold Map
-  document instead loads on a retained page-only `QWebEnginePage` that is not
-  attached to the native view. The stable, shared-theme Qt `Preparing map`
-  surface remains current. This isolation applies only to the cold first page;
-  an already usable map remains visible during ordinary data/layer reloads.
-- After cold page load and first-payload application, FIO makes the loaded
-  page the native view's page, then makes that view current exactly once behind
-  the opaque Qt loading surface. That presentation is `NoFocus`, performs no
-  top-level window operation, and uses one generation-fenced final quiescence
-  phase before paint acknowledgement and overlay removal. Stale prepare,
-  resize, JavaScript and title callbacks are no-ops. The implementation must
-  never alternate between stack children or phase names during this sequence.
-- `loadFinished` is necessary but is not paint readiness. The loading surface
-  may be removed only after load success, nonzero canvas and WebEngine geometry,
-  successful application of the first real map payload, and a page-owned
-  two-animation-frame acknowledgement. The WebEngine view has `NoFocus` during
-  attachment and accepts normal focus only after that reveal gate passes. A
-  bounded presentation deadline must replace an indefinitely retained loading
-  overlay with a calm degraded/retry surface; it must not alter the top-level
-  window to recover.
-- First-surface diagnostics record the final canvas, WebEngine and read-only
-  top-level geometry plus state, full-screen/maximized flags and assigned screen
-  at native construction and final reveal. With no operator resize between
-  those events, their top-level state/screen and settled canvas rectangle must
-  agree. Diagnostics may observe geometry but must never alter it.
+  ordinary expanding layout ownership. Cold navigation uses
+  `QWebEngineView.setUrl()` or `setHtml()` directly; FIO must not load a detached
+  page and later call `QWebEngineView.setPage()`, reparent a loaded page, install
+  an opaque reveal overlay, or wait on a geometry/quiescence/presentation gate.
+  Those mechanisms failed native macOS and Linux qualification and are rejected.
+- `loadFinished(True)` immediately selects the persistent WebEngine stack page
+  and begins the existing bounded first-payload readiness probe. A failed load
+  immediately returns to the shared-theme loading/error page with calm recovery
+  guidance. The status strip must never report Ready while a separate opaque
+  surface can still hide the map.
+- First-surface diagnostics may record the final canvas, WebEngine and read-only
+  top-level geometry plus state, full-screen/maximized flags and assigned screen.
+  Diagnostics may observe geometry but must never delay presentation or alter it.
 - Hidden primary pages and hidden Message modes do not contribute geometry
   hints to the current workspace. The main shell ignores even the active
   page's transient minimum-size hint: each page owns internal overflow while
@@ -668,10 +644,8 @@ normalize, maximize, or screen-placement operations.
   and splitter writes are idempotent and occur only when their resolved layout
   state changes; resize, paint, and layout settlement perform no data refresh or
   external I/O.
-- After the WebEngine viewport is visible, nonzero, and its Leaflet page is
-  ready, FIO invokes `invalidateSize(false)` once for that page generation and
-  viewport size. A true size change may schedule one new invalidation; hiding or
-  ordinary repaint does not reload the HTML or refresh map data.
+- Map resize/repaint must not reload HTML, refresh map data, repeatedly invoke
+  JavaScript, or introduce a second presentation lifecycle.
 - Deferred activation and first-visible layout callbacks are navigation-
   generation fenced. A superseded hidden tab cannot resize, refresh, or replace
   the current page.
@@ -694,6 +668,25 @@ on a secondary monitor where available. No Space/focus switch,
 flash/reposition sequence, monitor jump, top-level growth, adjacent-page
 exposure, status-strip height jump, or minimize/restore repair step is
 acceptable.
+
+### Approved next slice — persistent Map window
+
+After the direct embedded-loading recovery build passes its exit gate, Map will
+move to one persistent, nonmodal top-level window so operators can use it while
+working elsewhere in FIO. The Map widget and WebEngine view must be constructed
+in that final window from the outset and must never be reparented between the
+main stack and the Map window. Clicking Map opens or raises the existing window;
+closing it hides rather than destroys it. FIO owns one instance, closes it during
+application shutdown, and keeps hidden-window refresh work bounded.
+
+The Map window will persist normal geometry, maximized state, and screen identity
+with validation against currently connected displays. First use opens at a
+bounded normal size on the main FIO screen; it does not automatically enter
+full-screen or always-on-top mode. Subsequent opens honor the operator's valid
+saved placement. Showing, hiding, loading, resizing, or restoring the Map window
+must never move, resize, normalize, activate, or change the screen/full-screen
+state of the main FIO window. The main workspace exposes a concise open/bring-to-
+front status and no second embedded WebEngine surface.
 
 - Regional Intel summary list excludes green rows by default.
 - Green evidence can still lower concern or support trend internally.

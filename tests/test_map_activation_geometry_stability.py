@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import os
-from types import MethodType, SimpleNamespace
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QSize, QTimer, Qt, Signal
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -25,8 +25,6 @@ from PySide6.QtWidgets import (
 
 import freqinout.gui.stations_map_tab as stations_map_module
 from freqinout.gui.stations_map_tab import StationsMapTab
-from freqinout.gui.current_page_stack import CurrentPageStack
-from freqinout.gui.main_window import MainWindow
 from freqinout.gui.theme import get_theme
 
 
@@ -42,32 +40,6 @@ class _CountingGrid(QGridLayout):
     def takeAt(self, index: int):  # noqa: N802 - Qt virtual method name
         self.take_count += 1
         return super().takeAt(index)
-
-
-class _ViewportTimer:
-    def __init__(self) -> None:
-        self.starts: list[int] = []
-
-    def start(self, delay: int) -> None:
-        self.starts.append(int(delay))
-
-
-class _LifecycleTimer:
-    def __init__(self, active: bool = False) -> None:
-        self.active = active
-        self.start_count = 0
-        self.stop_count = 0
-
-    def isActive(self) -> bool:  # noqa: N802
-        return self.active
-
-    def start(self) -> None:
-        self.active = True
-        self.start_count += 1
-
-    def stop(self) -> None:
-        self.active = False
-        self.stop_count += 1
 
 
 class _Splitter:
@@ -113,53 +85,6 @@ class _MapPage:
         callback(True)
 
 
-class _TestSignal:
-    def __init__(self) -> None:
-        self._callbacks: list[object] = []
-
-    def connect(self, callback) -> None:
-        self._callbacks.append(callback)
-
-
-class _DetachedMapPage:
-    """QWebEnginePage stand-in that records detached navigation and probes."""
-
-    def __init__(self, parent=None) -> None:
-        self.parent = parent
-        self.loadFinished = _TestSignal()
-        self.titleChanged = _TestSignal()
-        self.urls: list[object] = []
-        self.html: list[str] = []
-        self.scripts: list[str] = []
-        self.probe_callbacks: list[object] = []
-
-    def deleteLater(self) -> None:  # noqa: N802 - Qt-compatible name
-        pass
-
-    def setUrl(self, url) -> None:  # noqa: N802 - Qt-compatible name
-        self.urls.append(url)
-
-    def setHtml(self, html: str) -> None:  # noqa: N802 - Qt-compatible name
-        self.html.append(html)
-
-    def runJavaScript(self, script: str, callback=None) -> None:  # noqa: N802
-        self.scripts.append(script)
-        if callback is not None:
-            self.probe_callbacks.append(callback)
-
-
-class _MapWebView:
-    def __init__(self, width: int, height: int) -> None:
-        self._size = QSize(width, height)
-        self._page = _MapPage()
-
-    def size(self) -> QSize:
-        return self._size
-
-    def page(self) -> _MapPage:
-        return self._page
-
-
 class _FakeWebEngineView(QWidget):
     """Small QWidget substitute that preserves WebEngine's lifecycle signals."""
 
@@ -185,91 +110,6 @@ class _FakeWebEngineView(QWidget):
 
     def setHtml(self, html: str) -> None:  # noqa: N802 - Qt-compatible name
         self.html.append(html)
-
-
-def _map_surface_window() -> tuple[QMainWindow, SimpleNamespace]:
-    window = QMainWindow()
-    central = QWidget(window)
-    central_layout = QVBoxLayout(central)
-    pages = CurrentPageStack(central)
-    inbox = QLabel("Inbox", pages)
-    map_page = QWidget(pages)
-    map_layout = QVBoxLayout(map_page)
-    canvas = QSplitter(Qt.Horizontal, map_page)
-    map_stack = QStackedWidget(canvas)
-    loading = QWidget(map_stack)
-    map_stack.addWidget(loading)
-    canvas.addWidget(map_stack)
-    map_layout.addWidget(canvas)
-    pages.addWidget(inbox)
-    pages.addWidget(map_page)
-    pages.setCurrentWidget(map_page)
-    pages.setGeometry(0, 0, 900, 560)
-    central_layout.addWidget(pages)
-    window.setCentralWidget(central)
-    window.setMinimumSize(0, 0)
-    window.resize(900, 560)
-
-    host = SimpleNamespace(
-        _map_stack=map_stack,
-        _map_canvas_splitter=canvas,
-        _map_loading_overlay=None,
-        _map_loading_overlay_label=None,
-        _map_loading_label=None,
-        _map_surface_ready=False,
-        _map_surface_payload_applied=False,
-        _map_surface_prepare_retry_count=0,
-        _map_surface_reveal_retry_count=0,
-        _map_surface_reveal_generation=0,
-        _map_surface_reveal_probe_pending=False,
-        _map_surface_presentation_started_at=0.0,
-        _pending_map_payload=None,
-        _map_initialized=False,
-        _map_load_ok=False,
-        _map_visible=True,
-        _app_active=True,
-        _is_shutting_down=False,
-        _map_runtime_detail="Loading map...",
-        web=None,
-        _set_map_runtime_state=lambda *_args, **_kwargs: None,
-        _map_ready_detail_text=lambda: "ready",
-        _theme_snapshot=lambda: get_theme("dark"),
-        _on_map_load_finished=lambda _ok: None,
-        _on_map_page_title_changed=lambda _title: None,
-        _emit_map_event=lambda *_args, **_kwargs: None,
-        _schedule_leaflet_viewport_settle=lambda: None,
-        _maybe_start_map_ingest=lambda: False,
-        window=lambda: window,
-    )
-    host._show_map_loading_overlay = MethodType(
-        StationsMapTab._show_map_loading_overlay,
-        host,
-    )
-    host._present_loaded_map_surface = MethodType(
-        StationsMapTab._present_loaded_map_surface,
-        host,
-    )
-    host._begin_map_surface_geometry_settle = MethodType(
-        StationsMapTab._begin_map_surface_geometry_settle,
-        host,
-    )
-    host._schedule_map_surface_reveal = MethodType(
-        StationsMapTab._schedule_map_surface_reveal,
-        host,
-    )
-    host._sync_map_loading_overlay_geometry = MethodType(
-        StationsMapTab._sync_map_loading_overlay_geometry,
-        host,
-    )
-    host._finish_map_surface_reveal = MethodType(StationsMapTab._finish_map_surface_reveal, host)
-    host._on_map_surface_reveal_timeout = MethodType(
-        StationsMapTab._on_map_surface_reveal_timeout,
-        host,
-    )
-    host._map_script_page = MethodType(StationsMapTab._map_script_page, host)
-    host._map_navigation_target = MethodType(StationsMapTab._map_navigation_target, host)
-    host._enter_map_degraded = lambda *_args, **_kwargs: None
-    return window, host
 
 
 def _map_load_host(stack: QStackedWidget, web: QWidget) -> SimpleNamespace:
@@ -379,421 +219,112 @@ def test_map_drawer_reflow_does_not_rewrite_splitter_for_unchanged_state() -> No
     assert splitter.size_writes == [[0, 1200]]
 
 
-def test_successful_map_load_queues_leaflet_viewport_settlement() -> None:
-    scheduled: list[str] = []
-    host = SimpleNamespace(
-        _map_page_loading=True,
-        _map_initialized=False,
-        _map_load_ok=False,
-        _map_js_ready_retry_count=4,
-        _map_stack=None,
-        web=object(),
-        _pending_map_payload=None,
-        _map_visible=False,
-        _map_dirty=False,
-        _render_requested_during_load=False,
-        _render_requested_during_load_level=0,
-        _emit_map_event=lambda *_args, **_kwargs: None,
-        _set_map_runtime_state=lambda *_args, **_kwargs: None,
-        _map_ready_detail_text=lambda: "ready",
-        _schedule_leaflet_viewport_settle=lambda: scheduled.append("settle"),
-        _maybe_start_map_ingest=lambda: False,
-    )
-
-    StationsMapTab._on_map_load_finished(host, True)
-
-    assert host._map_page_loading is False
-    assert host._map_initialized is True
-    assert host._map_load_ok is True
-    assert scheduled == ["settle"]
-
-
-def test_map_page_stays_on_loading_surface_until_canvas_geometry_is_nonzero() -> None:
-    """A cold load must not reveal a native view at the canvas fallback origin."""
+def test_map_load_finished_promotes_direct_webview_without_overlay_handoff() -> None:
+    """A successful direct-view load immediately owns the visible stack page."""
     app = _app()
-    shell = QWidget()
-    splitter = QSplitter(Qt.Horizontal, shell)
-    stack = QStackedWidget(splitter)
+    window = QMainWindow()
+    stack = QStackedWidget(window)
     loading = QWidget(stack)
-    stack.addWidget(loading)
-    splitter.addWidget(stack)
-    shell.resize(900, 560)
-    splitter.setGeometry(0, 0, 0, 0)
-    stack.setGeometry(0, 0, 0, 0)
     web = _FakeWebEngineView(stack)
+    stack.addWidget(loading)
     stack.addWidget(web)
-    stack.setCurrentIndex(0)
+    window.setCentralWidget(stack)
+    window.resize(900, 560)
+    stack.setCurrentWidget(loading)
+    window.show()
+    app.processEvents()
+
     host = _map_load_host(stack, web)
 
-    shell.show()
-    app.processEvents()
-    StationsMapTab._on_map_load_finished(host, True)
-
-    # loadFinished may arrive while Qt is still attaching/layouting the native
-    # child.  The loading surface must remain current in that interval.
-    assert stack.currentIndex() == 0
-    assert not web.isVisible()
-
-    splitter.setGeometry(0, 0, 900, 560)
-    stack.setGeometry(0, 0, 900, 560)
     StationsMapTab._on_map_load_finished(host, True)
     app.processEvents()
 
-    assert stack.currentIndex() == 1
-    assert web.parentWidget() is stack
+    assert host._map_load_ok is True
+    assert stack.currentWidget() is web
     assert web.isVisible()
-    assert web.width() > 0
-    assert web.height() > 0
 
-    shell.close()
-    shell.deleteLater()
+    window.close()
+    window.deleteLater()
     app.processEvents()
 
 
-def test_first_map_webview_preparation_waits_for_final_canvas_geometry() -> None:
-    """Lazy construction/switching must not place a native view at (0, 0)."""
-    calls: list[str] = []
-
-    class _Canvas:
-        def __init__(self) -> None:
-            self._size = QSize(0, 0)
-
-        def size(self) -> QSize:
-            return self._size
-
-    canvas = _Canvas()
-    host = SimpleNamespace(
-        _app_active=True,
-        _map_visible=True,
-        _map_canvas_splitter=canvas,
-        _map_dirty=False,
-        _emit_map_event=lambda *_args, **_kwargs: None,
-        _ensure_web_view=lambda: calls.append("ensure") or True,
-    )
-
-    assert StationsMapTab.prepare_webview_for_first_show(host) is False
-    assert calls == []
-
-    canvas._size = QSize(900, 560)
-    assert StationsMapTab.prepare_webview_for_first_show(host) is True
-    assert calls == ["ensure"]
-
-
-def test_map_surface_geometry_quiescence_requires_stable_samples_and_elapsed_time(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A changed signature restarts settling; two samples still need 150 ms."""
-    now = [10.0]
-    monkeypatch.setattr(stations_map_module.time, "monotonic", lambda: now[0])
-    signature = [(0, 0, 900, 560)]
-    events: list[str] = []
-    host = SimpleNamespace(
-        _map_surface_geometry_phase="",
-        _map_surface_geometry_signature_value=None,
-        _map_surface_geometry_changed_at=0.0,
-        _map_surface_geometry_stable_samples=0,
-        _map_surface_geometry_signature=lambda: signature[0],
-        _emit_map_event=lambda event, **_kwargs: events.append(str(event)),
-    )
-    host._begin_map_surface_geometry_settle = MethodType(
-        StationsMapTab._begin_map_surface_geometry_settle,
-        host,
-    )
-
-    assert StationsMapTab._map_surface_geometry_is_quiet(host, "precreate") is False
-    now[0] += 0.10
-    assert StationsMapTab._map_surface_geometry_is_quiet(host, "precreate") is False
-    now[0] += 0.049
-    assert StationsMapTab._map_surface_geometry_is_quiet(host, "precreate") is False
-    now[0] += 0.002
-    assert StationsMapTab._map_surface_geometry_is_quiet(host, "precreate") is True
-
-    signature[0] = (0, 0, 901, 560)
-    assert StationsMapTab._map_surface_geometry_is_quiet(host, "precreate") is False
-    assert host._map_surface_geometry_stable_samples == 0
-    assert events == ["surface_geometry_changed", "surface_geometry_changed"]
-
-
-def test_cold_map_activation_waits_for_precreate_and_post_attach_barriers() -> None:
-    """No Chromium load/render is allowed until both geometry barriers pass."""
-    events: list[str] = []
-    quiet_results = iter((False, True, False, True))
-    host = SimpleNamespace(
-        _map_visible=True,
-        _is_shutting_down=False,
-        _app_active=True,
-        web=None,
-        _map_surface_prepare_retry_count=0,
-        _map_page_loading=False,
-        _map_initialized=False,
-        _map_dirty=False,
-        _map_canvas_geometry_ready=lambda: True,
-        _map_surface_geometry_is_quiet=lambda phase: events.append(f"quiet:{phase}") or next(quiet_results),
-        _ensure_initial_data_loaded=lambda: events.append("data"),
-        prepare_webview_for_first_show=lambda: events.append("prepare") or True,
-        _schedule_map_surface_prepare=lambda delay: events.append(f"retry:{delay}"),
-        _begin_map_surface_geometry_settle=lambda phase: events.append(f"begin:{phase}"),
-        _request_map_refresh=lambda **_kwargs: events.append("render"),
-    )
-
-    # precreate geometry is moving: do not construct, load, or render.
-    StationsMapTab._on_map_visible_deferred(host)
-    assert events == ["quiet:precreate", "retry:75"]
-
-    # precreate geometry is quiet: construct once, then restart settling after
-    # the native child is attached; Chromium still must not load yet.
-    host.prepare_webview_for_first_show = lambda: events.append("prepare") or setattr(host, "web", object()) or True
-    StationsMapTab._on_map_visible_deferred(host)
-    assert events == ["quiet:precreate", "retry:75", "quiet:precreate", "data", "prepare", "begin:attached", "retry:75"]
-    assert "render" not in events
-
-    # Native attachment changed the signature: defer the load until it settles.
-    StationsMapTab._on_map_visible_deferred(host)
-    assert events[-2:] == ["quiet:attached", "retry:75"]
-    assert "render" not in events
-
-    # Only after the post-attach barrier may the initial map HTML/data load run.
-    StationsMapTab._on_map_visible_deferred(host)
-    assert events[-3:] == ["data", "prepare", "render"]
-
-
-def test_map_resize_invalidates_pending_geometry_quiescence() -> None:
-    """A resize restarts settling and schedules another bounded prepare pass."""
-    timer = QTimer()
-    timer.setSingleShot(True)
-    host = SimpleNamespace(
-        _is_shutting_down=False,
-        _map_surface_ready=False,
-        _map_surface_geometry_signature_value=(1, 2, 900, 560),
-        _map_surface_geometry_changed_at=4.0,
-        _map_surface_geometry_stable_samples=3,
-        _map_surface_prepare_timer=timer,
-        _map_visible=True,
-        _app_active=True,
-        _schedule_map_surface_reveal=lambda: None,
-        _flush_map_geometry_reflow=lambda: None,
-    )
-    host._invalidate_map_surface_geometry_settle = MethodType(
-        StationsMapTab._invalidate_map_surface_geometry_settle,
-        host,
-    )
-
-    StationsMapTab._schedule_map_geometry_reflow(host)
-
-    assert host._map_surface_geometry_signature_value is None
-    assert host._map_surface_geometry_stable_samples == 0
-    assert timer.isActive()
-    assert timer.interval() == 75
-    timer.stop()
-
-
-def test_map_first_visible_layout_settles_before_visibility_can_queue_native_view() -> None:
-    """Map activation must settle its parent canvas before set_map_visible()."""
-    _app()
-    stack = CurrentPageStack()
-    inbox = QLabel("Inbox")
-    events: list[tuple[str, QSize]] = []
-
-    class _MapPage(QWidget):
-        def on_first_visible_layout_ready(self) -> None:
-            events.append(("settled", self.size()))
-
-        def set_map_visible(self, visible: bool) -> None:
-            if visible:
-                events.append(("visible", self.size()))
-
-    map_page = _MapPage()
-    stack.addWidget(inbox)
-    stack.addWidget(map_page)
-    stack.setGeometry(0, 0, 900, 560)
-    stack.setCurrentWidget(inbox)
-
-    shell = SimpleNamespace(
-        settings={},
-        _shutting_down=False,
-        stack=stack,
-        _screens=[("Inbox", inbox), ("Map", map_page)],
-        _lazy_factories={},
-        _lazy_placeholders={},
-        _active_tab_index=None,
-        _navigation_epoch=0,
-        _pending_map_switch_index=None,
-        _help_dialog_settle_until=0.0,
-        _screen_is_runtime_suppressed=lambda _label: False,
-        _queue_map_switch_after_webengine_warmup=lambda _index: False,
-        _nav_screen_index_map={},
-        _suppress_initial_nav_group_auto_expand=True,
-        _expand_nav_group_for_screen=lambda _label: None,
-        nav_buttons=[],
-        _sync_compact_navigation_selection=lambda _label: None,
-        _update_ncs_nav_button_styles=lambda: None,
-        _schedule_status_refresh=lambda: None,
-        _ensure_lazy_tab_loaded=lambda _label, _index: None,
-        _update_map_filters_visibility=lambda index: map_page.set_map_visible(
-            shell._screens[index][0] == "Map"
-        ),
-    )
-    shell._settle_active_screen_layout = MethodType(MainWindow._settle_active_screen_layout, shell)
-
-    MainWindow._set_screen(shell, 1)
-
-    assert [kind for kind, _size in events] == ["settled", "visible"]
-    assert all(size.width() > 1 and size.height() > 1 for _kind, size in events)
-
-    stack.deleteLater()
-
-
-def test_map_surface_reveal_requires_load_success_geometry_and_payload() -> None:
-    """The opaque loading surface stays up until every readiness condition holds."""
-    events: list[str] = []
-
-    class _Geometry:
-        def __init__(self) -> None:
-            self._size = QSize(0, 0)
-
-        def size(self) -> QSize:
-            return self._size
-
-        def width(self) -> int:
-            return int(self._size.width())
-
-        def height(self) -> int:
-            return int(self._size.height())
-
-        def setFocusPolicy(self, _policy) -> None:  # noqa: N802 - Qt-compatible name
-            pass
-
-    class _Overlay:
-        def __init__(self) -> None:
-            self.hidden = False
-
-        def hide(self) -> None:
-            self.hidden = True
-
-    canvas = _Geometry()
-    stack = _Geometry()
-    web = _Geometry()
-    web._size = QSize(900, 560)
-    overlay = _Overlay()
-    host = SimpleNamespace(
-        _is_shutting_down=False,
-        _map_visible=True,
-        _app_active=True,
-        _map_initialized=False,
-        _map_load_ok=False,
-        _map_surface_payload_applied=False,
-        _map_surface_ready=False,
-        _map_surface_reveal_retry_count=0,
-        _map_canvas_splitter=canvas,
-        _map_stack=stack,
-        _map_loading_overlay=overlay,
-        web=web,
-        _schedule_map_surface_reveal=lambda: events.append("retry"),
-        _sync_map_loading_overlay_geometry=lambda: True,
-        _emit_map_event=lambda event, **_kwargs: events.append(str(event)),
-        _schedule_leaflet_viewport_settle=lambda: None,
-    )
-
-    StationsMapTab._finish_map_surface_reveal(host)
-    assert host._map_surface_ready is False
-    assert overlay.hidden is False
-    assert events == ["retry"]
-
-    host._map_initialized = True
-    StationsMapTab._finish_map_surface_reveal(host)
-    assert host._map_surface_ready is False
-    host._map_load_ok = True
-    StationsMapTab._finish_map_surface_reveal(host)
-    assert host._map_surface_ready is False
-    host._map_surface_payload_applied = True
-    StationsMapTab._finish_map_surface_reveal(host)
-    assert host._map_surface_ready is False
-
-    canvas._size = QSize(900, 560)
-    stack._size = QSize(900, 560)
-    StationsMapTab._finish_map_surface_reveal(host)
-
-    assert host._map_surface_ready is True
-    assert overlay.hidden is True
-    assert events[-1] == "surface_revealed"
-
-
-def test_macos_cold_map_load_keeps_webengine_page_noncurrent_behind_opaque_overlay(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """macOS cold load keeps the final native page out of the current stack page."""
-    monkeypatch.setattr(stations_map_module.sys, "platform", "darwin")
-    app = _app()
-    shell = QWidget()
-    stack = QStackedWidget(shell)
-    loading = QWidget(stack)
-    web = QWidget(stack)
-    stack.addWidget(loading)
-    stack.addWidget(web)
-    stack.setGeometry(0, 0, 900, 560)
-    shell.resize(900, 560)
-    host = SimpleNamespace(
-        _map_stack=stack,
-        _map_loading_overlay=None,
-        _map_loading_overlay_label=None,
-        _map_runtime_detail="Loading map...",
-        _map_first_load_isolated=True,
-        _map_surface_presented=False,
-        _theme_snapshot=lambda: get_theme("dark"),
-    )
-    host._sync_map_loading_overlay_geometry = MethodType(
-        StationsMapTab._sync_map_loading_overlay_geometry,
-        host,
-    )
-
-    stack.setCurrentWidget(loading)
-    shell.show()
-    app.processEvents()
-    StationsMapTab._show_map_loading_overlay(host, "Loading map...")
-    app.processEvents()
-
-    overlay = host._map_loading_overlay
-    assert stack.currentWidget() is loading
-    assert not web.isVisible()
-    assert overlay is not None
-    assert overlay.isVisible()
-    assert overlay.geometry() == stack.contentsRect()
-    assert "background:" in overlay.styleSheet()
-
-    shell.close()
-    shell.deleteLater()
-    app.processEvents()
-
-
-def test_macos_cold_navigation_targets_detached_page_not_native_view(
+def test_map_navigation_targets_visible_webview_directly_without_detached_page(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Cold macOS setUrl must never navigate the page owned by the visible view."""
-    _app()
-    monkeypatch.setattr(stations_map_module.sys, "platform", "darwin")
+    """Cold file navigation must use the one WebEngineView owned by the stack."""
+    app = _app()
     monkeypatch.setattr(stations_map_module, "QWebEngineView", _FakeWebEngineView)
-    monkeypatch.setattr(stations_map_module, "QWebEnginePage", _DetachedMapPage)
-    window, host = _map_surface_window()
+    window = QMainWindow()
+    stack = QStackedWidget(window)
+    loading = QWidget(stack)
+    stack.addWidget(loading)
+    window.setCentralWidget(stack)
+    window.resize(900, 560)
     window.show()
-    _app().processEvents()
+    app.processEvents()
+
+    host = SimpleNamespace(
+        _map_stack=stack,
+        web=None,
+        _map_loading_label=None,
+        _map_runtime_detail="Loading map...",
+        _map_page_loading=False,
+        _map_load_ok=False,
+        _set_map_runtime_state=lambda *_args, **_kwargs: None,
+        _emit_map_event=lambda *_args, **_kwargs: None,
+        _enter_map_degraded=lambda *_args, **_kwargs: None,
+        _on_map_load_finished=lambda _ok: None,
+        _on_map_page_title_changed=lambda _title: None,
+    )
 
     assert StationsMapTab._ensure_web_view(host) is True
-    detached = host._map_detached_page
-    assert isinstance(detached, _DetachedMapPage)
-    assert host.web.page() is not detached
+    web = host.web
+    assert web is not None
+    assert web.parentWidget() is stack
+    assert web.page() is not None
+    assert web.set_page_calls == []
 
     map_file = tmp_path / "map.html"
     map_file.write_text("<html></html>", encoding="utf-8")
     assert StationsMapTab._load_web_map_file(host, map_file) is True
 
-    assert len(detached.urls) == 1
-    assert host.web.urls == []
-    assert host._map_attached_page is None
+    assert host.web is web
+    assert len(web.urls) == 1
+    assert web.html == []
+    assert web.set_page_calls == []
 
     window.close()
     window.deleteLater()
-    _app().processEvents()
+    app.processEvents()
+
+
+def test_map_lifecycle_source_has_direct_navigation_and_no_detached_page_path() -> None:
+    source = (
+        Path(__file__).resolve().parents[1] / "freqinout/gui/stations_map_tab.py"
+    ).read_text(encoding="utf-8")
+
+    assert "self.web.setUrl(url)" in source
+    assert "self.web.setHtml(html)" in source
+    assert "_map_loading_overlay" not in source
+    assert "_map_detached_page" not in source
+    assert "_map_navigation_target" not in source
+
+    direct_load_source = source.split("    def _load_web_map_file", 1)[1].split(
+        "    def _on_map_page_title_changed", 1
+    )[0]
+    assert "setPage(" not in direct_load_source
+    assert "QWebEnginePage" not in direct_load_source
+    ensure_source = direct_load_source.split("    def _ensure_web_view", 1)[1]
+    for mutation in (
+        "setGeometry(",
+        ".resize(",
+        ".move(",
+        "showMaximized(",
+        "showFullScreen(",
+        "setWindowState(",
+    ):
+        assert mutation not in ensure_source
 
 
 def _window_state_snapshot(window: QMainWindow) -> tuple:
@@ -811,280 +342,13 @@ def _window_state_snapshot(window: QMainWindow) -> tuple:
     )
 
 
-def test_macos_successful_cold_load_does_not_reveal_web_before_final_payload_paint(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """loadFinished(True) is not allowed to switch the cold native page current."""
+def test_warm_map_reload_reuses_existing_visible_web_surface() -> None:
+    """A warm reload must reuse the current view without a blanking handoff."""
     app = _app()
-    monkeypatch.setattr(stations_map_module.sys, "platform", "darwin")
-    monkeypatch.setattr(stations_map_module, "QWebEngineView", _FakeWebEngineView)
-    monkeypatch.setattr(stations_map_module, "QWebEnginePage", _DetachedMapPage)
-    window, host = _map_surface_window()
-    host._set_map_runtime_state = lambda *_args, **_kwargs: None
-    host._map_ready_detail_text = lambda: "ready"
-    host._schedule_leaflet_viewport_settle = lambda: None
-    host._maybe_start_map_ingest = lambda: False
-    host._pending_map_payload = {"markers": []}
-    host._push_pending_map_payload_when_ready = lambda: None
-    monkeypatch.setattr(stations_map_module.QTimer, "singleShot", lambda *_args: None)
-    window.setGeometry(37, 59, 900, 560)
-    window.show()
-    app.processEvents()
-
-    before = _window_state_snapshot(window)
-    assert StationsMapTab._ensure_web_view(host) is True
-    assert host._map_first_load_isolated is True
-    assert host._map_stack.currentIndex() == 0
-    assert host.web is not None
-    assert not host.web.isVisible()
-
-    StationsMapTab._on_map_load_finished(host, True)
-    app.processEvents()
-
-    assert host._map_load_ok is True
-    assert host._map_surface_ready is False
-    assert host._map_stack.currentIndex() == 0
-    assert not host.web.isVisible()
-    assert _window_state_snapshot(window) == before
-
-    window.close()
-    window.deleteLater()
-    app.processEvents()
-
-
-def test_macos_final_payload_paint_presents_web_once_without_top_level_mutation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Only the final payload/paint handoff may switch the native page current."""
-    app = _app()
-    monkeypatch.setattr(stations_map_module.sys, "platform", "darwin")
-    monkeypatch.setattr(stations_map_module, "QWebEngineView", _FakeWebEngineView)
-    monkeypatch.setattr(stations_map_module, "QWebEnginePage", _DetachedMapPage)
-    window, host = _map_surface_window()
-    host._set_map_runtime_state = lambda *_args, **_kwargs: None
-    host._map_ready_detail_text = lambda: "ready"
-    host._map_surface_geometry_is_quiet = lambda _phase: True
-    host._schedule_leaflet_viewport_settle = lambda: None
-    host._maybe_start_map_ingest = lambda: False
-    host._pending_map_payload = {"markers": []}
-    host._push_pending_map_payload_when_ready = lambda: None
-    monkeypatch.setattr(stations_map_module.QTimer, "singleShot", lambda *_args: None)
-    window.setGeometry(37, 59, 900, 560)
-    window.show()
-    app.processEvents()
-
-    assert StationsMapTab._ensure_web_view(host) is True
-    StationsMapTab._on_map_load_finished(host, True)
-    assert host._map_stack.currentIndex() == 0
-    assert not host.web.isVisible()
-    detached = host._map_detached_page
-    assert isinstance(detached, _DetachedMapPage)
-    assert host.web.set_page_calls == []
-
-    current_changes: list[int] = []
-    host._map_stack.currentChanged.connect(current_changes.append)
-    before = _window_state_snapshot(window)
-    host._map_surface_payload_applied = True
-
-    StationsMapTab._schedule_map_surface_reveal(host)
-    StationsMapTab._schedule_map_surface_reveal(host)
-
-    assert host._map_stack.currentWidget() is host.web
-    assert host.web.isVisible()
-    assert current_changes == [1]
-    assert host.web.set_page_calls == [detached]
-    assert host._map_detached_page is None
-    assert host._map_surface_presented is True
-    assert _window_state_snapshot(window) == before
-
-    # The paint-complete handoff can run after presentation; it must not switch
-    # the stack a second time or alter the top-level shell.
-    StationsMapTab._finish_map_surface_reveal(host)
-    StationsMapTab._finish_map_surface_reveal(host)
-    assert current_changes == [1]
-    assert host.web.set_page_calls == [detached]
-    assert host._map_surface_ready is True
-    assert _window_state_snapshot(window) == before
-
-    window.close()
-    window.deleteLater()
-    app.processEvents()
-
-
-def test_stale_prepare_callback_cannot_rewind_present_phase_or_start_prepare() -> None:
-    """A late visibility callback must hand off to reveal, never attachment prep."""
-    events: list[str] = []
-    host = SimpleNamespace(
-        _map_visible=True,
-        _is_shutting_down=False,
-        _app_active=True,
-        _map_initialized=True,
-        _map_load_ok=True,
-        _map_surface_geometry_phase="present",
-        _schedule_map_surface_reveal=lambda: events.append("reveal"),
-        _schedule_map_surface_prepare=lambda *_args: events.append("prepare"),
-        _begin_map_surface_geometry_settle=lambda phase: events.append(f"begin:{phase}"),
-    )
-
-    StationsMapTab._on_map_visible_deferred(host)
-
-    assert host._map_surface_geometry_phase == "present"
-    assert events == ["reveal"]
-
-
-def test_stale_reveal_probe_callback_cannot_reveal_new_generation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An old two-frame probe is ignored after resize starts a new generation."""
-    page = _DetachedMapPage()
-    web = _MapWebView(1200, 700)
-    web._page = page
-    scheduled: list[str] = []
-    host = SimpleNamespace(
-        _is_shutting_down=False,
-        _map_visible=True,
-        _app_active=True,
-        _map_surface_ready=False,
-        _map_first_load_isolated=True,
-        _map_surface_presented=True,
-        _map_surface_presentation_started_at=0.0,
-        _map_initialized=True,
-        _map_load_ok=True,
-        _map_surface_payload_applied=True,
-        _map_surface_reveal_retry_count=0,
-        _map_surface_reveal_generation=7,
-        _map_surface_reveal_probe_pending=False,
-        _map_canvas_splitter=web,
-        _map_stack=web,
-        web=web,
-        _map_surface_geometry_is_quiet=lambda _phase: True,
-        _schedule_map_surface_reveal=lambda: scheduled.append("reveal"),
-    )
-    host._map_script_page = MethodType(StationsMapTab._map_script_page, host)
-    monkeypatch.setattr(stations_map_module.QTimer, "singleShot", lambda *_args: None)
-
-    StationsMapTab._schedule_map_surface_reveal(host)
-    assert len(page.probe_callbacks) == 1
-    callback = page.probe_callbacks[0]
-
-    host._map_surface_reveal_generation = 8
-    callback(True)
-
-    assert scheduled == []
-    assert host._map_surface_ready is False
-
-
-def test_map_ready_title_ignores_stale_generation_and_reveals_current_once() -> None:
-    """Only the title acknowledgement for the active generation can reveal."""
-    window, host = _map_surface_window()
-    web = _FakeWebEngineView(host._map_stack)
-    host._map_stack.addWidget(web)
-    host._map_stack.setCurrentWidget(web)
-    overlay = SimpleNamespace(hidden=False, hide=lambda: setattr(overlay, "hidden", True))
-    events: list[str] = []
-    host.web = web
-    host._map_loading_overlay = overlay
-    host._map_first_load_isolated = True
-    host._map_surface_presented = True
-    host._map_surface_ready = False
-    host._map_surface_reveal_generation = 4
-    host._map_surface_reveal_probe_pending = True
-    host._map_initialized = True
-    host._map_load_ok = True
-    host._map_surface_payload_applied = True
-    host._emit_map_event = lambda event, **_kwargs: events.append(str(event))
-    host._schedule_leaflet_viewport_settle = lambda: None
-    host._map_script_page = MethodType(StationsMapTab._map_script_page, host)
-    host._sync_map_loading_overlay_geometry = lambda: True
-
-    StationsMapTab._on_map_page_title_changed(host, "fio-map-ready:3")
-    assert host._map_surface_ready is False
-    assert events == []
-
-    StationsMapTab._on_map_page_title_changed(host, "fio-map-ready:4")
-    StationsMapTab._on_map_page_title_changed(host, "fio-map-ready:4")
-
-    assert host._map_surface_ready is True
-    assert overlay.hidden is True
-    assert events.count("surface_revealed") == 1
-    window.close()
-    window.deleteLater()
-    _app().processEvents()
-
-
-def test_map_surface_reveal_timeout_enters_degraded_instead_of_retrying_forever(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A presented page that never paints must leave the opaque loading state."""
-    degraded: list[tuple[str, str]] = []
-    monkeypatch.setattr(stations_map_module.time, "monotonic", lambda: 20.0)
-    host = SimpleNamespace(
-        _is_shutting_down=False,
-        _map_surface_ready=False,
-        _map_surface_presented=True,
-        _map_surface_presentation_started_at=1.0,
-        _enter_map_degraded=lambda detail, *, reason, **_kwargs: degraded.append((detail, reason)),
-    )
-
-    StationsMapTab._on_map_surface_reveal_timeout(host)
-
-    assert len(degraded) == 1
-    assert degraded[0][1] == "surface_reveal_timeout"
-
-
-def test_resize_after_presentation_stays_in_present_phase_and_schedules_reveal(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Post-presentation geometry changes invalidate reveal, not cold preparation."""
-    timer = QTimer()
-    timer.setSingleShot(True)
-    callbacks: list[object] = []
-    host = SimpleNamespace(
-        _is_shutting_down=False,
-        _map_surface_ready=False,
-        _map_surface_presented=True,
-        _map_surface_geometry_signature_value=(1, 2, 900, 560),
-        _map_surface_geometry_changed_at=4.0,
-        _map_surface_geometry_stable_samples=3,
-        _map_surface_geometry_phase="present",
-        _map_surface_reveal_generation=9,
-        _map_surface_reveal_probe_pending=True,
-        _map_surface_prepare_timer=timer,
-        _map_visible=True,
-        _app_active=True,
-        _schedule_map_surface_reveal=lambda: None,
-    )
-    monkeypatch.setattr(
-        stations_map_module.QTimer,
-        "singleShot",
-        lambda _delay, callback: callbacks.append(callback),
-    )
-    host._invalidate_map_surface_geometry_settle = MethodType(
-        StationsMapTab._invalidate_map_surface_geometry_settle,
-        host,
-    )
-
-    StationsMapTab._invalidate_map_surface_geometry_settle(host)
-
-    assert host._map_surface_geometry_phase == "present"
-    assert host._map_surface_reveal_generation == 10
-    assert host._map_surface_reveal_probe_pending is False
-    assert timer.isActive() is False
-    assert len(callbacks) == 1
-    assert callbacks[0] is host._schedule_map_surface_reveal
-    timer.deleteLater()
-
-
-def test_macos_warm_map_reload_keeps_existing_visible_web_surface(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A warm reload must not blank or hide the already-present map surface."""
-    app = _app()
-    monkeypatch.setattr(stations_map_module.sys, "platform", "darwin")
     window = QMainWindow()
     stack = QStackedWidget(window)
     loading = QWidget(stack)
-    web = QWidget(stack)
+    web = _FakeWebEngineView(stack)
     stack.addWidget(loading)
     stack.addWidget(web)
     window.setCentralWidget(stack)
@@ -1101,10 +365,7 @@ def test_macos_warm_map_reload_keeps_existing_visible_web_surface(
         _map_initialized=False,
         _map_load_ok=False,
         _map_js_ready_retry_count=0,
-        _map_surface_ready=True,
-        _map_surface_payload_applied=True,
-        _map_first_load_isolated=False,
-        _map_surface_presented=True,
+        _map_runtime_detail="Loading map...",
         _map_visible=True,
         _app_active=True,
         _is_shutting_down=False,
@@ -1114,19 +375,24 @@ def test_macos_warm_map_reload_keeps_existing_visible_web_surface(
         _render_requested_during_load_level=0,
         _emit_map_event=lambda event, **_kwargs: events.append(str(event)),
         _set_map_runtime_state=lambda *_args, **_kwargs: None,
+        _enter_map_degraded=lambda *_args, **_kwargs: None,
         _map_ready_detail_text=lambda: "ready",
         _schedule_leaflet_viewport_settle=lambda: None,
         _maybe_start_map_ingest=lambda: False,
     )
 
+    before_view = host.web
     assert web.isVisible()
+    StationsMapTab._load_map_html_into_webview(host, "<html>reload</html>")
     StationsMapTab._on_map_load_finished(host, True)
     app.processEvents()
 
+    assert host.web is before_view
     assert stack.currentWidget() is web
     assert web.isVisible()
+    assert web.html == ["<html>reload</html>"]
     assert host._map_load_ok is True
-    assert events[0] == "page_load_finished"
+    assert events == ["page_load_started", "page_load_finished"]
 
     window.close()
     window.deleteLater()
@@ -1144,8 +410,19 @@ def test_first_map_native_surface_preserves_window_geometry_state_and_screen(
     """Creating the lazy native child must not move or normalize the shell."""
     app = _app()
     monkeypatch.setattr(stations_map_module, "QWebEngineView", _FakeWebEngineView)
-    monkeypatch.setattr(stations_map_module, "QWebEnginePage", _DetachedMapPage)
-    window, host = _map_surface_window()
+    window = QMainWindow()
+    stack = QStackedWidget(window)
+    loading = QWidget(stack)
+    stack.addWidget(loading)
+    window.setCentralWidget(stack)
+    window.resize(900, 560)
+    host = SimpleNamespace(
+        _map_stack=stack,
+        web=None,
+        _map_loading_label=None,
+        _on_map_load_finished=lambda _ok: None,
+        _on_map_page_title_changed=lambda _title: None,
+    )
 
     window.setGeometry(37, 59, 900, 560)
     window.show()
@@ -1173,69 +450,11 @@ def test_first_map_native_surface_preserves_window_geometry_state_and_screen(
     assert host.web.parentWidget() is host._map_stack
     assert host.web.geometry().width() > 1
     assert host.web.geometry().height() > 1
+    assert host.web.set_page_calls == []
 
     window.close()
     window.deleteLater()
     app.processEvents()
-
-
-def test_leaflet_viewport_invalidation_is_once_per_visible_geometry_and_generation() -> None:
-    web = _MapWebView(1200, 700)
-    host = SimpleNamespace(
-        _is_shutting_down=False,
-        _map_visible=True,
-        _app_active=True,
-        _map_load_ok=True,
-        _map_has_leaflet_page=True,
-        web=web,
-        _leaflet_viewport_retry_count=0,
-        _last_leaflet_viewport_signature=None,
-        _map_payload_generation=3,
-        _leaflet_viewport_timer=_ViewportTimer(),
-    )
-    host._map_script_page = MethodType(StationsMapTab._map_script_page, host)
-
-    StationsMapTab._flush_leaflet_viewport_settle(host)
-    StationsMapTab._flush_leaflet_viewport_settle(host)
-
-    assert len(web.page().scripts) == 1
-    assert "invalidateSize(false)" in web.page().scripts[0]
-    assert host._last_leaflet_viewport_signature == (3, 1200, 700)
-    assert host._leaflet_viewport_retry_count == 0
-
-    web._size = QSize(1000, 700)
-    StationsMapTab._flush_leaflet_viewport_settle(host)
-
-    assert len(web.page().scripts) == 2
-    assert host._last_leaflet_viewport_signature == (3, 1000, 700)
-
-
-def test_isolated_cold_page_skips_leaflet_invalidation_until_presented() -> None:
-    """Hidden first-load work must not awaken the native compositor early."""
-    web = _MapWebView(1200, 700)
-    host = SimpleNamespace(
-        _is_shutting_down=False,
-        _map_visible=True,
-        _app_active=True,
-        _map_first_load_isolated=True,
-        _map_surface_presented=False,
-        _map_load_ok=True,
-        _map_has_leaflet_page=True,
-        web=web,
-        _leaflet_viewport_retry_count=0,
-        _last_leaflet_viewport_signature=None,
-        _map_payload_generation=3,
-        _leaflet_viewport_timer=_ViewportTimer(),
-    )
-    host._map_script_page = MethodType(StationsMapTab._map_script_page, host)
-
-    StationsMapTab._flush_leaflet_viewport_settle(host)
-    assert web.page().scripts == []
-
-    host._map_surface_presented = True
-    StationsMapTab._flush_leaflet_viewport_settle(host)
-    assert len(web.page().scripts) == 1
-    assert "invalidateSize(false)" in web.page().scripts[0]
 
 
 def test_main_shell_ignores_active_map_size_hint_to_preserve_window_geometry() -> None:
@@ -1245,74 +464,6 @@ def test_main_shell_ignores_active_map_size_hint_to_preserve_window_geometry() -
     ).read_text(encoding="utf-8")
 
     assert "self.stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)" in source
-
-
-def test_clean_warm_map_reentry_reuses_live_page_without_refresh_or_state_expansion() -> None:
-    states: list[str] = []
-    events: list[str] = []
-    settled: list[str] = []
-    timer = _LifecycleTimer(active=False)
-    host = SimpleNamespace(
-        _map_visible=False,
-        _app_active=True,
-        _is_shutting_down=False,
-        _map_initialized=True,
-        _map_load_ok=True,
-        _map_dirty=False,
-        _pending_refresh_level=0,
-        _ingest_started=True,
-        _deferred_initial_ingest_pending=False,
-        _js8_timer=timer,
-        _set_map_runtime_state=lambda state, *_args, **_kwargs: states.append(str(state)),
-        _map_ready_detail_text=lambda: "ready",
-        _emit_map_event=lambda event, **_kwargs: events.append(str(event)),
-        _schedule_leaflet_viewport_settle=lambda: settled.append("settle"),
-        _maybe_start_map_ingest=lambda: False,
-    )
-
-    StationsMapTab.set_map_visible(host, True)
-
-    assert host._map_visible is True
-    assert timer.start_count == 1
-    assert states == ["ready"]
-    assert events == ["activation_ready"]
-    assert settled == ["settle"]
-
-
-def test_application_inactivity_alone_does_not_mark_live_map_dirty() -> None:
-    timer = _LifecycleTimer(active=True)
-    events: list[str] = []
-    states: list[str] = []
-    settled: list[str] = []
-    host = SimpleNamespace(
-        _app_active=True,
-        _map_visible=True,
-        _is_shutting_down=False,
-        _map_dirty=False,
-        _pending_refresh_level=0,
-        _map_initialized=True,
-        _map_load_ok=True,
-        _ingest_started=True,
-        _js8_timer=timer,
-        _emit_map_event=lambda event, **_kwargs: events.append(str(event)),
-        _set_map_runtime_state=lambda state, *_args, **_kwargs: states.append(str(state)),
-        _map_ready_detail_text=lambda: "ready",
-        _schedule_leaflet_viewport_settle=lambda: settled.append("settle"),
-    )
-
-    StationsMapTab.set_app_active(host, False)
-
-    assert host._map_dirty is False
-    assert timer.stop_count == 1
-    assert events == ["ui_paused_inactive"]
-
-    StationsMapTab.set_app_active(host, True)
-
-    assert host._map_dirty is False
-    assert timer.start_count == 1
-    assert states == ["ready"]
-    assert events == ["ui_paused_inactive", "ui_resumed_ready"]
-    assert settled == ["settle"]
 
 
 def test_live_map_refresh_keeps_support_strip_compact() -> None:

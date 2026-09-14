@@ -5719,13 +5719,13 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _platform_needs_webengine_prewarm() -> bool:
         """Return whether first-use WebEngine startup can disturb window focus."""
-        return sys.platform == "darwin" or sys.platform.startswith("win")
+        return sys.platform.startswith("win")
 
     def _should_prewarm_webengine_at_startup(self) -> bool:
         """
-        Default to startup WebEngine prewarm on macOS and Windows, where helper
-        process startup during first Map activation can disturb focus, Spaces,
-        or monitor placement. Linux remains opt-in unless explicitly enabled.
+        Default to startup WebEngine prewarm on Windows, where the hidden
+        startup path measurably improves first Map activation. Other platforms
+        stay opt-in unless explicitly overridden in settings.
         """
         default_enabled = self._platform_needs_webengine_prewarm()
         try:
@@ -5780,9 +5780,9 @@ class MainWindow(QMainWindow):
 
     def _queue_map_switch_after_webengine_warmup(self, index: int) -> bool:
         """
-        On macOS and Windows, keep the current tab visible for the one-time
-        WebEngine warmup so first Map navigation does not visibly coincide with
-        helper-process startup or native-surface attachment.
+        On Windows, keep the current tab visible for the one-time WebEngine
+        warmup so the first Map navigation does not visibly coincide with the
+        helper-process startup path.
         """
         if not self._platform_needs_webengine_prewarm():
             return False
@@ -5813,19 +5813,19 @@ class MainWindow(QMainWindow):
         if idx is None:
             return
         self._pending_map_switch_index = None
-        # The native WebEngine surface is intentionally not constructed while
-        # Map is hidden.  _set_screen first gives the real Map canvas its final
-        # geometry, then the tab creates the surface in that final parent.
+        try:
+            if hasattr(self, "stations_map_tab") and self.stations_map_tab is not None:
+                if hasattr(self.stations_map_tab, "prepare_webview_for_first_show"):
+                    self.stations_map_tab.prepare_webview_for_first_show()
+        except Exception as e:
+            log.debug("MainWindow: hidden Map webview precreate failed: %s", e)
         QTimer.singleShot(0, lambda i=idx: self._set_screen(i))
 
     def _prewarm_webengine(self) -> None:
         """
-        Warm up Qt WebEngine without creating or showing a native child view.
-
-        A QWebEngineView attached directly to the top-level window can
-        participate in native-window placement while Windows is restoring a
-        multi-monitor layout.  A page-only warmup starts the WebEngine process
-        without changing the FIO window geometry or screen assignment.
+        Warm up Qt WebEngine process/components and native view startup early so
+        first Map activation avoids the one-time close/reopen-style visual glitch
+        on some Windows systems.
         """
         if self._shutting_down:
             return
@@ -5834,33 +5834,46 @@ class MainWindow(QMainWindow):
         if self._webengine_warmup_widget is not None:
             return
         try:
-            from PySide6.QtWebEngineCore import QWebEnginePage
+            from PySide6.QtWebEngineWidgets import QWebEngineView
         except Exception:
             return
         try:
-            page = QWebEnginePage(self)
-            self._webengine_warmup_widget = page
+            web = QWebEngineView(self)
+            web.resize(4, 4)
+            self._webengine_warmup_widget = web
+            try:
+                # Force an offscreen show once so WebEngine native surface/process
+                # startup does not occur during first visible Map activation.
+                web.setAttribute(Qt.WA_DontShowOnScreen, True)
+            except Exception:
+                pass
 
             def _cleanup() -> None:
                 try:
-                    if self._webengine_warmup_done and self._webengine_warmup_widget is not page:
-                        return
-                    if self._webengine_warmup_widget is page:
+                    if self._webengine_warmup_widget is web:
                         self._webengine_warmup_widget = None
                     self._webengine_warmup_done = True
-                    page.deleteLater()
+                    try:
+                        web.hide()
+                    except Exception:
+                        pass
+                    web.deleteLater()
                     QTimer.singleShot(0, self._complete_pending_map_switch_after_webengine_warmup)
                 except Exception:
                     pass
 
             try:
-                page.loadFinished.connect(lambda _ok: _cleanup())
+                web.loadFinished.connect(lambda _ok: _cleanup())
             except Exception:
                 pass
-            page.setUrl(QUrl("about:blank"))
+            try:
+                web.show()
+            except Exception:
+                pass
+            web.setUrl(QUrl("about:blank"))
             QTimer.singleShot(3000, _cleanup)
         except Exception as e:
-            log.debug("MainWindow: WebEngine warmup (page-only) skipped: %s", e)
+            log.debug("MainWindow: WebEngine warmup (hidden-view) skipped: %s", e)
             self._webengine_warmup_widget = None
 
     def _prewarm_next_lazy_tab(self) -> None:
@@ -13058,11 +13071,6 @@ class MainWindow(QMainWindow):
                     fit_child_combo_boxes(self.stack.widget(index))
                 except Exception:
                     pass
-                if label == "Map":
-                    # A QWebEngineView is a native/composited surface.  Settle
-                    # every parent splitter and the canvas synchronously before
-                    # set_map_visible() is allowed to queue its construction.
-                    self._settle_active_screen_layout(index, navigation_epoch)
                 try:
                     widget_active = self.stack.widget(index)
                     if label == "Messages":

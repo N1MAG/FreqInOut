@@ -5732,3 +5732,47 @@ full-screen confirmation of this corrected page-only load remains
 operator-assisted, followed by Linux and Windows first-load/multi-monitor
 qualification. No migration, runtime configuration or data write, RF/device
 command, application restart, commit, or push occurred.
+
+### P1 recovery — restore the proven direct Map lifecycle
+
+Native macOS qualification of the detached-page build failed, and the same
+build then failed on Linux. The automated gate was therefore a false green and
+the detached document/presentation design is rejected. Review against commit
+`ff967a0` and the single-rig tree at `/Users/bill/Radio/FreqInOut` confirmed the
+stable recovery boundary: one persistent `QWebEngineView` in the Map stack,
+direct `setUrl`/`setHtml` navigation, and immediate stack selection when
+`loadFinished` succeeds. The recovery removes the detached page, `setPage`
+presentation handoff, opaque loading overlay, geometry-quiescence state
+machine, reveal generations/deadline, and repeated Leaflet viewport-settlement
+callbacks. It also removes the Map-specific synchronous main-shell layout pass.
+
+Windows retains its previously proven offscreen `QWebEngineView` startup
+warm-up. macOS and Linux no longer prewarm WebEngine by default. The retained
+shutdown-only page replacement matches both stable baselines and is not part of
+navigation; regression coverage forbids `setPage` within the construction and
+live-load path, rejects the removed lifecycle symbols globally, and verifies
+direct navigation, immediate successful presentation, warm view reuse, and no
+top-level move/resize/state operation.
+
+Work packages and models: the `gpt-5.6-sol` high-reasoning primary owned the
+failed-gate decision, architecture boundary, baseline comparison review,
+production integration, specifications, delegated-diff review, acceptance and
+push; `gpt-5.6-luna` (high) independently compared the failed implementation
+with `ff967a0` and the single-rig lifecycle; `gpt-5.6-terra` (high) removed the
+rejected lifecycle machinery without changing Map intelligence or data/UI
+features; and `gpt-5.6-luna` (high) replaced the misleading synthetic lifecycle
+tests with direct-flow regressions. Primary review retained the stable
+shutdown-only `QWebEnginePage` use and narrowed the delegated source guard to
+the live navigation/construction region.
+
+Acceptance evidence: the direct lifecycle file passes **12 tests**; the
+integrated Map/first-render/current-page/Phase 7 shell gate passes **349 tests**;
+the focused high-use Messages/Compose/Spotter/Map gate passes **82 tests**; the
+shared-theme, font-derived geometry, lifecycle and design-control gate passes
+**45 tests**; and the multi-rig shell gate passes **135 tests** in clean,
+process-isolated shards. Changed production/test Python files compile and `git
+diff --check` passes. This recovery is committed and pushed to the private
+testing branch for native Linux/macOS qualification. No migration, runtime
+configuration/data write, RF/device command, or application restart occurred.
+The approved persistent nonmodal Map-window design remains the next slice and
+will not begin until this recovery build's native gate is confirmed.
