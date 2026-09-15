@@ -383,18 +383,32 @@ Current remediation gates from the responsiveness audit:
 2. Message Inbox and Message Compose build file, database, and mesh projections
    from immutable snapshots. Results are applied only when their request or
    generation id is current; older results are discarded without clearing the
-   current table.
-3. Daily Schedule and Settings must not use `QApplication.processEvents()` to
+   current table. A navigation handoff that changes Compose mode, saved source,
+   form, field values, radio target, and preview is one logical UI transaction:
+   intermediate signals may update local widget state, but derived preview and
+   layout work is coalesced and applied once after the transaction succeeds.
+   Failure releases every loading/update guard, preserves an operable Compose
+   surface, emits a diagnostic, and presents a durable recovery message. A
+   resize-driven geometry pass must use an idempotent viewport/content
+   signature; only an explicit semantic transition may force a bounded pass.
+   Geometry mutations must never force their own successor pass.
+3. Periodic GUI-thread timers are cache-only dispatch points. Runtime profile
+   discovery, SQLite reads, filesystem scans, signature verification, and other
+   potentially blocking work execute on bounded workers and publish immutable
+   eligibility/result snapshots back to the controller thread. A settings-save
+   event invalidates and refreshes such snapshots asynchronously; ordinary
+   timer ticks never repeat configuration discovery.
+4. Daily Schedule and Settings must not use `QApplication.processEvents()` to
    force repaint or commit editors. Use focus changes, model commits,
    `QTimer.singleShot(0, ...)`, or worker completion callbacks.
-4. Mesh runtime shutdown and reconnect paths must avoid long waits. If a GUI
+5. Mesh runtime shutdown and reconnect paths must avoid long waits. If a GUI
    thread waits for a worker, the wait is capped at 250 ms. Final application
    close then polls asynchronously and accepts the close only after guarded Qt
    workers have stopped, preserving responsiveness and QObject thread affinity.
-5. Plan Builder, daily schedule, net schedule, and SOP views must move broad
+6. Plan Builder, daily schedule, net schedule, and SOP views must move broad
    table projection and RF Guard scans into worker snapshots before further
    high-volume source families are added.
-6. NCS, operator history, and import/export workflows are lower-risk but still
+7. NCS, operator history, and import/export workflows are lower-risk but still
    covered by this contract. New file scans, database scans, subprocess calls,
    and import/export operations must be bounded and must not run as open-ended
    work in GUI handlers.

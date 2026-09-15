@@ -19,6 +19,7 @@ from freqinout.core.scheduler_coordination import EndpointKey, EndpointResult
 from freqinout.core.scheduler_engine import SchedulerEngine
 from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
 from freqinout.core.ptt_conflict_service import PttConflictService
+from freqinout.radio_interface.rigctl_client import FrequencyCommand
 from freqinout.core.settings_manager import SettingsManager
 
 
@@ -67,6 +68,31 @@ class _Settings:
         if key == "control_via":
             return "FLRig"
         return default
+
+
+class _StartupOverlapRig(_Rig):
+    """Keep the first liveness read open while command verification proceeds."""
+
+    def __init__(self, *, host: str, port: int, frequency_hz: int) -> None:
+        super().__init__(host=host, port=port, frequency_hz=frequency_hz)
+        self.release.clear()
+        self._frequency_read_count = 0
+        self._frequency_read_lock = threading.Lock()
+
+    def get_vfo_frequency(self) -> int:
+        with self._frequency_read_lock:
+            self._frequency_read_count += 1
+            call_number = self._frequency_read_count
+        self.calls += 1
+        if call_number == 1:
+            self.started.set()
+            assert self.release.wait(timeout=2.0)
+            self.finished.set()
+        return self.frequency_hz
+
+    def set_frequency(self, command: FrequencyCommand) -> bool:
+        self.frequency_hz = command.hz
+        return True
 
 
 def _key(rig: _Rig) -> EndpointKey:
@@ -147,6 +173,85 @@ def test_target_status_returns_unknown_promptly_and_peer_refresh_is_independent(
         assert snapshot_b.frequency_hz == 7_115_000
     finally:
         blocked.release_io()
+        _close(engine)
+
+
+def test_startup_liveness_poll_cannot_replace_post_apply_verification(
+    monkeypatch, tmp_path
+) -> None:
+    """An already-running FLRig verifies the first startup schedule apply once."""
+
+    engine = _engine(monkeypatch, tmp_path)
+    rig = _StartupOverlapRig(
+        host="127.0.0.1",
+        port=12_370,
+        frequency_hz=14_100_000,
+    )
+    endpoint = _key(rig)
+    engine._endpoint_keys_by_profile = {7: endpoint}
+    engine._should_delay_for_fldigi = lambda **_kwargs: (False, "")
+    engine._coordination_conflict_status = lambda *_args, **_kwargs: {}
+    engine._shared_ptt_lock_status = lambda **_kwargs: {}
+    engine._update_desired_fldigi_settings = lambda *_args, **_kwargs: None
+    engine._hold_for_frequency_prompt = lambda *_args, **_kwargs: False
+    applied = threading.Event()
+    original_clear = engine._clear_scheduler_health_issue
+
+    def _clear_health(name: str, **kwargs: object) -> None:
+        original_clear(name, **kwargs)
+        if name.startswith("control-task:"):
+            applied.set()
+
+    engine._clear_scheduler_health_issue = _clear_health
+    try:
+        # Startup liveness sees the already-running endpoint first and remains
+        # in flight while the initial schedule command is queued.
+        engine._request_endpoint_status_refresh(
+            endpoint_key=endpoint,
+            rig_client=rig,
+            js8_client=None,
+            control_mode="FLRIG",
+            force=True,
+        )
+        _wait(rig.started, "startup liveness read did not begin")
+
+        queued = engine._queue_control_action(
+            control_mode="FLRIG",
+            rig_client=rig,
+            js8_client=None,
+            endpoint_key=endpoint,
+            device_profile_id=7,
+            allow_global_fallback=False,
+            entry_key=(7, "20M", 14_115_000, None, None, "A", "", "DIGI"),
+            source="HF",
+            freq_hz=14_115_000,
+            band="20M",
+            mode="DIGI",
+            vfo="A",
+            auto_tune=False,
+            js8_offset=None,
+            js8_group="",
+        )
+        assert queued is True
+        _wait(applied, "startup schedule command did not complete")
+
+        # The command result owns a purpose-specific, post-apply readback. It
+        # must not inherit the blank in-flight liveness placeholder.
+        summary = engine.get_endpoint_operational_summaries()[7]
+        assert summary["state"] == "on_schedule_verified"
+        assert summary["label"] == "On schedule · verified"
+        assert rig._frequency_read_count == 2
+
+        # Releasing the older liveness request cannot overwrite the command's
+        # authoritative readback or trigger another schedule command.
+        rig.release_io()
+        _wait(rig.finished, "startup liveness read did not finish")
+        assert engine.get_endpoint_operational_summaries()[7]["state"] == "on_schedule_verified"
+        lane = engine._endpoint_lanes.lane(endpoint)
+        assert lane is not None
+        assert lane.snapshot().last_success_generation == 1
+    finally:
+        rig.release_io()
         _close(engine)
 
 

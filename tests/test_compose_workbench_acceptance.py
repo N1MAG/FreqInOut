@@ -20,6 +20,7 @@ from PySide6.QtWidgets import QApplication, QDialog
 from pathlib import Path
 
 from freqinout.gui.message_viewer_tab import MessageViewerTab
+from freqinout.gui.main_window import MainWindow
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -118,6 +119,125 @@ def test_compose_layout_refresh_is_coalesced_on_next_event_loop_turn(monkeypatch
     finally:
         tab.close()
         tab.deleteLater()
+
+
+def test_compose_resize_feedback_converges_after_one_signature_pass(monkeypatch, tmp_path) -> None:
+    """Same-size native resize feedback must not manufacture layout work."""
+
+    app = _app()
+    tab = _tab(monkeypatch, tmp_path)
+    try:
+        app.processEvents()
+        tab._compose_layout_refresh_pending = False
+        tab._compose_layout_signature = None
+        calls: list[int] = []
+        monkeypatch.setattr(tab, "_refresh_compose_layout_geometry", lambda: calls.append(1))
+
+        tab._refresh_compose_layout_geometry_if_needed()
+        QTest.qWait(20)
+        app.processEvents()
+        assert calls == [1]
+
+        for _ in range(8):
+            tab._update_messages_responsive_layout()
+        QTest.qWait(20)
+        app.processEvents()
+        assert calls == [1]
+        assert tab._compose_layout_refresh_pending is False
+        assert tab._compose_layout_refresh_running is False
+    finally:
+        tab.close()
+        tab.deleteLater()
+
+
+def test_compose_update_batch_flushes_once_and_recovers_after_failure() -> None:
+    """A navigation cascade derives one preview and never strands its guard."""
+
+    class _Draft:
+        _compose_update_depth = 0
+        _compose_preview_update_pending = False
+        _compose_spotter_source_loading = True
+
+        def __init__(self) -> None:
+            self.previews = 0
+
+        def _update_compose_preview(self) -> None:
+            self.previews += 1
+
+        def _apply_prefill_compose_intent(self, _intent) -> None:
+            self._compose_preview_update_pending = True
+
+    draft = _Draft()
+    MessageViewerTab.prefill_compose_intent(draft, {"mode": "spotter"})
+    assert draft.previews == 1
+    assert draft._compose_update_depth == 0
+    assert draft._compose_preview_update_pending is False
+    assert draft._compose_spotter_source_loading is False
+
+    def fail(_intent) -> None:
+        draft._compose_preview_update_pending = True
+        raise ValueError("malformed saved form")
+
+    draft._apply_prefill_compose_intent = fail
+    draft._compose_spotter_source_loading = True
+    with pytest.raises(ValueError, match="malformed saved form"):
+        MessageViewerTab.prefill_compose_intent(draft, {"mode": "spotter"})
+    assert draft.previews == 1
+    assert draft._compose_update_depth == 0
+    assert draft._compose_preview_update_pending is False
+    assert draft._compose_spotter_source_loading is False
+
+
+def test_failed_compose_navigation_reports_recoverable_status(caplog) -> None:
+    statuses: list[tuple[str, str]] = []
+
+    class _Tab:
+        def show_compose_from_navigation(self) -> None:
+            pass
+
+        def prefill_compose_intent(self, _intent) -> None:
+            raise ValueError("bad saved payload")
+
+        def _set_compose_status(self, text: str, *, role: str = "info") -> None:
+            statuses.append((text, role))
+
+    class _Window:
+        message_viewer_tab = _Tab()
+        _messages_nav_context = "compose"
+        _messages_nav_filter_context = {"compose_intent": {"mode": "spotter"}}
+
+    MainWindow._apply_messages_nav_context(_Window())
+
+    assert statuses
+    assert statuses[-1][1] == "warning"
+    assert "Compose remains available" in statuses[-1][0]
+    assert "failed applying Messages navigation context" in caplog.text
+
+
+def test_failed_saved_spotter_source_releases_guard_and_stays_recoverable() -> None:
+    statuses: list[tuple[str, str]] = []
+
+    class _Draft:
+        compose_spotter_source_combo = None
+        _compose_update_depth = 0
+        _compose_preview_update_pending = False
+        _compose_spotter_source_loading = True
+
+        def _clear_compose_spotter_working_response(self) -> None:
+            raise ValueError("malformed saved response")
+
+        def _set_compose_status(self, text: str, *, role: str = "info") -> None:
+            statuses.append((text, role))
+
+        def _update_compose_preview(self) -> None:
+            raise AssertionError("failed transaction must not derive a preview")
+
+    draft = _Draft()
+    assert MessageViewerTab._on_compose_spotter_source_changed(draft) is False
+    assert draft._compose_update_depth == 0
+    assert draft._compose_preview_update_pending is False
+    assert draft._compose_spotter_source_loading is False
+    assert statuses and statuses[-1][1] == "warning"
 
 
 def test_full_compose_workbench_respects_available_screen_geometry(monkeypatch, tmp_path) -> None:

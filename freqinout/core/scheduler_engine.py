@@ -93,6 +93,7 @@ def _collect_endpoint_verification(
     verify_js8_offset: bool,
     status_poll_coordinator: RadioStatusPollCoordinator,
     status_scope: str,
+    verification_purpose: str,
 ) -> Dict[str, object]:
     """Read one endpoint after apply on that endpoint's serialized worker."""
 
@@ -124,8 +125,9 @@ def _collect_endpoint_verification(
                 reading["source"] = "scheduler_post_apply_rig"
                 return reading
 
+            purpose = str(verification_purpose or "status").strip().lower().replace(" ", "_")
             rig_snapshot = status_poll_coordinator.get_snapshot(
-                f"scheduler:{status_scope}:post_apply_rig",
+                f"scheduler:{status_scope}:{purpose}_rig",
                 _poll_rig_status,
                 force=True,
             )
@@ -2664,6 +2666,7 @@ class SchedulerEngine(QObject):
                 verify_js8_offset=verify_expected_js8_offset,
                 status_poll_coordinator=status_coordinator,
                 status_scope=endpoint_key.canonical,
+                verification_purpose="liveness",
             )
             return self._endpoint_status_raw_from_verification(verification)
 
@@ -3027,6 +3030,7 @@ class SchedulerEngine(QObject):
                 verify_js8_offset=verify_js8_offset,
                 status_poll_coordinator=status_poll_coordinator,
                 status_scope=status_scope,
+                verification_purpose="post_apply",
             )
 
         def _on_done(done) -> None:
@@ -3336,6 +3340,7 @@ class SchedulerEngine(QObject):
                     verify_js8_offset=js8_offset is not None,
                     status_poll_coordinator=status_coordinator,
                     status_scope=endpoint_key.canonical,
+                    verification_purpose="post_apply",
                 )
             return {"ok": bool(ok), "actual_state": verification}
 

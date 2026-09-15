@@ -873,6 +873,16 @@ The following rules are binding corrections to MES-3 and MES-5:
     snapshot. A newer queued or running generation does not erase the most
     recent successful readback; that evidence remains usable until a later
     generation succeeds, fails its verification, or naturally becomes stale.
+11. Endpoint status coordination is purpose-scoped. A startup/liveness request
+    and a post-command verification request for the same endpoint may share the
+    bounded endpoint worker but must not share an in-flight snapshot key. The
+    command completion owns a fresh post-apply readback; an older liveness
+    completion cannot replace or downgrade it.
+12. Scheduler resume recovery is authorized only after FIO has committed an
+    inactive, hidden, or suspended application transition. The first native
+    transition to `ApplicationActive` during window presentation is launch
+    completion, not resume: it may settle timers and refresh visible UI but must
+    not clear applied intents, expected state, command lanes, or readback.
 
 The P1 automated exit gate requires:
 
@@ -892,6 +902,8 @@ The P1 automated exit gate requires:
 - liveness polling still runs when global process detection is stale but the
   configured endpoint client exists, and rapid generation coalescing retains
   the newest successful readback until a later success replaces it;
+- startup liveness and first-command verification remain independent, and the
+  initial native application activation cannot invoke scheduler resume recovery;
 - manual QSY feedback distinguishes pending, queued, and blocked outcomes;
 - target-specific shared-PTT and event-attribution tests pass; and
 - focused endpoint status, endpoint lane, lifecycle, runtime routing, manual

@@ -196,18 +196,40 @@ def test_background_ingest_refresh_runtime_settings_toggles_varac_vault_timer(mo
 
     controller.start(initial_stagger=False)
     try:
+        def timer_matches(expected: bool) -> bool:
+            app.processEvents()
+            return controller._varac_vault_timer.isActive() is expected
+
         assert controller._varac_vault_timer is not None
         assert controller._varac_vault_timer.isActive() is False
 
         settings.set("varac_bbs_vault_enabled", True)
         controller.refresh_runtime_settings()
+        assert _wait_until(lambda: timer_matches(True))
         assert controller._varac_vault_timer.isActive() is True
-        assert controller._varac_vault_timer.interval() == controller._VARAC_VAULT_ENABLED_INTERVAL_MS
+        assert controller._varac_vault_timer.interval() == controller._VARAC_VAULT_ACTIVE_INTERVAL_MS
 
         settings.set("varac_bbs_vault_enabled", False)
         controller.refresh_runtime_settings()
+        assert _wait_until(lambda: timer_matches(False))
         assert controller._varac_vault_timer.isActive() is False
     finally:
         controller.stop()
         controller.deleteLater()
         app.processEvents()
+
+
+def test_varac_vault_timer_eligibility_check_is_cache_only(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    settings = SettingsManager()
+    settings.set("varac_bbs_vault_enabled", False)
+    controller = BackgroundIngestController(settings)
+    controller._varac_vault_enabled_cached = True
+    monkeypatch.setattr(
+        controller,
+        "_active_varac_vault_profiles",
+        lambda: (_ for _ in ()).throw(AssertionError("timer callback queried SQLite")),
+    )
+
+    assert controller._varac_vault_enabled() is True

@@ -164,6 +164,13 @@ class BackgroundIngestController(QObject):
         self._running = False
         self._cancel_token = CancellationToken()
         self._varac_vault_activity_signature: Optional[object] = None
+        # Timer callbacks must stay cache-only. Runtime-profile discovery can
+        # touch SQLite, so eligibility is refreshed on the realtime worker and
+        # published back to this controller thread.
+        self._varac_vault_enabled_cached: bool = self._truthy(
+            self.settings.get("varac_bbs_vault_enabled", False), False
+        )
+        self._varac_vault_config_refresh_pending: bool = False
         self._varac_vault_no_change_runs: int = 0
         self._varac_vault_full_interval_ms: int = self._VARAC_VAULT_ACTIVE_INTERVAL_MS
         self._varac_vault_refresh_pending: bool = False
@@ -190,6 +197,7 @@ class BackgroundIngestController(QObject):
         self._dynamic_flamp_projection_ready.clear()
         self._running = True
         self._ensure_executor()
+        self._refresh_varac_vault_enabled_async()
         # JS8 links/background ingest: low cadence
         self._js8_links_timer = QTimer(self)
         self._js8_links_timer.setInterval(5 * 60 * 1000)  # 5 minutes
@@ -404,13 +412,42 @@ class BackgroundIngestController(QObject):
             return False
         return bool(default)
 
-    def _varac_vault_enabled(self) -> bool:
+    def _compute_varac_vault_enabled(self) -> bool:
         try:
             if self._active_varac_vault_profiles():
                 return True
             return self._truthy(self.settings.get("varac_bbs_vault_enabled", False), False)
         except Exception:
             return False
+
+    def _varac_vault_enabled(self) -> bool:
+        """Return the worker-published eligibility snapshot without I/O."""
+
+        return bool(getattr(self, "_varac_vault_enabled_cached", False))
+
+    def _refresh_varac_vault_enabled_async(self) -> None:
+        if not self._running:
+            return
+        with self._realtime_executor_lock:
+            future = self._realtime_job_futures.get("varac_vault_config")
+            if future is not None and not future.done():
+                self._varac_vault_config_refresh_pending = True
+                return
+        self._varac_vault_config_refresh_pending = False
+        self._submit_realtime_job("varac_vault_config", self._compute_varac_vault_enabled)
+
+    def _on_varac_vault_config_result(self, enabled: object) -> None:
+        previous = self._varac_vault_enabled()
+        self._varac_vault_enabled_cached = bool(enabled)
+        self._update_varac_vault_timer_state()
+        if self._varac_vault_config_refresh_pending:
+            self._varac_vault_config_refresh_pending = False
+            self._refresh_varac_vault_enabled_async()
+            return
+        refresh_requested = bool(self._varac_vault_refresh_pending)
+        self._varac_vault_refresh_pending = False
+        if self._varac_vault_enabled() and (not previous or refresh_requested):
+            self._ingest_varac_vault()
 
     def _update_varac_vault_timer_state(self) -> None:
         timer = self._varac_vault_timer
@@ -672,6 +709,8 @@ class BackgroundIngestController(QObject):
             self._queue_controller_thread_call(lambda result=result: self._on_varac_vault_result(result))
         elif job_name == "varac_vault_probe":
             self._queue_controller_thread_call(lambda result=result: self._on_varac_vault_activity_result(result))
+        elif job_name == "varac_vault_config":
+            self._queue_controller_thread_call(lambda result=result: self._on_varac_vault_config_result(result))
 
     def _job_timeout_seconds(self, job_name: str) -> float:
         if job_name in {"varac_vault", "varac_guard"}:
@@ -1645,6 +1684,10 @@ class BackgroundIngestController(QObject):
     def request_varac_vault_refresh(self, reason: str = "manual") -> None:
         self._varac_vault_no_change_runs = 0
         self._varac_vault_full_interval_ms = self._VARAC_VAULT_ACTIVE_INTERVAL_MS
+        if str(reason or "").strip().lower() == "settings_saved":
+            self._varac_vault_refresh_pending = True
+            self._refresh_varac_vault_enabled_async()
+            return
         self._update_varac_vault_timer_state()
         log.debug("VARAC_VAULT_CADENCE|refresh_requested|reason=%s", str(reason or "manual"))
         if not self._running or not self._varac_vault_enabled():

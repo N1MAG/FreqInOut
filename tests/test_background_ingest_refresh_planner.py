@@ -433,3 +433,33 @@ def test_runtime_ingest_inventory_is_cached_and_cleared_on_settings_refresh(monk
     assert controller._runtime_ingest_inventory() is inventory
     assert calls["inventory"] == 2
     assert calls["vault_refresh"] == 1
+
+
+def test_varac_vault_timer_eligibility_snapshot_is_cache_only(monkeypatch):
+    controller = BackgroundIngestController(_Settings())  # type: ignore[arg-type]
+    controller._varac_vault_enabled_cached = True
+    monkeypatch.setattr(
+        controller,
+        "_active_varac_vault_profiles",
+        lambda: (_ for _ in ()).throw(AssertionError("timer path queried runtime SQLite")),
+    )
+
+    assert controller._varac_vault_enabled() is True
+
+
+def test_varac_vault_configuration_refresh_dispatches_to_worker(monkeypatch):
+    controller = BackgroundIngestController(_Settings())  # type: ignore[arg-type]
+    controller._running = True
+    submitted = []
+    monkeypatch.setattr(
+        controller,
+        "_submit_realtime_job",
+        lambda name, callback: submitted.append((name, callback)),
+    )
+
+    controller._refresh_varac_vault_enabled_async()
+
+    assert len(submitted) == 1
+    assert submitted[0][0] == "varac_vault_config"
+    assert submitted[0][1].__self__ is controller
+    assert submitted[0][1].__func__ is controller._compute_varac_vault_enabled.__func__

@@ -3700,6 +3700,9 @@ class MessageViewerTab(QWidget):
         self._compose_commstat_brevity_catalogs_cache: List[Tuple[str, str, Dict[str, object]]] = []
         self._compose_layout_signature: tuple[object, ...] | None = None
         self._compose_layout_refresh_pending: bool = False
+        self._compose_layout_refresh_running: bool = False
+        self._compose_update_depth: int = 0
+        self._compose_preview_update_pending: bool = False
         self._compose_spotter_scroll_reset_pending: bool = False
         self._compose_spotter_last_scroll_reset_key: tuple[str, str] | None = None
         self._messages_text_size_guard_signature: tuple[object, ...] | None = None
@@ -6015,7 +6018,10 @@ class MessageViewerTab(QWidget):
                         self.compose_body_splitter.setOrientation(desired_body)
                 if self.compose_splitter.orientation() != Qt.Vertical:
                     self.compose_splitter.setOrientation(Qt.Vertical)
-                self._refresh_compose_layout_geometry_if_needed(force=True)
+                # A native resize can be caused by the geometry pass itself.
+                # Signature de-duplication is therefore mandatory on this
+                # path; forcing here creates a resize -> layout -> resize loop.
+                self._refresh_compose_layout_geometry_if_needed()
             return
         self._responsive_layout_mode = mode
         compact = mode == "compact"
@@ -7999,8 +8005,22 @@ class MessageViewerTab(QWidget):
         if not getattr(self, "_compose_layout_refresh_pending", False):
             return
         self._compose_layout_refresh_pending = False
-        self._refresh_compose_layout_geometry()
-        self._refresh_compose_workbench_button_style()
+        if getattr(self, "_compose_layout_refresh_running", False):
+            return
+        requested_signature = getattr(self, "_compose_layout_signature", None)
+        self._compose_layout_refresh_running = True
+        try:
+            self._refresh_compose_layout_geometry()
+            self._refresh_compose_workbench_button_style()
+        finally:
+            self._compose_layout_refresh_running = False
+        # If a real viewport bucket or mode change arrived while the pass was
+        # running, honor it once on the next event turn. Same-signature native
+        # resize feedback is intentionally discarded.
+        if requested_signature != getattr(self, "_compose_layout_signature", None):
+            if not getattr(self, "_compose_layout_refresh_pending", False):
+                self._compose_layout_refresh_pending = True
+                QTimer.singleShot(0, self._run_pending_compose_layout_geometry_refresh)
 
     def _open_compose_workbench_dialog(self) -> None:
         existing = getattr(self, "_compose_workbench_dialog", None)
@@ -8018,7 +8038,7 @@ class MessageViewerTab(QWidget):
                 getattr(self, "_compose_workbench_dialog", None) is dialog
                 and bool(getattr(self, "_compose_in_workbench", False))
             ):
-                self._refresh_compose_layout_geometry_if_needed(force=True)
+                self._refresh_compose_layout_geometry_if_needed()
 
         dialog = _ResponsiveComposeWorkbenchDialog(self, refresh_for_workbench_resize)
         self._compose_workbench_dialog = dialog
@@ -8789,7 +8809,42 @@ class MessageViewerTab(QWidget):
         except Exception:
             pass
 
-    def _on_compose_spotter_source_changed(self, *_args) -> None:
+    def _begin_compose_update(self) -> None:
+        """Defer derived preview/layout work during one logical draft change."""
+
+        self._compose_update_depth = max(0, int(getattr(self, "_compose_update_depth", 0) or 0)) + 1
+
+    def _end_compose_update(self, *, flush: bool) -> None:
+        depth = max(0, int(getattr(self, "_compose_update_depth", 0) or 0) - 1)
+        self._compose_update_depth = depth
+        if depth > 0:
+            return
+        pending = bool(getattr(self, "_compose_preview_update_pending", False))
+        self._compose_preview_update_pending = False
+        if flush and pending:
+            self._update_compose_preview()
+
+    def _on_compose_spotter_source_changed(self, *_args) -> bool:
+        MessageViewerTab._begin_compose_update(self)
+        completed = False
+        try:
+            MessageViewerTab._apply_compose_spotter_source_changed(self, *_args)
+            completed = True
+        except Exception as exc:
+            log.exception("MessageViewer: failed loading saved Spotter working copy: %s", exc)
+            self._set_compose_status(
+                "This saved response could not be loaded completely. "
+                "Choose it again or start a new FIOSpotter draft.",
+                role="warning",
+            )
+        finally:
+            # A malformed or unavailable saved form must never leave Compose
+            # permanently suppressing previews or carrying a loading flag.
+            self._compose_spotter_source_loading = False
+            MessageViewerTab._end_compose_update(self, flush=completed)
+        return completed
+
+    def _apply_compose_spotter_source_changed(self, *_args) -> None:
         combo = getattr(self, "compose_spotter_source_combo", None)
         data = combo.currentData() if isinstance(combo, QComboBox) else None
         if not isinstance(data, dict) or data.get("kind") != "saved_expect":
@@ -11294,6 +11349,18 @@ class MessageViewerTab(QWidget):
         return False
 
     def prefill_compose_intent(self, intent: Mapping[str, object]) -> None:
+        """Apply a navigation handoff as one recoverable Compose transaction."""
+
+        MessageViewerTab._begin_compose_update(self)
+        completed = False
+        try:
+            self._apply_prefill_compose_intent(intent)
+            completed = True
+        finally:
+            self._compose_spotter_source_loading = False
+            MessageViewerTab._end_compose_update(self, flush=completed)
+
+    def _apply_prefill_compose_intent(self, intent: Mapping[str, object]) -> None:
         data = compose_intent_from_mapping(intent).as_dict()
         self._compose_intent = data
         self._compose_expect_view_editing = not bool(data.get("expect_view", False))
@@ -11334,14 +11401,29 @@ class MessageViewerTab(QWidget):
                     entry = item.get("entry", {}) if isinstance(item, dict) else {}
                     if isinstance(entry, dict) and int(entry.get("id", 0) or 0) == expect_entry_id:
                         if combo.currentIndex() == index:
-                            self._on_compose_spotter_source_changed()
+                            loaded = self._on_compose_spotter_source_changed()
                         else:
-                            combo.setCurrentIndex(index)
+                            # Apply the one-shot navigation transaction
+                            # directly. Qt signal exceptions are otherwise
+                            # reported outside this call stack, preventing the
+                            # navigation boundary from showing its recoverable
+                            # failure state.
+                            blocked = combo.blockSignals(True)
+                            try:
+                                combo.setCurrentIndex(index)
+                            finally:
+                                combo.blockSignals(blocked)
+                            loaded = self._on_compose_spotter_source_changed()
+                        if not loaded:
+                            raise ValueError("saved FIOSpotter response could not be decoded")
                         break
         if requested_spotter_form:
             self._select_compose_spotter_form_code(requested_spotter_form)
         self._apply_compose_expect_view_state()
-        self._refresh_compose_radio_targets(force=True)
+        # Mode activation already refreshes this cache when required. Reusing
+        # it here avoids a second synchronous runtime-store scan during an
+        # Expect View handoff while still loading it when absent.
+        self._refresh_compose_radio_targets(force=False)
         last_heard = self._compose_last_heard_from_intent()
         if last_heard is not None:
             self._select_compose_radio_id(last_heard.radio_id)
@@ -12923,6 +13005,9 @@ class MessageViewerTab(QWidget):
         return self._compose_flamp_target_selected()
 
     def _update_compose_preview(self) -> None:
+        if int(getattr(self, "_compose_update_depth", 0) or 0) > 0:
+            self._compose_preview_update_pending = True
+            return
         if bool(getattr(self, "_compose_restoring_mode_draft", False)):
             return
         if not hasattr(self, "compose_summary_label"):

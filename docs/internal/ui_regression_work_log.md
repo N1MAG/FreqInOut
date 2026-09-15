@@ -6211,3 +6211,90 @@ only genuine one-line box layouts receive the one-line cap. The setup card also
 stops at its derived content height instead of stretching its border through
 the full work-surface height. The surrounding scroll rail continues to own
 bounded overflow and resize behavior.
+
+### Startup verification lifecycle correction
+
+Status: implementation complete and automated gate passed; restarted Linux
+hardware confirmation remains operator-assisted.
+
+The operator reported that manual QSY and later Resume both reached verified
+state, while launch with FLRig/JS8Call already running remained at
+`Applied · verification unavailable`. The supplied Linux log identifies the
+runtime configuration root as `/home/bill/.freqinout` and records the causal
+ordering: the startup schedule command applied at 20:27:53, the first native
+`ApplicationActive` event arrived at 20:27:54, and an `app_resume` refresh ran at
+20:27:55. MainWindow had sampled QApplication as inactive while its native
+window was still being presented, then treated that first activation as a true
+resume. Scheduler resume recovery consequently retired the just-completed
+lanes and cleared expected/applied state. A simultaneous FLDigi/PTT safety hold
+prevented immediate reconstruction, leaving the control bar without a usable
+intent/readback pair.
+
+MainWindow now records whether FIO itself committed a sustained inactive,
+hidden, or suspended transition. Only that evidence authorizes
+`SchedulerEngine.handle_resume()`. Initial window activation still resumes UI
+timers, reactivates children, and refreshes the visible page, but cannot erase
+startup scheduler state. Genuine background/resume retains the existing full
+safety recomputation. Endpoint readback is additionally purpose-scoped so an
+already-running endpoint's in-flight liveness request cannot be reused as the
+fresh post-command verification or later downgrade that evidence.
+
+The high-reasoning primary GPT-5 model owned log correlation, lifecycle and
+endpoint-concurrency implementation, regression coverage, specification, and
+exit review. Delegation was unavailable under the active execution contract,
+so no delegated diff was integrated. Deterministic event/barrier tests avoid
+timing-only assumptions. The focused lifecycle and P1 endpoint-verification
+partition passes **53 tests**; the broader routing, endpoint-lane,
+manual-control, executor-bounds, UI-responsiveness, and navigation partition
+passes **86 tests**. Python compilation and `git diff --check` are final exit
+gates below. No runtime configuration/database write, endpoint command,
+application restart, commit, or push was performed.
+
+## 2026-09-14 — Expect View to FIOSpotter Compose freeze remediation
+
+Status: implementation complete; automated qualification passed and operator
+reproduction remains pending.
+
+The supplied application/performance logs and nine CPU hotspot snapshots cover
+both the failed Expect-to-Compose handoff and a successful post-restart retry.
+No snapshot captured a Python lock deadlock and the UI heartbeat continued, but
+the process repeatedly consumed approximately one CPU core inside Qt's native
+event loop. The failed transition overlapped first construction of Messages /
+Compose, signature verification, message projection, and periodic VarAC
+runtime-profile discovery. This evidence identifies a native geometry/event
+storm plus serialized UI work rather than a single blocking Python frame.
+
+The Compose resize handler was forcing a geometry refresh even when the
+responsive mode and coarse viewport signature had not changed. That pass
+mutates splitter limits, size policies, and child geometry, which can generate
+another native resize and sustain the same forced cycle. Resize and pop-out
+workbench callbacks now use signature de-duplication; explicit semantic mode
+changes retain a bounded forced pass. A running-pass fence accepts one newer
+signature while discarding same-signature feedback.
+
+Expect View handoff now batches mode selection, saved-source selection, form
+rebuild, decoded values, radio selection, and preview derivation as one logical
+Compose update. Intermediate preview requests collapse to one successful final
+render. Every exit path releases loading and batching guards. A failed handoff
+is logged and leaves the Compose surface active with a warning that directs the
+operator to retry View or start a new draft. Saved-source selection is invoked
+inside the navigation call stack so malformed payload failures reach that
+recovery boundary instead of escaping through Qt signal dispatch.
+
+The hotspot series also showed the five-second VarAC timer repeatedly building
+multi-rig runtime status and reading SQLite on the GUI thread. Timer eligibility
+checks are now cache-only. Initial and settings-triggered eligibility discovery
+runs on the bounded realtime worker and publishes a Boolean snapshot back to
+the controller thread before changing cadence or scheduling vault work.
+
+Acceptance evidence: the focused Compose/Expect/workbench partition passes
+**38 tests**, including new convergence, one-preview transaction, guard-release,
+and visible recovery checks. The background-ingest/adaptive-cadence partition
+passes **25 tests with 1 platform skip**. Broader UI and projection gates plus
+the final implementation pass add **91 Compose/send-contract tests**, **26
+first-render and UI-geometry tests**, and **157 message-ingest/projection
+tests**, all passing. A further **27 UI/scheduler responsiveness-contract
+tests** pass. Python compilation and `git diff --check` are final exit checks
+below.
+No application restart, runtime database mutation, endpoint command, commit, or
+push was performed.

@@ -265,6 +265,11 @@ class MainWindow(QMainWindow):
         self._ui_timers_paused_for_inactive = False
         self._observed_application_state = Qt.ApplicationActive
         self._ui_inactive_pending = False
+        # QApplication can report an inactive launch state while the native
+        # window is still being presented.  The first transition to Active is
+        # startup completion, not an OS resume, and must not invalidate the
+        # scheduler state established moments earlier.
+        self._ui_scheduler_resume_required = False
         self._status_refresh_pending = False
         self._status_refresh_running = False
         self._station_command_refresh_pending = False
@@ -1798,12 +1803,19 @@ class MainWindow(QMainWindow):
         self._ui_resume_pending = False
         self._resume_noncritical_ui_timers()
         self._set_child_app_active(True)
-        try:
-            scheduler = getattr(self, "scheduler", None)
-            if scheduler is not None and hasattr(scheduler, "handle_resume"):
-                scheduler.handle_resume()
-        except Exception as exc:
-            log.debug("UI_LIFECYCLE|scheduler_resume_failed err=%s", exc)
+        scheduler_resume_required = bool(
+            getattr(self, "_ui_scheduler_resume_required", False)
+        )
+        self._ui_scheduler_resume_required = False
+        if scheduler_resume_required:
+            try:
+                scheduler = getattr(self, "scheduler", None)
+                if scheduler is not None and hasattr(scheduler, "handle_resume"):
+                    scheduler.handle_resume()
+            except Exception as exc:
+                log.debug("UI_LIFECYCLE|scheduler_resume_failed err=%s", exc)
+        else:
+            log.info("UI_LIFECYCLE|initial_activation scheduler_resume_skipped=True")
         self._flush_visible_ui_refresh("app_resume")
 
     def _on_ui_inactive_settled(self) -> None:
@@ -1819,6 +1831,7 @@ class MainWindow(QMainWindow):
         if not bool(getattr(self, "_app_active", True)):
             return
         self._app_active = False
+        self._ui_scheduler_resume_required = True
         log.info(
             "UI_LIFECYCLE|app_active=False state=%s",
             getattr(self, "_observed_application_state", Qt.ApplicationInactive),
@@ -4991,8 +5004,18 @@ class MainWindow(QMainWindow):
                     tab.show_inbox_from_navigation()
             elif hasattr(tab, "show_inbox_from_navigation"):
                 tab.show_inbox_from_navigation()
-        except Exception:
-            pass
+        except Exception as exc:
+            log.exception("MainWindow: failed applying Messages navigation context: %s", exc)
+            set_status = getattr(tab, "_set_compose_status", None)
+            if mode == "compose" and callable(set_status):
+                try:
+                    set_status(
+                        "The requested working copy could not be loaded completely. "
+                        "Compose remains available; retry View or start a new draft.",
+                        role="warning",
+                    )
+                except Exception:
+                    pass
 
     def _open_station_health_detail(self, device_profile_id: int = 0, scope_name: str = "") -> None:
         idx = self._screen_index_by_label.get("Station Health", -1)
