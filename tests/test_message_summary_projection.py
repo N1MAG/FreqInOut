@@ -60,8 +60,18 @@ def _ts(days_ago: int = 0) -> float:
 def test_message_source_family_normalization_uses_operator_labels() -> None:
     assert normalize_message_source_family("JS8Call") == "js8"
     assert normalize_message_source_family("JS8Spotter") == "spotter"
-    assert message_source_label("spotter") == "FIOSpotter"
-    assert message_source_label("commstat_rf") == "CommStat RF"
+    assert message_source_label("spotter") == "Spotter"
+    assert message_source_label("commstat_rf") == "CommStat"
+
+
+def test_legacy_sitrep_projection_uses_semantic_spotter_or_commstat_source() -> None:
+    spotter = _Row(origin="sitrep", payload=_Payload(), rcv_ts=_ts())
+    commstat_payload = _Payload()
+    commstat_payload.display_type = "CommStat"
+    commstat = _Row(origin="sitrep", payload=commstat_payload, rcv_ts=_ts())
+
+    assert message_summary_from_row(spotter, now_ts=_ts()).source_label == "Spotter"
+    assert message_summary_from_row(commstat, now_ts=_ts()).source_label == "CommStat"
 
 
 def test_js8_message_summary_preserves_source_and_action_contract() -> None:
@@ -161,7 +171,7 @@ def test_message_summary_helpers_filter_without_widget_state() -> None:
     summaries = message_summaries_from_rows(rows, now_ts=now_ts)
 
     assert message_summary_source_counts(summaries) == {
-        "CommStat RF": 1,
+        "CommStat": 1,
         "JS8Call": 1,
         "VarAC": 1,
     }

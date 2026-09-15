@@ -29,13 +29,12 @@ def _app() -> QApplication:
 
 def test_watches_make_table_dominant_and_fold_primary_controls(monkeypatch) -> None:
     app = _app()
-    monkeypatch.setattr(spotter_ui, "list_spotter_activity", lambda **_kwargs: [])
     monkeypatch.setattr(spotter_ui, "list_spotter_watches", lambda **_kwargs: [])
     tab = FioSpotterTab(settings=_Settings())
     try:
         tab.show()
         tab.resize(1400, 900)
-        tab.tabs.setCurrentIndex(1)
+        tab.tabs.setCurrentIndex(0)
         app.processEvents()
 
         split = tab.findChild(QSplitter, "fioSpotterWatchesSplit")
@@ -58,11 +57,10 @@ def test_watches_make_table_dominant_and_fold_primary_controls(monkeypatch) -> N
 
 def test_watch_compact_controls_keep_payload_and_second_condition_behavior(monkeypatch) -> None:
     app = _app()
-    monkeypatch.setattr(spotter_ui, "list_spotter_activity", lambda **_kwargs: [])
     monkeypatch.setattr(spotter_ui, "list_spotter_watches", lambda **_kwargs: [])
     tab = FioSpotterTab(settings=_Settings())
     try:
-        tab.tabs.setCurrentIndex(1)
+        tab.tabs.setCurrentIndex(0)
         app.processEvents()
         tab.watch_name.setText("Two conditions")
         tab.watch_kind.setCurrentText("group")
@@ -91,13 +89,12 @@ def test_watch_compact_controls_keep_payload_and_second_condition_behavior(monke
 
 def test_watches_switch_to_vertical_splitter_at_compact_width(monkeypatch) -> None:
     app = _app()
-    monkeypatch.setattr(spotter_ui, "list_spotter_activity", lambda **_kwargs: [])
     monkeypatch.setattr(spotter_ui, "list_spotter_watches", lambda **_kwargs: [])
     tab = FioSpotterTab(settings=_Settings())
     try:
         tab.show()
         tab.resize(800, 900)
-        tab.tabs.setCurrentIndex(1)
+        tab.tabs.setCurrentIndex(0)
         app.processEvents()
 
         split = tab.findChild(QSplitter, "fioSpotterWatchesSplit")
@@ -112,13 +109,12 @@ def test_watches_switch_to_vertical_splitter_at_compact_width(monkeypatch) -> No
 def test_watches_medium_width_stacks_without_page_overflow_or_action_gap(monkeypatch) -> None:
     """The screenshot-sized window keeps the editor usable and top-packed."""
     app = _app()
-    monkeypatch.setattr(spotter_ui, "list_spotter_activity", lambda **_kwargs: [])
     monkeypatch.setattr(spotter_ui, "list_spotter_watches", lambda **_kwargs: [])
     tab = FioSpotterTab(settings=_Settings())
     try:
         tab.show()
         tab.resize(1104, 768)
-        tab.tabs.setCurrentIndex(1)
+        tab.tabs.setCurrentIndex(0)
         app.processEvents()
 
         split = tab.findChild(QSplitter, "fioSpotterWatchesSplit")

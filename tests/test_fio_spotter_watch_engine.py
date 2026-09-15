@@ -61,6 +61,26 @@ def test_legacy_watch_compiles_and_source_scope_is_applied_when_known(tmp_path: 
     assert compile_spotter_watch({"watch_kind": "keyword", "pattern": "term", "match_mode": "contains"})
 
 
+def test_source_and_kind_conditions_match_unified_projection_fields() -> None:
+    candidate = {
+        "source_family": "js8",
+        "source_label": "CommStat",
+        "source_kind": "CommStat/STATUS_RECEIPT",
+        "message_type": "CommStat/STATUS_RECEIPT",
+        "display_type": "CommStat",
+    }
+    source = compile_spotter_watch({"watch_kind": "source", "pattern": "js8", "match_mode": "exact"})
+    kind = compile_spotter_watch({"watch_kind": "kind", "pattern": "status receipt", "match_mode": "contains"})
+    assert source.matches(candidate)
+    assert kind.matches(candidate)
+    assert not source.matches({**candidate, "source_family": "varac"})
+
+    semantic_scope = compile_spotter_watch({
+        "watch_kind": "kind", "pattern": "status receipt", "source_families": ["commstat"]
+    })
+    assert semantic_scope.matches({**candidate, "display_type": "CommStat"})
+
+
 def test_duplicate_detection_normalizes_structured_order_and_legacy_text(tmp_path: Path) -> None:
     db = tmp_path / "nets.db"
     save_spotter_watch({"name": "First", "watch_kind": "keyword", "pattern": " Wildfire "}, db_path=db)

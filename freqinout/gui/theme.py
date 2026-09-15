@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, Tuple
 
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QFont, QPalette
 from PySide6.QtWidgets import (
     QApplication,
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import (
     QLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QPlainTextEdit,
     QSplitter,
     QTabBar,
@@ -363,6 +365,91 @@ def button_style(role: str, theme: Dict[str, str]) -> str:
         disabled_fg=disabled_fg,
         disabled_border=border,
     )
+
+
+def choice_chip_selector_style(object_name: str, theme: Dict[str, str]) -> str:
+    """Return the shared themed treatment for wrapping peer-choice chips."""
+
+    name = str(object_name or "fioChoiceChipSelector").strip()
+    selector = f"QListWidget#{name}"
+    accent_text = contrast_text_for_background(theme["accent"], theme)
+    return (
+        f"{selector} {{"
+        f" background-color: {theme['surface']};"
+        f" border: 1px solid {theme['border']};"
+        " border-radius: 6px; padding: 3px; outline: 0;"
+        "}"
+        f" {selector}:focus {{ border-color: {theme['accent']}; }}"
+        f" {selector}::item {{"
+        f" background-color: {theme['surface_alt']}; color: {theme['text']};"
+        f" border: 1px solid {theme['border']};"
+        " border-radius: 6px; padding: 5px 16px; margin: 1px 4px 1px 0;"
+        " font-weight: 600;"
+        "}"
+        f" {selector}::item:hover {{"
+        f" background-color: {theme['accent_hover']}; color: {accent_text};"
+        "}"
+        f" {selector}::item:selected {{"
+        f" background-color: {theme['accent']}; color: {accent_text};"
+        f" border-color: {theme['accent_active']};"
+        "}"
+        f" {selector}::item:disabled {{"
+        f" background-color: {theme['surface']}; color: {theme['text_muted']};"
+        f" border-color: {theme['border']};"
+        "}"
+    )
+
+
+def fit_wrapping_choice_chip_selector(selector: QListWidget | None) -> int:
+    """Fit a left-flowing chip selector from its active font and viewport.
+
+    The operation is geometry-only and bounded by the selector's item count.
+    It returns the calculated height so an owning group may include its title.
+    """
+
+    if not isinstance(selector, QListWidget):
+        return 0
+    metrics = selector.fontMetrics()
+    line_height = max(1, int(metrics.lineSpacing()))
+    row_height = button_height_for_font(
+        selector,
+        vertical_padding=max(1, line_height // 2),
+        floor=line_height,
+    )
+    item_gap = max(1, line_height // 3)
+    widths: list[int] = []
+    for index in range(selector.count()):
+        item = selector.item(index)
+        text = item.text() if item is not None else ""
+        width = max(line_height, int(metrics.horizontalAdvance(text)) + 3 * line_height)
+        widths.append(width)
+        if item is not None:
+            item.setSizeHint(QSize(width, row_height))
+    selector.setTextElideMode(Qt.ElideNone)
+    available = int(selector.viewport().width() or selector.width() or 0)
+    if available <= 0:
+        parent = selector.parentWidget()
+        available = int(parent.width() or 0) if parent is not None else 0
+    available = max(1, available)
+    rows = 1
+    flow_gap = 2 * item_gap
+    used = item_gap
+    for width in widths:
+        trailing = item_gap
+        if used > item_gap and used + flow_gap + width + trailing > available:
+            rows += 1
+            used = item_gap + width
+        else:
+            used += width if used == item_gap else flow_gap + width
+    frame = max(1, int(selector.frameWidth()))
+    height = rows * row_height + 2 * frame + 2 * rows * item_gap
+    selector.setSpacing(item_gap)
+    selector.setMinimumHeight(height)
+    selector.setMaximumHeight(height)
+    selector.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    selector.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    selector.updateGeometry()
+    return height
 
 
 def label_style(role: str, theme: Dict[str, str], *, weight: int = 400) -> str:

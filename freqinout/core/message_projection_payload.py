@@ -25,6 +25,10 @@ class ProjectedMessagePayload:
     scope: str = ""
     state_code: str = ""
     grid: str = ""
+    event_ts: float = 0.0
+    received_ts: float = 0.0
+    event_utc: str = ""
+    received_utc: str = ""
     subject: str = ""
     summary: str = ""
     body_preview: str = ""
@@ -72,6 +76,10 @@ def projected_payload_from_row(
         scope=_text(_get(row, "scope")),
         state_code=_text(_get(row, "state_code")).upper(),
         grid=_text(_get(row, "grid")).upper(),
+        event_ts=_float(_get(row, "event_ts")),
+        received_ts=_float(_get(row, "received_ts")),
+        event_utc=_text(_get(row, "event_utc")),
+        received_utc=_text(_get(row, "received_utc")),
         subject=_text(_get(row, "subject")),
         summary=_text(_get(row, "summary")),
         body_preview=_text(_get(row, "body_preview")),
@@ -93,6 +101,13 @@ def _get(row: object, key: str) -> object:
 
 def _text(value: object) -> str:
     return str(value or "").strip()
+
+
+def _float(value: object) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _json_mapping(value: object) -> Mapping[str, object]:

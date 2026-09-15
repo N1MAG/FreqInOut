@@ -107,7 +107,7 @@ def message_summary_from_row(
 ) -> MessageSummary:
     """Build the source-neutral inbox projection from an existing message row."""
     payload = getattr(row, "payload", None)
-    source_family = normalize_message_source_family(getattr(row, "origin", ""))
+    source_family = _semantic_source_family(row, payload)
     source_label = message_source_label(source_family)
     form_type = str(getattr(row, "msg_type", "") or "").strip()
     status = str(getattr(row, "status", "") or "").strip().upper()
@@ -242,9 +242,17 @@ def normalize_message_source_family(value: object) -> str:
         "flmsg": "flmsg",
         "flamp": "flamp",
         "fastlight": "flmsg",
-        "sitrep": "sitrep",
+        # SitRep is a retained storage/projection family.  In the unified
+        # Inbox its operator-facing source is Spotter; CommStat rows are
+        # identified separately from their display type before this fallback.
+        "sitrep": "spotter",
         "commstat": "commstat",
         "commstat_rf": "commstat",
+        "mesh": "mesh",
+        "meshcore": "mesh",
+        "meshtastic": "mesh",
+        "mesh_client": "mesh",
+        "local_mesh": "mesh",
         "local": "local_report",
         "local_report": "local_report",
     }
@@ -255,15 +263,29 @@ def message_source_label(source_family: object) -> str:
     family = normalize_message_source_family(source_family)
     return {
         "js8": "JS8Call",
-        "spotter": "FIOSpotter",
+        "spotter": "Spotter",
         "varac": "VarAC",
         "bbs": "BBS",
         "flmsg": "FLMsg",
         "flamp": "FLAmp",
-        "sitrep": "SitRep",
-        "commstat": "CommStat RF",
+        "commstat": "CommStat",
+        "mesh": "Mesh",
         "local_report": "Local Report",
     }.get(family, str(source_family or "Message").strip() or "Message")
+
+
+def _semantic_source_family(row: object, payload: object) -> str:
+    """Separate CommStat from the legacy mixed sitrep projection family."""
+
+    for value in (
+        getattr(payload, "display_type", "") if payload is not None else "",
+        getattr(payload, "source_family_label", "") if payload is not None else "",
+        getattr(payload, "message_type", "") if payload is not None else "",
+        getattr(row, "display_type", ""),
+    ):
+        if "commstat" in str(value or "").strip().casefold():
+            return "commstat"
+    return normalize_message_source_family(getattr(row, "origin", ""))
 
 
 def _actions_for_row(row: MessageSummaryRowLike, payload: object, map_hint: MessageMapHint) -> MessageActionValidity:

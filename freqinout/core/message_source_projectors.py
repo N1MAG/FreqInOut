@@ -19,6 +19,7 @@ from freqinout.core.js8_message_policy import (
     unique_js8_analysis_text,
 )
 from freqinout.core.message_intelligence import analyze_commstat_fields, analyze_spotter_text
+from freqinout.core.message_semantics import commstat_status_receipt, status_receipt_summary
 from freqinout.core.message_file_metadata import cached_message_file_row_summary
 from freqinout.core.message_file_scanner import FileRecord, file_path_display, file_path_key
 from freqinout.core.message_projection_store import (
@@ -41,7 +42,7 @@ from freqinout.core.sqlite_utils import connect_sqlite, table_exists
 
 PROJECTOR_VERSION = 3
 FILE_PROJECTOR_VERSION = 4
-JS8_COMMSTAT_CLASSIFICATION_VERSION = 1
+JS8_COMMSTAT_CLASSIFICATION_VERSION = 2
 SPOTTER_PROVENANCE_VERSION = 1
 DEFAULT_SOURCE_NATIVE_LIMIT = 5000
 _PROJECTION_WRITE_LOCK = threading.Lock()
@@ -629,6 +630,40 @@ def _analyze_local_js8_commstat(
 
     raw_text = _text(raw_payload)
     decoded_text = _text(decoded_payload)
+    receipt = commstat_status_receipt(decoded_text, raw_text)
+    if receipt is not None:
+        summary = status_receipt_summary(sender=from_call, receipt=receipt)
+        intelligence = analyze_commstat_fields(
+            artifact_kind="STATUS_RECEIPT",
+            title="CommStat · Status receipt",
+            body=summary,
+            from_call=from_call,
+            target=to_call,
+            report_group=to_call,
+            status="INFO",
+            subtype="STATUS_RECEIPT",
+            remarks=summary,
+            transport="js8",
+            source_family="JS8Call RF",
+            event_utc=event_utc,
+        )
+        return {
+            "intelligence": intelligence,
+            "subtype": "STATUS_RECEIPT",
+            "form_name": "CommStat/Status receipt",
+            "status": "INFO",
+            "subject": "CommStat · Status receipt",
+            "summary": summary,
+            "entities": {
+                "form_name": "CommStat/Status receipt",
+                "commstat_subtype": "STATUS_RECEIPT",
+                "commstat_transport": "js8",
+                "acknowledged_callsign": receipt.report_callsign,
+                "acknowledged_report_id": receipt.report_id,
+                "commstat_raw_evidence": raw_text[:4000],
+                "commstat_decoded_evidence": decoded_text[:4000],
+            },
+        }
     parsed: dict[str, object] | None = None
     evidence = ""
     for candidate in dict.fromkeys(value for value in (decoded_text, raw_text) if value):

@@ -4827,6 +4827,45 @@ class MainWindow(QMainWindow):
         self._set_screen(idx)
         QTimer.singleShot(0, self._apply_messages_nav_context)
 
+    def open_hf_operator(self, callsign: str = "") -> None:
+        """Open HF Operators and apply an optional cached reader identity."""
+
+        idx = self._screen_index_by_label.get("HF Operators", -1)
+        if idx < 0:
+            return
+        requested = str(callsign or "").strip().upper()
+        self._set_screen(idx)
+
+        def apply_focus() -> None:
+            tab = getattr(self, "operator_history_tab", None)
+            search = getattr(tab, "search_edit", None)
+            if tab is None or search is None or not requested:
+                return
+            search.setText(requested)
+            apply_filter = getattr(tab, "_apply_filter", None)
+            if callable(apply_filter):
+                apply_filter()
+            search.setFocus(Qt.OtherFocusReason)
+
+        QTimer.singleShot(0, apply_focus)
+
+    def open_fio_spotter_watch(self, candidate: Mapping[str, object]) -> None:
+        """Open FIO Spotter and stage one unsaved source-neutral watch."""
+
+        idx = self._screen_index_by_label.get("FIO Spotter", -1)
+        if idx < 0:
+            return
+        payload = dict(candidate or {})
+        self._set_screen(idx)
+
+        def apply_draft() -> None:
+            tab = getattr(self, "fio_spotter_tab", None)
+            callback = getattr(tab, "open_watch_draft", None)
+            if callable(callback):
+                callback(payload)
+
+        QTimer.singleShot(0, apply_draft)
+
     @Slot()
     def present_main_window(self) -> None:
         """Bring the existing FIO workspace forward without changing its placement.
@@ -6072,8 +6111,8 @@ class MainWindow(QMainWindow):
                     state_filter=str(row.get("state_code") or ""),
                     grid_filter=str(row.get("grid") or ""),
                 ),
-                open_operator=lambda _row: self._set_screen(
-                    self._screen_index_by_label.get("HF Operators", -1)
+                open_operator=lambda row: self.open_hf_operator(
+                    str(row.get("from_call") or "")
                 ),
             )
             self.fio_spotter_tab = tab
@@ -6297,6 +6336,20 @@ class MainWindow(QMainWindow):
             # current QStackedWidget page first can briefly expose an adjacent
             # page, which users perceive as the recurring "swipe and vanish".
             self.stack.insertWidget(insert_index, new_widget)
+            # Finish theme and base layout while the real page is still
+            # hidden behind its stable placeholder.  Publishing the page
+            # first and styling it afterward can expose two native geometry
+            # profiles during a screen's first frame.
+            try:
+                if hasattr(new_widget, "apply_theme"):
+                    new_widget.apply_theme()
+                new_widget.ensurePolished()
+                new_layout = new_widget.layout()
+                if new_layout is not None:
+                    new_layout.invalidate()
+                    new_layout.activate()
+            except Exception:
+                pass
             if current_widget is placeholder:
                 self.stack.setCurrentWidget(new_widget)
             if placeholder is not None and placeholder_index >= 0:
@@ -6305,11 +6358,6 @@ class MainWindow(QMainWindow):
             elif current_widget is not None and current_widget is not placeholder:
                 self.stack.setCurrentWidget(current_widget)
             self._screens[index] = (label, new_widget)
-            try:
-                if hasattr(new_widget, "apply_theme"):
-                    new_widget.apply_theme()
-            except Exception:
-                pass
 
     def _settle_active_screen_layout(self, index: int, navigation_epoch: int) -> None:
         """Finish one first-visible layout pass without resizing the top-level window."""

@@ -9,6 +9,7 @@ database is required for the reader interactions.
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -29,6 +30,12 @@ from freqinout.gui.message_viewer_tab import (
     UnifiedMessage,
     _ProjectedMessageQueryWorker,
 )
+from freqinout.core.message_semantics import (
+    commstat_status_receipt,
+    message_row_kind_label,
+    message_row_source_label,
+)
+from PySide6.QtWidgets import QHeaderView
 
 
 def _app() -> QApplication:
@@ -99,6 +106,104 @@ def _settle_reader_paint(app: QApplication, tab: MessageViewerTab) -> None:
     QTest.qWait(120)
     app.processEvents()
     assert getattr(tab, "_reader_transitioning", False) is False
+
+
+def test_default_inbox_separates_source_kind_and_status_receipt_semantics() -> None:
+    payload = SimpleNamespace(
+        source_family="js8",
+        display_type="CommStat",
+        message_type="CommStat/STATUS_RECEIPT",
+        body_preview="@MAGNET RRSR N6KYL,L42",
+    )
+    row = UnifiedMessage(
+        "CommStat/STATUS_RECEIPT", "INFO", "W4WYD", "@MAGNET", 1.0, "", "receipt", "js8", payload
+    )
+    model = MessageTableModel([row])
+
+    receipt = commstat_status_receipt(payload.body_preview)
+    assert receipt is not None
+    assert model.headerData(1, Qt.Horizontal, Qt.DisplayRole) == "Source"
+    assert model.headerData(6, Qt.Horizontal, Qt.DisplayRole) == "Kind / Message"
+    assert message_row_source_label(row) == "CommStat"
+    assert message_row_kind_label(row) == "Status receipt"
+
+
+def test_commstat_kind_column_is_content_fit_not_full_screen_stretch(monkeypatch, tmp_path) -> None:
+    app = _app()
+    tab = _tab(monkeypatch, tmp_path)
+    try:
+        row = UnifiedMessage(
+            "CommStat", "INFO", "K1ABC", "@MR08", 1.0, "now", "Power stable", "commstat",
+            SimpleNamespace(artifact_kind="STATREP", state_code="CO", grid="DM79"),
+        )
+        _set_rows(tab, [row])
+        tab._messages_model.set_display_profile("intel_report", "Age")
+        tab.resize(1800, 800)
+        tab.show()
+        app.processEvents()
+        tab._message_table_fit_signature = None
+        tab._apply_message_table_profile_widths()
+        assert tab.messages_table.columnWidth(1) <= 300
+        assert tab.messages_table.horizontalHeader().sectionResizeMode(1) == QHeaderView.Interactive
+    finally:
+        tab.close()
+        tab.deleteLater()
+
+
+def test_inbox_installs_initial_table_geometry_before_show_and_publishes_atomically(
+    monkeypatch, tmp_path
+) -> None:
+    _app()
+    tab = _tab(monkeypatch, tmp_path)
+    try:
+        # Construction owns the final empty-page geometry; showing the native
+        # window must not first expose the obsolete fixed-width profile.
+        assert tab._message_table_fit_signature is not None
+        assert tab.messages_table.horizontalHeader().sectionResizeMode(6) == QHeaderView.Stretch
+
+        # Atomic fitting preserves a caller's update fence rather than
+        # spuriously repainting a partially-updated header.
+        tab.messages_table.setUpdatesEnabled(False)
+        tab._message_table_fit_signature = None
+        tab._apply_message_table_profile_widths()
+        assert tab.messages_table.updatesEnabled() is False
+    finally:
+        tab.messages_table.setUpdatesEnabled(True)
+        tab.close()
+        tab.deleteLater()
+
+
+def test_reader_context_actions_stage_navigation_from_cached_row(monkeypatch, tmp_path) -> None:
+    app = _app()
+    tab = _tab(monkeypatch, tmp_path)
+    try:
+        row = _row(7)
+        row.payload.state_code = "CO"
+        row.payload.grid = "DM79"
+        row.summary = viewer_module.message_summary_from_row(row)
+        opened = []
+        tab.open_spotter_map = lambda **values: opened.append(("map", values))
+        tab.open_hf_operator = lambda callsign: opened.append(("operator", callsign))
+        tab.open_messages_section = lambda mode, **values: opened.append((mode, values))
+        tab.open_fio_spotter_watch = lambda values: opened.append(("watch", values))
+        tab._reader_snapshot = [row]
+        tab._reader_index = 0
+        tab._sync_reader_context_actions(row)
+
+        assert tab.reader_map_btn.isEnabled()
+        assert tab.reader_operator_btn.isEnabled()
+        assert tab.reader_reply_btn.isEnabled()
+        assert tab.reader_watch_btn.isEnabled()
+        tab.reader_map_btn.click()
+        tab.reader_operator_btn.click()
+        tab.reader_reply_btn.click()
+        tab.reader_watch_btn.click()
+        assert [item[0] for item in opened] == ["map", "operator", "compose", "watch"]
+        assert opened[2][1]["compose_intent"]["recipient_callsign"] == "SRC7"
+        assert opened[3][1]["source_family"] == "js8"
+    finally:
+        tab.close()
+        tab.deleteLater()
 
 
 def test_reader_clear_does_not_change_tab_active_lifecycle(monkeypatch, tmp_path) -> None:

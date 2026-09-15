@@ -2619,10 +2619,12 @@ def test_phase7_messages_workspace_filters_source_and_group(monkeypatch, tmp_pat
         assert tab.show_all_message_groups_chk.text() == "All Groups"
         assert tab.operating_group_filter.text() == "Groups: All"
         source_values = {value for value, _label in tab._message_source_options([])}
-        assert {"js8", "varac"} <= source_values
+        assert {"js8", "varac", "spotter"} <= source_values
+        assert "sitrep" not in source_values
         assert tab._row_matches_workspace_filters(rows[0]) is True
 
-        tab.source_filter.set_selected_values(["sitrep"])
+        assert tab._select_context_source_filter(["sitrep"]) is True
+        assert tab.source_filter.selected_values() == {"spotter"}
 
         assert tab._row_matches_workspace_filters(rows[0]) is False
         assert tab._row_matches_workspace_filters(rows[1]) is True
@@ -2631,7 +2633,7 @@ def test_phase7_messages_workspace_filters_source_and_group(monkeypatch, tmp_pat
 
         assert tab._row_matches_workspace_filters(rows[1]) is False
 
-        tab.source_filter.set_selected_values(["sitrep"])
+        tab.source_filter.set_selected_values(["spotter"])
         tab.operating_group_filter.set_selected_values(["HF NETS"])
 
         assert tab._is_filter_active() is True
@@ -2769,13 +2771,13 @@ def test_phase7_messages_filter_row_and_compose_splitter_reflow(monkeypatch, tmp
         assert tab.compose_splitter.orientation() == Qt.Vertical
         tab._set_message_table_display_profile("field_report")
         header = tab.messages_table.horizontalHeader()
-        assert header.sectionResizeMode(1) == QHeaderView.Stretch
+        assert header.sectionResizeMode(1) == QHeaderView.Interactive
         assert header.sectionResizeMode(6) == QHeaderView.Interactive
-        assert tab.messages_table.columnWidth(1) >= 280
-        assert tab.messages_table.columnWidth(5) <= 120
+        assert 78 <= tab.messages_table.columnWidth(1) <= 300
+        assert tab.messages_table.columnWidth(5) <= 520
         assert tab.messages_table.columnWidth(6) <= 90
-        assert tab.messages_table.columnWidth(7) >= 200
-        assert tab.messages_table.minimumWidth() >= 930
+        assert 118 <= tab.messages_table.columnWidth(7) <= 230
+        assert tab.messages_table.minimumWidth() == 0
 
         tab.resize(900, 560)
         tab.show()
@@ -2817,11 +2819,11 @@ def test_phase7_messages_filter_row_and_compose_splitter_reflow(monkeypatch, tmp
         assert header.sectionResizeMode(6) == QHeaderView.Interactive
         assert tab.messages_table.columnWidth(1) >= 420
         assert tab.messages_table.columnWidth(6) <= 90
-        assert tab.messages_table.minimumWidth() >= 960
+        assert tab.messages_table.minimumWidth() == 0
         tab._set_message_table_display_profile("intel_report")
-        assert header.sectionResizeMode(1) == QHeaderView.Stretch
-        assert tab.messages_table.columnWidth(1) >= 180
-        assert tab.messages_table.columnWidth(5) <= 120
+        assert header.sectionResizeMode(1) == QHeaderView.Interactive
+        assert 78 <= tab.messages_table.columnWidth(1) <= 240
+        assert tab.messages_table.columnWidth(5) <= 220
         assert tab.compose_splitter.orientation() == Qt.Vertical
         assert tab.compose_body_splitter.orientation() == Qt.Horizontal
     finally:

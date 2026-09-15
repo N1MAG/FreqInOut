@@ -63,7 +63,7 @@ def test_expect_and_access_policy_editors_stay_above_tables_without_resize_io(mo
     tab = FioSpotterTab(settings=_Settings())
     try:
         tab.resize(1200, 1200)
-        tab.tabs.setCurrentIndex(2)
+        tab.tabs.setCurrentIndex(1)
         tab.show()
         app.processEvents()
 
@@ -89,7 +89,7 @@ def test_expect_and_access_policy_editors_stay_above_tables_without_resize_io(mo
         assert reads == reads_before_resize_and_typing
 
         tab.resize(1200, 1200)
-        tab.tabs.setCurrentIndex(3)
+        tab.tabs.setCurrentIndex(2)
         app.processEvents()
         policy_editor = tab.policy_editor_panel
         policy_table_panel = tab.policy_table.parentWidget()
@@ -126,7 +126,7 @@ def test_expect_wide_editor_packs_actions_and_metadata_above_saved_responses(mon
     try:
         # 1595×903 is the logical size of the reported 2392×1354 Retina view.
         tab.resize(1595, 903)
-        tab.tabs.setCurrentIndex(2)
+        tab.tabs.setCurrentIndex(1)
         tab.show()
         app.processEvents()
 
@@ -173,7 +173,7 @@ def test_expect_metadata_reflows_without_page_horizontal_overflow(monkeypatch) -
     tab = FioSpotterTab(settings=_Settings())
     try:
         tab.resize(900, 800)
-        tab.tabs.setCurrentIndex(2)
+        tab.tabs.setCurrentIndex(1)
         tab.show()
         app.processEvents()
         assert tab._expect_meta_layout_mode == "medium"
@@ -212,7 +212,7 @@ def test_policy_wide_summaries_have_dedicated_nonoverlapping_space(monkeypatch) 
     try:
         # Logical equivalent of the reported 2326x722 high-DPI capture.
         tab.resize(1550, 480)
-        tab.tabs.setCurrentIndex(3)
+        tab.tabs.setCurrentIndex(2)
         tab.show()
         app.processEvents()
 
@@ -256,7 +256,7 @@ def test_policy_selection_uses_cached_usage_and_known_radio_labels(monkeypatch) 
     tab = FioSpotterTab(settings=_Settings(), radio_store=_RadioStore())
     try:
         tab.resize(1200, 900)
-        tab.tabs.setCurrentIndex(3)
+        tab.tabs.setCurrentIndex(2)
         tab.show()
         app.processEvents()
         loaded = dict(reads)
@@ -287,7 +287,7 @@ def test_expect_and_policy_actions_reapply_shared_theme_roles(monkeypatch) -> No
     settings.values = {"ui_theme": "light"}
     tab = FioSpotterTab(settings=settings)
     try:
-        tab.tabs.setCurrentIndex(2)
+        tab.tabs.setCurrentIndex(1)
         app.processEvents()
         light_primary = tab.expect_save.styleSheet()
         light_danger = tab.expect_delete.styleSheet()
@@ -295,7 +295,7 @@ def test_expect_and_policy_actions_reapply_shared_theme_roles(monkeypatch) -> No
         assert "#C62828" in light_danger
 
         settings.values["ui_theme"] = "dark"
-        tab.tabs.setCurrentIndex(3)
+        tab.tabs.setCurrentIndex(2)
         tab.apply_theme()
         assert "#4C9BD3" in tab.expect_save.styleSheet()
         assert "#E05252" in tab.policy_delete.styleSheet()

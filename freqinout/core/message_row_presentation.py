@@ -60,7 +60,7 @@ def message_display_profile_headers(profile: object) -> tuple[str, tuple[str, ..
         return profile_text, ("", "Kind", "Status", "From", "To", "State / Grid", "Age", "")
     if profile_text == "form_message":
         return profile_text, ("", "Message", "Type", "Status", "From", "To", "Age", "")
-    return profile_text, ("", "Type", "Status", "From", "To", "Age", "Message", "")
+    return profile_text, ("", "Source", "Status", "From", "To", "Age", "Kind / Message", "")
 
 
 def message_display_profile_for_focus_type(focus: object, type_sel: object) -> str:

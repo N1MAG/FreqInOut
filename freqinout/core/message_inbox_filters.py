@@ -12,12 +12,11 @@ from freqinout.core.sitrep_metadata import parse_filter_subtype_label
 
 MESSAGE_SOURCE_LABELS = {
     "js8": "JS8Call",
-    "spotter": "FIOSpotter",
+    "spotter": "Spotter",
     "varac": "VarAC",
     "flmsg": "FLMSG",
     "flamp": "FLAmp",
     "bbs": "BBS",
-    "sitrep": "SitRep",
     "commstat": "CommStat",
     "mesh": "Mesh",
     "meshcore": "MeshCore",
@@ -114,7 +113,13 @@ def _is_fast_light_row(row: MessageRowLike) -> bool:
 
 
 def message_source_value(row: MessageRowLike) -> str:
-    return str(getattr(row, "origin", "") or "").strip().lower()
+    """Return the canonical operator-facing source family for one row.
+
+    ``sitrep`` is a retained projection/storage family, not a separate Inbox
+    source.  Non-CommStat rows from that legacy store belong to Spotter.
+    """
+
+    return _normalize_source_alias(getattr(row, "origin", ""))
 
 
 def _normalize_source_alias(value: object) -> str:
@@ -134,7 +139,7 @@ def _normalize_source_alias(value: object) -> str:
         "flmsg": "flmsg",
         "flamp": "flamp",
         "fastlight": "flmsg",
-        "sitrep": "sitrep",
+        "sitrep": "spotter",
         "commstat": "commstat",
         "commstat_rf": "commstat",
         "commstat rf": "commstat",
@@ -168,6 +173,11 @@ def message_source_aliases(row: MessageRowLike) -> set[str]:
         normalized = _normalize_source_alias(candidate)
         if normalized == "commstat":
             aliases.add("commstat")
+    # The legacy sitrep projection contains both Spotter and CommStat-derived
+    # records.  Once semantic evidence says CommStat, do not also present or
+    # filter the same row as Spotter merely because of its storage family.
+    if "commstat" in aliases:
+        aliases.discard("spotter")
     return {alias for alias in aliases if alias}
 
 

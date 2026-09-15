@@ -54,7 +54,11 @@ def _open_expect(monkeypatch) -> FioSpotterTab:
         monkeypatch.setattr(spotter_ui, name, lambda **_kwargs: [])
     tab = FioSpotterTab(settings=_Settings())
     tab.resize(1800, 900)
-    tab.tabs.setCurrentIndex(2)
+    expect_index = next(
+        index for index in range(tab.tabs.count())
+        if tab.tabs.tabText(index) == "Expect"
+    )
+    tab.tabs.setCurrentIndex(expect_index)
     tab.show()
     _app().processEvents()
     return tab

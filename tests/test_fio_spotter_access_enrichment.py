@@ -229,7 +229,7 @@ def test_expect_access_ui_is_lazy_autocompleting_and_compact(monkeypatch, tmp_pa
     try:
         assert calls == []
         tab.resize(900, 560)
-        tab.tabs.setCurrentIndex(2)
+        tab.tabs.setCurrentIndex(1)
         tab.show()
         app.processEvents()
         assert calls == [2000]
@@ -315,13 +315,13 @@ def test_expect_rule_editor_keeps_optional_policy_default_and_round_trips_truste
     tab = FioSpotterTab(settings=_Settings())
     try:
         tab.resize(900, 560)
-        tab.tabs.setCurrentIndex(2)
+        tab.tabs.setCurrentIndex(1)
         tab.show()
         app.processEvents()
 
         assert tab.expect_policy.itemData(0) == 0
         assert tab.expect_policy.currentData() == 0
-        tab.tabs.setCurrentIndex(3)
+        tab.tabs.setCurrentIndex(2)
         app.processEvents()
         assert tab.policy_manage.currentData() == 0
         assert tab.expect_groups._completion_values == ["@MAGNET", "@MR08"]
@@ -338,7 +338,7 @@ def test_expect_rule_editor_keeps_optional_policy_default_and_round_trips_truste
         policies = spotter_ui.list_expect_allow_policies()
         assert len(policies) == 1
         policy_id = int(policies[0]["id"])
-        tab.tabs.setCurrentIndex(2)
+        tab.tabs.setCurrentIndex(1)
         app.processEvents()
         assert tab.expect_policy.findData(policy_id) >= 0
 
@@ -387,7 +387,7 @@ def test_repeated_group_lookup_clears_entry_and_keeps_all_accepted_chips(monkeyp
         # Expect inline-access editor is intentionally collapsed and hidden for
         # new responses, so exercise the same token component in its active
         # policy-first workspace.
-        tab.tabs.setCurrentIndex(3)
+        tab.tabs.setCurrentIndex(2)
         tab.show()
         app.processEvents()
         editor = tab.policy_trusted_groups

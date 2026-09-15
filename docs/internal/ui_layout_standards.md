@@ -250,6 +250,15 @@ Required behavior:
 - `QTabWidget`/`QTabBar` controls should normally rely on the global app
   stylesheet. If a local override is necessary, it must explicitly cover normal,
   selected, hover, and disabled states for both themes.
+- Peer task or mode choices that behave as one mutually exclusive view selector
+  may use the shared wrapping choice-chip control instead of document-style
+  tabs. These selectors start at the leading edge, preserve task order, expose
+  one selected item to keyboard and assistive technology, and use shared theme
+  tokens for normal, selected, hover, focus, and disabled states. Their item and
+  container heights derive from the active font; they wrap when the available
+  width is insufficient and never introduce a horizontal scrollbar. A hidden
+  internal `QTabWidget` may retain page ownership and lazy-page compatibility,
+  but its tab bar must not compete with the visible selector.
 - A runtime theme change is an atomic application-level publication. The main
   window resolves one fresh palette and passes that immutable snapshot to
   persistent pop-outs and locally styled workspaces. A child must not resolve a
@@ -392,6 +401,14 @@ Current remediation gates from the responsiveness audit:
    resize-driven geometry pass must use an idempotent viewport/content
    signature; only an explicit semantic transition may force a bounded pass.
    Geometry mutations must never force their own successor pass.
+   A lazily-created screen must be inserted in its final parent, themed,
+   polished, and given its final empty-state layout/table resize profile before
+   its first visible frame. Do not show a placeholder or provisional equal-
+   width table and then replace it after publication. Later bounded data may
+   update content-derived widths atomically, but it must not call top-level
+   window sizing APIs, change screen/window state, or expose a partially updated
+   header. A stable loading/empty shell owns the same outer geometry as the
+   populated result so first activation cannot sweep, swipe, bounce, or vanish.
 3. Periodic GUI-thread timers are cache-only dispatch points. Runtime profile
    discovery, SQLite reads, filesystem scans, signature verification, and other
    potentially blocking work execute on bounded workers and publish immutable
@@ -589,3 +606,33 @@ In compact layouts, retain the same card command model. `QSY`, `Timed QSY`,
 `Timed Suspend`, `Resume`, and `Change Plan` may reflow or resize, but they
 must not change into the older single-radio control-strip wording or share
 state with another card.
+
+## Content-Aware Table Column Sizing
+
+Operational tables must fit the bounded, currently retained model rather than
+divide the viewport evenly or assign spare width to an arbitrary column.
+
+- Measure header text and visible display values with the active widget font.
+  Widths must therefore remain correct under Normal and Large text and after a
+  runtime font, palette, style, or theme change.
+- Categorical columns such as Source, Kind, Status, Age, callsign, group, and
+  state/grid use content-derived minimums and semantic maximums. They do not
+  expand merely because a window is maximized. For example, a CommStat `Kind`
+  column containing only `CommStat` must remain compact.
+- Narrative columns such as Message, Summary, Subject, or decoded content are
+  the preferred recipients of genuine surplus width. A table with no narrative
+  column may leave surplus viewport space rather than distort categorical data.
+- Selection indicators and action columns are fixed from font/control metrics
+  and the bounded labels they contain. They must not use hard-coded heights or
+  truncate translated/large-text action labels.
+- Fit work operates only on the already-loaded bounded model, is O(rows ×
+  visible columns), is coalesced after model/profile/viewport/font changes, and
+  must not invoke source, filesystem, database, network, projection, or refresh
+  work.
+- Do not use a perpetual `ResizeToContents` header mode on high-frequency
+  tables. Measure once per stable signature, then install Interactive or Fixed
+  widths plus at most one intentional Stretch narrative column. This avoids
+  repeated model calls during native resize and paint passes.
+- Horizontal scrolling is an accessibility fallback when semantic caps and
+  minimum readable widths exceed the viewport. It is preferable to clipped
+  controls, compressed text, or font-independent pixel floors.

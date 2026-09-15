@@ -19,6 +19,7 @@ import time
 import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Tuple, Optional, Sequence, Set, Mapping
 
 from PySide6.QtCore import (
@@ -264,6 +265,13 @@ from freqinout.core.message_summary import (
     message_summary_from_row,
     normalize_message_source_family,
 )
+from freqinout.core.message_semantics import (
+    commstat_status_receipt,
+    message_row_kind_label,
+    message_row_narrative_label,
+    message_row_source_label,
+    status_receipt_summary,
+)
 from freqinout.core.traffic_actionability import (
     OperatorTrafficContext,
     build_traffic_action_summary,
@@ -495,6 +503,7 @@ from freqinout.gui.theme import (
     apply_text_size_accessibility_guards,
     button_height_for_font,
     button_style,
+    choice_chip_selector_style,
     control_height_for_font,
     fit_child_combo_boxes,
     fit_combo_box_to_contents,
@@ -2658,7 +2667,24 @@ class MessageTableModel(QAbstractTableModel):
         self._row_index_by_key: Dict[tuple, int] = {}
         self._select_column_index = 0
         self._display_profile = "triage"
-        self._headers = ["", "Type", "Status", "From", "To", "Age", "Message", ""]
+        self._headers = ["", "Source", "Status", "From", "To", "Age", "Kind / Message", ""]
+        self._semantic_cache = self._build_semantic_cache(self._rows)
+
+    @staticmethod
+    def _build_semantic_cache(rows: Sequence[UnifiedMessage]) -> Dict[int, Tuple[str, str]]:
+        """Prepare Source and Kind/Message labels once per bounded snapshot."""
+
+        return {
+            id(row): (message_row_source_label(row), message_row_narrative_label(row))
+            for row in rows[:200]
+        }
+
+    def _semantic_labels_for_row(self, row: UnifiedMessage) -> Tuple[str, str]:
+        labels = self._semantic_cache.get(id(row))
+        if labels is None:
+            labels = (message_row_source_label(row), message_row_narrative_label(row))
+            self._semantic_cache[id(row)] = labels
+        return labels
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
         if parent.isValid():
@@ -2715,7 +2741,7 @@ class MessageTableModel(QAbstractTableModel):
                     return self._relative_age(row.rcv_ts)
             else:
                 if col == 1:
-                    return self._cell_text(row, "type")
+                    return self._semantic_labels_for_row(row)[0]
                 if col == 2:
                     return self._cell_text(row, "status")
                 if col == 3:
@@ -2725,7 +2751,7 @@ class MessageTableModel(QAbstractTableModel):
                 if col == 5:
                     return self._relative_age(row.rcv_ts)
                 if col == 6:
-                    return self._cell_text(row, "message")
+                    return self._semantic_labels_for_row(row)[1]
             if col == 7:
                 if isinstance(row.payload, FileRecord) and (row.origin or "").strip().lower() == "bbs":
                     return "View | Archive | Delete"
@@ -2747,6 +2773,11 @@ class MessageTableModel(QAbstractTableModel):
             if auth in {"invalid", "error"}:
                 return style.standardIcon(QStyle.SP_MessageBoxWarning)
             return None
+        if role == Qt.ToolTipRole:
+            age_column = 6 if self._display_profile in {"field_report", "field_summary", "intel_report", "form_message"} else 5
+            if col == age_column:
+                exact = str(getattr(row, "rcv_display", "") or "").strip()
+                return f"Received: {exact}" if exact else None
         if role == Qt.ToolTipRole and col in (1, 6):
             details = [
                 str(row.title or "").strip() if col in (1, 6) else "",
@@ -2972,6 +3003,7 @@ class MessageTableModel(QAbstractTableModel):
             self.endResetModel()
 
         row_index_by_key: Dict[tuple, int] = {}
+        self._semantic_cache = self._build_semantic_cache(rows)
         for i, row in enumerate(rows):
             key = self._row_key(row)
             if key is not None and key not in row_index_by_key:
@@ -5741,6 +5773,10 @@ class MessageViewerTab(QWidget):
         self.messages_table.setColumnWidth(4, 104)
         self.messages_table.setColumnWidth(5, 148)
         self.messages_table.setColumnWidth(7, 220)
+        # Publish the final empty-model profile before the first frame.  Later
+        # row snapshots may request one coalesced atomic refit, but the native
+        # table never paints an obsolete fixed-width profile first.
+        self._apply_message_table_profile_widths()
         msg_header.setVisible(True)
         msg_header.sectionClicked.connect(self._on_sort_clicked)
         msg_header.checkboxToggled.connect(self._on_header_checkbox_toggled)
@@ -5777,6 +5813,25 @@ class MessageViewerTab(QWidget):
         self.reader_next_btn.clicked.connect(lambda: self._navigate_message_reader(1))
         self.reader_position_label = QLabel("0 of 0")
         self.reader_position_label.setAccessibleName("Reader position")
+        self.reader_map_btn = QPushButton("Map")
+        self.reader_map_btn.setAccessibleName("Show message location on Map")
+        self.reader_map_btn.clicked.connect(self._open_reader_map)
+        self.reader_operator_btn = QPushButton("Operator")
+        self.reader_operator_btn.setAccessibleName("Open sender in HF Operators")
+        self.reader_operator_btn.clicked.connect(self._open_reader_operator)
+        self.reader_reply_btn = QPushButton("Reply")
+        self.reader_reply_btn.setAccessibleName("Reply to message sender")
+        self.reader_reply_btn.clicked.connect(self._reply_to_reader_message)
+        self.reader_watch_btn = QPushButton("Add to Watch…")
+        self.reader_watch_btn.setAccessibleName("Stage a watch from this message")
+        self.reader_watch_btn.clicked.connect(self._add_reader_message_to_watch)
+        for context_button in (
+            self.reader_map_btn,
+            self.reader_operator_btn,
+            self.reader_reply_btn,
+            self.reader_watch_btn,
+        ):
+            context_button.setVisible(False)
         self.reader_bbs_btn = QPushButton("+BBS")
         self.reader_bbs_btn.setAccessibleName("Add message file to Managed BBS")
         self.reader_bbs_btn.setToolTip("Choose the Managed BBS locations for this message file.")
@@ -5802,6 +5857,17 @@ class MessageViewerTab(QWidget):
         reader_toolbar.addWidget(self.reader_bbs_btn)
         reader_toolbar.addWidget(self.reader_delete_btn)
         reader_layout.addLayout(reader_toolbar)
+        self.reader_context_actions_widget = QWidget()
+        reader_context_actions = QHBoxLayout(self.reader_context_actions_widget)
+        reader_context_actions.setContentsMargins(0, 0, 0, 0)
+        reader_context_actions.setSpacing(6)
+        reader_context_actions.addWidget(self.reader_map_btn)
+        reader_context_actions.addWidget(self.reader_operator_btn)
+        reader_context_actions.addWidget(self.reader_reply_btn)
+        reader_context_actions.addWidget(self.reader_watch_btn)
+        reader_context_actions.addStretch(1)
+        self.reader_context_actions_widget.setVisible(False)
+        reader_layout.addWidget(self.reader_context_actions_widget)
         self._reader_back_escape_shortcut = QShortcut(QKeySequence("Escape"), self.reader_page)
         self._reader_back_escape_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         self._reader_back_escape_shortcut.activated.connect(self._close_message_reader)
@@ -5991,6 +6057,12 @@ class MessageViewerTab(QWidget):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._update_messages_responsive_layout()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() in {QEvent.FontChange, QEvent.PaletteChange, QEvent.StyleChange}:
+            self._message_table_fit_signature = None
+            self._queue_message_table_column_fit()
 
     def _messages_responsive_mode_for_width(self, width: int) -> str:
         try:
@@ -6307,6 +6379,12 @@ class MessageViewerTab(QWidget):
                 expanded.update({"mesh", "meshcore", "meshtastic"})
             elif source == "bbs":
                 expanded.update({"bbs", "bbs_archive"})
+            elif source in {"spotter", "commstat"}:
+                # ``sitrep`` remains a projection/storage family containing
+                # historical Spotter and CommStat records.  Query it for both
+                # operator-facing scopes, then let the semantic row filter
+                # keep the two sources separate in the Inbox.
+                expanded.update({source, "sitrep"})
             else:
                 expanded.add(source)
         return tuple(sorted(expanded))
@@ -7230,34 +7308,7 @@ class MessageViewerTab(QWidget):
         if not isinstance(selector, QListWidget):
             return
         theme = resolve_theme(self.settings)
-        accent_text = theme.get("text_on_accent", theme.get("surface", theme["text"]))
-        selector.setStyleSheet(
-            "QListWidget#messageComposeModeSelector {"
-            f" background-color: {theme.get('surface', '#F0F2F4')};"
-            f" border: 1px solid {theme.get('border', '#D3D7DD')};"
-            " border-radius: 6px;"
-            " padding: 3px;"
-            " outline: 0;"
-            "}"
-            " QListWidget#messageComposeModeSelector::item {"
-            f" background-color: {theme.get('surface_alt', '#DDE1E6')};"
-            f" color: {theme.get('text', '#1C1F21')};"
-            f" border: 1px solid {theme.get('border', '#D3D7DD')};"
-            " border-radius: 6px;"
-            " padding: 5px 16px;"
-            " margin: 1px 4px 1px 0;"
-            " font-weight: 600;"
-            "}"
-            " QListWidget#messageComposeModeSelector::item:hover {"
-            f" background-color: {theme.get('accent_hover', '#3B84B4')};"
-            f" color: {accent_text};"
-            "}"
-            " QListWidget#messageComposeModeSelector::item:selected {"
-            f" background-color: {theme.get('accent', '#2E6F9E')};"
-            f" border-color: {theme.get('accent_active', '#1F5A83')};"
-            f" color: {accent_text};"
-            "}"
-        )
+        selector.setStyleSheet(choice_chip_selector_style(selector.objectName(), theme))
 
     def _configure_compose_combo_width(self, combo: QComboBox, *, floor: int = 110) -> None:
         try:
@@ -11965,7 +12016,11 @@ class MessageViewerTab(QWidget):
         if not hasattr(self, "source_filter") or not source_values:
             return False
         options = self._dropdown_option_values(self.source_filter)
-        wanted = [value for value in source_values if value in options]
+        wanted = [
+            canonical
+            for value in source_values
+            if (canonical := normalize_message_source_family(value)) in options
+        ]
         if not wanted:
             return False
         self.source_filter.blockSignals(True)
@@ -16188,6 +16243,14 @@ class MessageViewerTab(QWidget):
         self._refresh_compose_js8_selected_target_cue()
         if hasattr(self, "reader_delete_btn"):
             self.reader_delete_btn.setStyleSheet(button_style("danger", theme))
+        for context_button in (
+            getattr(self, "reader_map_btn", None),
+            getattr(self, "reader_operator_btn", None),
+            getattr(self, "reader_reply_btn", None),
+            getattr(self, "reader_watch_btn", None),
+        ):
+            if isinstance(context_button, QPushButton):
+                context_button.setStyleSheet(button_style("secondary", theme))
 
     def shutdown(self) -> None:
         self._is_shutting_down = True
@@ -18394,48 +18457,121 @@ class MessageViewerTab(QWidget):
         return raw
 
     def _apply_message_table_profile_widths(self) -> None:
+        """Fit the bounded Inbox model without turning resize into a hot path.
+
+        The model is capped at 200 rows.  Measuring those retained display
+        values is deterministic and cache-only, unlike Qt's ResizeToContents
+        mode, which may repeatedly call the model during native layout passes.
+        Narrative columns may consume genuine surplus; categorical columns
+        (especially CommStat Kind) never expand merely because the window is
+        wide.
+        """
         profile = self._messages_model.display_profile() if hasattr(self, "_messages_model") else "triage"
+        table = getattr(self, "messages_table", None)
+        model = getattr(self, "_messages_model", None)
+        if table is None or model is None:
+            return
+        font_metrics = table.fontMetrics()
+        padding = max(24, int(font_metrics.horizontalAdvance("MM")))
+        indicator_width = max(32, int(font_metrics.height()) + 16)
+        measured: list[int] = []
+        for column in range(model.columnCount()):
+            header_text = str(model.headerData(column, Qt.Horizontal, Qt.DisplayRole) or "")
+            semantic = header_text.strip().casefold()
+            if column == 0:
+                minimum, cap = indicator_width, indicator_width
+            elif column == model.columnCount() - 1:
+                minimum, cap = 118, 230
+            elif semantic == "source":
+                minimum, cap = 78, 180
+            elif semantic in {"status", "age"}:
+                minimum, cap = (78, 132) if semantic == "status" else (68, 100)
+            elif semantic in {"from", "to"}:
+                minimum, cap = 88, 190
+            elif semantic == "kind":
+                minimum, cap = 78, 240
+            elif semantic in {"message", "summary", "kind / message"}:
+                minimum, cap = 140, 760
+            elif semantic == "mcf":
+                minimum, cap = 90, 300
+            elif semantic == "state / grid":
+                minimum, cap = 100, 220
+            elif semantic == "type":
+                minimum, cap = 78, 220
+            else:
+                minimum, cap = 78, 300
+            widest = font_metrics.horizontalAdvance(header_text) + padding
+            for row_index in range(model.rowCount()):
+                value = model.data(model.index(row_index, column), Qt.DisplayRole)
+                if value is not None:
+                    widest = max(widest, font_metrics.horizontalAdvance(str(value)) + padding)
+            measured.append(max(minimum, min(cap, int(widest))))
+
+        signature = (
+            profile,
+            font_metrics.height(),
+            tuple(measured),
+        )
+        if signature == getattr(self, "_message_table_fit_signature", None):
+            return
+        self._message_table_fit_signature = signature
+
+        # Summary/message text is the only elastic content.  CommStat's Kind
+        # is intentionally content-fit so a single repeated value cannot
+        # become the dominant full-screen column.
+        stretch_col = {
+            "triage": 6,
+            "field_summary": 5,
+            "form_message": 1,
+        }.get(profile)
+        updates_were_enabled = table.updatesEnabled()
+        if updates_were_enabled:
+            table.setUpdatesEnabled(False)
         try:
-            header = self.messages_table.horizontalHeader()
-            for idx in range(8):
-                if idx == 0:
-                    header.setSectionResizeMode(idx, QHeaderView.Fixed)
-                elif idx == 7:
-                    header.setSectionResizeMode(idx, QHeaderView.Fixed)
-                else:
-                    header.setSectionResizeMode(idx, QHeaderView.Interactive)
-            stretch_col = 1 if profile in {"field_report", "field_summary", "intel_report", "form_message"} else 6
-            header.setSectionResizeMode(stretch_col, QHeaderView.Stretch)
-        except Exception:
-            pass
-        if profile == "field_summary":
-            widths = {0: 32, 1: 140, 2: 76, 3: 104, 4: 112, 5: 360, 6: 78, 7: 220}
-            min_width = 1120
-        elif profile == "field_report":
-            widths = {0: 32, 1: 280, 2: 76, 3: 104, 4: 112, 5: 112, 6: 78, 7: 220}
-            min_width = 1015
-        elif profile == "intel_report":
-            widths = {0: 32, 1: 180, 2: 82, 3: 104, 4: 112, 5: 120, 6: 78, 7: 220}
-            min_width = 935
-        elif profile == "form_message":
-            widths = {0: 32, 1: 420, 2: 104, 3: 82, 4: 104, 5: 112, 6: 78, 7: 220}
-            min_width = 1170
-        else:
-            widths = {0: 32, 1: 76, 2: 82, 3: 104, 4: 104, 5: 78, 7: 220}
-            min_width = 935
-        for idx, width in widths.items():
             try:
-                self.messages_table.setColumnWidth(idx, width)
+                header = table.horizontalHeader()
+                header.setStretchLastSection(False)
+                for idx in range(8):
+                    if idx in {0, 7}:
+                        header.setSectionResizeMode(idx, QHeaderView.Fixed)
+                    else:
+                        header.setSectionResizeMode(idx, QHeaderView.Interactive)
+                if stretch_col is not None:
+                    header.setSectionResizeMode(stretch_col, QHeaderView.Stretch)
             except Exception:
                 pass
-        try:
-            self.messages_table.setMinimumWidth(min_width)
-        except Exception:
-            pass
-        try:
-            self._sync_header_widths()
-        except Exception:
-            pass
+            for idx, width in enumerate(measured):
+                if idx == stretch_col:
+                    continue
+                try:
+                    table.setColumnWidth(idx, width)
+                except Exception:
+                    pass
+            try:
+                table.setMinimumWidth(0)
+            except Exception:
+                pass
+            try:
+                self._sync_header_widths()
+            except Exception:
+                pass
+        finally:
+            if updates_were_enabled:
+                table.setUpdatesEnabled(True)
+                table.viewport().update()
+
+    def _queue_message_table_column_fit(self) -> None:
+        """Coalesce font/model/viewport fit requests into one UI-thread pass."""
+
+        if not hasattr(self, "messages_table"):
+            return
+        timer = getattr(self, "_message_table_fit_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._apply_message_table_profile_widths)
+            self._message_table_fit_timer = timer
+        timer.start(0)
 
     def _refresh_workspace_filter_options(self, rows: List[UnifiedMessage]) -> None:
         group_option_rows = rows
@@ -18461,7 +18597,13 @@ class MessageViewerTab(QWidget):
         if hasattr(self, "source_filter"):
             selected_sources = None
             if not self.source_filter.all_selected():
-                selected_sources = sorted(self.source_filter.selected_values())
+                # Preserve a live pre-normalization selection across the
+                # operator-facing SitRep -> Spotter vocabulary migration.
+                selected_sources = sorted({
+                    normalize_message_source_family(value)
+                    for value in self.source_filter.selected_values()
+                    if normalize_message_source_family(value)
+                })
             self.source_filter.set_options(
                 self._message_source_options(rows),
                 selected_values=selected_sources,
@@ -19031,6 +19173,8 @@ class MessageViewerTab(QWidget):
             self.current_sitrep = None
             self.current_commstat = None
         self.messages_table.setUpdatesEnabled(True)
+        self._message_table_fit_signature = None
+        self._queue_message_table_column_fit()
         self._update_bulk_delete_buttons()
         self._update_mark_all_read_style()
 
@@ -20344,7 +20488,7 @@ class MessageViewerTab(QWidget):
                     return row.rcv_ts or 0.0
                 return row.rcv_ts or 0.0
             if col == 1:
-                return row.msg_type or ""
+                return message_row_source_label(row)
             if col == 2:
                 return row.status or ""
             if col == 3:
@@ -20354,7 +20498,7 @@ class MessageViewerTab(QWidget):
             if col == 5:
                 return row.rcv_ts or 0.0
             if col == 6:
-                return row.title or ""
+                return message_row_narrative_label(row)
             return row.rcv_ts or 0.0
 
         return sorted(rows, key=key, reverse=reverse)
@@ -20563,6 +20707,7 @@ class MessageViewerTab(QWidget):
         row = self._reader_current_row()
         self._sync_reader_bbs_action(row)
         self._sync_reader_delete_action(row)
+        self._sync_reader_context_actions(row)
         self._update_message_reader_navigation()
 
     def _reader_current_row(self) -> UnifiedMessage | None:
@@ -20571,6 +20716,143 @@ class MessageViewerTab(QWidget):
         if 0 <= index < len(rows):
             return rows[index]
         return None
+
+    @staticmethod
+    def _reader_summary(row: UnifiedMessage | None) -> MessageSummary | None:
+        if row is None:
+            return None
+        summary = getattr(row, "summary", None)
+        if isinstance(summary, MessageSummary):
+            return summary
+        summary = message_summary_from_row(row)
+        row.summary = summary
+        return summary
+
+    def _sync_reader_context_actions(self, row: UnifiedMessage | None) -> None:
+        """Update source-neutral reader actions from the retained row only."""
+
+        summary = self._reader_summary(row)
+        transitioning = bool(getattr(self, "_reader_transitioning", False))
+        family = normalize_message_source_family(summary.source_family if summary else "")
+        map_ready = bool(
+            summary
+            and summary.actions.can_map
+            and summary.map_hint
+            and (
+                summary.map_hint.state
+                or summary.map_hint.grid
+                or summary.map_hint.region
+                or summary.map_hint.latitude is not None
+            )
+        )
+        operator_ready = bool(summary and summary.from_call)
+        reply_ready = bool(summary and summary.actions.can_reply and family in {"js8", "spotter", "commstat"})
+        watch_ready = bool(
+            summary
+            and (
+                summary.from_call
+                or summary.to_target
+                or summary.group
+                or summary.topics
+                or summary.status
+                or summary.summary
+            )
+        )
+        states = (
+            (getattr(self, "reader_map_btn", None), map_ready, "No mapped state or grid is available."),
+            (getattr(self, "reader_operator_btn", None), operator_ready, "No sender callsign is available."),
+            (getattr(self, "reader_reply_btn", None), reply_ready, "Reply is not supported for this source."),
+            (getattr(self, "reader_watch_btn", None), watch_ready, "No watchable identity is available."),
+        )
+        for button, ready, unavailable_tip in states:
+            if not isinstance(button, QPushButton):
+                continue
+            button.setVisible(summary is not None)
+            button.setEnabled(bool(ready) and not transitioning)
+            if not ready:
+                button.setToolTip(unavailable_tip)
+        action_row = getattr(self, "reader_context_actions_widget", None)
+        if action_row is not None:
+            action_row.setVisible(summary is not None)
+        if map_ready:
+            self.reader_map_btn.setToolTip("Open Map using this message's cached location context.")
+        if operator_ready:
+            self.reader_operator_btn.setToolTip(f"Open {summary.from_call} in HF Operators.")
+        if reply_ready:
+            self.reader_reply_btn.setToolTip(f"Compose a JS8 reply to {summary.from_call}.")
+        if watch_ready:
+            self.reader_watch_btn.setToolTip("Stage an unsaved shared watch from this message for review.")
+
+    def _open_reader_map(self) -> None:
+        summary = self._reader_summary(self._reader_current_row())
+        if summary is None or summary.map_hint is None or not summary.actions.can_map:
+            return
+        host = self.window()
+        callback = getattr(host, "open_spotter_map", None)
+        if callable(callback):
+            callback(
+                group_filter=summary.group,
+                topic_filter=next(iter(summary.topics), ""),
+                query_filter=summary.from_call,
+                state_filter=summary.map_hint.state,
+                grid_filter=summary.map_hint.grid,
+            )
+
+    def _open_reader_operator(self) -> None:
+        summary = self._reader_summary(self._reader_current_row())
+        callback = getattr(self.window(), "open_hf_operator", None)
+        if summary is not None and summary.from_call and callable(callback):
+            callback(summary.from_call)
+
+    def _reply_to_reader_message(self) -> None:
+        summary = self._reader_summary(self._reader_current_row())
+        if summary is None or not summary.from_call:
+            return
+        callback = getattr(self.window(), "open_messages_section", None)
+        if callable(callback):
+            callback(
+                "compose",
+                compose_intent={
+                    "mode": "js8",
+                    "transport": "js8",
+                    "recipient_callsign": summary.from_call,
+                    "group": summary.group,
+                    "source": "message_reader_reply",
+                    "source_family": summary.source_family,
+                    "source_ref": summary.provenance.source_ref if summary.provenance else "",
+                    "title": summary.subject,
+                    "topic": next(iter(summary.topics), ""),
+                    "state": summary.map_hint.state if summary.map_hint else "",
+                    "grid": summary.map_hint.grid if summary.map_hint else "",
+                },
+            )
+
+    def _add_reader_message_to_watch(self) -> None:
+        row = self._reader_current_row()
+        summary = self._reader_summary(row)
+        callback = getattr(self.window(), "open_fio_spotter_watch", None)
+        if row is None or summary is None or not callable(callback):
+            return
+        callback(
+            {
+                "source_family": summary.source_family,
+                "source_label": summary.source_label,
+                "source_scope": normalize_message_source_family(message_row_source_label(row)),
+                "source_kind": message_row_kind_label(row),
+                "message_type": summary.form_type,
+                "from_call": summary.from_call,
+                "to_call": summary.to_target,
+                "group_name": summary.group,
+                "status": summary.status,
+                "severity": summary.severity,
+                "state_code": summary.map_hint.state if summary.map_hint else "",
+                "grid": summary.map_hint.grid if summary.map_hint else "",
+                "subject": summary.subject,
+                "summary": summary.summary,
+                "topics": tuple(summary.topics),
+                "radio_id": summary.provenance.radio_short_name if summary.provenance else "",
+            }
+        )
 
     def _cached_reader_bbs_location_count(self, row: UnifiedMessage | None) -> int | None:
         rec = self._file_record_for_message_row(row, allow_detail_lookup=False)
@@ -20749,6 +21031,7 @@ class MessageViewerTab(QWidget):
         self._render_message_content(row)
         self._sync_reader_bbs_action(row)
         self._sync_reader_delete_action(row)
+        self._sync_reader_context_actions(row)
         self._scroll_reader_to_top()
         self._update_message_reader_navigation()
         self._log_message_reader_lifecycle(
@@ -20801,6 +21084,7 @@ class MessageViewerTab(QWidget):
             self._reader_message_key = self._reader_row_key(row)
             self._sync_reader_bbs_action(row)
             self._sync_reader_delete_action(row)
+            self._sync_reader_context_actions(row)
             self._update_message_reader_navigation()
             self._log_message_reader_lifecycle(
                 "navigate",
@@ -20864,6 +21148,7 @@ class MessageViewerTab(QWidget):
             self.reader_bbs_status_label.setVisible(False)
         if hasattr(self, "reader_delete_btn"):
             self.reader_delete_btn.setVisible(False)
+        self._sync_reader_context_actions(None)
         self._update_message_reader_navigation()
         if was_open:
             self._log_message_reader_lifecycle("close", reason=reason, clear=int(bool(clear_content)))
@@ -20957,7 +21242,7 @@ class MessageViewerTab(QWidget):
                 self.current_sitrep = None
                 self.current_commstat = None
                 self.current_observation = None
-                file_record = self._projected_file_record(row.payload)
+                file_record = self._projected_file_record(row.payload, allow_detail_lookup=False)
                 if file_record is not None and file_record.path.exists():
                     self.current_record = file_record
                     self._load_content(file_record)
@@ -20997,40 +21282,78 @@ class MessageViewerTab(QWidget):
             meta={"source_family": msg.source_family},
             min_ms=2.0,
         ):
+            source_label = message_row_source_label(
+                SimpleNamespace(
+                    origin=msg.source_family,
+                    display_type=msg.display_type,
+                    payload=msg,
+                    summary=None,
+                )
+            )
+            kind_label = message_row_kind_label(
+                SimpleNamespace(
+                    origin=msg.source_family,
+                    display_type=msg.display_type,
+                    msg_type=msg.message_type,
+                    title=msg.summary or msg.subject,
+                    payload=msg,
+                    summary=None,
+                )
+            )
+            receipt = commstat_status_receipt(msg.body_preview, msg.summary, msg.subject)
+            message_text = (
+                status_receipt_summary(sender=msg.from_call, receipt=receipt)
+                if receipt is not None
+                else (msg.body_preview or msg.summary or msg.subject or "--")
+            )
+            destination = msg.to_call or msg.report_group or msg.group
+            route = " -> ".join(part for part in (msg.from_call, destination) if part) or "Message"
+            event_ts = float(msg.event_ts or msg.received_ts or 0.0)
+            age = relative_age_label(event_ts)
             lines = [
-                f"{msg.source_label or msg.source_family or 'Message'} | {msg.from_call} -> {msg.to_call}",
+                route,
             ]
+            self._append_text_body(lines, "Message", message_text)
             self._append_detail_section(
                 lines,
                 "Key Fields",
                 (
-                    ("From", msg.from_call),
-                    ("To", msg.to_call),
-                    ("Group", msg.report_group or msg.group),
-                    ("Type", msg.message_type),
+                    ("Source", source_label),
+                    ("Kind", kind_label),
                     ("Status", msg.status),
+                    ("Age", age),
+                    ("From", msg.from_call),
+                    ("To", destination),
+                    ("Group", msg.report_group or msg.group),
                     ("Severity", msg.severity),
                     ("State/Grid", " / ".join(part for part in (msg.state_code, msg.grid) if part)),
-                    ("Source", msg.source_label or msg.source_family),
-                    ("Reference", msg.source_ref),
+                    ("Event time", msg.event_utc or msg.received_utc),
                 ),
             )
             topics = ", ".join(msg.topics)
             if topics:
                 self._append_detail_section(lines, "Intelligence", (("Topics", topics),))
-            detail = self._projected_message_detail(msg.message_id)
-            refs = detail.get("refs", []) if isinstance(detail, dict) else []
-            artifacts = detail.get("artifacts", []) if isinstance(detail, dict) else []
-            ref_lines = self._projected_ref_lines(refs)
+            # Projection rows already carry their bounded reference snapshot.
+            # Reader selection must not issue a detail query merely to expose
+            # diagnostics; keep technical provenance secondary and cache-only.
+            ref_lines = self._projected_ref_lines(msg.external_refs)
+            provenance = dict(msg.provenance or {})
+            provenance_lines = [
+                f"{key}: {value}"
+                for key, value in (
+                    ("Message ID", msg.message_id),
+                    ("Source record", msg.source_ref),
+                    ("Adapter", provenance.get("app_instance_id", "")),
+                    ("Radio", provenance.get("radio_id", "")),
+                )
+                if str(value or "").strip()
+            ]
             if ref_lines:
-                self._append_text_body(lines, "Source References", "\n".join(ref_lines))
-            artifact_lines = self._projected_artifact_lines(artifacts)
-            if artifact_lines:
-                self._append_text_body(lines, "Artifacts", "\n".join(artifact_lines))
-            self._append_text_body(lines, "Message", msg.body_preview or msg.summary or msg.subject or "--")
-            self.info_label.setText(
-                f"{msg.source_label or msg.source_family or 'Message'} {msg.from_call} -> {msg.to_call}"
-            )
+                provenance_lines.extend(ref_lines)
+            if provenance_lines:
+                self._append_text_body(lines, "Technical provenance", "\n".join(provenance_lines))
+            chips = " · ".join(part for part in (source_label, kind_label, msg.status, age) if part)
+            self.info_label.setText(f"{route}  |  {chips}" if chips else route)
             self.viewer.setAcceptRichText(False)
             self.viewer.setPlainText("\n".join(lines))
 

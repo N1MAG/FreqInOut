@@ -8,20 +8,20 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal, QStringListModel
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFormLayout, QGridLayout, QGroupBox,
     QCompleter, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton, QFileDialog, QMessageBox, QMenu,
-    QScrollArea, QSizePolicy, QSplitter, QSpinBox, QTabWidget, QTableWidget, QTableWidgetItem, QTextEdit,
+    QListWidget, QListWidgetItem, QScrollArea, QSizePolicy, QSplitter, QSpinBox, QTabWidget, QTableWidget, QTableWidgetItem, QTextEdit,
     QVBoxLayout, QWidget,
 )
 
 from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.fio_spotter_store import (
     MATCH_MODES, PRIORITIES, WATCH_KINDS, delete_spotter_watch,
-    list_spotter_activity, list_spotter_watches, save_spotter_watch, watch_matches,
+    list_spotter_watches, save_spotter_watch, watch_matches,
 )
 from freqinout.core.js8_expect_dispatcher import list_expect_dispatch_audit
 from freqinout.core.js8_expect_runtime import (
@@ -48,21 +48,13 @@ from freqinout.core.js8spotter_importer import import_js8spotter_database, previ
 from freqinout.core.perf_metrics import emit_span
 from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
-from freqinout.core.traffic_actionability import (
-    TrafficActionSummary,
-    build_operator_traffic_context,
-    build_traffic_action_summary,
-    configured_group_names,
-    load_operator_traffic_context,
-    message_matches_traffic_bucket,
-    traffic_action_item,
-)
 from freqinout.core.varac_bbs_vault import list_flamp_transfer_index_statuses
-from freqinout.gui.traffic_action_summary_widget import TrafficActionSummaryWidget
 from freqinout.gui.theme import (
     button_style,
+    choice_chip_selector_style,
     control_height_for_font,
     fit_child_combo_boxes,
+    fit_wrapping_choice_chip_selector,
     label_style,
     resolve_theme,
     style_splitter_handles,
@@ -70,7 +62,8 @@ from freqinout.gui.theme import (
 
 
 _MAX_ROWS = 200
-_TAB_NAMES = ("Activity", "Watches", "Expect", "Access Policies", "Forms", "Imports")
+_TAB_NAMES = ("Watches", "Expect", "Access Policies", "Forms", "Imports")
+_TAB_INDEX = {name: index for index, name in enumerate(_TAB_NAMES)}
 
 
 def _csv(value: object) -> list[str]:
@@ -306,15 +299,12 @@ class FioSpotterTab(QWidget):
         self._open_operator = open_operator
         self._radio_store_override = radio_store
         self._built: set[int] = set()
+        self._loaded: set[int] = set()
         self._policy_rows: list[dict[str, Any]] = []
         self._entry_rows: list[dict[str, Any]] = []
         self._policy_usage_entries: dict[int, list[dict[str, Any]]] = {}
         self._policy_radio_name_to_id: dict[str, str] = {}
         self._policy_radio_id_to_name: dict[str, str] = {}
-        self._activity_rows: list[dict[str, Any]] = []
-        self._activity_catalog_rows: list[dict[str, Any]] = []
-        self._activity_action_filter = ""
-        self._activity_context = None
         self._watch_rows: list[dict[str, Any]] = []
         self._expect_access_catalog_loaded_at = 0.0
         self._pending_expect_entry_id = 0
@@ -328,33 +318,57 @@ class FioSpotterTab(QWidget):
         title.setObjectName("fioSpotterTitle")
         title.setAccessibleName("FIO Spotter service")
         outer.addWidget(title)
-        why = QLabel("Monitor FIO traffic, maintain shared watches, and safely administer JS8 Expect automation.")
+        why = QLabel("Configure shared watches and safely administer JS8 Expect automation. Operational traffic is unified in Message Inbox.")
         why.setWordWrap(True)
         why.setObjectName("fioSpotterWhy")
         outer.addWidget(why)
+        self.tab_selector = QListWidget()
+        self.tab_selector.setObjectName("fioSpotterModeSelector")
+        self.tab_selector.setAccessibleName("FIO Spotter configuration sections")
+        self.tab_selector.setFlow(QListWidget.LeftToRight)
+        self.tab_selector.setWrapping(True)
+        self.tab_selector.setResizeMode(QListWidget.Adjust)
+        self.tab_selector.setMovement(QListWidget.Static)
+        self.tab_selector.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.tab_selector.setUniformItemSizes(False)
+        self.tab_selector.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        for name in _TAB_NAMES:
+            item = QListWidgetItem(name)
+            item.setToolTip(f"Open FIO Spotter {name}")
+            self.tab_selector.addItem(item)
+        self.tab_selector.setCurrentRow(0)
+        outer.addWidget(self.tab_selector)
         self.tabs = QTabWidget()
         self.tabs.setObjectName("fioSpotterBrowserTabs")
         self.tabs.setAccessibleName("FIO Spotter browser tabs")
-        self.tabs.setUsesScrollButtons(True)
         for name in _TAB_NAMES:
             page = QWidget()
             page.setObjectName(f"fioSpotter{name}Page")
             self.tabs.addTab(page, name)
+        self.tabs.tabBar().hide()
+        self.tab_selector.currentRowChanged.connect(self.tabs.setCurrentIndex)
+        self.tabs.currentChanged.connect(self._sync_tab_selector)
         self.tabs.currentChanged.connect(self._activate_tab)
         outer.addWidget(self.tabs, 1)
-        self._activate_tab(0)
+        # Construct the default page in its final parent before first show, but
+        # defer its store read until the page is activated.  This avoids a
+        # first-frame placeholder/page replacement and keeps window geometry
+        # stable while retaining the existing bounded refresh behavior.
+        self._activate_tab(_TAB_INDEX["Watches"], refresh=False)
+        self._refresh_tab_selector_geometry()
 
     def set_tab_active(self, active: bool) -> None:
         """Lifecycle hook used by MainWindow's lazy screen controller."""
-        if active and self.tabs.currentIndex() not in self._built:
+        if active:
             self._activate_tab(self.tabs.currentIndex())
 
     def open_expect_entry(self, *, entry_id: int = 0, expect_key: str = "") -> None:
         """Open authoritative Expect administration and select fresh store data."""
         self._pending_expect_entry_id = max(0, int(entry_id or 0))
         self._pending_expect_key = _text(expect_key).upper()
-        already_built = 2 in self._built
-        self.tabs.setCurrentIndex(2)
+        expect_index = _TAB_INDEX["Expect"]
+        already_built = expect_index in self._built
+        self.tabs.setCurrentIndex(expect_index)
         if already_built:
             self.refresh_expect()
 
@@ -364,13 +378,18 @@ class FioSpotterTab(QWidget):
             self._compact = compact
             for splitter in self.findChildren(QSplitter):
                 splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)
+            # The generic shell transition may have already assigned the
+            # Watches splitter its new orientation. Preserve the fact that it
+            # still needs its table-dominant default allocation once Qt has
+            # published the resized viewport.
+            self._watch_split_needs_default_sizing = True
         # Watches need a little more room than the other editor/list pairs:
         # below this breakpoint a side-by-side editor would be narrower than
         # its condition controls and make the table look clipped.  This is
         # geometry-only; no refresh or other store work is triggered here.
         self._apply_watch_responsive_layout()
-        self._apply_activity_responsive_layout()
         super().resizeEvent(event)
+        self._refresh_tab_selector_geometry()
         # Expect's metadata breakpoints are based on its actual laid-out
         # content width, not merely the outer tab width.  Rechecking after Qt
         # applies geometry makes the first visible frame correct and is
@@ -393,9 +412,22 @@ class FioSpotterTab(QWidget):
             # when the outer viewport is unchanged. Reflow only from cached
             # widget metrics; never activate a tab or refresh a store here.
             self._apply_watch_responsive_layout()
-            self._apply_activity_responsive_layout()
             self._apply_expect_responsive_layout()
             self._fit_forms_preview_geometry()
+            self._refresh_tab_selector_geometry()
+
+    def _sync_tab_selector(self, index: int) -> None:
+        if not hasattr(self, "tab_selector") or self.tab_selector.currentRow() == index:
+            return
+        self.tab_selector.blockSignals(True)
+        self.tab_selector.setCurrentRow(index)
+        self.tab_selector.blockSignals(False)
+
+    def _refresh_tab_selector_geometry(self) -> None:
+        selector = getattr(self, "tab_selector", None)
+        if not isinstance(selector, QListWidget):
+            return
+        fit_wrapping_choice_chip_selector(selector)
 
     def apply_theme(self) -> None:
         """Apply shared semantic roles to Spotter actions and splitters.
@@ -406,12 +438,6 @@ class FioSpotterTab(QWidget):
         """
         theme = resolve_theme(self.settings)
         role_map = {
-            "activity_refresh": "muted",
-            "activity_inbox": "secondary",
-            "activity_map": "secondary",
-            "activity_operator": "secondary",
-            "activity_reply": "secondary",
-            "activity_watch": "primary",
             "watches_refresh": "muted",
             "watch_save": "primary",
             "watch_new": "secondary",
@@ -454,12 +480,12 @@ class FioSpotterTab(QWidget):
             if button is not None:
                 button.setStyleSheet(button_style(role, theme))
         self._style_expect_status_chips(theme)
+        selector = getattr(self, "tab_selector", None)
+        if isinstance(selector, QListWidget):
+            selector.setStyleSheet(choice_chip_selector_style(selector.objectName(), theme))
+            self._refresh_tab_selector_geometry()
         for splitter in self.findChildren(QSplitter):
             style_splitter_handles(splitter, theme)
-        summary = getattr(self, "activity_intelligence", None)
-        if summary is not None:
-            summary.apply_theme(theme)
-        self._style_activity_chips(theme)
         for name in ("forms_state", "imports_state"):
             label = getattr(self, name, None)
             if isinstance(label, QLabel):
@@ -482,37 +508,12 @@ class FioSpotterTab(QWidget):
                 colors,
             ))
 
-    def _style_activity_chips(self, theme=None) -> None:
-        chips = getattr(self, "activity_chips", ())
-        if not chips:
-            return
-        colors = theme or resolve_theme(self.settings)
-        for button in chips:
-            button.setStyleSheet(button_style("primary" if button.isChecked() else "muted", colors))
-
-    def _apply_activity_responsive_layout(self) -> None:
-        """Keep Activity's table dominant while stacking its inspector compactly."""
-        split = getattr(self, "activity_split", None)
-        if split is None:
-            return
-        wanted = Qt.Vertical if self.width() <= 1000 else Qt.Horizontal
-        changed = split.orientation() != wanted
-        if changed:
-            split.setOrientation(wanted)
-        available = split.height() if wanted == Qt.Vertical else split.width()
-        # Initial lazy construction often occurs before the page is shown.  A
-        # later resize seeds the splitter from its measured viewport, while
-        # preserving any operator-adjusted sizes during same-mode resizes.
-        if available > 0 and (changed or sum(split.sizes()) <= 0):
-            first = max(1, int(available * 2 / 3))
-            split.setSizes([first, max(1, available - first)])
-
     def _apply_watch_responsive_layout(self) -> None:
         if not hasattr(self, "watches_split"):
             return
         split = self.watches_split
         editor = split.widget(1)
-        editor_min_width = editor.minimumSizeHint().width() if editor is not None else 0
+        editor_min_width = editor.minimumWidth() if editor is not None else 0
         # Keep enough room for the editor's condition row and at least an
         # equally useful table pane.  The font-derived term matters in Large
         # Text mode; a fixed breakpoint alone would clip the editor there.
@@ -521,13 +522,16 @@ class FioSpotterTab(QWidget):
         changed = split.orientation() != wanted
         if changed:
             split.setOrientation(wanted)
+            self._watch_split_needs_default_sizing = True
         available = split.height() if compact else split.width()
-        if available > 0 and (changed or sum(split.sizes()) <= 0):
+        needs_default = bool(getattr(self, "_watch_split_needs_default_sizing", False))
+        if available > 0 and (needs_default or sum(split.sizes()) <= 0):
             if compact:
                 first = max(1, available // 2)
             else:
                 first = max(1, int(available * 0.75))
             split.setSizes([first, max(1, available - first)])
+            self._watch_split_needs_default_sizing = False
 
     def _apply_expect_responsive_layout(self) -> None:
         compact = self.width() <= 1000
@@ -856,33 +860,34 @@ class FioSpotterTab(QWidget):
         index = self.expect_radio.findData(radio_id) if hasattr(self, "expect_radio") else -1
         return self.expect_radio.itemText(index) if index >= 0 else f"Radio ID {radio_id}"
 
-    def _activate_tab(self, index: int) -> None:
-        if index in self._built:
-            return
+    def _activate_tab(self, index: int, *, refresh: bool = True) -> None:
+        newly_built = index not in self._built
         started = time.perf_counter()
         builders: tuple[Callable[[QWidget], None], ...] = (
-            self._build_activity, self._build_watches, self._build_expect,
+            self._build_watches, self._build_expect,
             self._build_policies, self._build_forms, self._build_imports,
         )
-        builders[index](self.tabs.widget(index))
-        self._built.add(index)
-        self.apply_theme()
+        if newly_built:
+            builders[index](self.tabs.widget(index))
+            self._built.add(index)
+            self.apply_theme()
+        if not refresh or index in self._loaded:
+            return
+        self._loaded.add(index)
         # Forms/import preview can touch an external directory/database, so
         # those scans are operator-triggered rather than tab-activation work.
-        if index == 0:
-            self.refresh_activity()
-        elif index == 1:
+        if index == _TAB_INDEX["Watches"]:
             self.refresh_watches()
-        elif index == 2:
+        elif index == _TAB_INDEX["Expect"]:
             self.refresh_expect()
             # The first build happens before Qt has assigned the tab page its
             # final width.  One generation-neutral, geometry-only follow-up
             # lets the metadata strip choose its true initial wrap without
             # doing I/O or creating a resize loop.
             QTimer.singleShot(0, self._apply_expect_responsive_layout)
-        elif index == 3:
+        elif index == _TAB_INDEX["Access Policies"]:
             self.refresh_policies()
-        elif index == 4:
+        elif index == _TAB_INDEX["Forms"]:
             self._refresh_forms_state()
         else:
             self.refresh_imports()
@@ -943,356 +948,16 @@ class FioSpotterTab(QWidget):
         outer.addWidget(scroll)
         return layout
 
-    def _chip_row(self, labels: tuple[str, ...], callback: Callable[[], None]) -> QWidget:
-        row = QWidget()
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(5)
-        for label in labels:
-            btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setObjectName("fioSpotterFilterChip")
-            btn.setToolTip(f"Filter FIO Spotter results by {label}")
-            btn.clicked.connect(callback)
-            layout.addWidget(btn)
-        layout.addStretch(1)
-        return row
+    def open_watch_draft(self, candidate: Mapping[str, object]) -> None:
+        """Stage, but never save, a watch suggested by a cached Inbox row."""
 
-    # Activity -------------------------------------------------------------
-    def _build_activity(self, page: QWidget) -> None:
-        layout = self._page_layout(page)
-        header = QHBoxLayout()
-        title = QLabel("Scan recent FIO traffic")
-        title.setObjectName("fioSpotterActivityTitle")
-        title.setAccessibleName("Spotter Activity workspace")
-        header.addWidget(title)
-        header.addStretch(1)
-        refresh = QPushButton("Refresh")
-        self.activity_refresh = refresh
-        refresh.setAccessibleName("Refresh Spotter activity")
-        refresh.setToolTip("Read the latest bounded Activity page")
-        refresh.clicked.connect(self.refresh_activity)
-        header.addWidget(refresh)
-        layout.addLayout(header)
-        self.activity_chip_row = self._chip_row(("All", "JS8", "Forms"), self._on_activity_filter)
-        self.activity_chips = self.activity_chip_row.findChildren(QPushButton)
-        self.activity_chips[0].setChecked(True)
-        layout.addWidget(self.activity_chip_row)
-        self.activity_intelligence = TrafficActionSummaryWidget(self.settings)
-        self.activity_intelligence.title_label.setText("Message intelligence")
-        self.activity_intelligence.setToolTip(
-            "Action counts are derived from the newest bounded Spotter page and your operator/group duties."
-        )
-        self.activity_intelligence.bucketActivated.connect(self._set_activity_action_filter)
-        layout.addWidget(self.activity_intelligence)
-        split = QSplitter(Qt.Horizontal)
-        split.setObjectName("fioSpotterActivitySplit")
-        split.setChildrenCollapsible(False)
-        self.activity_split = split
-        self.activity_table = self._table(["Age", "Source", "From", "Group", "Form", "Action", "Summary"], name="fioSpotterActivityTable")
-        hdr = self.activity_table.horizontalHeader()
-        for col in range(6):
-            hdr.setSectionResizeMode(col, QHeaderView.Interactive)
-        hdr.setSectionResizeMode(6, QHeaderView.Stretch)
-        for col, width in enumerate((145, 85, 90, 90, 90, 85)):
-            self.activity_table.setColumnWidth(col, width)
-        detail_panel = QWidget()
-        detail_layout = QVBoxLayout(detail_panel)
-        detail_layout.setContentsMargins(0, 0, 0, 0)
-        self.activity_detail = QTextEdit()
-        self.activity_detail.setObjectName("fioSpotterActivityDetail")
-        self.activity_detail.setReadOnly(True)
-        self.activity_detail.setAccessibleName("Selected activity evidence")
-        self.activity_detail.setPlaceholderText("Select traffic to inspect decoded evidence and routing context.")
-        detail_layout.addWidget(self.activity_detail, 1)
-        detail_actions = QGridLayout()
-        self.activity_action_buttons: list[QPushButton] = []
-        for index, (label, callback) in enumerate(
-            (
-                ("Inbox", self._open_selected_activity_inbox),
-                ("Map", self._open_selected_activity_map),
-                ("Operator", self._open_selected_activity_operator),
-                ("Reply", self._open_spotter_compose),
-                ("Add to Watch…", self._stage_selected_activity_watch),
-            )
-        ):
-            button = QPushButton(label)
-            key = {
-                "Inbox": "activity_inbox",
-                "Map": "activity_map",
-                "Operator": "activity_operator",
-                "Reply": "activity_reply",
-                "Add to Watch…": "activity_watch",
-            }[label]
-            setattr(self, key, button)
-            button.setAccessibleName(f"Open {label} for selected Spotter activity")
-            button.setEnabled(False)
-            button.clicked.connect(callback)
-            detail_actions.addWidget(button, index // 2, index % 2)
-            self.activity_action_buttons.append(button)
-        detail_layout.addLayout(detail_actions)
-        self.activity_table.itemSelectionChanged.connect(self._show_activity_detail)
-        split.addWidget(self.activity_table)
-        split.addWidget(detail_panel)
-        split.setStretchFactor(0, 2)
-        split.setStretchFactor(1, 1)
-        split.setSizes([700, 360])
-        layout.addWidget(split, 1)
-        self._apply_activity_responsive_layout()
-
-    def refresh_activity(self) -> None:
-        """Explicitly refresh the bounded projection page from the station store."""
-        table = getattr(self, "activity_table", None)
-        if table is None:
-            return
-        started = time.perf_counter()
-        self._activity_catalog_rows = []
-        try:
-            # The service defaults match projection source families emitted by
-            # FIO: ``spotter`` (decoded forms), ``js8`` and legacy ``js8call``.
-            # Filter chips intentionally operate on this cached bounded page;
-            # toggling them must not issue a database query.
-            self._activity_catalog_rows = list_spotter_activity(
-                source_families=("spotter", "js8", "js8call"), limit=_MAX_ROWS
-            )
-        except Exception as exc:
-            log.warning("FIO Spotter: Activity refresh failed: %s", exc, exc_info=True)
-            self._activity_catalog_rows = []
-        hf_groups, local_groups = configured_group_names(self.settings)
-        callsign = self.settings.get("operator_callsign", "") or self.settings.get("callsign", "")
-        try:
-            self._activity_context = load_operator_traffic_context(
-                default_expect_db_path(),
-                callsign=callsign,
-                configured_operating_groups=hf_groups,
-                configured_local_groups=local_groups,
-            )
-        except Exception as exc:
-            log.warning("FIO Spotter: operator traffic context read failed: %s", exc, exc_info=True)
-            self._activity_context = build_operator_traffic_context(
-                callsign=callsign,
-                configured_operating_groups=hf_groups,
-                configured_local_groups=local_groups,
-            )
-        query_elapsed = (time.perf_counter() - started) * 1000.0
-        self._apply_activity_filters(query_elapsed=query_elapsed)
-
-    def _apply_activity_filters(self, *, query_elapsed: float = 0.0) -> None:
-        """Apply Activity chips to the current bounded page without I/O."""
-        table = getattr(self, "activity_table", None)
-        if table is None:
-            return
-        selected_before = self._selected_activity()
-        selected_id = _text(selected_before.get("message_id")) if selected_before else ""
-        selected = {button.text() for button in getattr(self, "activity_chips", ()) if button.isChecked()}
-        families = {"spotter", "js8", "js8call"}
-        if "JS8" in selected and "Forms" not in selected:
-            families = {"js8", "js8call"}
-        elif "Forms" in selected and "JS8" not in selected:
-            families = {"spotter"}
-        source_rows = [
-            row for row in self._activity_catalog_rows
-            if _text(row.get("source_family")).lower() in families
-        ]
-        context = self._activity_context
-        summary = build_traffic_action_summary(source_rows, context) if context is not None else None
-        if hasattr(self, "activity_intelligence"):
-            self.activity_intelligence.set_active_bucket(self._activity_action_filter)
-            self.activity_intelligence.set_summary(summary or TrafficActionSummary())
-        if self._activity_action_filter and context is not None:
-            self._activity_rows = [
-                row for row in source_rows
-                if message_matches_traffic_bucket(row, context, self._activity_action_filter)
-            ]
-        else:
-            self._activity_rows = source_rows
-        render_started = time.perf_counter()
-        table.setUpdatesEnabled(False)
-        table.blockSignals(True)
-        try:
-            table.clearContents()
-            table.setRowCount(len(self._activity_rows))
-            for i, row in enumerate(self._activity_rows):
-                age = _when(row.get("received_ts") or row.get("event_ts"))
-                self._put(table, i, 0, age, data=row)
-                self._put(table, i, 1, self._activity_source_text(row))
-                self._put(table, i, 2, row.get("from_call"))
-                self._put(table, i, 3, row.get("group_name") or row.get("to_call"))
-                self._put(table, i, 4, self._activity_form_text(row))
-                self._put(table, i, 5, self._activity_action_text(row))
-                self._put(table, i, 6, self._activity_topic_text(row))
-        finally:
-            table.blockSignals(False)
-            table.setUpdatesEnabled(True)
-        restored = False
-        if selected_id:
-            for row_index, row in enumerate(self._activity_rows):
-                if _text(row.get("message_id")) == selected_id:
-                    table.selectRow(row_index)
-                    restored = True
-                    break
-        if restored:
-            self._show_activity_detail()
-        elif not self._activity_rows:
-            self.activity_detail.setPlainText("No matching traffic in the current bounded page. Refresh to read newer station traffic.")
-        else:
-            table.clearSelection()
-            self.activity_detail.setPlainText("Select traffic to inspect decoded evidence and routing context.")
-        emit_span(
-            "fio_spotter.activity_refresh",
-            query_elapsed + (time.perf_counter() - render_started) * 1000.0,
-            meta={
-                "query_ms": round(query_elapsed, 1),
-                "render_ms": round((time.perf_counter() - render_started) * 1000.0, 1),
-                "rows": len(self._activity_rows),
-            },
-            min_ms=10.0,
-        )
-        self._style_activity_chips()
-        self._update_activity_action_state()
-
-    def _update_activity_action_state(self) -> None:
-        selected = self._selected_activity() if hasattr(self, "activity_table") else None
-        for button in getattr(self, "activity_action_buttons", ()):
-            button.setEnabled(selected is not None)
-
-    @staticmethod
-    def _activity_source_text(row: dict[str, Any]) -> str:
-        family = _text(row.get("source_family")).lower()
-        if family in {"js8", "js8call"}:
-            return "JS8Call"
-        if family == "spotter":
-            return "FIOSpotter"
-        return _text(row.get("source_label") or row.get("source_family"))
-
-    @staticmethod
-    def _activity_form_text(row: dict[str, Any]) -> str:
-        if _text(row.get("display_type")).lower() == "commstat":
-            return "CommStat"
-        intelligence = row.get("intelligence") if isinstance(row.get("intelligence"), dict) else {}
-        return _text(intelligence.get("form_name") or row.get("form_id") or row.get("message_type"))
-
-    @staticmethod
-    def _activity_topic_text(row: dict[str, Any]) -> str:
-        if _text(row.get("display_type")).lower() == "commstat":
-            parts = [_text(part) for part in _text(row.get("summary")).split("|")]
-            if len(parts) > 1 and parts[1]:
-                return parts[1]
-            return _text(row.get("status")).title() or "Status not reported"
-        return (
-            ", ".join(row.get("topics") or ())
-            or _text(row.get("subject") or row.get("summary") or row.get("preview") or row.get("body_text"))
-        )
-
-    def _set_activity_action_filter(self, bucket: object) -> None:
-        """Filter the cached Activity page by shared message intelligence."""
-        self._activity_action_filter = _text(bucket).lower()
-        self._apply_activity_filters()
-
-    def _activity_action_text(self, row: dict[str, Any]) -> str:
-        """Render the same operator-aware action used by the summary chips."""
-        item = traffic_action_item(row, self._activity_context) if self._activity_context is not None else None
-        if item is not None:
-            return item.primary_bucket.title()
-        action = _text(row.get("recommended_action")).replace("_", " ")
-        if action:
-            return action[:1].upper() + action[1:]
-        if row.get("operator_attention") or row.get("actionable"):
-            return "Review"
-        status = _text(row.get("status"))
-        severity = _text(row.get("severity"))
-        return "No action" if not severity or severity.lower() == "info" else f"Monitor · {severity}"
-
-    def _on_activity_filter(self) -> None:
-        sender = self.sender()
-        if isinstance(sender, QPushButton) and sender.text() == "All" and sender.isChecked():
-            for button in self.activity_chips:
-                if button is not sender:
-                    button.setChecked(False)
-        elif isinstance(sender, QPushButton) and sender.text() != "All":
-            self.activity_chips[0].setChecked(False)
-        if not any(button.isChecked() for button in self.activity_chips):
-            self.activity_chips[0].setChecked(True)
-        self._apply_activity_filters()
-        self._style_activity_chips()
-
-    def _show_activity_detail(self) -> None:
-        selected = self.activity_table.selectedItems()
-        if not selected:
-            self._update_activity_action_state()
-            return
-        row = selected[0].data(Qt.UserRole) or {}
-        intelligence = row.get("intelligence") if isinstance(row.get("intelligence"), dict) else {}
-        provenance = intelligence.get("provenance") if isinstance(intelligence.get("provenance"), dict) else {}
-        map_context = intelligence.get("map") if isinstance(intelligence.get("map"), dict) else {}
-        topics = ", ".join(str(topic) for topic in row.get("topics") or ()) or "None classified"
-        action_item = traffic_action_item(row, self._activity_context) if self._activity_context is not None else None
-        why: list[str] = []
-        severity = _text(row.get("severity"))
-        if severity:
-            why.append(f"Severity: {severity}")
-        trust = _text(provenance.get("trust"))
-        freshness = _text(provenance.get("freshness"))
-        if trust:
-            why.append(f"Trust: {trust}")
-        if freshness:
-            why.append(f"Freshness: {freshness}")
-        location = " / ".join(part for part in (_text(map_context.get("state")) or _text(row.get("state_code")), _text(map_context.get("grid")) or _text(row.get("grid"))) if part)
-        if location:
-            why.append(f"Location: {location}")
-        source_detail = self._activity_source_text(row)
-        if _text(row.get("radio_id")):
-            source_detail += f" · Radio {_text(row.get('radio_id'))}"
-        if _text(row.get("app_instance_id")):
-            source_detail += f" · Instance {_text(row.get('app_instance_id'))}"
-        self.activity_detail.setPlainText(
-            "Assessment\n\n"
-            f"{_text(row.get('summary') or row.get('subject')) or 'No shared summary is available.'}\n"
-            f"Recommended action: {self._activity_action_text(row)}\n"
-            f"Topics: {topics}\n"
-            f"What: {action_item.what if action_item is not None else 'Monitor this traffic in context.'}\n"
-            f"Why: {action_item.why if action_item is not None else ('; '.join(why) or 'No elevated condition in the shared projection.')}\n\n"
-            "Source evidence\n\n"
-            f"From: {_text(row.get('from_call')) or 'Unknown'}\n"
-            f"Target: {_text(row.get('to_call') or row.get('group_name')) or 'Unknown'}\n"
-            f"Source: {source_detail or 'Unknown'}\n\n"
-            f"{_text(row.get('body_text') or row.get('preview') or row.get('subject'))}\n\n"
-            "Use Inbox, Map, or Compose for the corresponding operator action."
-        )
-        self._update_activity_action_state()
-
-    def _selected_activity(self) -> dict[str, Any] | None:
-        if not hasattr(self, "activity_table") or self.activity_table.currentRow() < 0:
-            return None
-        item = self.activity_table.item(self.activity_table.currentRow(), 0)
-        row = item.data(Qt.UserRole) if item is not None else None
-        return dict(row) if isinstance(row, dict) else None
-
-    def _open_selected_activity_inbox(self) -> None:
-        row = self._selected_activity()
-        if row is not None and self._open_inbox is not None:
-            self._open_inbox(row)
-
-    def _open_selected_activity_map(self) -> None:
-        row = self._selected_activity()
-        if row is not None and self._open_map is not None:
-            self._open_map(row)
-
-    def _open_selected_activity_operator(self) -> None:
-        row = self._selected_activity()
-        if row is not None and self._open_operator is not None:
-            self._open_operator(row)
-
-    def _stage_selected_activity_watch(self) -> None:
-        """Open Watches with a useful, unsaved rule derived from Activity."""
-        row = self._selected_activity()
-        if row is None:
-            self.activity_detail.setPlainText("Select an Activity row before adding a watch.")
-            return
-        self.tabs.setCurrentIndex(1)
-        if 1 not in self._built:
-            self._activate_tab(1)
+        row = dict(candidate or {})
+        watches_index = _TAB_INDEX["Watches"]
+        self.tabs.setCurrentIndex(watches_index)
+        if watches_index not in self._built:
+            self._activate_tab(watches_index)
         self._clear_watch()
+        self._watch_preview_candidate = row
         callsign = _text(row.get("from_call")).upper()
         topics = [str(value or "").strip() for value in row.get("topics") or () if str(value or "").strip()]
         status = _text(row.get("status")).upper()
@@ -1303,7 +968,7 @@ class FioSpotterTab(QWidget):
         secondary_value = topics[0] if secondary_kind == "topic" else status if secondary_kind else ""
         self.watch_name.setText(
             " · ".join(value for value in (callsign or group, secondary_value) if value)
-            or "Activity watch"
+            or "Inbox watch"
         )
         self.watch_kind.setCurrentText(primary_kind)
         self.watch_pattern.setText(primary_value)
@@ -1316,7 +981,7 @@ class FioSpotterTab(QWidget):
             self.watch_secondary_mode.setCurrentText(
                 "exact" if secondary_kind == "status" else "contains"
             )
-        source = _text(row.get("source_family")).lower()
+        source = _text(row.get("source_scope") or row.get("source_family")).lower()
         self.watch_sources.setText(source if source else "")
         radio_id = _text(row.get("radio_id"))
         self.watch_radios.setText(radio_id)
@@ -1328,7 +993,7 @@ class FioSpotterTab(QWidget):
     # Watches --------------------------------------------------------------
     def _build_watches(self, page: QWidget) -> None:
         layout = self._page_layout(page)
-        hint = QLabel("Shared watches match callsigns, groups, topics, status, locations, and keywords in station traffic. Changes apply to the shared station watch service.")
+        hint = QLabel("Shared watches match callsigns, groups, sources, kinds, topics, status, locations, and keywords across supported Message Inbox traffic. Changes apply to the shared station watch service.")
         hint.setWordWrap(True)
         layout.addWidget(hint)
         header = QHBoxLayout()
@@ -1413,7 +1078,7 @@ class FioSpotterTab(QWidget):
         self.watch_priority = QComboBox(); self.watch_priority.addItems(PRIORITIES)
         for combo in (self.watch_kind, self.watch_mode, self.watch_secondary_kind, self.watch_secondary_mode, self.watch_priority):
             self._fit_spotter_combo(combo)
-        self.watch_sources = QLineEdit(); self.watch_sources.setPlaceholderText("spotter, js8 (blank is all)")
+        self.watch_sources = QLineEdit(); self.watch_sources.setPlaceholderText("js8, spotter, commstat, flmsg, flamp, varac, bbs, mesh (blank = all Inbox sources)")
         self.watch_radios = QLineEdit(); self.watch_radios.setPlaceholderText("Radio IDs, comma separated")
         self.watch_expiry_days = QSpinBox(); self.watch_expiry_days.setRange(0, 3650); self.watch_expiry_days.setSuffix(" days (0 = never)")
         self.watch_notes = QLineEdit(); self.watch_notes.setPlaceholderText("Optional operator note")
@@ -1431,7 +1096,7 @@ class FioSpotterTab(QWidget):
         form.addRow("AND (optional)", secondary)
         actions = QWidget(); action_grid = QGridLayout(actions); action_grid.setContentsMargins(0, 4, 0, 0)
         delete = QPushButton("Delete"); self.watch_delete = delete; delete.setAccessibleName("Delete selected Spotter watch"); delete.clicked.connect(self._delete_watch)
-        test = QPushButton("Test selected traffic"); self.watch_test = test; test.setAccessibleName("Test selected traffic against this watch"); test.clicked.connect(self._test_watch)
+        test = QPushButton("Test staged message"); self.watch_test = test; test.setAccessibleName("Test the staged Inbox message against this watch"); test.clicked.connect(self._test_watch)
         action_grid.addWidget(delete, 0, 0)
         action_grid.addWidget(test, 0, 1)
         action_grid.setColumnStretch(3, 1)
@@ -1447,13 +1112,17 @@ class FioSpotterTab(QWidget):
         # Preserve the natural width of the editor controls when the table and
         # editor are side by side.  The responsive helper stacks them before
         # this minimum can crowd the page at smaller or large-text widths.
-        editor.setMinimumWidth(editor.minimumSizeHint().width())
+        # Placeholder copy is intentionally descriptive, but it must not make
+        # the editor's intrinsic size hint consume half of a wide workspace.
+        # Use a font-derived control floor and let fields elide/scroll locally.
+        editor_width_floor = max(360, editor.fontMetrics().horizontalAdvance("M" * 28))
+        editor.setMinimumWidth(editor_width_floor)
         split.addWidget(editor)
         # Give the table the dominant share of the horizontal workspace while
         # retaining enough editor width for its three-part condition rows.
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 1)
-        if self.width() <= max(1200, (editor.minimumSizeHint().width() * 2) + 40):
+        if self.width() <= max(1200, (editor_width_floor * 2) + 40):
             split.setOrientation(Qt.Vertical)
         if split.orientation() == Qt.Vertical:
             split.setSizes([400, 400])
@@ -1539,6 +1208,7 @@ class FioSpotterTab(QWidget):
         self.watch_status.setText(f"Selected {row.get('name')}. Matched {int(row.get('match_count') or 0)} time(s).")
 
     def _clear_watch(self) -> None:
+        self._watch_preview_candidate = None
         self.watches_table.clearSelection(); self.watch_name.clear(); self.watch_kind.setCurrentText("keyword"); self.watch_pattern.clear(); self.watch_mode.setCurrentIndex(0); self.watch_secondary_kind.setCurrentIndex(0); self.watch_secondary_pattern.clear(); self.watch_secondary_mode.setCurrentIndex(0); self.watch_priority.setCurrentIndex(0); self.watch_sources.clear(); self.watch_radios.clear(); self.watch_expiry_days.setValue(0); self.watch_enabled.setChecked(True); self.watch_notes.clear(); self.watch_status.setText("New watch. Save to add it to the station service.")
 
     def _watch_values(self, existing: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1604,14 +1274,11 @@ class FioSpotterTab(QWidget):
         current = self._selected_watch()
         if not current:
             current = self._watch_values()
-        candidate: dict[str, Any] | None = None
-        if hasattr(self, "activity_table") and self.activity_table.currentRow() >= 0:
-            item = self.activity_table.item(self.activity_table.currentRow(), 0)
-            candidate = item.data(Qt.UserRole) if item else None
+        candidate = getattr(self, "_watch_preview_candidate", None)
         if not isinstance(candidate, dict):
-            self.watch_status.setText("Select an Activity row, then test this watch. Testing never changes match counts.")
+            self.watch_status.setText("Use Add to Watch from Message Inbox to stage a message for testing. Testing never changes match counts.")
             return
-        self.watch_status.setText("Test match: matched selected traffic." if watch_matches(current, candidate) else "Test match: no match for selected traffic.")
+        self.watch_status.setText("Test match: matched staged message." if watch_matches(current, candidate) else "Test match: no match for staged message.")
 
     # Expect ---------------------------------------------------------------
     def _build_expect(self, page: QWidget) -> None:
@@ -1761,7 +1428,9 @@ class FioSpotterTab(QWidget):
         self.expect_policy_summary = QPushButton("Policy: required for Auto reply")
         self.expect_policy_summary.setAccessibleName("Assigned access policy summary")
         self.expect_policy_summary.setToolTip("Automatic replies require a named, enabled access policy. Saved-only responses do not.")
-        self.expect_policy_summary.clicked.connect(lambda: self.tabs.setCurrentIndex(3))
+        self.expect_policy_summary.clicked.connect(
+            lambda: self.tabs.setCurrentIndex(_TAB_INDEX["Access Policies"])
+        )
         self.expect_access_catalog_state = QLabel()
         self.expect_access_catalog_state.setVisible(False)
         self.expect_access_catalog_state.setObjectName("fioSpotterExpectAccessCatalogState")
@@ -1903,7 +1572,9 @@ class FioSpotterTab(QWidget):
         new_menu.addAction("FLAMP Q rule", self._new_dynamic_q_entry)
         new.setMenu(new_menu)
         manage_policies = QPushButton("Access policies…"); self.expect_manage_policies = manage_policies
-        manage_policies.clicked.connect(lambda: self.tabs.setCurrentIndex(3))
+        manage_policies.clicked.connect(
+            lambda: self.tabs.setCurrentIndex(_TAB_INDEX["Access Policies"])
+        )
         self.expect_editor_action_buttons = (
             save, view, send_now, new, manage_policies, remove,
         )
@@ -1989,7 +1660,7 @@ class FioSpotterTab(QWidget):
         # Access Policies is lazy-built. Activate it before addressing its
         # editor widgets; this transition is explicit and performs the normal
         # bounded tab refresh once.
-        self.tabs.setCurrentIndex(3)
+        self.tabs.setCurrentIndex(_TAB_INDEX["Access Policies"])
         self._clear_policy_editor()
         base_name = f"{_text(row.get('expect_key')).upper() or 'Expect'} access"
         existing_names = {

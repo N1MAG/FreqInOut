@@ -14,7 +14,9 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 
-WATCH_KINDS = ("callsign", "group", "topic", "keyword", "status", "location", "structured")
+WATCH_KINDS = (
+    "callsign", "group", "source", "kind", "topic", "keyword", "status", "location", "structured"
+)
 MATCH_MODES = ("contains", "whole-word", "exact")
 
 
@@ -50,7 +52,23 @@ def _canonical_pattern(kind: str, pattern: object) -> str:
     value = " ".join(_text(pattern).split())
     if kind in {"callsign", "group"}:
         value = value.lstrip("@").upper()
+    elif kind == "kind":
+        value = " ".join(re.sub(r"[_/:-]+", " ", value).split())
     return value.casefold() if kind not in {"callsign", "group"} else value
+
+
+def _source_alias(value: object) -> str:
+    text = _text(value).casefold()
+    aliases = {
+        "js8call": "js8",
+        "fiospotter": "spotter",
+        "js8spotter": "spotter",
+        "commstat rf": "commstat",
+        "commstat_rf": "commstat",
+        "meshcore": "mesh",
+        "meshtastic": "mesh",
+    }
+    return aliases.get(text, text)
 
 
 @dataclass(frozen=True)
@@ -80,6 +98,8 @@ def _condition_values(kind: str, candidate: Mapping[str, Any]) -> list[str]:
     fields: dict[str, tuple[str, ...]] = {
         "callsign": ("from_call", "to_call", "callsign", "target_callsign"),
         "group": ("group_name", "group", "to_call"),
+        "source": ("source_family", "source_label", "source"),
+        "kind": ("source_kind", "message_type", "display_type", "form_type", "artifact_kind"),
         "topic": ("topic", "topics", "topic_names", "topic_labels"),
         "status": ("status", "severity", "confirmed_state", "followup_state"),
         "location": ("state_code", "grid", "city", "county", "location"),
@@ -184,11 +204,23 @@ class CompiledSpotterWatch:
         if self.expires_ts > 0 and now >= self.expires_ts:
             return False
         if self.source_families:
-            source = _text(candidate.get("source_family") or candidate.get("source_kind")).casefold()
+            candidate_sources = {
+                _source_alias(candidate.get(key))
+                for key in ("source_family", "source_label")
+                if _source_alias(candidate.get(key))
+            }
+            display_source = _source_alias(candidate.get("display_type"))
+            if display_source in {"js8", "spotter", "commstat", "flmsg", "flamp", "varac", "bbs", "mesh"}:
+                candidate_sources.add(display_source)
+            if not candidate_sources:
+                fallback = _source_alias(candidate.get("source_kind"))
+                if fallback:
+                    candidate_sources.add(fallback)
             # Preview callers may provide only message text. Runtime
             # projected candidates always carry source identity; unknown
             # identity is therefore left to the caller's preflight policy.
-            if source and source not in self.source_families:
+            allowed_sources = {_source_alias(value) for value in self.source_families}
+            if candidate_sources and candidate_sources.isdisjoint(allowed_sources):
                 return False
         if self.source_radio_ids:
             radio = _text(candidate.get("source_radio_id") or candidate.get("radio_id")).casefold()

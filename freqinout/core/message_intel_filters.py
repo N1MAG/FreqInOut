@@ -199,7 +199,10 @@ def focus_source_values(focus: object) -> tuple[str, ...]:
     mapping = {
         "forms": ("flmsg", "flamp"),
         "spotter": ("spotter", "js8"),
-        "commstat": ("commstat",),
+        # CommStat may be projected either from its fused artifact store or
+        # directly from locally received JS8 RF (including RRSR receipts).
+        # The focus predicate narrows the bounded mixed page by semantic kind.
+        "commstat": ("commstat", "js8"),
         "js8call": ("js8", "commstat", "spotter"),
         "mesh": ("mesh", "meshcore", "meshtastic"),
         "varac": ("varac",),

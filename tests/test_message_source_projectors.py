@@ -301,6 +301,23 @@ def test_local_js8_commstat_helper_has_compact_status_and_rejects_internet_marke
     ) is None
 
 
+def test_local_js8_rrsr_is_a_commstat_status_receipt() -> None:
+    classified = _analyze_local_js8_commstat(
+        raw_payload="W4WYD: @MAGNET RRSR N6KYL,L42",
+        decoded_payload="",
+        from_call="W4WYD",
+        to_call="@MAGNET",
+        event_utc="2026-09-15 02:00:00",
+    )
+
+    assert classified is not None
+    assert classified["form_name"] == "CommStat/Status receipt"
+    assert classified["status"] == "INFO"
+    assert classified["summary"] == "W4WYD acknowledged N6KYL status report L42"
+    assert classified["entities"]["acknowledged_callsign"] == "N6KYL"
+    assert classified["entities"]["acknowledged_report_id"] == "L42"
+
+
 def test_spotter_projector_marks_imported_history_without_claiming_local_rf(tmp_path) -> None:
     db_path = tmp_path / "fio.db"
     conn = _connect(db_path)

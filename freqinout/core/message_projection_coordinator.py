@@ -551,7 +551,10 @@ class MessageProjectionCoordinator:
                     continue
                 candidate = {
                     "source_family": message.source_family,
+                    "source_label": message.source_label,
                     "source_kind": message.message_type,
+                    "message_type": message.message_type,
+                    "display_type": message.display_type,
                     "radio_id": message.radio_id,
                     "from_call": message.from_call,
                     "to_call": message.to_call,

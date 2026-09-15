@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QDateTimeEdit,
     QGroupBox,
     QLineEdit,
+    QListWidget,
     QPlainTextEdit,
     QRadioButton,
     QSpinBox,
@@ -25,6 +26,8 @@ from freqinout.gui.theme import (
     apply_app_theme,
     apply_text_size_accessibility_guards,
     contrast_text_for_background,
+    choice_chip_selector_style,
+    fit_wrapping_choice_chip_selector,
     font_derived_widget_height,
     get_theme,
     item_view_height_for_rows,
@@ -194,6 +197,27 @@ def test_multiline_and_item_view_bounds_grow_with_the_active_font() -> None:
     finally:
         edit.deleteLater()
         table.deleteLater()
+
+
+def test_shared_choice_chip_selector_wraps_and_uses_theme_tokens() -> None:
+    _app()
+    selector = QListWidget()
+    selector.setObjectName("testChoiceChips")
+    selector.setFlow(QListWidget.LeftToRight)
+    selector.setWrapping(True)
+    selector.setFixedWidth(260)
+    selector.addItems(["Watches", "Expect", "Access Policies", "Forms", "Imports"])
+    try:
+        theme = get_theme("dark")
+        selector.setStyleSheet(choice_chip_selector_style(selector.objectName(), theme))
+        fitted_height = fit_wrapping_choice_chip_selector(selector)
+        assert theme["accent"] in selector.styleSheet()
+        assert theme["surface_alt"] in selector.styleSheet()
+        assert fitted_height > selector.item(0).sizeHint().height()
+        assert selector.horizontalScrollBarPolicy().name == "ScrollBarAlwaysOff"
+        assert selector.verticalScrollBarPolicy().name == "ScrollBarAlwaysOff"
+    finally:
+        selector.deleteLater()
 
 
 def test_settings_theme_path_only_paints_cached_dependency_status() -> None:

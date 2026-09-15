@@ -21,7 +21,9 @@ from freqinout.core.fio_spotter_watch_engine import (
 )
 
 
-WATCH_KINDS = ("callsign", "group", "topic", "keyword", "status", "location", "structured")
+WATCH_KINDS = (
+    "callsign", "group", "source", "kind", "topic", "keyword", "status", "location", "structured"
+)
 MATCH_MODES = ("contains", "whole-word", "exact")
 PRIORITIES = ("routine", "watch", "important", "urgent")
 MAX_WATCH_ROWS = 500

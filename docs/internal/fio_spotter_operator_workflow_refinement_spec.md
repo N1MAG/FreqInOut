@@ -20,17 +20,22 @@ FIO Spotter is a top-level local-RF observation and automatic-response service.
 It should feel intelligent without presenting the operator with its internal
 state machine. This refinement makes the common workflow small and predictable:
 
-1. understand meaningful locally heard Activity;
-2. save or watch an operator, group, topic, status, or useful combination;
-3. maintain reusable E? responses and decide which may answer automatically;
-4. define who may ask in one dedicated Access Policies workspace; and
-5. select a saved response or form, review its current payload, and send it
+1. save or watch an operator, group, topic, status, or useful combination;
+2. maintain reusable E? responses and decide which may answer automatically;
+3. define who may ask in one dedicated Access Policies workspace; and
+4. select a saved response or form, review its current payload, and send it
    through the existing guarded JS8Call path.
 
 Raw projection fields, compatibility flags, database keys, and duplicate
 permission switches remain implementation detail. Message Intelligence remains
-the shared interpretation layer for Activity, Watches, Messages, Map, and Ops
-Center.
+the shared interpretation layer for Inbox, Watches, Map, and Ops Center.
+
+Placement refinement (2026-09-15): operational Activity is now owned by the
+unified Message Inbox under
+`message_inbox_fiospotter_activity_consolidation_spec.md`. FIO Spotter owns
+configuration; Inbox owns review and source-neutral Map, Operator, Reply, and
+Add to Watch actions. The former Activity page is removed and FIOSpotter opens
+on Watches.
 
 ## Task-Oriented Redesign Brief
 
@@ -41,10 +46,10 @@ control treatment.
 
 ### Primary tasks and outcomes
 
-- **Activity — Understand RF traffic:** start with the newest bounded local-RF
-  projection; finish by understanding its meaning or routing a selected item to
-  Inbox, Map, Operator, Reply, or a reviewed Watch draft.
-- **Watches — Define what deserves attention:** start from an Activity
+- **Inbox Spotter focus — Understand RF traffic:** start with the newest bounded
+  Spotter projection; finish by understanding its meaning or routing a selected
+  item to Map, Operator, Reply, or a reviewed Watch draft.
+- **Watches — Define what deserves attention:** start from an Inbox
   suggestion or saved watch; finish with one understandable, bounded match rule
   whose enabled state and criteria are visible.
 - **Expect — Manage reusable replies:** start from a saved response or new E?
@@ -64,7 +69,7 @@ control treatment.
 
 ### Archetypes and normal sequences
 
-- Activity uses **dominant table with contextual inspector**:
+- Inbox Spotter focus uses **dominant table with contextual inspector**:
   `meaning/filter → traffic → selected evidence → contextual action`.
 - Watches uses **dominant table with contextual inspector** on wide displays and
   task-ordered stacking on compact displays:
@@ -104,7 +109,7 @@ paint, theme, hover, selection, chip layout, filter typing, and field typing are
 cache-only and perform no filesystem, database, process, endpoint, device, or
 network I/O.
 
-The slice must exercise Activity, Watches, Expect, Access Policies, Forms,
+The slice must exercise Inbox Spotter focus, Watches, Expect, Access Policies, Forms,
 Imports, and Spotter Compose in populated/empty/selected/loading/error states as
 applicable; Normal/Large Text; Light/Dark; 1920x1080, 1280x720, 1000x700, and
 900x560; long values and bounded maximum selections. The exit gate rejects
@@ -117,12 +122,20 @@ behavior.
 
 The browser-tab order is:
 
-1. `Activity`
-2. `Watches`
-3. `Expect`
-4. `Access Policies`
-5. `Forms`
-6. `Imports`
+1. `Watches`
+2. `Expect`
+3. `Access Policies`
+4. `Forms`
+5. `Imports`
+
+These peer configuration sections are presented as a left-aligned, wrapping
+choice-chip selector. The selected chip uses the shared accent role while
+unselected, hover, focus, and disabled states use the shared theme vocabulary;
+no Spotter-local colors are permitted. Chip and selector heights derive from
+the active font, labels do not elide, and compact widths wrap without horizontal
+scrolling. The existing tab widget remains an invisible internal page stack so
+lazy construction, programmatic navigation, current-page state, and accessibility
+semantics are preserved without rebuilding a page on resize or theme change.
 
 The normal UI uses these terms consistently:
 
@@ -422,9 +435,9 @@ or its revision is invalidated. Filtering is in-memory. Background refreshes
 publish immutable results only if their generation still owns the visible
 selection.
 
-## Smart Activity To Watch Workflow
+## Smart Inbox To Watch Workflow
 
-Activity adds `Add to Watch…` for a selected row. It opens a compact review
+Inbox adds `Add to Watch…` for a selected row. It opens a compact review
 surface and makes no write until Save. Candidate chips may include:
 
 - sender callsign;
@@ -468,7 +481,7 @@ candidate dictionaries with a pure matcher. It does not query SQLite once per
 watch or once per candidate.
 
 Matching is invoked from the message-projection/ingest completion path, never
-from Activity rendering. Match-count/last-match persistence is deduplicated by
+from Inbox rendering. Match-count/last-match persistence is deduplicated by
 watch and message identity and flushed in a bounded batch. Reprojection or
 restart cannot manufacture a new match. Notification/Message Intelligence
 consumers receive a bounded immutable match event. One malformed rule is marked
@@ -506,7 +519,7 @@ unhealthy and skipped without blocking other watches or message ingest.
 
 - Add backward-compatible structured AND criteria, duplicate/cap enforcement,
   compiled snapshot matching, durable match dedupe, and batched persistence.
-- Add Activity review/prefill and Watches editing/preview.
+- Add Inbox review/prefill and Watches editing/preview.
 - Gate: legacy watches match identically, compound watches are deterministic,
   caps hold under concurrent writes, reprocessing is idempotent, and one bad
   watch or slow store write cannot block message ingest or UI rendering.
@@ -592,7 +605,7 @@ operator-assisted qualification and is never performed by automated tests.
   guarded JS8 send path and require destination review.
 - Eligible outgoing form dates reflect send preparation time, are signed only
   afterward, and do not mutate the stored Expect response.
-- Activity can stage a meaningful single/compound watch; duplicate and absurd
+- Inbox can stage a meaningful single/compound watch; duplicate and absurd
   watch growth are prevented.
 - Runtime watch matching is event-driven, cached, pure per candidate,
   idempotent, and isolated from UI rendering and database latency.
@@ -614,7 +627,7 @@ request-derived and cannot be sent generically. Eligible
 MCForm dates are refreshed on the outgoing copy before signing while the stored
 response remains unchanged.
 
-Activity stages an unsaved watch review, with callsign-plus-topic/status as
+Inbox stages an unsaved watch review, with callsign-plus-topic/status as
 explicit AND criteria when reliable. Legacy watches remain readable. The
 runtime uses a cached compiled snapshot from the background message-projection
 lane, performs pure per-candidate matching, and writes one bounded batch keyed
@@ -662,8 +675,8 @@ turn and perform no discovery or I/O.
 ### Task-oriented shared-theme qualification
 
 The complete Spotter surface now implements the redesign brief in this
-specification. Activity keeps its bounded traffic table dominant and exposes
-selection-aware Inbox, Map, Operator, Reply, and Add to Watch actions. Watches
+specification. Inbox keeps its bounded traffic table dominant and exposes
+selection-aware Map, Operator, Reply, and Add to Watch actions. Watches
 uses a table-first wide layout and task-ordered compact stack; one `Enabled`
 checkbox is the only normal enable-state control, and its value is committed by
 `Save`. Expect and Access Policies retain editor-above-list flow, use cached
@@ -919,7 +932,7 @@ answers remain reviewable; the shared summary is supplementary.
   normal and `Send as MSG` modes; mode and draft state survive tab changes.
 - Directed, live-API, and inbox-native MSG fixtures ingest one FIOSpotter
   message each and do not regress protocol-frame filtering.
-- F!701B/F!701C status summaries agree across Activity, Inbox, Map, and other
+- F!701B/F!701C status summaries agree across Inbox, Map, and other
   Message Intelligence consumers.
 - Focused and expanded tests, Python compilation, and `git diff --check` pass.
   Live RF transmission and packaged macOS/Linux/Windows visual qualification

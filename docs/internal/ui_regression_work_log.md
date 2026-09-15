@@ -6298,3 +6298,89 @@ tests** pass. Python compilation and `git diff --check` are final exit checks
 below.
 No application restart, runtime database mutation, endpoint command, commit, or
 push was performed.
+
+## 2026-09-15 — Message Inbox and FIOSpotter Activity consolidation
+
+Status: implementation complete; automated gate passed; native-platform visual
+qualification remains operator-assisted.
+
+Message Inbox is now the single operational traffic surface. FIOSpotter
+Activity no longer runs or renders a duplicate catalog; its compatibility page
+routes directly to Inbox Spotter focus or Inbox All, while FIOSpotter retains
+ownership of Watches, Expect, policies, Forms, and Imports. Inbox All separates
+Source from Kind, reports relative Age, recognizes JS8 `RRSR` traffic as a
+CommStat status receipt, and presents human meaning before technical provenance.
+
+The cached reader adds stable Map, Operator, Reply, and Add to Watch actions.
+Add to Watch stages an unsaved, source-neutral rule in FIOSpotter. The compiled
+watch model accepts Source and Kind conditions and the projection coordinator
+supplies those canonical fields on its existing bounded background path; no
+schema migration or GUI-thread history scan was introduced.
+
+Operational table columns now autofit the bounded retained content using active
+font metrics and semantic caps. Categorical fields remain compact, narrative
+content receives surplus width, and a repeated CommStat Kind cannot stretch
+across a maximized screen. Fit requests are idempotent and coalesced and use no
+source, filesystem, database, endpoint, or network access.
+
+Primary Codex GPT-5 with high reasoning owned architecture, implementation,
+integration review, focused tests, and documentation. The active execution
+contract prohibited spawning new subagents, so no delegated diff was integrated.
+The integrated affected partition passes **407 tests**; the established
+process-isolated Compose/projection/performance partition passes **94 tests**.
+Changed modules compile and `git diff --check` passes. A monolithic repository
+run encountered a native JS8/Qt worker process abort in a Compose test that
+passes in the isolated partition; no gate was silently waived. Native Linux and
+macOS Light/Dark, Normal/Large Text, 1920x1080, 1000x700, and 900x560 visual
+review remains operator-assisted. No runtime state, endpoint, commit, or remote
+repository was changed.
+
+## 2026-09-15 — Inbox first-frame and Spotter vocabulary follow-up
+
+Status: implementation complete; automated qualification passed; native first-
+launch confirmation remains operator-assisted.
+
+The operator approved the consolidated Inbox but reported one first-render
+`swipe & vanish` event. The Inbox now installs its bounded, font-measured table
+profile before the first visible frame and applies header resize modes plus
+fixed widths as one update-suppressed publication. It does not add source I/O,
+parsing, model resets, event pumping, or resize-time work.
+
+The obsolete FIOSpotter Activity page and its traffic-query UI were removed;
+Watches is prebuilt as the stable default page and performs its bounded store
+read only when FIOSpotter is activated. The Watch editor uses a font-derived
+minimum instead of a long-placeholder size hint so its wide layout remains
+table-dominant.
+
+Inbox vocabulary now exposes `Spotter` rather than the legacy `SitRep` storage
+family. Historical `sitrep` projections are still queried for Spotter and
+CommStat scopes, then separated by cached semantic evidence so a CommStat row
+cannot also match Spotter. No database migration or stored source identity was
+changed.
+
+Acceptance evidence: **441 integrated Inbox/Spotter/source/first-render tests**
+and **49 focused GUI-soak, production-hotpath, asynchronous UI, and projection
+performance tests** pass. Changed Python modules compile and `git diff --check`
+passes. No application restart, production-state mutation, endpoint command,
+commit, or remote push was performed.
+
+## 2026-09-15 — FIO Spotter section-selector consistency
+
+Status: implementation complete; automated qualification passed; native visual
+confirmation remains operator-assisted.
+
+The centered document-style FIO Spotter tabs are replaced by a left-aligned,
+wrapping, mutually exclusive chip selector. Its normal, selected, hover, focus,
+and disabled treatments come from the shared theme helper also used by Compose;
+Light and Dark therefore cannot acquire separate local palettes. Item and
+container heights derive from the active font, complete labels do not elide,
+compact widths wrap without scrollbars, and keyboard or programmatic selection
+remains synchronized with the hidden lazy page stack.
+
+The selector's resize, font, and theme paths are bounded geometry/paint work.
+They do not rebuild pages, refresh stores, pump events, or perform database,
+filesystem, endpoint, device, process, or network work. Focused Spotter,
+theme/geometry, and embedded/pop-out Compose qualification passes **82 tests**.
+Changed Python modules compile and `git diff --check` passes. No application
+restart, runtime-state mutation, endpoint command, commit, or remote push was
+performed.

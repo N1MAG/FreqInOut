@@ -9,10 +9,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QApplication, QCheckBox, QScrollArea, QTableWidgetItem, QWidget
+from PySide6.QtWidgets import QApplication, QCheckBox, QLabel, QScrollArea, QTableWidgetItem, QWidget
 
 from freqinout.core import fio_spotter_store
-from freqinout.core.traffic_actionability import build_operator_traffic_context
 from freqinout.gui import fio_spotter_tab as spotter_ui
 from freqinout.gui.fio_spotter_tab import FioSpotterTab
 
@@ -59,140 +58,43 @@ def _set_app_text_scale(app: QApplication, scale: float) -> QFont:
     return old_font
 
 
+def _select_tab(tab: FioSpotterTab, name: str) -> None:
+    index = next(i for i in range(tab.tabs.count()) if tab.tabs.tabText(i) == name)
+    tab.tabs.setCurrentIndex(index)
+
+
 def test_spotter_tab_has_lazy_browser_tabs_in_service_order():
     app = _app()
     tab = FioSpotterTab(settings=_Settings(), radio_store=_RadioStore())
     try:
         assert [tab.tabs.tabText(i) for i in range(tab.tabs.count())] == [
-            "Activity", "Watches", "Expect", "Access Policies", "Forms", "Imports",
+            "Watches", "Expect", "Access Policies", "Forms", "Imports",
         ]
         assert tab._built == {0}
-        tab.tabs.setCurrentIndex(2)
+        assert not hasattr(tab, "activity_open_spotter_inbox")
+        _select_tab(tab, "Expect")
         app.processEvents()
-        assert 2 in tab._built
+        assert 1 in tab._built
         assert tab.expect_entries_table.rowCount() <= 200
         assert tab.tabs.currentWidget().findChild(QScrollArea) is not None
     finally:
         tab.deleteLater()
 
 
-def test_screen_reactivation_does_not_repeat_activity_query(monkeypatch):
-    app = _app()
+def test_default_watch_page_defers_its_store_read_until_activation(monkeypatch):
     calls: list[int] = []
-
-    def activity(**_kwargs):
-        calls.append(1)
-        return []
-
-    monkeypatch.setattr(spotter_ui, "list_spotter_activity", activity)
-    tab = FioSpotterTab(settings=_Settings())
-    try:
-        assert len(calls) == 1
-        tab.set_tab_active(True)
-        tab.set_tab_active(True)
-        app.processEvents()
-        assert len(calls) == 1
-        tab.refresh_activity()
-        assert len(calls) == 2
-    finally:
-        tab.deleteLater()
-
-
-def test_activity_filter_chips_use_the_current_bounded_page_without_a_query(monkeypatch):
-    app = _app()
-    calls: list[int] = []
-
-    def activity(**_kwargs):
-        calls.append(1)
-        return [
-            {"message_id": "spotter:1", "source_family": "spotter", "summary": "Form"},
-            {"message_id": "js8:1", "source_family": "js8", "summary": "JS8"},
-        ]
-
-    monkeypatch.setattr(spotter_ui, "list_spotter_activity", activity)
-    tab = FioSpotterTab(settings=_Settings())
-    try:
-        assert calls == [1]
-        next(button for button in tab.activity_chips if button.text() == "JS8").click()
-        app.processEvents()
-        assert calls == [1]
-        assert [row["message_id"] for row in tab._activity_rows] == ["js8:1"]
-    finally:
-        tab.deleteLater()
-
-
-def test_activity_intelligence_filters_the_cached_page_without_a_query(monkeypatch):
-    app = _app()
-    calls: list[int] = []
-
-    def activity(**_kwargs):
-        calls.append(1)
-        return [
-            {
-                "message_id": "spotter:event", "source_family": "spotter",
-                "from_call": "K1ABC", "to_call": "@MR08", "group_name": "MR08",
-                "summary": "Wildfire affecting Route 9", "topics": ["Fire", "Travel/Roads"],
-                "severity": "warning", "actionable": True, "received_ts": 20.0,
-            },
-            {
-                "message_id": "js8:other", "source_family": "js8",
-                "from_call": "K2ABC", "to_call": "@OTHER", "group_name": "OTHER",
-                "summary": "Routine traffic", "topics": [], "received_ts": 10.0,
-            },
-        ]
-
-    context = build_operator_traffic_context(
-        callsign="N1MAG",
-        configured_operating_groups=("MR08",),
-        operator_rows=({"callsign": "N1MAG", "group1": "MR08", "group_role": "HUB"},),
+    monkeypatch.setattr(
+        spotter_ui,
+        "list_spotter_watches",
+        lambda **_kwargs: calls.append(1) or [],
     )
-    monkeypatch.setattr(spotter_ui, "list_spotter_activity", activity)
-    monkeypatch.setattr(spotter_ui, "load_operator_traffic_context", lambda *_args, **_kwargs: context)
-
     tab = FioSpotterTab(settings=_Settings())
     try:
+        assert calls == []
+        assert tab.tabs.tabText(tab.tabs.currentIndex()) == "Watches"
+        tab.set_tab_active(True)
+        tab.set_tab_active(True)
         assert calls == [1]
-        assert tab.activity_intelligence.buttons["relay"].text() == "Relay 1"
-        tab.activity_intelligence.buttons["relay"].click()
-        app.processEvents()
-        assert calls == [1]
-        assert [row["message_id"] for row in tab._activity_rows] == ["spotter:event"]
-        assert tab.activity_table.item(0, 5).text() == "Relay"
-        assert "Distribute Fire report" in tab.activity_intelligence.insight_label.text()
-    finally:
-        tab.deleteLater()
-
-
-def test_activity_renders_local_js8_commstat_as_concise_intelligence(monkeypatch):
-    """CommStat is a JS8/RF form in Activity, not a second source family."""
-    app = _app()
-    calls: list[tuple[str, ...]] = []
-
-    def activity(**kwargs):
-        calls.append(tuple(kwargs.get("source_families", ())))
-        return [{
-            "message_id": "js8:commstat-1",
-            "source_family": "js8",
-            "display_type": "commstat",
-            "from_call": "K1ABC",
-            "to_call": "N1MAG",
-            "summary": "CommStat | Yellow | Battery low",
-            "status": "yellow",
-            "received_ts": 20.0,
-        }]
-
-    monkeypatch.setattr(spotter_ui, "list_spotter_activity", activity)
-    tab = FioSpotterTab(settings=_Settings())
-    try:
-        assert calls == [("spotter", "js8", "js8call")]
-        assert tab.activity_table.item(0, 4).text() == "CommStat"
-        assert tab.activity_table.item(0, 6).text() == "Yellow"
-        # The JS8 chip is the natural home for a locally received CommStat;
-        # no separate internet/CommStat query or filter is introduced.
-        tab.activity_chips[1].click()
-        app.processEvents()
-        assert calls == [("spotter", "js8", "js8call")]
-        assert tab.activity_table.rowCount() == 1
     finally:
         tab.deleteLater()
 
@@ -204,7 +106,7 @@ def test_open_expect_entry_refreshes_once_and_selects_requested_row(monkeypatch)
     try:
         # Build the page without touching the real store, then provide a
         # bounded row exactly as the store projector would.
-        tab.tabs.setCurrentIndex(2)
+        _select_tab(tab, "Expect")
         app.processEvents()
         tab.expect_entries_table.setRowCount(1)
         row = {"id": 42, "expect_key": "F!304", "response_text": "F!304 OK"}
@@ -230,7 +132,7 @@ def test_bulk_expect_date_action_confirms_once_refreshes_once_and_preserves_sele
     app = _app()
     tab = FioSpotterTab(settings=_Settings())
     try:
-        tab.tabs.setCurrentIndex(2)
+        _select_tab(tab, "Expect")
         app.processEvents()
         eligible = {"id": 7, "expect_key": "F!304", "response_text": "F!304 OK #ABCD"}
         other = {"id": 8, "expect_key": "Q", "response_text": "Q ABCD"}
@@ -259,7 +161,7 @@ def test_bulk_expect_date_action_noop_does_not_write(monkeypatch):
     app = _app()
     tab = FioSpotterTab(settings=_Settings())
     try:
-        tab.tabs.setCurrentIndex(2)
+        _select_tab(tab, "Expect")
         app.processEvents()
         tab._entry_rows = [{"id": 8, "expect_key": "Q", "response_text": "Q ABCD"}]
         monkeypatch.setattr(spotter_ui, "list_expect_entries", lambda **_kwargs: list(tab._entry_rows))
@@ -278,7 +180,7 @@ def test_forms_action_stages_selected_form_in_expect(monkeypatch):
     intents: list[dict] = []
     tab = FioSpotterTab(settings=_Settings(), open_compose=lambda intent: intents.append(intent))
     try:
-        tab.tabs.setCurrentIndex(4)
+        _select_tab(tab, "Forms")
         app.processEvents()
         tab.forms_table.setRowCount(1)
         item = QTableWidgetItem("F!304")
@@ -302,7 +204,7 @@ def test_compact_expect_page_scrolls_without_expanding_shell_height():
     tab = FioSpotterTab(settings=_Settings())
     try:
         tab.resize(900, 560)
-        tab.tabs.setCurrentIndex(2)
+        _select_tab(tab, "Expect")
         tab.show()
         app.processEvents()
         assert tab.height() == 560
@@ -323,7 +225,7 @@ def test_expect_editor_keeps_narrow_layout_and_text_controls_readable(scale):
     tab = FioSpotterTab(settings=_Settings())
     try:
         tab.resize(900, 560)
-        tab.tabs.setCurrentIndex(2)
+        _select_tab(tab, "Expect")
         tab.show()
         app.processEvents()
 
@@ -352,7 +254,7 @@ def test_expect_editor_keeps_narrow_layout_and_text_controls_readable(scale):
         # taller than the operator-facing three-line working surface.
         assert tab.expect_reply.height() >= tab.expect_reply.fontMetrics().lineSpacing() * 3
 
-        tab.tabs.setCurrentIndex(3)
+        _select_tab(tab, "Access Policies")
         app.processEvents()
         policy_controls = (
             tab.policy_manage,
@@ -366,7 +268,7 @@ def test_expect_editor_keeps_narrow_layout_and_text_controls_readable(scale):
         )
         assert all(widget.height() >= widget.sizeHint().height() for widget in policy_controls)
 
-        tab.tabs.setCurrentIndex(2)
+        _select_tab(tab, "Expect")
         app.processEvents()
 
         # Inline access is not part of the normal editor. It is disclosed only
@@ -426,7 +328,7 @@ def test_expect_editor_recovers_when_selected_policy_disappears(monkeypatch):
 
     tab = FioSpotterTab(settings=_Settings())
     try:
-        tab.tabs.setCurrentIndex(3)
+        _select_tab(tab, "Access Policies")
         app.processEvents()
         tab.policy_manage.setCurrentIndex(tab.policy_manage.findData(7))
         app.processEvents()
@@ -439,7 +341,7 @@ def test_expect_editor_recovers_when_selected_policy_disappears(monkeypatch):
         assert tab.policy_manage.currentText() == "New policy"
         assert tab.policy_name.text() == ""
         assert tab.policy_trusted_groups.text() == ""
-        tab.tabs.setCurrentIndex(2)
+        _select_tab(tab, "Expect")
         app.processEvents()
         tab.refresh_expect()
         assert tab.expect_policy.currentData() == 0
@@ -464,7 +366,7 @@ def test_enabling_dynamic_flamp_queues_an_immediate_background_projection(monkey
     )
     tab = FioSpotterTab(parent=host, settings=_Settings())
     try:
-        tab.tabs.setCurrentIndex(2)
+        _select_tab(tab, "Expect")
         app.processEvents()
         tab.dynamic_flamp_enabled.setChecked(True)
         app.processEvents()
@@ -527,9 +429,9 @@ def test_expect_editor_typing_and_policy_selection_do_not_requery_after_lazy_loa
 
     tab = FioSpotterTab(settings=_Settings())
     try:
-        tab.tabs.setCurrentIndex(2)
+        _select_tab(tab, "Expect")
         app.processEvents()
-        tab.tabs.setCurrentIndex(3)
+        _select_tab(tab, "Access Policies")
         app.processEvents()
         initial = dict(counts)
 
@@ -538,7 +440,7 @@ def test_expect_editor_typing_and_policy_selection_do_not_requery_after_lazy_loa
         tab.expect_groups.setText("@MAGNET")
         tab.expect_trusted_groups.setText("MR08")
         tab.policy_manage.setCurrentIndex(tab.policy_manage.findData(7))
-        tab.tabs.setCurrentIndex(2)
+        _select_tab(tab, "Expect")
         app.processEvents()
         tab.expect_policy.setCurrentIndex(tab.expect_policy.findData(7))
         tab.expect_radio.setCurrentIndex(0)
@@ -571,7 +473,7 @@ def test_expect_editor_uses_named_fio_radio_and_hides_routing_details(monkeypatc
     settings = _Settings()
     tab = FioSpotterTab(settings=settings, radio_store=_RadioStore())
     try:
-        tab.tabs.setCurrentIndex(3)
+        _select_tab(tab, "Access Policies")
         app.processEvents()
         tab.policy_name.setText("Regional hubs")
         tab.policy_calls.setText("K1ABC")
@@ -583,7 +485,7 @@ def test_expect_editor_uses_named_fio_radio_and_hides_routing_details(monkeypatc
         assert policies[0]["allowed_groups"] == ["@MAGNET"]
         assert policies[0]["source_radio_ids"] == ["7"]
 
-        tab.tabs.setCurrentIndex(2)
+        _select_tab(tab, "Expect")
         app.processEvents()
         tab.expect_key.setText("INFO")
         tab.expect_reply.setText("STATUS GREEN")
@@ -625,7 +527,7 @@ def test_expect_editor_defaults_to_all_radios_and_preserves_legacy_routing(monke
     })
     tab = FioSpotterTab(settings=_Settings(), radio_store=_RadioStore())
     try:
-        tab.tabs.setCurrentIndex(2)
+        _select_tab(tab, "Expect")
         app.processEvents()
         tab._clear_entry()
         assert tab.expect_radio.currentData() == ""
@@ -663,7 +565,6 @@ def test_watches_editor_uses_shared_bounded_store_for_save_toggle_delete_and_tes
     """The UI owns no watch list: every editor action reaches the core store."""
     app = _app()
     db_path = tmp_path / "spotter.db"
-    monkeypatch.setattr(spotter_ui, "list_spotter_activity", lambda **_kwargs: [])
     monkeypatch.setattr(
         spotter_ui, "list_spotter_watches",
         lambda *, limit: fio_spotter_store.list_spotter_watches(db_path=db_path, limit=limit),
@@ -678,7 +579,7 @@ def test_watches_editor_uses_shared_bounded_store_for_save_toggle_delete_and_tes
     )
     tab = FioSpotterTab(settings=_Settings())
     try:
-        tab.tabs.setCurrentIndex(1)
+        _select_tab(tab, "Watches")
         app.processEvents()
         tab.watch_name.setText("Smoke")
         tab.watch_pattern.setText("smoke")
@@ -689,9 +590,7 @@ def test_watches_editor_uses_shared_bounded_store_for_save_toggle_delete_and_tes
         assert rows[0]["source_families"] == ["spotter", "js8"]
         assert tab.watches_table.rowCount() == 1
 
-        tab.activity_table.setRowCount(1)
-        tab._put(tab.activity_table, 0, 0, "now", data={"body_text": "Smoke reported"})
-        tab.activity_table.selectRow(0)
+        tab._watch_preview_candidate = {"body_text": "Smoke reported", "source_family": "spotter"}
         tab.watches_table.selectRow(0)
         tab._test_watch()
         assert "matched" in tab.watch_status.text().lower()
@@ -714,7 +613,6 @@ def test_forms_folder_and_import_preview_use_canonical_settings_keys(tmp_path, m
         encoding="utf-8",
     )
     source = tmp_path / "js8spotter.db"; source.touch()
-    monkeypatch.setattr(spotter_ui, "list_spotter_activity", lambda **_kwargs: [])
     monkeypatch.setattr(
         spotter_ui,
         "list_expect_entries",
@@ -732,7 +630,7 @@ def test_forms_folder_and_import_preview_use_canonical_settings_keys(tmp_path, m
     monkeypatch.setattr(spotter_ui, "preview_js8spotter_import", lambda *_args, **_kwargs: preview)
     tab = FioSpotterTab(settings=settings)
     try:
-        tab.tabs.setCurrentIndex(4); app.processEvents()
+        _select_tab(tab, "Forms"); app.processEvents()
         tab.forms_path.setText(str(forms_dir)); tab._use_forms_folder()
         assert settings.values["js8_forms_path"] == str(forms_dir)
         assert "preserved" in tab.forms_state.text().lower()
@@ -755,7 +653,7 @@ def test_forms_folder_and_import_preview_use_canonical_settings_keys(tmp_path, m
         tab._preview_selected_form()
         assert "Weather report" in tab.forms_preview.toPlainText()
 
-        tab.tabs.setCurrentIndex(5); app.processEvents()
+        _select_tab(tab, "Imports"); app.processEvents()
         tab.import_source.setText(str(source)); tab._preview_import()
         assert settings.values["js8spotter_import_db_path"] == str(source)
         assert "4 candidates" in tab.imports_state.text()
@@ -780,7 +678,7 @@ def test_forms_selection_is_cache_only_and_preview_is_explicit(tmp_path, monkeyp
         return original_read(path, *args, **kwargs)
 
     try:
-        tab.tabs.setCurrentIndex(4)
+        _select_tab(tab, "Forms")
         app.processEvents()
         tab.refresh_forms()
         monkeypatch.setattr(Path, "read_text", tracked_read)
@@ -801,7 +699,7 @@ def test_forms_compose_handoff_carries_the_selected_catalog_form():
     opened: list[dict[str, str]] = []
     tab = FioSpotterTab(settings=_Settings(), open_compose=lambda intent: opened.append(intent))
     try:
-        tab.tabs.setCurrentIndex(4)
+        _select_tab(tab, "Forms")
         app.processEvents()
         tab.forms_table.setRowCount(1)
         item = QTableWidgetItem("F!307")
@@ -827,7 +725,7 @@ def test_import_requires_a_clean_preview_before_the_commit_action(tmp_path, monk
     monkeypatch.setattr(spotter_ui, "preview_js8spotter_import", lambda *_args, **_kwargs: preview)
     tab = FioSpotterTab(settings=_Settings())
     try:
-        tab.tabs.setCurrentIndex(5)
+        _select_tab(tab, "Imports")
         app.processEvents()
         assert not tab.import_apply_btn.isEnabled()
         tab.import_source.setText(str(source))
@@ -844,70 +742,13 @@ def test_import_requires_a_clean_preview_before_the_commit_action(tmp_path, monk
 
 def test_forms_compose_action_uses_main_shell_handoff(monkeypatch):
     app = _app()
-    monkeypatch.setattr(spotter_ui, "list_spotter_activity", lambda **_kwargs: [])
     opened: list[str] = []
     tab = FioSpotterTab(settings=_Settings(), open_compose=lambda: opened.append("compose"))
     try:
-        tab.tabs.setCurrentIndex(4)
+        _select_tab(tab, "Forms")
         app.processEvents()
         tab._open_spotter_compose()
         assert opened == ["compose"]
-    finally:
-        tab.deleteLater()
-
-
-def test_activity_actions_pass_selected_shared_projection(monkeypatch):
-    app = _app()
-    row = {
-        "message_id": "spotter:1",
-        "from_call": "K1ABC",
-        "group_name": "MAGNET",
-        "source_family": "spotter",
-    }
-    monkeypatch.setattr(spotter_ui, "list_spotter_activity", lambda **_kwargs: [row])
-    opened: list[tuple[str, str]] = []
-    tab = FioSpotterTab(
-        settings=_Settings(),
-        open_inbox=lambda value: opened.append(("inbox", value["message_id"])),
-        open_map=lambda value: opened.append(("map", value["message_id"])),
-        open_operator=lambda value: opened.append(("operator", value["message_id"])),
-    )
-    try:
-        tab.activity_table.selectRow(0)
-        app.processEvents()
-        tab._open_selected_activity_inbox()
-        tab._open_selected_activity_map()
-        tab._open_selected_activity_operator()
-        assert opened == [
-            ("inbox", "spotter:1"),
-            ("map", "spotter:1"),
-            ("operator", "spotter:1"),
-        ]
-    finally:
-        tab.deleteLater()
-
-
-def test_activity_leads_with_shared_assessment_then_source_evidence(monkeypatch):
-    app = _app()
-    row = {
-        "message_id": "spotter:assessment", "source_family": "spotter", "from_call": "K1ABC",
-        "to_call": "@MR08", "summary": "Wildfire reported", "body_text": "Smoke near Route 9.",
-        "topics": ["Fire", "Travel/Roads"], "severity": "warning",
-        "operator_attention": True, "recommended_action": "review_now",
-        "intelligence": {"provenance": {"trust": "trusted", "freshness": "recent"}},
-    }
-    monkeypatch.setattr(spotter_ui, "list_spotter_activity", lambda **_kwargs: [row])
-    tab = FioSpotterTab(settings=_Settings())
-    try:
-        tab.activity_table.selectRow(0)
-        app.processEvents()
-        assert tab.activity_table.item(0, 5).text() == "Review now"
-        assert tab.activity_table.item(0, 6).text() == "Fire, Travel/Roads"
-        detail = tab.activity_detail.toPlainText()
-        assert "Assessment" in detail
-        assert "Recommended action: Review now" in detail
-        assert "Trust: trusted" in detail
-        assert "Source evidence" in detail
     finally:
         tab.deleteLater()
 
@@ -922,7 +763,7 @@ def test_expect_presents_one_service_state_and_one_per_entry_auto_reply(monkeypa
     monkeypatch.setattr(spotter_ui, "list_flamp_transfer_index_statuses", lambda **_kwargs: [])
     tab = FioSpotterTab(settings=_Settings())
     try:
-        tab.tabs.setCurrentIndex(2)
+        _select_tab(tab, "Expect")
         app.processEvents()
         assert tab.expect_runtime_chip.text() in {"Expect service: On", "Expect service: Paused"}
         assert tab.dynamic_flamp_chip.text() == "FLAMP Q: Waiting for scan"
@@ -959,7 +800,7 @@ def test_expect_requires_named_enabled_policy_for_new_auto_reply_and_keeps_legac
     monkeypatch.setattr(spotter_ui, "save_expect_entry", lambda payload: writes.append(payload) or _Saved())
     tab = FioSpotterTab(settings=_Settings())
     try:
-        tab.tabs.setCurrentIndex(2)
+        _select_tab(tab, "Expect")
         app.processEvents()
         tab.expect_key.setText("INFO")
         tab.expect_reply.setText("READY")
@@ -1015,7 +856,7 @@ def test_expect_send_now_hands_saved_response_to_compose_review(monkeypatch):
     intents: list[dict] = []
     tab = FioSpotterTab(settings=_Settings(), open_compose=lambda intent: intents.append(intent))
     try:
-        tab.tabs.setCurrentIndex(2)
+        _select_tab(tab, "Expect")
         app.processEvents()
         tab.expect_entries_table.selectRow(0)
         tab._send_selected_expect_now()
@@ -1028,19 +869,17 @@ def test_expect_send_now_hands_saved_response_to_compose_review(monkeypatch):
         tab.deleteLater()
 
 
-def test_activity_add_to_watch_stages_anded_callsign_topic_without_saving(monkeypatch):
+def test_inbox_add_to_watch_stages_anded_callsign_topic_without_saving(monkeypatch):
     app = _app()
     row = {
         "message_id": "spotter:watch", "source_family": "spotter",
         "from_call": "N0CALL", "topics": ["Fire"], "radio_id": "7",
     }
-    monkeypatch.setattr(spotter_ui, "list_spotter_activity", lambda **_kwargs: [row])
     monkeypatch.setattr(spotter_ui, "list_spotter_watches", lambda **_kwargs: [])
     tab = FioSpotterTab(settings=_Settings())
     try:
-        tab.activity_table.selectRow(0)
-        tab._stage_selected_activity_watch()
-        assert tab.tabs.currentIndex() == 1
+        tab.open_watch_draft(row)
+        assert tab.tabs.currentIndex() == 0
         assert tab.watch_kind.currentText() == "callsign"
         assert tab.watch_pattern.text() == "N0CALL"
         assert tab.watch_secondary_kind.currentData() == "topic"

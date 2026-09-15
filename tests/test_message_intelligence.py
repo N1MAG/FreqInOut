@@ -1884,7 +1884,7 @@ def test_active_inbox_scope_summary_is_core_operator_text() -> None:
 
     assert "Focus Spotter" in summary
     assert "Groups MAGNET, MR08, MR09 +1" in summary
-    assert "Sources CommStat, FIOSpotter, JS8Call +1" in summary
+    assert "Sources CommStat, JS8Call, Spotter +1" in summary
     assert "Older than 2 weeks" in summary
     assert 'Search "wildfire"' in summary
     assert "Status Action Needed" in summary
@@ -1990,7 +1990,7 @@ def test_message_source_options_are_limited_by_inbox_focus() -> None:
     assert options == [
         ("commstat", "CommStat"),
         ("js8", "JS8Call"),
-        ("spotter", "FIOSpotter"),
+        ("spotter", "Spotter"),
     ]
 
 
@@ -2414,9 +2414,12 @@ def test_message_group_options_follow_current_message_focus() -> None:
 
 
 def test_message_source_filter_always_includes_connected_app_sources() -> None:
-    assert {"js8", "varac"} <= {
+    options = message_source_options([])
+    assert {"js8", "varac", "spotter"} <= {
         value for value, _label in message_source_options([])
     }
+    assert ("spotter", "Spotter") in options
+    assert not any(value == "sitrep" for value, _label in options)
     row = UnifiedMessage("CommStat", "INFO", "K7ETC", "MR08", 1.0, "", "Power", "commstat", object())
     assert message_source_value(row) == "commstat"
     assert ("commstat", "CommStat") in message_source_options([row])
@@ -2432,7 +2435,9 @@ def test_commstat_source_filter_matches_projected_commstat_sitreps() -> None:
     row = UnifiedMessage("COMMSTAT", "INFO", "K7ETC", "MR08", 1.0, "", "Power update", "sitrep", payload)
 
     assert "commstat" in message_source_aliases(row)
+    assert "spotter" not in message_source_aliases(row)
     assert row_matches_source_filter(row, {"commstat"}) is True
+    assert row_matches_source_filter(row, {"spotter"}) is False
     assert row_matches_workspace_scope(row, selected_sources={"commstat"}) is True
     assert row_matches_inbox_focus(row, "commstat") is True
 
@@ -2471,7 +2476,7 @@ def test_message_filter_recovery_selects_all_when_stale_scope_hides_loaded_rows(
 def test_inbox_focus_aligns_source_filter_to_commstat() -> None:
     class FakeSourceFilter:
         def __init__(self) -> None:
-            self._options = [("js8", "JS8Call"), ("spotter", "FIOSpotter"), ("commstat", "CommStat")]
+            self._options = [("js8", "JS8Call"), ("spotter", "Spotter"), ("commstat", "CommStat")]
             self.selected: list[str] = ["spotter"]
 
         def blockSignals(self, _blocked: bool) -> None:
@@ -2485,7 +2490,7 @@ def test_inbox_focus_aligns_source_filter_to_commstat() -> None:
 
     MessageViewerTab._sync_source_filter_for_inbox_focus(tab, "commstat")
 
-    assert tab.source_filter.selected == ["commstat"]
+    assert tab.source_filter.selected == ["commstat", "js8"]
 
 
 def test_commstat_focus_group_options_include_configured_commstat_groups_without_rows() -> None:
@@ -2572,12 +2577,20 @@ def test_spotter_focus_profile_shows_intelligent_summary() -> None:
     assert model.data(model.index(0, 5), Qt.DisplayRole) == summary
 
 
-def test_commstat_focus_projects_only_commstat_source_family() -> None:
+def test_commstat_focus_projects_artifacts_and_local_js8_classifications() -> None:
     tab = MessageViewerTab.__new__(MessageViewerTab)
     tab._inbox_focus = "commstat"
     tab._selected_message_sources = lambda: {"commstat", "sitrep", "spotter"}
 
-    assert MessageViewerTab._projected_source_families_for_current_scope(tab) == ("commstat",)
+    assert MessageViewerTab._projected_source_families_for_current_scope(tab) == ("commstat", "js8", "sitrep")
+
+
+def test_spotter_focus_queries_legacy_sitrep_storage_without_exposing_it_as_a_source() -> None:
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    tab._inbox_focus = "spotter"
+    tab._selected_message_sources = lambda: {"spotter"}
+
+    assert MessageViewerTab._projected_source_families_for_current_scope(tab) == ("js8", "sitrep", "spotter")
 
 
 def test_form_message_type_label_normalizes_common_nbems_form_families() -> None:

@@ -155,6 +155,35 @@ def test_lazy_replacement_never_exposes_adjacent_page_when_placeholder_is_curren
     stack.deleteLater()
 
 
+def test_lazy_replacement_themes_real_page_before_first_visible_transition() -> None:
+    """The first native frame must not publish an unthemed geometry profile."""
+
+    _app()
+    stack = CurrentPageStack()
+    placeholder = QLabel("Loading Deferred...")
+    stack.addWidget(placeholder)
+    themed_while: list[QWidget | None] = []
+
+    class _ThemedPage(QWidget):
+        def apply_theme(self) -> None:
+            themed_while.append(stack.currentWidget())
+
+    shell = SimpleNamespace(
+        settings={},
+        stack=stack,
+        _lazy_placeholders={"Deferred": placeholder},
+        _lazy_factories={"Deferred": _ThemedPage},
+        _screens=[("Deferred", placeholder)],
+    )
+    shell._get_tab_by_label = MethodType(MainWindow._get_tab_by_label, shell)
+
+    MainWindow._ensure_lazy_tab_loaded(shell, "Deferred", 0)
+
+    assert themed_while == [placeholder]
+    assert isinstance(stack.currentWidget(), _ThemedPage)
+    stack.deleteLater()
+
+
 def test_first_visible_activation_is_queued_after_lazy_page_becomes_current() -> None:
     """The deferred activation callback observes the replacement page as current."""
 

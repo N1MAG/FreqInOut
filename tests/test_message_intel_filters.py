@@ -71,6 +71,7 @@ def test_travel_topic_aliases_collapse_to_travel_roads() -> None:
 
 def test_focus_source_values_are_operator_domain_refinements() -> None:
     assert focus_source_values("mesh") == ("mesh", "meshcore", "meshtastic")
+    assert focus_source_values("commstat") == ("commstat", "js8")
     assert focus_source_values("js8call") == ("js8", "commstat", "spotter")
 
 
