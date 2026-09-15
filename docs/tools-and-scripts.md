@@ -35,11 +35,10 @@ source .venv/bin/activate
 - `uninstall_FreqInOut_linux.sh`: Linux uninstaller.
 - `start-multi-rig.sh`: local multi-rig launcher that uses the configured multi-rig runtime profile.
 
-Safe starter commands:
+Safe starter commands (run the Windows-only build command only on Windows):
 
 ```bash
 python install_freqinout.py
-python build_executable.py
 python release_builder.py
 bash install_FreqInOut_linux.sh --help
 bash uninstall_FreqInOut_linux.sh --help
@@ -50,7 +49,8 @@ Notes:
 
 - `view_logs.py` prints the entire log; use only when you intentionally want full output.
 - `install_freqinout.py` does not have `-h`; running it executes installation immediately.
-- Older local checkouts may still have a `venv` directory. New helper scripts prefer `.venv` and fall back to `venv` when needed.
+- `install_freqinout.py` creates `.venv`; the Linux guided installer creates `venv`. `start-multi-rig.sh` accepts either layout.
+- `start-multi-rig.sh` accepts `FREQINOUT_INSTALL_DIR` and `FREQINOUT_RUNTIME_ROOT`, so community testers do not need to edit the script or use maintainer-local paths.
 
 ### DB wrappers (recommended for beginners)
 
@@ -143,7 +143,6 @@ python tools/dedupe_operator_groups.py --apply --show
 - `tools/release_preflight.py`: verifies version/changelog/docs/license consistency before release.
 - `release_builder.py`: runs preflight and optionally `.exe` build.
 - `build_executable.py`: PyInstaller build for Windows executable from `FreqInOut.spec`.
-- `tools/publish-release.ps1`: GitHub release publish/upload helper (maintainer workflow).
 - `tools/update_changelog_from_security.py`: reads internal security incident YAML and reports status (stub behavior).
 
 Safe starter commands:
@@ -223,11 +222,23 @@ tools/start_multirig_gui_lab.sh status
 .venv/bin/python tools/multirig_capture_test_session.py --help
 ```
 
+For a community support report, start with a metadata-only bundle:
+
+```bash
+python tools/multirig_capture_test_session.py --session-label "short-issue-name"
+```
+
+Copy only the relevant `freqinout.log`, `perf_metrics.log`, hang/hotspot files,
+screenshots, and recording into the generated folders. Do not pass
+`--config-dir` or send SQLite databases unless support specifically requests
+them. Review evidence for callsigns, message content, access codes, local paths,
+and secrets before sharing.
+
 Notes:
 
 - Use [docs/multirig-test-lab.md](multirig-test-lab.md) for the full repeatable lab workflow.
 - Multi-rig runtime data may live outside `~/.freqinout/config`; confirm the active `FREQINOUT_CONFIG_DIR` before inspecting or modifying databases.
-- For Bill's current multi-rig lab, the usual active databases are under `/Users/bill/RadioCode/runtime/multi-rig/config`.
+- Always identify the active profile root before inspecting a database. Community testing should use the isolated profile named in `docs/Installation.md`.
 
 ## Common workflows
 

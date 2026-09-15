@@ -15,6 +15,10 @@ def run(cmd: list[str]) -> int:
 
 
 def main() -> int:
+    if not sys.platform.startswith("win"):
+        print("[build_executable] ERROR: the delivered executable target is Windows only.")
+        print("[build_executable] Run this helper from a Windows build environment.")
+        return 2
     if not SPEC_FILE.exists():
         print(f"[build_executable] ERROR: Spec file not found: {SPEC_FILE}")
         return 1

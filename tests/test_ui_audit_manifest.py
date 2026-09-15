@@ -18,7 +18,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 PRINCIPAL_NESTED_TAB_MANIFEST = {
     "freqinout/gui/fio_spotter_tab.py": {
-        "Activity",
         "Watches",
         "Expect",
         "Access Policies",

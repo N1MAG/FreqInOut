@@ -2216,8 +2216,9 @@ class StationsMapTab(QWidget):
             renderer.apply_theme(theme)
         if self._controls_button is not None:
             self._controls_button.setStyleSheet(button_style("muted", theme))
-        if self._show_fio_button is not None:
-            self._show_fio_button.setStyleSheet(button_style("primary", theme))
+        show_fio_button = getattr(self, "_show_fio_button", None)
+        if show_fio_button is not None:
+            show_fio_button.setStyleSheet(button_style("primary", theme))
         if getattr(self, "_help_button", None) is not None:
             self._help_button.setStyleSheet(button_style("secondary", theme))
         if getattr(self, "_paths_help_button", None) is not None:

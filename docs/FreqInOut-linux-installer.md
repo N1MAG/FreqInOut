@@ -9,12 +9,15 @@ The installer script is:
 
 ---
 
-## 1) Fast path (recommended)
+## 1) Testing-community fast path
 
 From a checked-out multi-rig WIP repo, open a terminal and run:
 
 ```bash
-bash install_FreqInOut_linux.sh
+bash install_FreqInOut_linux.sh \
+  --dir "$HOME/FreqInOut-multi-rig-test" \
+  --config-root "$HOME/.freqinout-multi-rig-test" \
+  --branch "wip/private-testing-multi-rig-1.2.3-not-ready"
 ```
 
 If you still need the WIP repo locally:
@@ -22,7 +25,10 @@ If you still need the WIP repo locally:
 ```bash
 git clone --branch "wip/private-testing-multi-rig-1.2.3-not-ready" git@github.com:N1MAG/FreqInOut-internal-testing.git FreqInOut-multi-rig
 cd FreqInOut-multi-rig
-bash install_FreqInOut_linux.sh
+bash install_FreqInOut_linux.sh \
+  --dir "$HOME/FreqInOut-multi-rig-test" \
+  --config-root "$HOME/.freqinout-multi-rig-test" \
+  --branch "wip/private-testing-multi-rig-1.2.3-not-ready"
 ```
 
 When started with no arguments, the installer opens a guided prompt flow. In this WIP branch, the default repository is `git@github.com:N1MAG/FreqInOut-internal-testing.git` and the default branch is `wip/private-testing-multi-rig-1.2.3-not-ready`.
@@ -36,6 +42,7 @@ It automatically:
 - installs missing dependencies when possible
 - clones or updates FreqInOut from GitHub
 - creates/repairs a virtual environment and installs `requirements.txt`
+- optionally binds the generated launcher and migration work to a dedicated profile root
 - creates launcher + desktop entry/icon
 - runs a post-install self-test
 - writes detailed logs to `~/freqinout-install.log`
@@ -103,17 +110,22 @@ Use a specific branch:
 bash install_FreqInOut_linux.sh --branch "wip/private-testing-multi-rig-1.2.3-not-ready"
 ```
 
-Use channel shortcut:
+Bind the install, migration, and generated launcher to a dedicated test profile:
 
 ```bash
-bash install_FreqInOut_linux.sh --channel beta
+bash install_FreqInOut_linux.sh \
+  --dir "$HOME/FreqInOut-multi-rig-test" \
+  --config-root "$HOME/.freqinout-multi-rig-test" \
+  --branch "wip/private-testing-multi-rig-1.2.3-not-ready"
 ```
 
 Install a private multi-rig WIP build for isolated testing:
 
 ```bash
 bash install_FreqInOut_linux.sh \
-  --dir "$HOME/FreqInOut-multi-rig-test"
+  --dir "$HOME/FreqInOut-multi-rig-test" \
+  --config-root "$HOME/.freqinout-multi-rig-test" \
+  --branch "wip/private-testing-multi-rig-1.2.3-not-ready"
 ```
 
 Use a separate install directory for this WIP branch until upgrade testing is complete. The branch name is intentionally treated as an opaque test-channel name even when the app version advances to 2.0.0.
@@ -149,6 +161,9 @@ bash install_FreqInOut_linux.sh --help
 Run FreqInOut:
 - App menu: search **FreqInOut**
 - Terminal: `freqinout`
+
+When `--config-root` was supplied, the generated launcher exports that same
+profile root on every launch. Rerun updates and repairs with the same value.
 
 Uninstall:
 
@@ -210,9 +225,9 @@ The installer includes:
 ## 9) Suggested usage patterns
 
 For **new users**:
-- run `bash install_FreqInOut_linux.sh`
+- clone the private WIP branch and use the isolated `--dir` and `--config-root` command from section 1
 - follow guided prompts
-- keep default install path unless you have a reason to change it
+- do not reuse the normal production profile during general community testing
 
 For **advanced users / automation**:
 - prefer explicit flags (`--dir`, `--repo`, `--branch`, `--yes`, policy flags)

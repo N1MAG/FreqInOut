@@ -1,12 +1,17 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
-    branches: [main, beta]
+    branches:
+      - main
+      - beta
+      - wip/private-testing-multi-rig-1.2.3-not-ready
   pull_request:
 
 jobs:
   verify:
+    name: Full verification (Linux, Python 3.11)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -20,8 +25,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest
+          python -m pip install -r requirements.txt
+          python -m pip install pytest
 
       - name: Release preflight
         run: python tools/release_preflight.py
@@ -30,4 +35,42 @@ jobs:
         run: python -m compileall freqinout
 
       - name: Regression tests
-        run: pytest -q tests
+        run: python -m pytest -q tests
+
+  desktop-platform-smoke:
+    name: Desktop smoke (${{ matrix.os }}, Python 3.11)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest
+
+      - name: Release preflight
+        run: python tools/release_preflight.py
+
+      - name: Compile check
+        run: python -m compileall freqinout
+
+      - name: Cross-platform installer and desktop smoke
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -m pytest -q
+          tests/test_testing_install_contract.py
+          tests/test_app_icon_identity.py
+          tests/test_compose_workbench_acceptance.py
+          tests/test_native_map_advanced_parity.py

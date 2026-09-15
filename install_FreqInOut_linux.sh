@@ -11,6 +11,7 @@ DEFAULT_BRANCH="wip/private-testing-multi-rig-1.2.3-not-ready"
 REPO_URL="${REPO_URL:-$DEFAULT_REPO_URL}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/FreqInOut}"
 LOG_FILE="${LOG_FILE:-$HOME/freqinout-install.log}"
+CONFIG_ROOT_OVERRIDE="${FREQINOUT_CONFIG_DIR:-}"
 
 ASSUME_YES=0
 DRY_RUN=0
@@ -71,6 +72,7 @@ Options:
   -r, --repo <url>      Git repository URL (default: multi-rig WIP repo)
   -c, --channel <name>  Update channel: stable or beta (default: stable/WIP branch)
   -b, --branch <name>   Git branch override (takes priority over --channel)
+      --config-root <p> Dedicated FIO profile root (sets FREQINOUT_CONFIG_DIR)
       --repair          Rebuild venv + launcher + icon without recloning
       --dry-run         Show what would be done without changing anything
       --offline         Skip network checks/downloads and use local files only
@@ -227,7 +229,11 @@ on_error() {
   fi
   warn "Recovery tips:"
   warn "1) Open the log at: $LOG_FILE"
-  warn "2) Retry with: bash install_FreqInOut_linux.sh --repair --dir \"$INSTALL_DIR\""
+  if [[ -n "$CONFIG_ROOT_OVERRIDE" ]]; then
+    warn "2) Retry with: bash install_FreqInOut_linux.sh --repair --dir \"$INSTALL_DIR\" --config-root \"$CONFIG_ROOT_OVERRIDE\""
+  else
+    warn "2) Retry with: bash install_FreqInOut_linux.sh --repair --dir \"$INSTALL_DIR\""
+  fi
   warn "3) If package install failed, run again with sudo access."
 }
 trap 'on_error $LINENO "$BASH_COMMAND"' ERR
@@ -293,6 +299,11 @@ parse_args() {
       -b|--branch)
         [[ $# -ge 2 ]] || die "Missing value for $1"
         BRANCH="$2"
+        shift 2
+        ;;
+      --config-root)
+        [[ $# -ge 2 ]] || die "Missing value for $1"
+        CONFIG_ROOT_OVERRIDE="$2"
         shift 2
         ;;
       --repair)
@@ -864,6 +875,9 @@ backup_user_data() {
     "$HOME/.config/FreqInOut"
     "$HOME/.local/share/FreqInOut"
   )
+  if [[ -n "$CONFIG_ROOT_OVERRIDE" ]]; then
+    candidates=("$CONFIG_ROOT_OVERRIDE" "${candidates[@]}")
+  fi
   local existing=()
   local item
   for item in "${candidates[@]}"; do
@@ -1281,7 +1295,7 @@ create_venv_and_install_python_deps() {
   log "Installing Python dependencies..."
   run_cmd "$VENV_DIR/bin/python" -m ensurepip --upgrade
   run_cmd "$VENV_DIR/bin/python" -m pip install --upgrade pip
-  run_cmd "$VENV_DIR/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
+  run_cmd "$VENV_DIR/bin/python" -m pip install -r "$INSTALL_DIR/requirements.txt"
 }
 
 cleanup_deprecated_files() {
@@ -1342,11 +1356,15 @@ create_launcher() {
     log "DRY RUN: would write launcher to $LAUNCHER_PATH"
     return 0
   fi
-  cat >"$LAUNCHER_PATH" <<EOF
-#!/usr/bin/env bash
-cd "$INSTALL_DIR"
-exec "$VENV_DIR/bin/python" -m freqinout.main "\$@"
-EOF
+  {
+    echo '#!/usr/bin/env bash'
+    echo 'set -euo pipefail'
+    if [[ -n "$CONFIG_ROOT_OVERRIDE" ]]; then
+      printf 'export FREQINOUT_CONFIG_DIR=%q\n' "$CONFIG_ROOT_OVERRIDE"
+    fi
+    printf 'cd %q\n' "$INSTALL_DIR"
+    printf 'exec %q -m freqinout.main "$@"\n' "$VENV_DIR/bin/python"
+  } >"$LAUNCHER_PATH"
   chmod +x "$LAUNCHER_PATH"
   log "Launcher written: $LAUNCHER_PATH"
 }
@@ -1759,13 +1777,18 @@ Installed to:
   - Desktop:    $DESKTOP_ENTRY_PATH
   - Log file:   $LOG_FILE
 EOF
+  if [[ -n "$CONFIG_ROOT_OVERRIDE" ]]; then
+    echo "  - Profile root: $CONFIG_ROOT_OVERRIDE (isolated via FREQINOUT_CONFIG_DIR)"
+  else
+    echo "  - Profile root: default (~/.freqinout)"
+  fi
   if [[ -n "$BACKUP_ARCHIVE" ]]; then
     echo "  - Backup:     $BACKUP_ARCHIVE"
   fi
   cat <<'EOF'
 
 Helpful commands:
-  - Repair install: bash install_FreqInOut_linux.sh --repair --dir "$HOME/FreqInOut"
+  - Repair install: rerun this installer with --repair and the same --dir/--config-root values
   - Dry run:        bash install_FreqInOut_linux.sh --dry-run
   - Uninstall:      bash uninstall_FreqInOut_linux.sh --dir "$HOME/FreqInOut"
 EOF
@@ -1776,6 +1799,10 @@ main() {
   prompt_startup_options
   acquire_lock
   LOG_FILE="$(expand_path "$LOG_FILE")"
+  if [[ -n "$CONFIG_ROOT_OVERRIDE" ]]; then
+    CONFIG_ROOT_OVERRIDE="$(expand_path "$CONFIG_ROOT_OVERRIDE")"
+    export FREQINOUT_CONFIG_DIR="$CONFIG_ROOT_OVERRIDE"
+  fi
   setup_logging
   prompt_existing_install_mode
 
@@ -1792,6 +1819,11 @@ main() {
   log "Starting installer."
   log "Install folder: $INSTALL_DIR"
   log "Repository: $REPO_URL"
+  if [[ -n "$CONFIG_ROOT_OVERRIDE" ]]; then
+    log "Profile root: $CONFIG_ROOT_OVERRIDE (isolated)"
+  else
+    log "Profile root: default (~/.freqinout)"
+  fi
   log "Desktop icon zoom percent: $ICON_ZOOM_PERCENT"
   log "Policies: on-dirty=$ON_DIRTY_POLICY, on-running=$ON_RUNNING_POLICY, on-non-git=$ON_NON_GIT_POLICY"
   if [[ $OFFLINE_MODE -eq 1 ]]; then

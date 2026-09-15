@@ -1,328 +1,162 @@
-# FreqInOut
+# FreqInOut 2.0 Multi-Rig — Testing Preview
 
-FreqInOut is a desktop operations console for amateur radio. It helps an operator answer three practical questions: where do I need to be, when do I need to be there, and what do I do when traffic or reports arrive? It brings scheduling, net control, message review, map awareness, operator history, SOP reminders, and VarAC BBS file handling into one place without trying to replace the radio programs you already use.
+FreqInOut is a desktop operations console for amateur radio. It brings radio-profile control, scheduling, net operations, message review, offline map awareness, operator history, SOP reminders, FIO Spotter/JS8 Expect automation, and VarAC BBS handling into one application without replacing the radio programs an operator already uses.
 
-<p align="center">
-  <a href="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/ControlFreq_tab.png">
-    <img
-      src="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/ControlFreq_tab.png"
-      alt="ControlFreq tab showing frequency control, operating status, message summary, and schedule outlook"
-      width="980">
-  </a>
-</p>
+> **Testing-community build:** this branch is not a public release. Install it beside any production FreqInOut setup and use a dedicated profile root. Access to the private `FreqInOut-internal-testing` repository is required. Do not perform an in-place production upgrade unless you have been assigned an upgrade test.
 
-## Highlights
+## Testing target
 
-- ControlFreq operations dashboard with Frequency Control, Schedule Outlook, unread message and BBS file awareness, propagation forecast, and View presets/chips for card layout control
-- Offline propagation modeling (Modeled/Actual/Blended) with lower-48 targeting (Region/State/Operator) and historical-outcome blending
-- SitRep, weather, alert, infrastructure, and medical awareness from CommStat and JS8Spotter forms, routed by operator-friendly form mapping
-- Map intelligence with station/link layers, weather and infrastructure report icons, alert overlays, propagation, SitRep-only mode, and schedule-risk/QSY awareness
-- UTC-native HF + Net scheduling with controlled enforcement, busy deferral, and NET override behavior
-- SOP Builder v2 with `HF SOP` and `Local Comms SOP` categories, conflict-aware save-time resolution, and Daily interval support
-- Net control operations for both FLDigi and JS8Call (start/track/save/end workflows)
-- Settings redesign: `Fast Light Settings`, `VarAC Settings`, `Launch Control`, and `Logging & Diagnostics`
-- Local operations expansion: `Local Operators` roster tab and `NCS-Local` net control tab
-- Net resources catalog workflow via SitRepNet.com or custom JSON: import JSON into managed Net Resources and promote selected entries into active Net Schedule
-- Launch orchestration with configurable start order, per-app startup toggles, global startup mode, and continue-on-failure handling
-- Messages center for JS8, JS8Spotter, CommStat, FLMSG, FLAMP, and VarAC traffic, with visible-tab refresh controls, BBS status, archive/delete actions, and GPG/PGP or hash verification
-- Managed VarAC BBS support for publishing a clean per-radio live BBS folder from a shared Managed BBS Library, organizing BBS file sets behind simple menu names, auto-archiving old BBS files, and protecting inbound VarAC files with BBS Access Guard sender checks
-- Operator History with CSV import/export, group/role standardization, trust tools, sorting/filtering, SitRep chip updates, and VarAC callsign-tag sync
-- Linux guided installer with repair mode, rollback protections, desktop launcher support, and detailed logs
-- Cross-platform database admin wrappers and maintenance tooling for advanced users
+| Item | Required value |
+|---|---|
+| Repository | `https://github.com/N1MAG/FreqInOut-internal-testing.git` |
+| Branch | `wip/private-testing-multi-rig-1.2.3-not-ready` |
+| Application version | `2.0.0` |
+| Supported Python | 3.9–3.13 (3.11 recommended) |
 
-## What FIO Helps You Do
+The WIP branch name is an opaque testing-channel name. It is intentionally unchanged while the application version advances. These temporary repository instructions will be switched to the public repository when the multi-rig work is approved for merge.
 
-- Keep the station on the expected frequency, mode, and schedule while still letting the operator pause, hold, or override when live traffic requires it.
-- Run FLDigi/SSB and JS8Call nets with rosters, check-ins, traffic tracking, acknowledgements, and saved records.
-- Review incoming traffic from JS8Call, JS8Spotter, CommStat, FLMsg, FLAmp, and VarAC in one Messages tab instead of checking several folders and programs by hand.
-- Stage outbound forms for FLMsg, FLAmp, VarAC Outbox, or VarAC BBS from the Messages Compose workflow.
-- Use the Map to see known stations, recent links, report icons, weather/alert/infrastructure evidence, and schedule-aware context without treating the map as a guarantee of radio reachability.
-- Use Managed BBS when one live VarAC BBS folder is not enough: FIO can publish clean menu-style file sets into the live BBS folder, archive old BBS files, and help protect inbound VarAC files from unknown senders.
+## What is in this preview
 
-## What's New in v2.0.0
+- Named radio profiles with profile-specific companion-app paths, endpoints, runtime state, launch control, and health monitoring.
+- Unified Message Inbox for JS8, Spotter, CommStat, FLMsg, FLAmp, VarAC, Mesh, and BBS traffic, with source-aware actions and shared watches.
+- FIO Spotter configuration for watches, Expect responses, reusable access policies, forms, and imports.
+- Compose and full Compose Workbench flows for FLMsg/FLAmp, JS8Call, FIO Spotter, and CommStat RF, including Spotter form handling and `Send as MSG` where supported.
+- A separate, responsive Map window with local vector geography and operational overlays. It does not download map tiles or require an API key or Internet connection.
+- UTC-native HF and net scheduling, controlled enforcement, busy deferral, NET override behavior, and multi-endpoint scheduler routing.
+- FLDigi/SSB and JS8Call net-control workflows, operator history, offline propagation modeling, and schedule-aware operational context.
+- Managed VarAC BBS libraries, per-radio live folders, inbound access controls, and archive handling.
 
-- Multi-rig testing release with radio-profile-specific runtime configuration, launch control, health monitoring, and JS8/Fast Light path handling.
-- Map intelligence now includes Regional Intel heat-map behavior, focused path rendering, station/report action panels, CommStat reported-for/reported-by handling, and map-to-Messages handoff.
-- Messages and map topic filtering were tightened so status labels such as `Not Reported` do not create false topic matches while real reported issues still surface.
-- Launch Control now treats configured supported apps and custom tools as one operator-facing software surface with Monitor Health, Launch at Startup, Start/Stop, and Status behavior.
-- Station Health and readiness guidance were refined for multi-radio operating environments, including clearer distinction between monitored apps and manually managed tools.
+## Safe quick start
 
-## What's New in v1.2.8
+Use a new source folder and profile root. The environment variable points FIO at the test profile; the databases are created below its `config` directory.
 
-- Station Health now shows one latest scheduler success plus an issue log, so routine already-applied schedule checks do not crowd out useful information.
-- Informational scheduler holds and old transient FLDigi busy-check diagnostics no longer appear as active station responsiveness issues.
-- FIO now shares companion-app process/status checks across consumers, reducing repeated Linux `/proc` reads and idle CPU activity.
-- JS8Call scheduler and status checks share one process-global JS8Net connection, preventing RX/TX/heartbeat thread counts from climbing over time.
-- VarAC Managed BBS Library reconciliation now adapts its cadence during idle periods while still waking promptly when files, logs, or settings change.
-- ControlFreq now colors the `FLMsg / FLAmp` message-summary row consistently with the other message-summary rows.
+### Windows 10/11 (PowerShell)
 
-## What's New in v1.2.6
+Install Git and 64-bit Python 3.11 first, then:
 
-- Map report layers now show weather, alert, infrastructure, and medical-style JS8Spotter reports as clear icons when the sender has a known station location.
-- Map layer controls for Stations, Links, Weather, Alerts, and Infrastructure sit above the map so operators can reduce clutter quickly during busy events.
-- JS8Spotter Form Mapper help now explains how form purposes route traffic to Messages, Map layers, Alerts, JS8 Net Control, and shared status views.
-- Messages has a cleaner one-row inbox control layout, a simple clickable BBS status indicator, a less distracting five-second refresh countdown, and a More menu for less common actions.
-- Dropdowns across FIO auto-fit their text more reliably, including Messages and JS8 NCS controls.
-- The help guide and README were refreshed to explain map icons, Messages refresh/BBS behavior, JS8Spotter form mapping, Managed BBS, and first-run expectations in plainer language.
-
-## What's New in v1.2.5.5
-
-- JS8 intake is more defensive around malformed, partial, or unusually large JS8Call API/DB records. FIO now normalizes incoming JS8 fields before they reach message display, link parsing, or net-control listeners, and quarantines unreadable DB rows instead of reprocessing them repeatedly.
-- The Messages table is hardened against corrupt local JS8 cache rows and out-of-range Qt model requests, reducing the chance that unexpected JS8 traffic or JS8Call database changes can destabilize the UI.
-
-## What's New in v1.2.5.4
-
-- FLDigi / SSB Net Control now keeps an explicit check-in order number, supports PP/RR traffic sorting, keeps NCS/ANCS pinned at the top, and adds a Default Sort button so operators can get back to the working net order quickly.
-- ANCS relay work is clearer: Compare can show stations your local roster has but the partner NCS list does not, and Copy Relays writes the selected relay set to role-specific relay files for paste or macro use.
-- Station Health now explains both external app responsiveness and scheduler holds. Stale OK checks are called out, and FLDigi busy break-away events are shown as possible stale/hung external app busy states instead of leaving FIO trapped behind a stale receive indication.
-- Multi-rig scheduler protection was hardened so FLDigi busy holds force a fresh recheck after 3 minutes, status snapshot workers can be reset if they stall, and scheduler/control-task issues are visible in Station Health without losing shared PTT protection.
-
-## What's New in v1.2.5.3
-
-- VarAC Managed BBS FLAMP block requests are more forgiving during live operation: `BLKS 7,8 E957`, `BLK 7,8 E957`, `BLOCK 7,8 E957`, and `BLOCKS 7,8 E957` all request a generated block-fill file for the selected radio profile.
-- FLAMP BBS helpers now separate the commands more clearly: use `LIST E957` to inspect a queue's blocks, and use `BLKS 7,8 E957` to generate a block file. If a station types `BLKS E957` without block numbers, FIO publishes a helper notice instead of guessing.
-- `Resume Schedule` is now treated as an operator override from both the left ledge and ControlFreq even when companion apps appear RX-busy, while active PTT protection remains in place.
-
-## What's New in v1.2.5.2
-
-- VarAC Managed BBS FLAMP block fills are more reliable per radio profile: when a station requests blocks such as `BLK 0,1 E957`, FIO keeps that block-fill file available through refreshes and recreates it if VarAC consumes the live file during download handling.
-
-## What's New in v1.2.5.1
-
-- Multi-rig VarAC Managed BBS now uses each active radio profile's VarAC traffic log as the command authority, with durable log cursors so valid commands are not skipped by stale runtime timestamps.
-- Managed BBS listings stay published until the remote station sends another command or disconnects, which supports long BBS refreshes and multiple file downloads from the same listing.
-- Active radio profiles with duplicate live BBS folders are skipped with a clear warning so two VarAC instances cannot publish into the same live directory.
-- Public-visible code-protected BBS folders now show in the root menu, while the access code is still enforced when a station opens the folder.
-- FLAMP BBS helper views are clean standalone views instead of being mixed with the current managed folder.
-- Access codes are more forgiving for operators: `HUBS MRHUB`, `hubs mrhub`, and `HUBS [MRHUB]` are handled as the same request.
-
-## What's New in v1.2.4
-
-- FLDigi / SSB Net Control now lists scheduled nets that are active or coming up soon, so operators who start a little late can still select the intended scheduled net.
-- The FLDigi / SSB Net Roster now uses role-aware `Directed By` and `Acked By` chips, scoped live actions (`NCS`, `ANCS`, `Shared`, `All`), `ACK Needed`, `Next TFC`, traffic progress chips, and role-first macro files such as `NCS_ACK_Pending.txt` and `ANCS_Next_TFC.txt`.
-- The FLDigi macro area is collapsible and quieter during a net, with setup controls shown only when a macro is missing or needs mapping; the expanded Help guide now explains copy actions, macro files, and NCS/ANCS workflows in operator-friendly wording.
-- Station Health adds a dedicated view for external dependency responsiveness, including per-radio context for multi-rig companion software.
-- Messages filtering/export and FLAMP/CommStat handling were tightened for field use, including cleaner CSV export behavior and clearer incomplete-FLAMP/CommStat message handling.
-- Performance isolation work reduces the chance that slow or unreachable companion applications can make FIO feel like the culprit, with guarded background work, cooldowns, and clearer status reporting.
-
-## What's New in v1.2.3
-
-- FLDigi Net Control now uses a unified editable local roster table for the left-side working area, with category outputs and live check-in file sync derived from the roster rather than the legacy TFC/QRU/LATE text buckets.
-- Added FLDigi macro-profile discovery and mapping for `.mdf` files, including structured `<FILE:...>` parsing, review-only fallback separation, and safe persistence of operator-configured rows without activating mapped mode until a complete enabled mapping exists.
-- Added profile-scoped persistence with absolute-path keys, profile-local custom-name fallback, and reviewable storage for incomplete or disabled operator edits instead of silently discarding them.
-- Added FLDigi log-assisted intake TX-context support so the most recent TX prompt can annotate later RX review candidates across incremental polls without creating inbound check-ins or changing RX-only intake semantics.
-- Fixed Task 2 regression coverage so the real `.mdf` fixture, manual fallback review paths, and activation/persistence split stay covered before Task 3.
-- Fixed Task 3 workspace refinement so enabled custom mappings surface as visible workspace cards and compare options stay aligned with the current role and mapped profile.
-
-## Quick Start
-
-### Windows
-
-```bash
-git clone https://github.com/N1MAG/FreqInOut.git FreqInOut
-cd FreqInOut
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python -m freqinout.main
+```powershell
+git clone --branch "wip/private-testing-multi-rig-1.2.3-not-ready" `
+  https://github.com/N1MAG/FreqInOut-internal-testing.git `
+  "$HOME\FreqInOut-multi-rig-test"
+Set-Location "$HOME\FreqInOut-multi-rig-test"
+py -3.11 install_freqinout.py
+$env:FREQINOUT_CONFIG_DIR = "$env:LOCALAPPDATA\FreqInOut-MultiRig-Test"
+.\.venv\Scripts\python.exe -m freqinout.main
 ```
 
-### Linux (Debian/Ubuntu)
+Keep that PowerShell window open while testing so the isolated profile setting remains in effect.
 
-This path runs FreqInOut from a source checkout.
+### macOS (Terminal)
 
-```bash
-sudo apt-get install python3 python3-venv python3-pip libxcb-cursor0 libxcb-xinerama0
-git clone https://github.com/N1MAG/FreqInOut.git FreqInOut
-cd FreqInOut
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python -m freqinout.main
-```
-
-### Linux one-step installer
-
-Recommended for end users. The installer keeps the installed app checkout runtime-focused and excludes `tests/` and other developer-only paths from the installed working tree, so later `git pull` updates stay lean.
-
-Run locally from a clone:
+Install Git and Python 3.11 first (the Python.org installer or Homebrew are both suitable), then:
 
 ```bash
-bash install_FreqInOut_linux.sh
+git clone --branch "wip/private-testing-multi-rig-1.2.3-not-ready" \
+  https://github.com/N1MAG/FreqInOut-internal-testing.git \
+  "$HOME/FreqInOut-multi-rig-test"
+cd "$HOME/FreqInOut-multi-rig-test"
+python3.11 install_freqinout.py
+FREQINOUT_CONFIG_DIR="$HOME/.freqinout-multi-rig-test" \
+  ./.venv/bin/python -m freqinout.main
 ```
 
-When started without command-line arguments, the installer now shows an interactive mode menu (guided, dry-run, repair, etc.).
+macOS may ask for permission when FIO first opens files or launches companion applications. Grant only the access needed by the configured paths.
 
-Or run directly from GitHub (review script first, then run):
+### Linux
+
+For a side-by-side test under the same OS account, use the source launch so the production desktop/menu entry is untouched:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/N1MAG/FreqInOut/main/install_FreqInOut_linux.sh -o install_FreqInOut_linux.sh && bash install_FreqInOut_linux.sh
+git clone --branch "wip/private-testing-multi-rig-1.2.3-not-ready" \
+  https://github.com/N1MAG/FreqInOut-internal-testing.git \
+  "$HOME/FreqInOut-multi-rig-test"
+cd "$HOME/FreqInOut-multi-rig-test"
+python3.11 install_freqinout.py
+FREQINOUT_CONFIG_DIR="$HOME/.freqinout-multi-rig-test" \
+  ./.venv/bin/python -m freqinout.main
 ```
 
-This installer:
-- Checks Python version (supported: 3.9 through 3.13; 3.11 recommended)
-- Offers to install missing system dependencies automatically
-- Creates a virtual environment, installs requirements, and creates launcher + desktop icon
-- If already installed, asks for existing app location and lets you choose:
-  update app, install icon/launcher, or both
-- Backs up detected user/config data before updates
-- Runs a post-install self-test and writes logs to `~/freqinout-install.log`
+The guided installer supports Debian/Ubuntu/Mint, Fedora/RHEL-family, Arch-family, and openSUSE-family package managers. It installs required system packages and preserves an isolated `--config-root`, but it also refreshes the account's standard `freqinout` launcher/menu entry. Use it on a dedicated test account, or only when replacing that launcher target is acceptable. See the full installation guide for its command and dry-run option.
 
-`keyring` is included in `requirements.txt` and is installed automatically by the installer or by `pip install -r requirements.txt`. FIO uses it only for secure GPG signing passphrase storage through the OS credential store. On Linux, the desktop keyring service must also be available, such as Secret Service or KWallet.
+## First-run checks
 
-Default install path is `~/FreqInOut`.
+Before connecting FIO to live radio applications:
 
-Easiest install-location override:
+1. Confirm the title/version and open **Settings**.
+2. Confirm the test databases are under the dedicated profile root, not the normal production root.
+3. Create or review the first radio profile and its station-default assignment.
+4. Configure only the companion paths and endpoints needed for the test.
+5. Open each major tab once, then open and close the separate Map window.
+6. Restart FIO and confirm settings, radio profiles, theme, and window placement persist.
+
+The two primary databases are:
+
+- `<profile-root>/config/freqinout.db` for settings and configuration.
+- `<profile-root>/config/freqinout_nets.db` for operational and message data.
+
+The main logs are `<profile-root>/freqinout.log` and `<profile-root>/perf_metrics.log`.
+
+## Updating the preview
+
+Close FIO and its companion applications before updating.
+
+Windows/macOS source checkout:
 
 ```bash
-bash install_FreqInOut_linux.sh --dir "$HOME/Apps/FreqInOut"
+git pull --ff-only origin wip/private-testing-multi-rig-1.2.3-not-ready
 ```
 
-You can also pass the folder directly:
+Then rerun `install_freqinout.py`. On Linux, rerun the original installer command with the same `--dir` and `--config-root` values. Never change the profile root during an update unless the test plan explicitly calls for it.
+
+## Reporting a test issue
+
+Include:
+
+- operating system and version;
+- FIO version and git commit (`git rev-parse --short HEAD`);
+- Python version (`python --version`);
+- radio profile and companion-app versions involved;
+- exact steps, expected behavior, and observed behavior;
+- `freqinout.log`, `perf_metrics.log`, and any generated hang/hotspot file for the affected run;
+- a screenshot or short recording for visual or window-management problems.
+
+Remove callsigns, message content, access codes, filesystem details, or other sensitive data you do not want to share. Do not send the SQLite databases or a full configuration copy unless support specifically requests them.
+
+The cross-platform capture helper creates a structured folder for notes and evidence:
 
 ```bash
-bash install_FreqInOut_linux.sh "$HOME/Apps/FreqInOut"
+python tools/multirig_capture_test_session.py --session-label "short-issue-name"
 ```
 
-Useful modes:
+Copy the relevant logs into the generated `logs` folder and screenshots into its `screenshots` folder. See [Installation](docs/Installation.md) for platform-specific log locations and [Tools and Scripts](docs/tools-and-scripts.md) for advanced capture options.
 
-```bash
-# repair existing install (rebuild venv/launcher/icon)
-bash install_FreqInOut_linux.sh --repair --dir "$HOME/FreqInOut"
+## Important operating notes
 
-# preview actions without changing anything
-bash install_FreqInOut_linux.sh --dry-run
-
-# use beta channel (branch "beta")
-bash install_FreqInOut_linux.sh --channel beta
-
-# offline mode (skip internet checks/downloads)
-bash install_FreqInOut_linux.sh --offline
-
-# explicit non-interactive safety policies
-bash install_FreqInOut_linux.sh --yes --on-dirty stash --on-running fail --on-non-git replace
-```
-
-Uninstall helper:
-
-```bash
-bash uninstall_FreqInOut_linux.sh --dir "$HOME/FreqInOut"
-```
-
-The separate Map window uses native Qt Quick and Qt Location as a provider-free
-coordinate canvas. FIO supplies its bundled North American vector geography and
-all operational overlays locally: the Map does not download tiles, request an
-API key, or require Internet access. Packaged builds include the required QML
-and positioning components. For Qt Location window-system integration on
-Debian/Ubuntu:
-
-```bash
-sudo apt-get install libxcb-cursor0 libxcb-xinerama0
-```
-
-## Configuration Notes
-
-- Set radio software paths and JS8Call DIRECTED.TXT in the Settings tab.
-- Watch the Settings left-nav for warning highlights; they indicate partially configured sections that still need required companion fields.
-- When `JS8Call Install Folder` is set, also configure host, TCP port, and `DIRECTED.TXT`. Configure the FIO Spotter forms folder when using built-in Spotter compose/decode workflows. The external JS8Spotter app path is optional and is only needed when FIO should track or launch the separate JS8Spotter application.
-- When `VarAC Install Folder` is set, also configure `Incoming Files`.
-- When `Managed BBS Library` is enabled under `Settings -> VarAC Settings`, also configure a per-radio live `BBS Directory`, initialize the library, and keep at least one valid `Default Location` in the selected Station Default radio bundle. Access codes are operational controls, not strong secrets.
-- In the current release, the library root is automatic: if your live VarAC BBS is `/path/to/VarAC_files/BBS`, FreqInOut creates the managed library next to it as `/path/to/VarAC_files/FIO_BBS_Vault`.
-- New library location content belongs under `FIO_BBS_Vault/locations/<Location Name>` for the selected radio bundle. That is where you place files from your computer when you want a library location to publish into the live BBS.
-- Remote Vault workflow is: caller refreshes the BBS root, reads the helper entry, sends the location alias like `TEST_A` or `TEST_A <code>`, then refreshes again to see that location's files. `ROOT`, `BACK`, `EXIT`, or `LOCK` returns to the main menu.
-- Populate Operator History before expecting the Map tab to show full results.
-- JS8 live ingest is used when available; log parsing is used as a fallback.
-- Set your operator Grid (Grid 6 recommended) in Settings to enable full propagation forecast output in ControlFreq.
-
-## Screenshots
-
-<details>
-<summary>Additional tab screenshots (click to expand)</summary>
-
-### FreqPlanner Tab
-
-<p align="center">
-  <a href="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/FreqPlanner_tab.png">
-    <img src="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/FreqPlanner_tab.png" alt="FreqPlanner tab screenshot" width="900">
-  </a>
-</p>
-
-### Messages Tab
-
-<p align="center">
-  <a href="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/Messages_tab.png">
-    <img src="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/Messages_tab.png" alt="Messages tab screenshot" width="900">
-  </a>
-</p>
-
-### Map Tab
-
-<p align="center">
-  <a href="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/Map_tab.png">
-    <img src="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/Map_tab.png" alt="Map tab screenshot" width="900">
-  </a>
-</p>
-
-### NCS Tab
-
-<p align="center">
-  <a href="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/NCS_tab.png">
-    <img src="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/NCS_tab.png" alt="NCS tab screenshot" width="900">
-  </a>
-</p>
-
-### HF Schedule Tab
-
-<p align="center">
-  <a href="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/HF_Schedule_tab.png">
-    <img src="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/HF_Schedule_tab.png" alt="HF Schedule tab screenshot" width="900">
-  </a>
-</p>
-
-### NetSchedule Tab
-
-<p align="center">
-  <a href="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/NetSchedule_tab.png">
-    <img src="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/NetSchedule_tab.png" alt="Net Schedule tab screenshot" width="900">
-  </a>
-</p>
-
-### SOP Builder Tab
-
-<p align="center">
-  <a href="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/SOPBuilder_tab.png">
-    <img src="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/SOPBuilder_tab.png" alt="SOP Builder tab screenshot" width="900">
-  </a>
-</p>
-
-### Settings Tab
-
-<p align="center">
-  <a href="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/Settings_tab.png">
-    <img src="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/Settings_tab.png" alt="Settings tab screenshot" width="900">
-  </a>
-</p>
-
-### Help Tab
-
-<p align="center">
-  <a href="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/Help_tab.png">
-    <img src="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/Help_tab.png" alt="Help tab screenshot" width="900">
-  </a>
-</p>
-
-</details>
+- FIO's Map uses bundled vector geography and local operational data; map use must remain fully functional offline.
+- Populate Operator History and operator grids before expecting complete station placement and propagation context.
+- JS8 live API ingest is used when available; local JS8 files and databases provide supported fallback/history sources.
+- `keyring` is installed from `requirements.txt`. Secure passphrase storage also requires an available OS credential backend; FIO does not fall back to plaintext.
+- Access codes used by Managed BBS are operational controls, not strong secrets.
+- Backups are recovery points, not working directories. Validate restores under a separate profile root before changing production data.
 
 ## Documentation
 
-- Installation: `docs/Installation.md`
-- Linux installer guide: `docs/FreqInOut-linux-installer.md`
-- Linux installer guide (HTML): `docs/FreqInOut-linux-installer.html`
-- User guide: `docs/guide.html`
-- Changelog: `CHANGELOG.md`
-- Contributing: `CONTRIBUTING.md`
-- Code of Conduct: `CODE_OF_CONDUCT.md`
+- [Cross-platform installation and testing guide](docs/Installation.md)
+- [Linux guided installer reference](docs/FreqInOut-linux-installer.md)
+- [Linux isolated fresh-install guide](docs/multi-rig-isolated-fresh-install-linux.md)
+- [Linux single-rig upgrade guide](docs/single-rig-to-multi-rig-upgrade-linux.md) — assigned upgrade tests only
+- [Tools and support scripts](docs/tools-and-scripts.md)
+- [User guide](docs/guide.html)
+- [Changelog](CHANGELOG.md)
+- [Contributing](CONTRIBUTING.md)
+- [Code of Conduct](CODE_OF_CONDUCT.md)
+
+## Packaging status
+
+Community testing currently uses source checkouts from the private WIP branch. `FreqInOut.spec`, `build_executable.py`, and `installer.iss` support maintainer-side Windows packaging, but no public 2.0 installer should be inferred from this README. macOS application bundling and signed/notarized distribution are not yet published workflows.
+
+The native offline Map depends on the Qt Location, Qt Positioning, and Qt Quick QML runtime modules. Packaged builds must include those modules and FIO's bundled QML/vector assets; the Map does not use a browser engine, an online tile provider, or an API-key service.
 
 ## License
 
-GNU General Public License v3 (see `LICENSE.md`).
+GNU General Public License v3; see [LICENSE.md](LICENSE.md).

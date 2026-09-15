@@ -1,6 +1,6 @@
 # Contributing to FreqInOut
 
-Thanks for your interest in contributing. This guide covers how to set up the project, propose changes, and submit a pull request.
+Thanks for your interest in contributing. During 2.0 testing, changes target the private WIP branch. The work is intended to merge into the public single-rig repository after the testing gate passes.
 
 ## Quick Start
 
@@ -8,14 +8,14 @@ Thanks for your interest in contributing. This guide covers how to set up the pr
 - Clone the repo and set up a virtual environment:
 
 ```bash
-git clone https://github.com/N1MAG/FreqInOut.git FreqInOut
-cd FreqInOut
-python -m venv venv
+git clone --branch "wip/private-testing-multi-rig-1.2.3-not-ready" https://github.com/N1MAG/FreqInOut-internal-testing.git FreqInOut-multi-rig
+cd FreqInOut-multi-rig
+python -m venv .venv
 ```
 
 - Activate the virtual environment:
-  - Windows PowerShell: `.\venv\Scripts\Activate.ps1`
-  - Linux/macOS: `source venv/bin/activate`
+  - Windows PowerShell: `.\.venv\Scripts\Activate.ps1`
+  - Linux/macOS: `source .venv/bin/activate`
 
 - Install dependencies:
 
@@ -72,7 +72,13 @@ Then verify packaging flows:
 
 ## Tests and Verification
 
-There is no formal test suite yet. Please include manual verification steps, such as:
+Run the automated test suite and include focused manual verification for behavior that depends on real companion applications or window managers:
+
+```bash
+python -m pytest -q tests
+```
+
+Examples of useful manual verification:
 
 - "Open Settings tab, change X, save, restart, confirm Y"
 - "Run FLDigi NCS tab, start net, save check-ins, end net"

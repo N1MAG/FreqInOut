@@ -1239,9 +1239,10 @@ def test_settings_logging_diagnostics_panel_is_compact_and_themed() -> None:
         source.index("def _make_compact_settings_panel(")
         : source.index("def _sync_device_profiles_table_to_settings_focus")
     ]
+    apply_theme_start = source.index("def apply_theme(")
     theme_block = source[
-        source.index("if hasattr(self, \"open_logs_btn\"):")
-        : source.index("if hasattr(self, \"sections_nav_list\"):")
+        apply_theme_start
+        : source.index("def resizeEvent", apply_theme_start)
     ]
 
     assert "self.logging_group, logging_group_layout = self._make_compact_settings_panel(" in build_block

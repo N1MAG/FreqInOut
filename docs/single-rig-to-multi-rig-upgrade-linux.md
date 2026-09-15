@@ -2,6 +2,8 @@
 
 Purpose: upgrade an existing production single-rig FIO install to the current multi-rig WIP on Linux while preserving a restorable backup of the production configuration.
 
+> **Assigned upgrade test only:** general testing-community participants should use the isolated fresh-install guide. This procedure intentionally opens and migrates production-profile data and must not be used as the default installation path.
+
 ## Upgrade Target
 
 | Item | Value |
@@ -48,6 +50,8 @@ freqinout.db
 ```
 
 If the production install uses a custom `FREQINOUT_CONFIG_DIR`, write that path down before proceeding and use it consistently for launch/testing.
+
+For a custom production root, add `--config-root "/the/recorded/root"` to every installer command below. Omitting it would target the platform default profile instead.
 
 ## 3. Pull the Latest Multi-Rig WIP Installer
 

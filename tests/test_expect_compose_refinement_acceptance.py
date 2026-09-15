@@ -42,8 +42,16 @@ def _app() -> QApplication:
 
 
 def _patch_spotter_reads(monkeypatch, *, entries=(), policies=(), statuses=()):
-    monkeypatch.setattr(spotter_ui, "list_spotter_activity", lambda **_kwargs: [])
-    monkeypatch.setattr(spotter_ui, "load_operator_traffic_context", lambda *_args, **_kwargs: None)
+    # The legacy Spotter Activity tab was removed when activity moved into the
+    # unified Message Inbox. Keep this fixture compatible with either side of
+    # that migration without requiring a dead runtime import.
+    monkeypatch.setattr(spotter_ui, "list_spotter_activity", lambda **_kwargs: [], raising=False)
+    monkeypatch.setattr(
+        spotter_ui,
+        "load_operator_traffic_context",
+        lambda *_args, **_kwargs: None,
+        raising=False,
+    )
     monkeypatch.setattr(spotter_ui, "list_expect_entries", lambda **_kwargs: list(entries))
     monkeypatch.setattr(spotter_ui, "list_expect_allow_policies", lambda **_kwargs: list(policies))
     monkeypatch.setattr(spotter_ui, "list_expect_operator_access_catalog", lambda **_kwargs: [])
@@ -55,7 +63,12 @@ def _patch_spotter_reads(monkeypatch, *, entries=(), policies=(), statuses=()):
 def _open_expect(monkeypatch, *, entries=(), policies=(), settings=None, compose=None):
     _patch_spotter_reads(monkeypatch, entries=entries, policies=policies)
     tab = FioSpotterTab(settings=settings or _Settings(), open_compose=compose)
-    tab.tabs.setCurrentIndex(2)
+    expect_index = next(
+        index
+        for index in range(tab.tabs.count())
+        if tab.tabs.tabText(index).strip().casefold() == "expect"
+    )
+    tab.tabs.setCurrentIndex(expect_index)
     _app().processEvents()
     return tab
 
@@ -153,7 +166,7 @@ def test_legacy_access_can_be_copied_to_an_unsaved_named_policy_draft(monkeypatc
     try:
         tab.expect_entries_table.selectRow(0)
         tab._draft_policy_from_legacy_access()
-        assert tab.tabs.currentIndex() == 3
+        assert tab.tabs.tabText(tab.tabs.currentIndex()).strip() == "Access Policies"
         assert tab.policy_name.text() == "INFO access"
         assert tab.policy_calls.text() == "N0CALL"
         assert tab.policy_groups.text() == "@MR08"

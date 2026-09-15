@@ -75,6 +75,14 @@ def _primary_radio(store: MultiRadioStore, name: str = "Primary Rig") -> dict:
 
 
 def _configure_scheduler_for_apply(monkeypatch, engine: SchedulerEngine, queued: list[tuple[str, int]]) -> None:
+    # Exercise the scheduler's primary-radio fallback with the injected rig.
+    # Runtime routing may otherwise construct a profile client, which is a
+    # separate integration concern and bypasses this evidence-publisher seam.
+    monkeypatch.setattr(
+        engine,
+        "_control_context_for_entry",
+        lambda _entry: (engine.rig, engine.js8, engine.varac, engine.settings, None),
+    )
     monkeypatch.setattr(engine, "_control_mode", lambda: "FLRIG")
     monkeypatch.setattr(engine, "_scheduler_enabled", lambda: True)
     monkeypatch.setattr(engine, "_varac_status", lambda: {"busy": False, "waiting_for_frequency": False, "reason": None})

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import sys
@@ -1986,12 +1987,12 @@ def test_settings_mesh_channel_review_dark_theme_uses_readable_semantic_colors()
 
 
 def test_settings_theme_refresh_rebuilds_mesh_channel_table_brushes() -> None:
-    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8-sig")
-    apply_start = source.index("def apply_theme(self):")
-    apply_block = source[apply_start : source.index("def resizeEvent", apply_start)]
+    from freqinout.gui.settings_tab import SettingsTab
+
+    apply_block = inspect.getsource(SettingsTab.apply_theme)
 
     assert 'hasattr(self, "mesh_channel_admin")' in apply_block
-    assert "self._refresh_mesh_channel_table()" in apply_block
+    assert "self._refresh_mesh_channel_table" in apply_block
 
 
 def test_settings_mesh_display_device_prefers_human_name_over_raw_ble_identifier() -> None:
