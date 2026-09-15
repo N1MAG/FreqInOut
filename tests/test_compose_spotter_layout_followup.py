@@ -173,7 +173,8 @@ def test_compose_sidebar_does_not_starve_medium_commstat_surface(monkeypatch, tm
     try:
         assert tab._compose_sidebar_enabled("commstat_rf", 1000, in_workbench=False) is False
         assert tab._compose_sidebar_enabled("commstat_rf", 1400, in_workbench=False) is True
-        assert tab._compose_sidebar_enabled("js8", 1400, in_workbench=False) is False
+        assert tab._compose_sidebar_enabled("js8", 1000, in_workbench=False) is False
+        assert tab._compose_sidebar_enabled("js8", 1400, in_workbench=False) is True
     finally:
         tab.close()
         tab.deleteLater()
@@ -214,6 +215,34 @@ def test_compose_sidebar_floor_tracks_large_text_controls(monkeypatch, tmp_path)
             "commstat_rf", in_workbench=False
         )
         assert large_floor >= default_floor
+    finally:
+        tab.close()
+        tab.deleteLater()
+
+
+def test_js8_and_spotter_wide_target_rows_never_overlap_and_setup_is_natural_height(
+    monkeypatch, tmp_path
+) -> None:
+    """Two-row delivery controls remain legible without a false full-height card."""
+    app = _app()
+    tab = _tab(monkeypatch, tmp_path)
+    try:
+        tab.resize(1920, 1080)
+        tab.show()
+        tab._set_messages_mode("Compose")
+        for row in (1, 2):
+            tab.compose_mode_selector.setCurrentRow(row)
+            tab._refresh_compose_layout_geometry_if_needed(force=True)
+            app.processEvents()
+            target_rect = tab.compose_js8_target_edit.geometry()
+            delivery_rect = tab.compose_js8_send_as_msg_chk.geometry()
+            assert target_rect.bottom() < delivery_rect.top()
+            assert (
+                tab.compose_js8_target_row_widget.height()
+                >= tab.compose_js8_target_row_widget.minimumSizeHint().height()
+            )
+            assert tab.compose_setup_box.maximumHeight() == tab.compose_setup_box.minimumHeight()
+            assert tab.compose_setup_box.height() < tab.compose_setup_scroll.viewport().height()
     finally:
         tab.close()
         tab.deleteLater()

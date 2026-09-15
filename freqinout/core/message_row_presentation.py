@@ -8,6 +8,7 @@ from typing import Callable, Mapping
 
 from freqinout.core.commstat_artifacts import artifact_kind_label
 from freqinout.core.js8_spotter_decode import parse_spotter_bracket_fields, summarize_spotter_form_text
+from freqinout.core.js8_spotter_forms import FORM_ID_PATTERN, FORM_TOKEN_RE, normalize_form_code
 from freqinout.core.message_intelligence import MessageIntelligence, analyze_commstat_fields, analyze_spotter_text
 
 
@@ -77,7 +78,7 @@ def message_display_profile_for_type(type_sel: object) -> str:
     text = str(type_sel or "").strip()
     if not text or text == "MSG Type...":
         return "triage"
-    if text == "Spotter" or re.match(r"^F![0-9]{3}[A-Z]?$", text):
+    if text == "Spotter" or bool(normalize_form_code(text)):
         return "field_report"
     if text == "SitRep" or text.startswith("SitRep/"):
         return "intel_report"
@@ -111,15 +112,16 @@ def relative_age_label(ts: object, *, now_ts: float | None = None) -> str:
 
 
 def spotter_mcf_display_label(code: object, title: object = "") -> str:
-    code_text = str(code or "").strip().upper()
-    if re.fullmatch(r"[0-9]{3}[A-Z]?", code_text):
-        code_text = f"F!{code_text}"
-    if not re.fullmatch(r"F![0-9]{3}[A-Z]?", code_text):
-        code_text = ""
+    code_text = normalize_form_code(code)
 
     first_part = str(title or "").strip().split("|", 1)[0].strip()
-    first_part = re.sub(r"^MCF\s*[0-9]{3}[A-Z]?\s*[-:]?\s*", "", first_part, flags=re.IGNORECASE).strip()
-    first_part = re.sub(r"^F![0-9]{3}[A-Z]?\s*[-:]?\s*", "", first_part, flags=re.IGNORECASE).strip()
+    first_part = re.sub(
+        rf"^MCF\s*{FORM_ID_PATTERN}\s*[-:]?\s*",
+        "",
+        first_part,
+        flags=re.IGNORECASE,
+    ).strip()
+    first_part = FORM_TOKEN_RE.sub("", first_part, count=1).strip(" -:")
     first_part = re.sub(
         r"\b(Status\s+Report|Situation\s+Report|Field\s+Report|Report|Form)\b",
         "",

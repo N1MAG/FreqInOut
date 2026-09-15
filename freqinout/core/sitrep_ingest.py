@@ -39,6 +39,7 @@ from freqinout.core.js8_spotter_forms import (
     forms_enabled_for,
     normalize_form_code,
 )
+from freqinout.core.js8_spotter_decode import parse_spotter_bracket_fields
 from freqinout.core.logger import log
 
 
@@ -46,6 +47,8 @@ SPOTTER_SITREP_FORMS = {
     "F!104": "SPOTTER_104",
     "F!301": "SPOTTER_301",
     "F!304": "SPOTTER_304",
+    "F!701B": "SPOTTER_701B",
+    "F!701C": "SPOTTER_701C",
 }
 
 _INGEST_LOCK = threading.Lock()
@@ -599,9 +602,8 @@ def _custom_mapper_configured(settings) -> bool:
 
 
 def _mapped_sitrep_forms(settings) -> set[str]:
-    # Status fusion only knows the legacy JS8Spotter status-bearing response layouts.
-    # The mapper can still route other forms to Messages/Map/Alerts without inventing
-    # status fields FIO cannot parse safely yet.
+    # Only forms with an explicit, reviewed status contract enter status
+    # fusion. Other mapped forms still participate in Messages/Map/Alerts.
     mapped = forms_enabled_for(settings, flag="status") & set(SPOTTER_SITREP_FORMS.keys())
     if mapped:
         return mapped
@@ -977,6 +979,9 @@ def _ingest_local_spotter_backfill(
         event_ts, event_ts_utc = _parse_ts(row[1], fallback=str(row[2] or ""))
         raw_text = str(row[6] or "")
         responses = _parse_spotter_response(raw_text)
+        structured = parse_spotter_bracket_fields(raw_text)
+        grid = str(structured.get("GR", "") or "").strip().upper()
+        state_code, state_confidence, geo_confidence = infer_state_and_geo(grid, raw_text)
         inserted = _insert_source_event(
             local_conn,
             source=source,
@@ -986,8 +991,11 @@ def _ingest_local_spotter_backfill(
             subtype=subtype,
             from_call=str(row[3] or ""),
             target=str(row[4] or ""),
-            grid="",
+            grid=grid,
             scope="",
+            state_code=state_code,
+            state_confidence=state_confidence,
+            geo_confidence=geo_confidence,
             status_payload={
                 "form_id": form_id,
                 "responses": responses,

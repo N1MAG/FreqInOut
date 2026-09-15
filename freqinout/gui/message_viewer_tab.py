@@ -331,17 +331,28 @@ from freqinout.core.js8_source_context import resolve_js8_endpoint_context
 from freqinout.core.varac_runtime_ingest import ingest_varac_for_runtime_sources
 from freqinout.gui.plan_context_label import PlanContextLabel
 from freqinout.core.js8_spotter_forms import (
+    FORM_TOKEN_RE,
+    SPOTTER_COMMENTS_KEY,
+    SpotterFormField,
     discover_spotter_forms,
     factory_mapping_for_form,
     form_codes_enabled_for,
     form_id_enabled,
     normalize_form_code,
     parse_spotter_form_fields,
+    parse_spotter_form_guidance,
+    spotter_operator_autofill_kind,
 )
 from freqinout.core.js8_spotter_decode import (
     decode_spotter_form_text,
     parse_spotter_bracket_fields,
 )
+from freqinout.core.js8_spotter_codec import (
+    parse_spotter_form_payload,
+    serialize_spotter_form_payload,
+    unwrap_native_js8_form_payload,
+)
+from freqinout.core.js8_spotter_status import classify_spotter_status
 from freqinout.core.js8_send_service import (
     js8_endpoint_from_radio_profile,
     query_js8_selected_target,
@@ -1034,7 +1045,10 @@ class _ComposeCatalogDiscoveryWorker(QObject):
                         continue
                     try:
                         text_value = Path(key).read_text(encoding="utf-8", errors="replace")
-                        parsed[key] = {"spotter_rows": parse_spotter_form_fields(text_value)}
+                        parsed[key] = {
+                            "spotter_rows": parse_spotter_form_fields(text_value),
+                            "spotter_guidance": parse_spotter_form_guidance(text_value),
+                        }
                     except Exception as exc:
                         problems.append(f"{Path(key).name}: {exc}")
         except Exception as exc:
@@ -1608,6 +1622,10 @@ class _RowsBuildWorker(QObject):
             return "SPOTTER_301"
         if form == "F!304":
             return "SPOTTER_304"
+        if form == "F!701B":
+            return "SPOTTER_701B"
+        if form == "F!701C":
+            return "SPOTTER_701C"
         return ""
 
     @staticmethod
@@ -1733,6 +1751,10 @@ class _RowsBuildWorker(QObject):
         elif subtype == "SPOTTER_304":
             mapped = _RowsBuildWorker._spotter_304_fields(responses)
             fields.update(mapped)
+        elif subtype in {"SPOTTER_701B", "SPOTTER_701C"}:
+            form_id = subtype.removeprefix("SPOTTER_")
+            status_key, _label, _evidence = classify_spotter_status(form_id, responses)
+            fields["overall_status"] = status_key
         return _RowsBuildWorker._semantic_report_key(
             subtype=subtype,
             from_call=(msg.from_call or "").strip().upper(),
@@ -3595,6 +3617,8 @@ class MessageViewerTab(QWidget):
         self._compose_template_kind: str = "custom"
         self._compose_field_widgets: Dict[str, QWidget] = {}
         self._compose_field_rows: List[ComposeFieldDefinition] = []
+        self._compose_spotter_fields: List[SpotterFormField] = []
+        self._compose_spotter_guidance: tuple[str, ...] = ()
         self._compose_last_smart_defaults: Dict[str, str] = {}
         self._compose_template_title: str = ""
         self._compose_template_menu_item: str = ""
@@ -6416,7 +6440,7 @@ class MessageViewerTab(QWidget):
 
         compose_type_box = QGroupBox("Compose Type")
         self.compose_type_box = compose_type_box
-        compose_type_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        compose_type_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         compose_type_box.setMaximumHeight(16777215)
         compose_type_layout = QVBoxLayout(compose_type_box)
         compose_type_layout.setContentsMargins(8, 8, 8, 6)
@@ -6427,7 +6451,8 @@ class MessageViewerTab(QWidget):
         self.compose_mode_selector.setResizeMode(QListWidget.Adjust)
         self.compose_mode_selector.setMovement(QListWidget.Static)
         self.compose_mode_selector.setUniformItemSizes(False)
-        self.compose_mode_selector.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.compose_mode_selector.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.compose_mode_selector.setTextElideMode(Qt.ElideNone)
         self.compose_mode_selector.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.compose_mode_selector.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         for label in ("FLMsg / FLAmp", "JS8Call", "FIOSpotter", "CommStat RF"):
@@ -6538,21 +6563,30 @@ class MessageViewerTab(QWidget):
         setup_layout.addWidget(self.compose_context_row_widget)
 
         self.compose_js8_target_row_widget = QWidget()
-        self.compose_js8_target_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.compose_js8_target_row_widget.setMaximumHeight(control_height_for_font(self.compose_js8_target_row_widget, vertical_padding=14, floor=40))
-        js8_target_row = QHBoxLayout(self.compose_js8_target_row_widget)
+        self.compose_js8_target_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        js8_target_row = QGridLayout(self.compose_js8_target_row_widget)
         js8_target_row.setContentsMargins(0, 0, 0, 0)
-        js8_target_row.setSpacing(8)
+        js8_target_row.setHorizontalSpacing(8)
+        js8_target_row.setVerticalSpacing(4)
         self.compose_js8_target_label = QLabel("JS8 Target")
-        js8_target_row.addWidget(self.compose_js8_target_label)
+        js8_target_row.addWidget(self.compose_js8_target_label, 0, 0)
         self.compose_js8_target_edit = QLineEdit()
-        self.compose_js8_target_edit.setMinimumWidth(220)
+        self.compose_js8_target_edit.setMinimumWidth(0)
         self.compose_js8_target_edit.setPlaceholderText("GROUP or CALLSIGN")
         self.compose_js8_target_edit.setToolTip(
             "Destination typed into the JS8 command. Enter a group or callsign; FIO strips @ before transmit."
         )
         self.compose_js8_target_edit.textChanged.connect(self._on_compose_rf_target_changed)
-        js8_target_row.addWidget(self.compose_js8_target_edit, 1)
+        js8_target_row.addWidget(self.compose_js8_target_edit, 0, 1)
+        self.compose_js8_send_as_msg_chk = QCheckBox("Send as MSG")
+        self.compose_js8_send_as_msg_chk.setToolTip(
+            "Ask JS8Call to store this message in the recipient's inbox. A callsign or group destination is required."
+        )
+        self.compose_js8_send_as_msg_chk.stateChanged.connect(self._update_compose_preview)
+        # Keep delivery semantics directly below the destination.  This avoids
+        # widening the bounded setup rail and remains readable with scaled
+        # fonts or translated labels.
+        js8_target_row.addWidget(self.compose_js8_send_as_msg_chk, 1, 1)
         self.compose_js8_sign_chk = QCheckBox("Sign MsgAuth")
         self.compose_js8_sign_chk.setToolTip("Append a MsgAuth checksum using a key scoped to this JS8 target and your callsign.")
         self.compose_js8_sign_chk.stateChanged.connect(self._update_compose_preview)
@@ -6570,7 +6604,8 @@ class MessageViewerTab(QWidget):
         self.compose_js8_auth_refresh_btn.clicked.connect(self._start_compose_target_guidance_worker)
         self.compose_js8_target_spacer = QWidget()
         self.compose_js8_target_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        js8_target_row.addWidget(self.compose_js8_target_spacer, 1)
+        js8_target_row.addWidget(self.compose_js8_target_spacer, 1, 2)
+        js8_target_row.setColumnStretch(1, 1)
         self.compose_js8_target_row_widget.setVisible(False)
         setup_layout.addWidget(self.compose_js8_target_row_widget)
 
@@ -7305,7 +7340,7 @@ class MessageViewerTab(QWidget):
         mode = str(mode or "nbems")
         width = max(1, int(viewport_width or 0))
         compact_threshold = 920 if in_workbench else int(self._responsive_compact_width)
-        if width < compact_threshold or mode not in {"nbems", "spotter", "commstat_rf"}:
+        if width < compact_threshold or mode not in {"nbems", "js8", "spotter", "commstat_rf"}:
             return False
         rail_minimum = self._compose_sidebar_readable_minimum_width(
             mode,
@@ -7326,6 +7361,7 @@ class MessageViewerTab(QWidget):
         base = {
             "spotter": 440 if in_workbench else 420,
             "commstat_rf": 440 if in_workbench else 420,
+            "js8": 440 if in_workbench else 420,
             "nbems": 430 if in_workbench else 400,
         }.get(mode, 400)
         # The JS8 selection cue owns two actions on its second row.  Derive
@@ -7465,6 +7501,14 @@ class MessageViewerTab(QWidget):
         if not isinstance(selector, QListWidget):
             return
         try:
+            type_box = getattr(self, "compose_type_box", None)
+            if isinstance(type_box, QGroupBox):
+                # Release a stale aggregate floor before measuring.  Older
+                # accessibility passes used the QListWidget's whole viewport
+                # hint as a group-title floor; responsive geometry must be
+                # able to recover in the same process after font/theme work.
+                type_box.setMinimumHeight(0)
+                type_box.setMaximumHeight(16777215)
             metrics = selector.fontMetrics()
             line_height = max(1, int(metrics.lineSpacing()))
             row_height = button_height_for_font(
@@ -7479,11 +7523,16 @@ class MessageViewerTab(QWidget):
                 text = item.text() if item is not None else ""
                 width = max(
                     line_height,
-                    int(metrics.horizontalAdvance(text)) + 2 * line_height,
+                    # The shared selector style adds horizontal padding and a
+                    # trailing item margin. Reserve three line-heights so the
+                    # delegate still owns the complete label on platform
+                    # styles whose content rect is narrower than the item.
+                    int(metrics.horizontalAdvance(text)) + 3 * line_height,
                 )
                 widths.append(width)
                 if item is not None:
                     item.setSizeHint(QSize(width, row_height))
+            selector.setTextElideMode(Qt.ElideNone)
             available = int(selector.viewport().width() or 0)
             if available <= 0:
                 available = int(selector.width() or 0)
@@ -7492,21 +7541,39 @@ class MessageViewerTab(QWidget):
                 available = int(parent.width() or 0) if parent is not None else 0
             available = max(1, available)
             rows = 1
-            used = 0
+            # QListView's flow layout applies spacing on both adjacent item
+            # edges. Account for those painted gutters and the outer gutters
+            # when predicting wraps; using one spacing unit under-counted the
+            # row width and let the final mode silently spill to another row.
+            flow_gap = 2 * item_gap
+            used = item_gap
             for width in widths:
-                if used and used + item_gap + width > available:
+                trailing = item_gap
+                if used > item_gap and used + flow_gap + width + trailing > available:
                     rows += 1
-                    used = width
+                    used = item_gap + width
                 else:
-                    used += width if not used else item_gap + width
+                    used += width if used == item_gap else flow_gap + width
             frame = max(1, int(selector.frameWidth()))
-            height = rows * row_height + 2 * frame + 2 * item_gap
+            height = rows * row_height + 2 * frame + 2 * rows * item_gap
             selector.setSpacing(item_gap)
             selector.setMinimumHeight(height)
             selector.setMaximumHeight(height)
             selector.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             selector.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             selector.updateGeometry()
+            if isinstance(type_box, QGroupBox):
+                type_layout = type_box.layout()
+                if type_layout is not None:
+                    type_layout.activate()
+                natural_height = max(
+                    height + line_height,
+                    int(type_box.sizeHint().height()),
+                )
+                type_box.setMinimumHeight(natural_height)
+                type_box.setMaximumHeight(natural_height)
+                type_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                type_box.updateGeometry()
         except Exception:
             # Geometry refresh is best effort during construction; the next
             # queued resize pass will retry once the widget has a viewport.
@@ -7520,12 +7587,25 @@ class MessageViewerTab(QWidget):
             layout.setDirection(
                 QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight
             )
-        if compact:
-            widget.setMaximumHeight(16777215)
+            if compact:
+                widget.setMaximumHeight(16777215)
+            else:
+                widget.setMaximumHeight(
+                    control_height_for_font(widget, vertical_padding=14, floor=1)
+                )
         else:
-            widget.setMaximumHeight(
-                control_height_for_font(widget, vertical_padding=14, floor=1)
-            )
+            # A grid may intentionally own more than one row. The JS8 and
+            # Spotter destination grid puts delivery mode below the target;
+            # capping that grid to one control line makes the checkbox overlap
+            # the destination editor at wide widths.
+            widget.setMaximumHeight(16777215)
+            if layout is not None:
+                try:
+                    widget.setMinimumHeight(0)
+                    layout.activate()
+                    widget.setMinimumHeight(max(0, int(layout.minimumSize().height())))
+                except Exception:
+                    pass
         widget.updateGeometry()
 
     @staticmethod
@@ -7669,7 +7749,7 @@ class MessageViewerTab(QWidget):
                         sidebar_w = readable_floor
                     setup_box.setMinimumWidth(sidebar_w)
                     setup_box.setMaximumWidth(16777215)
-                    setup_box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+                    setup_box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Maximum)
                     if setup_scroll is not None:
                         setup_scroll.setMinimumWidth(sidebar_w)
                         setup_scroll.setMaximumWidth(sidebar_w)
@@ -7738,7 +7818,12 @@ class MessageViewerTab(QWidget):
                         setup_box.set_derived_minimum_height(target_h)
                     else:
                         setup_box.setMinimumHeight(target_h)
-                    setup_box.setMaximumHeight(16777215)
+                    # A side rail is an orientation/setup card, not a second
+                    # full-height work surface. Keep its border at natural
+                    # content height and leave the remaining rail background
+                    # quiet; the scroll area still owns overflow when the
+                    # viewport is shorter than this derived height.
+                    setup_box.setMaximumHeight(target_h)
                     if setup_scroll is not None:
                         setup_scroll.setMinimumHeight(min(target_h, max(120, viewport_height // 3)))
                         setup_scroll.setMaximumHeight(16777215)
@@ -8545,62 +8630,27 @@ class MessageViewerTab(QWidget):
         expect_key: object,
         fields: Sequence[ComposeFieldDefinition],
     ) -> Dict[str, str]:
-        """Best-effort decode of the compact saved MCForm response.
-
-        Compose-created responses concatenate option tokens.  Imported rows
-        may instead use ``XX[value]`` fields.  Decode both forms without
-        claiming that an ambiguous free-text response is losslessly parsed.
-        The original response is retained as the clean working copy until a
-        field is edited, so this fallback never changes the transmitted text.
-        """
-        _target, body = MessageViewerTab._compose_spotter_expect_response_parts(response, expect_key)
-        body_tokens = body.split()
-        if body_tokens and body_tokens[0].upper() == str(expect_key or "").strip().upper():
-            body = " ".join(body_tokens[1:])
-        body = re.sub(r"\s+#[A-Z0-9]{4}$", "", body, flags=re.IGNORECASE).strip()
-        bracket_values = parse_spotter_bracket_fields(body)
-        if bracket_values:
-            values: Dict[str, str] = {}
-            for field in fields:
-                direct = bracket_values.get(str(field.key or "").upper())
-                if direct is not None:
-                    values[field.key] = direct
-                    continue
-                label_key = re.sub(r"[^A-Z0-9]", "", str(field.label or "").upper())
-                for short_key, value in bracket_values.items():
-                    if label_key and (label_key.startswith(short_key) or short_key.startswith(label_key)):
-                        values[field.key] = value
-                        break
-            return values
-
-        tokens = body.split()
-        compact = "".join(tokens)
-        values = {}
-        offset = 0
-        for field in fields:
-            options = sorted(
-                (str(option.value or "") for option in field.options if str(option.value or "")),
-                key=len,
-                reverse=True,
+        """Decode choices, bracket prompts, and Comments as one round trip."""
+        codec_fields = [
+            SpotterFormField(
+                key=field.key,
+                label=field.label,
+                options=tuple(
+                    (str(option.value or ""), str(option.label or option.value or ""))
+                    for option in field.options
+                    if str(option.value or "")
+                ),
+                kind="choice" if field.options else "prompt",
             )
-            matched = ""
-            for option in options:
-                if compact[offset:].upper().startswith(option.upper()):
-                    matched = compact[offset:offset + len(option)]
-                    break
-            if matched:
-                values[field.key] = matched
-                offset += len(matched)
-        if fields and len(values) < len(fields):
-            remaining = compact[offset:]
-            if len(fields) == 1 and remaining:
-                values.setdefault(fields[0].key, remaining)
-            elif tokens:
-                for idx, field in enumerate(fields):
-                    if field.key in values or idx >= len(tokens):
-                        continue
-                    values[field.key] = tokens[idx]
-        return values
+            for field in fields
+            if field.key != SPOTTER_COMMENTS_KEY
+        ]
+        parsed = parse_spotter_form_payload(
+            response,
+            codec_fields,
+            expected_form_code=expect_key,
+        )
+        return {str(key): str(value or "") for key, value in parsed.values.items()}
 
     def _refresh_compose_spotter_expect_entries(self, *, force: bool = False) -> None:
         """Load at most 200 static Expect rows on activation/explicit refresh."""
@@ -8919,6 +8969,7 @@ class MessageViewerTab(QWidget):
                 "target": getattr(getattr(self, "compose_js8_target_edit", None), "text", lambda: "")(),
                 "kind": self._compose_combo_text(getattr(self, "compose_js8_plain_kind_combo", None)),
                 "text": getattr(getattr(self, "compose_js8_plain_text_edit", None), "toPlainText", lambda: "")(),
+                "send_as_msg": bool(getattr(getattr(self, "compose_js8_send_as_msg_chk", None), "isChecked", lambda: False)()),
             }
         elif mode == "spotter":
             draft = {
@@ -8928,6 +8979,7 @@ class MessageViewerTab(QWidget):
                 "sign": bool(getattr(getattr(self, "compose_js8_sign_chk", None), "isChecked", lambda: False)()),
                 "date_code": bool(getattr(getattr(self, "compose_js8_auth_datecode_chk", None), "isChecked", lambda: False)()),
                 "auth_key": self._compose_combo_data(getattr(self, "compose_js8_auth_key_combo", None)),
+                "send_as_msg": bool(getattr(getattr(self, "compose_js8_send_as_msg_chk", None), "isChecked", lambda: False)()),
             }
             self._compose_store_mode_form_identity(draft)
         elif mode == "commstat_rf":
@@ -8973,6 +9025,8 @@ class MessageViewerTab(QWidget):
     def _restore_compose_mode_draft(self, mode: str) -> None:
         draft = dict(self._compose_mode_drafts.get(str(mode or "nbems"), {}) or {})
         if not draft:
+            if mode in {"js8", "spotter"}:
+                self._compose_set_checked(getattr(self, "compose_js8_send_as_msg_chk", None), False)
             return
         if mode == "nbems":
             self._compose_set_combo_data(getattr(self, "compose_operating_group_combo", None), draft.get("group"))
@@ -9021,6 +9075,7 @@ class MessageViewerTab(QWidget):
                     widget.setPlainText(str(draft.get("text", "") or ""))
                 finally:
                     widget.blockSignals(blocked)
+            self._compose_set_checked(getattr(self, "compose_js8_send_as_msg_chk", None), draft.get("send_as_msg"))
         elif mode == "spotter":
             self._compose_set_line_text(getattr(self, "compose_js8_target_edit", None), draft.get("target"))
             active_id = int(draft.get("expect_active_id", 0) or 0)
@@ -9041,6 +9096,7 @@ class MessageViewerTab(QWidget):
             self._compose_set_checked(getattr(self, "compose_js8_sign_chk", None), draft.get("sign"))
             self._compose_set_checked(getattr(self, "compose_js8_auth_datecode_chk", None), draft.get("date_code"))
             self._compose_set_combo_data(getattr(self, "compose_js8_auth_key_combo", None), draft.get("auth_key"))
+            self._compose_set_checked(getattr(self, "compose_js8_send_as_msg_chk", None), draft.get("send_as_msg"))
         elif mode == "commstat_rf":
             for widget_name, key in (
                 ("compose_commstat_target_edit", "target"),
@@ -9486,14 +9542,26 @@ class MessageViewerTab(QWidget):
             return ""
         return self.compose_js8_plain_text_edit.toPlainText().strip()
 
+    def _compose_send_as_msg(self) -> bool:
+        return bool(
+            hasattr(self, "compose_js8_send_as_msg_chk")
+            and self.compose_js8_send_as_msg_chk.isChecked()
+        )
+
     def _compose_plain_js8_command(self) -> str:
         target = self._compose_rf_target_text(self.compose_js8_target_edit.text()) if hasattr(self, "compose_js8_target_edit") else ""
         text = re.sub(r"\s+", " ", self._compose_plain_js8_text()).strip()
         if not text:
             return ""
-        if self._compose_plain_js8_kind() == "Directed Message" and not target:
+        if (self._compose_plain_js8_kind() == "Directed Message" or self._compose_send_as_msg()) and not target:
             return ""
         if target:
+            if self._compose_send_as_msg():
+                if text.upper().startswith(f"{target} MSG "):
+                    return text
+                if text.upper().startswith(f"{target} "):
+                    text = text[len(target):].strip()
+                return f"{target} MSG {text}".strip()
             if text.upper().startswith(f"{target} "):
                 return text
             return f"{target} {text}".strip()
@@ -9728,6 +9796,8 @@ class MessageViewerTab(QWidget):
         rows: List[ComposeFieldDefinition] = []
         defaults: Dict[str, str] = {}
         smart_defaults: Dict[str, str] = {}
+        self._compose_spotter_fields = []
+        self._compose_spotter_guidance = ()
         self._compose_template_kind = "custom"
         self._compose_template_title = ""
         self._compose_template_menu_item = ""
@@ -9761,20 +9831,68 @@ class MessageViewerTab(QWidget):
                 self._compose_last_source_dir = path.parent
             cached = dict(self._compose_parsed_form_cache.get(str(path), {}) or {})
             spotter_rows = list(cached.get("spotter_rows", []) or [])
+            self._compose_spotter_fields = [
+                field for field in spotter_rows if isinstance(field, SpotterFormField)
+            ]
+            self._compose_spotter_guidance = tuple(
+                str(item or "").strip()
+                for item in cached.get("spotter_guidance", ()) or ()
+                if str(item or "").strip()
+            )
             rows = [
                 ComposeFieldDefinition(
                     key=field.key,
                     label=field.label,
                     field_type="select" if field.options else "text",
                     options=tuple(
-                        ComposeFieldOption(value=value, label=label, selected=idx == 0)
-                        for idx, (value, label) in enumerate(field.options)
+                        [ComposeFieldOption(value="", label="Choose an answer…", selected=not bool(field.default_value))]
+                        + [
+                            ComposeFieldOption(
+                                value=value,
+                                label=label,
+                                selected=str(value).upper() == str(field.default_value).upper(),
+                            )
+                            for value, label in field.options
+                        ]
                     ),
                     allow_custom=not bool(field.options),
+                    # The source guidance is rendered once above the form.
+                    # Repeating it below each control makes long forms harder
+                    # to scan and can associate trailing notes with the wrong
+                    # question.
+                    description="",
                 )
                 for field in spotter_rows
             ]
-            defaults = {field.key: current_values.get(field.key, "") for field in rows}
+            rows.append(
+                ComposeFieldDefinition(
+                    key=SPOTTER_COMMENTS_KEY,
+                    label="Comments (optional)",
+                    description="Add context not captured by the structured form fields.",
+                    field_type="textarea",
+                    placeholder="Additional text for this form",
+                    rows=3,
+                )
+            )
+            identity_values = {
+                "callsign": self._compose_operator_callsign(),
+                "state": self._compose_operator_state(),
+                "grid": self._compose_operator_grid(),
+            }
+            defaults = {}
+            for field in rows:
+                if field.key in current_values:
+                    defaults[field.key] = current_values[field.key]
+                    continue
+                source_field = next((item for item in self._compose_spotter_fields if item.key == field.key), None)
+                if source_field is None:
+                    defaults[field.key] = ""
+                    continue
+                if source_field.kind == "choice":
+                    defaults[field.key] = source_field.default_value
+                else:
+                    default_kind = spotter_operator_autofill_kind(code, source_field.key)
+                    defaults[field.key] = identity_values.get(default_kind, "")
         self._rebuild_compose_field_editor(rows, defaults)
         self._compose_last_smart_defaults = smart_defaults
         self._compose_active_form_key = form_identity
@@ -9912,6 +10030,17 @@ class MessageViewerTab(QWidget):
         long_labels = {"MESSAGE", "NARRATIVE", "REMARK", "REMARKS", "SUMMARY", "BODY", "DETAILS", "COMMENTS"}
         grid_row = 0
         grid_col = 0
+        if spotter_mode and self._compose_spotter_guidance:
+            guidance = QLabel(
+                "Form guidance\n"
+                + "\n".join(f"• {line}" for line in self._compose_spotter_guidance)
+            )
+            guidance.setWordWrap(True)
+            guidance.setMinimumWidth(0)
+            guidance.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+            guidance.setStyleSheet(label_style("info", resolve_theme(self.settings)))
+            layout.addWidget(guidance, grid_row, 0, 1, 2)
+            grid_row += 1
         for field in rows:
             initial = str(values.get(field.key, "") or "")
             upper_label = f"{field.label} {field.description}".upper()
@@ -10377,7 +10506,11 @@ class MessageViewerTab(QWidget):
             refresh_datecode=refresh_datecode,
         )
         target = self._compose_rf_target_text(self.compose_js8_target_edit.text()) if hasattr(self, "compose_js8_target_edit") else ""
-        return " ".join(part for part in (target, message_text) if part).strip()
+        if self._compose_send_as_msg() and not target:
+            return ""
+        return " ".join(
+            part for part in (target, "MSG" if self._compose_send_as_msg() else "", message_text) if part
+        ).strip()
 
     def _compose_spotter_message_text(
         self,
@@ -10420,9 +10553,12 @@ class MessageViewerTab(QWidget):
             values = self._compose_field_values()
             if refresh_datecode:
                 values = self._compose_spotter_refresh_date_fields(values, self._compose_timestamp_utc)
-            responses = [str(values.get(field.key, "") or "").strip() for field in self._compose_field_rows]
-            response_text = "".join(responses)
-            message_text = " ".join(part for part in (code, response_text) if part).strip()
+            message_text = serialize_spotter_form_payload(
+                code,
+                self._compose_spotter_fields,
+                values,
+                comments=values.get(SPOTTER_COMMENTS_KEY, ""),
+            )
         if refresh_datecode:
             refreshed = update_mcform_response_datecode(
                 message_text,
@@ -12540,6 +12676,7 @@ class MessageViewerTab(QWidget):
             elif mode == "js8":
                 self._compose_set_line_text(getattr(self, "compose_js8_target_edit", None), "")
                 self._compose_set_combo_text(getattr(self, "compose_js8_plain_kind_combo", None), "Directed Message")
+                self._compose_set_checked(getattr(self, "compose_js8_send_as_msg_chk", None), False)
                 widget = getattr(self, "compose_js8_plain_text_edit", None)
                 if isinstance(widget, QTextEdit):
                     blocked = widget.blockSignals(True)
@@ -12557,6 +12694,7 @@ class MessageViewerTab(QWidget):
                     finally:
                         source_combo.blockSignals(False)
                 self._compose_set_line_text(getattr(self, "compose_js8_target_edit", None), "")
+                self._compose_set_checked(getattr(self, "compose_js8_send_as_msg_chk", None), False)
                 self._compose_set_checked(getattr(self, "compose_js8_sign_chk", None), False)
                 self._compose_set_checked(getattr(self, "compose_js8_auth_datecode_chk", None), False)
                 self._on_compose_form_changed()
@@ -13067,11 +13205,26 @@ class MessageViewerTab(QWidget):
             dict(getattr(self, "_compose_intent", {}) or {}).get("expect_view", False)
             and not bool(getattr(self, "_compose_spotter_working_response_dirty", False))
         )
-        spotter_command = self._compose_spotter_command(refresh_datecode=not expect_view) if spotter_selected else ""
+        spotter_issue = ""
+        spotter_message_text = ""
+        try:
+            if spotter_selected:
+                spotter_message_text = self._compose_spotter_message_text(
+                    sign_for_target=False,
+                    refresh_datecode=not expect_view,
+                )
+            spotter_command = self._compose_spotter_command(refresh_datecode=not expect_view) if spotter_selected else ""
+        except ValueError as exc:
+            spotter_command = ""
+            spotter_message_text = ""
+            spotter_issue = str(exc)
         if hasattr(self, "compose_js8_target_row_widget"):
             self.compose_js8_target_row_widget.setVisible(js8_mode or spotter_mode)
         if hasattr(self, "compose_js8_target_label"):
             self.compose_js8_target_label.setText("Send To" if js8_mode else "JS8 Target")
+        if hasattr(self, "compose_js8_send_as_msg_chk"):
+            self.compose_js8_send_as_msg_chk.setVisible(js8_mode or spotter_mode)
+            self.compose_js8_send_as_msg_chk.setEnabled(js8_mode or spotter_mode)
         for widget in (
             getattr(self, "compose_js8_sign_chk", None),
             getattr(self, "compose_js8_auth_key_label", None),
@@ -13102,6 +13255,7 @@ class MessageViewerTab(QWidget):
             metadata.extend(
                 [
                     f"<div><b>JS8Call:</b> {html.escape(self._compose_plain_js8_kind())}</div>",
+                    f"<div><b>Delivery:</b> {'Stored MSG' if self._compose_send_as_msg() else 'Directed traffic'}</div>",
                     f"<div><b>Send From:</b> {html.escape(self._compose_radio_short_label(profile) if isinstance(profile, dict) else radio_label)}</div>",
                     f"<div><b>Send To:</b> {html.escape(self._compose_intent_target() or 'Set a callsign or group for directed traffic')}</div>",
                     f"<div><b>RF Payload:</b> {html.escape(js8_plain_command or 'Enter short JS8 text to build the payload.')}</div>",
@@ -13118,8 +13272,9 @@ class MessageViewerTab(QWidget):
             metadata.extend(
                 [
                     f"<div><b>Spotter Form:</b> {html.escape(self.compose_form_combo.currentText() if hasattr(self, 'compose_form_combo') else '')}</div>",
+                    f"<div><b>Delivery:</b> {'Stored MSG' if self._compose_send_as_msg() else 'Directed traffic'}</div>",
                     f"<div><b>Send From:</b> {html.escape(self._compose_radio_short_label(profile) if isinstance(profile, dict) else radio_label)}</div>",
-                    f"<div><b>JS8 Payload:</b> {html.escape(spotter_command or 'Enter a JS8 target to build the payload.')}</div>",
+                    f"<div><b>JS8 Payload:</b> {html.escape(spotter_command or spotter_issue or 'Enter a JS8 target to build the payload.')}</div>",
                     f"<div><b>MsgAuth:</b> {html.escape(auth_label)}</div>",
                 ]
             )
@@ -13225,8 +13380,7 @@ class MessageViewerTab(QWidget):
         if hasattr(self, "compose_save_expect_btn"):
             self.compose_save_expect_btn.setEnabled(bool(
                 spotter_selected
-                and spotter_command
-                and radio_target is not None
+                and spotter_message_text
                 and not self._expect_view_is_read_only()
                 and ((not self._compose_js8_msg_auth_selected()) or bool(self._selected_compose_js8_msg_auth_key()))
             ))
@@ -13449,7 +13603,11 @@ class MessageViewerTab(QWidget):
         if self._compose_template_kind != "spotter" and active_id <= 0:
             self._set_compose_status("Select a FIOSpotter form before saving to Expect.", role="warning")
             return
-        message_text = self._compose_spotter_message_text(sign_for_target=False)
+        try:
+            message_text = self._compose_spotter_message_text(sign_for_target=False)
+        except ValueError as exc:
+            self._set_compose_status(f"Complete the Spotter form before saving: {exc}", role="warning")
+            return
         form_data = self.compose_form_combo.currentData() if hasattr(self, "compose_form_combo") else None
         active_entry: Dict[str, object] = {}
         for row in getattr(self, "_compose_spotter_expect_entries", []) or []:
@@ -17568,7 +17726,7 @@ class MessageViewerTab(QWidget):
         status_vals = sorted({r.status for r in rows if r.status})
         from_vals = sorted({r.from_call for r in rows if r.from_call})
         to_vals = sorted({r.to_call for r in rows if r.to_call})
-        spotter_forms = sorted({t for t in type_vals if re.match(r"^F![0-9]{3}[A-Z]?$", t)})
+        spotter_forms = sorted({t for t in type_vals if normalize_form_code(t)})
         has_commstat = any((r.origin or "").strip().lower() == "commstat" for r in rows)
         has_js8call = any((r.origin or "").strip().lower() == "js8" for r in rows)
         form_types = {
@@ -25048,13 +25206,11 @@ class MessageViewerTab(QWidget):
         if ":" not in msg:
             return None
         msg_upper = msg.upper()
-        if "?" in msg_upper or "E?" in msg_upper:
+        if re.search(r"(?:^|\s)E\?\s+F!", msg_upper):
             return None
-        if "..." in msg:
+        if re.search(r"\.\.\.\s*(?:\u2662)?$", msg):
             return None
-        if re.search(r"\bMSG\b", msg_upper):
-            return None
-        form_match = re.search(r"F!([0-9]{3}[A-Z]?)", msg_upper)
+        form_match = FORM_TOKEN_RE.search(msg_upper)
         if not form_match:
             return None
         try:
@@ -25072,16 +25228,13 @@ class MessageViewerTab(QWidget):
             return None
         de_match = re.search(r"\*DE\*\s*([A-Z0-9/]+)", msg_upper)
         from_call = de_match.group(1) if de_match else relay_via
-        form_start = msg_upper.find("F!")
-        if form_start < 0:
-            return None
-        raw_form = msg[form_start:].strip()
+        raw_form = unwrap_native_js8_form_payload(msg)
         raw_form = re.split(r"\*DE\*", raw_form, 1, flags=re.IGNORECASE)[0].strip()
         if raw_form.endswith("\u2662"):
             raw_form = raw_form[:-1].rstrip()
         token_match = re.search(r"(#[A-Z0-9]{3,})", raw_form.upper())
         token = token_match.group(1) if token_match else ""
-        form_id = form_match.group(1)
+        form_id = normalize_form_code(form_match.group(0))[2:]
         return {
             "utc_ts": ts.timestamp(),
             "utc_str": ts.strftime("%Y-%m-%d %H:%M:%S"),

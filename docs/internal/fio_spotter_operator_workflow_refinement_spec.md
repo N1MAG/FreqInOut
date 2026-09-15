@@ -798,3 +798,200 @@ projection, and responsive UI tests** pass. Changed Python files compile and
 external endpoint action, application restart, or production-data mutation was
 performed. Production Linux visual confirmation and live RF qualification
 remain operator-assisted.
+
+## FSW-8 — Complete Offline MCForms And Native JS8 Message Interoperability
+
+Status: implementation complete; external RF/platform qualification remains
+
+This package closes the remaining compatibility gaps in the FIO-supported
+SuperSpotter surface. It covers the configured MCForms catalog, Compose,
+Expect round trips, received native-JS8 stored messages, and shared Message
+Intelligence. It does not add the legacy application's email/HTTP/APRS
+gateways. Protocol-neutral Store & Forward remains the separately gated
+Message Relay Queue described in `superspotter_offline_integration_spec.md`.
+
+| SuperSpotter behavior | FIO disposition |
+|---|---|
+| MCForm catalog, explicit defaults, bracket prompts, Comments | Supported offline through the shared codec |
+| Create/view/edit/send saved E? responses | Supported through Compose + Expect |
+| Ordinary directed and native JS8 stored-message delivery | Supported; `Send as MSG` is explicit and off by default |
+| Receive, decode, summarize, map, and deduplicate MCForms | Supported through shared Message Intelligence |
+| SuperSpotter proprietary Store & Forward commands | Not copied; protocol-neutral Message Relay Queue remains separately gated |
+| Email, APRS-email, HTTP gateways, online propagation/tile services | Intentionally excluded by the offline product contract |
+
+### Canonical form grammar and persistence contract
+
+One core parser and codec owns MCForm identity and payload structure. A form ID
+is `F!` followed by either the established three-digit code with an optional
+letter suffix or a catalog-supported alphabetic code such as `F!BDN`.
+Consumers must use that shared grammar instead of maintaining narrower local
+regular expressions.
+
+The catalog model retains, in source order:
+
+- titles and `!`, `!!`, or `!!!` section headings;
+- `.` operator instructions;
+- `?` single-choice questions and their `@` answer tokens;
+- the answer explicitly marked with `*`, if any;
+- `[XX]` structured text prompts; and
+- a universal optional `Comments` field supplied by FIO for every form.
+
+Serialization is deterministic:
+
+`F!code` + compact choice tokens + ordered `XX[value]` fields + Comments +
+datecode.
+
+Structured values may not contain an unmatched closing bracket. Empty
+structured fields are omitted. Comments remain untagged free text and are
+preserved separately from structured values. Every choice question must have
+an answer before Save to Expect or Send can proceed. A choice is initialized
+only when its source option carries `*`; an unmarked question remains visibly
+unanswered. Opening and viewing an untouched saved response keeps the exact
+stored payload. Editing uses the same codec to reconstruct choice answers,
+structured prompts, Comments, and datecode together; bracket fields must never
+cause compact answers or Comments to disappear.
+
+Catalog discovery, parsing, and definition lookup are bounded and cached off
+the resize, paint, theme, field-edit, and preview paths. A malformed form is
+isolated with an operator-readable compatibility notice rather than partially
+serialized.
+
+### Guided Compose behavior
+
+FIOSpotter Compose presents source headings and instructions once in a wrapped
+orientation block, then the choice and structured fields in source order, then
+a comfortable multi-line `Comments (optional)` control. This preserves the
+form's operational context without repeating the same guidance under several
+controls. Field labels and controls use the shared theme and font-derived
+geometry contract. Long instructions wrap; they do not become fake editable
+fields or force page-level horizontal scrolling.
+
+Safe operator identity defaults are form-semantic, not label guesses. FIO may
+fill the configured operator callsign, state, and grid only when the catalog
+prompt clearly identifies the reporting station or operator's own location.
+Incident, affected-area, assessment-area, destination, medivac, wildfire, and
+`other area` prompts remain blank. A blank value never means the operator's
+location when the form documents a special meaning such as `all areas`.
+
+Both JS8Call Compose and FIOSpotter Compose expose `Send as MSG`. It is off by
+default and is stored only in the local draft. When enabled, the exact command
+passed to the existing guarded send service is:
+
+`TARGET MSG PAYLOAD`
+
+The preview displays that exact command. MSG does not relax target, radio,
+selected-target, busy/PTT, RF Guard, schedule, signing, duplicate-click, or
+endpoint/source checks. Traffic mode without a destination cannot use MSG.
+Saving an Expect response stores the MCForm payload, not the destination or
+the transient `MSG` wrapper.
+
+### Receive, intelligence, and dedupe contract
+
+FIO accepts an MCForm delivered as ordinary directed traffic or as a native
+JS8Call stored message. The transport wrapper is removed before form parsing;
+the normalized payload is classified as FIOSpotter and projected once. The
+same RF event encountered through live API, directed log, and JS8 inbox paths
+must deduplicate under the existing source/event identity rules. Protocol
+control text remains excluded from the operator Inbox, but `MSG` is not a
+reason to discard a valid form.
+
+All discovered form IDs, including alphabetic IDs, participate consistently in
+Forms, Expect date maintenance, Inbox classification, summaries, mappings, and
+Message Intelligence. The MAGNET basic check-in (`F!701C`) maps its first
+choice to Green/Yellow/Red status. MAGNET StatRep (`F!701B`) derives an overall
+summary conservatively from its explicit status dimensions, with the worst
+reported state winning and Unknown retained when no status is present. Raw
+answers remain reviewable; the shared summary is supplementary.
+
+### Acceptance gate
+
+- Every active form in the reference catalog is discovered and parsed.
+- Catalog totals and source order are stable: 30 forms, 214 choice questions,
+  1,405 answer options, 90 structured prompts, and 42 distinct prompt codes.
+- All 62 explicit source defaults are honored; no other choice is guessed.
+- Callsign/state/grid autofill passes an allow/deny matrix, including all
+  `other area` and affected/incident-area exclusions.
+- Every form serializes and round-trips choices, prompt values, Comments, and
+  datecode without field loss.
+- Incomplete choices and illegal prompt brackets block Save and Send with the
+  first actionable field identified.
+- JS8Call and FIOSpotter previews and guarded-worker commands match exactly in
+  normal and `Send as MSG` modes; mode and draft state survive tab changes.
+- Directed, live-API, and inbox-native MSG fixtures ingest one FIOSpotter
+  message each and do not regress protocol-frame filtering.
+- F!701B/F!701C status summaries agree across Activity, Inbox, Map, and other
+  Message Intelligence consumers.
+- Focused and expanded tests, Python compilation, and `git diff --check` pass.
+  Live RF transmission and packaged macOS/Linux/Windows visual qualification
+  remain operator-assisted release gates.
+
+### Implementation and acceptance evidence
+
+The completed package introduces one shared MCForm grammar, catalog parser,
+payload codec, and operational-status classifier. Compose, Expect, native JS8
+inbox ingestion, live/directed ingest, Message Intelligence, SitRep fusion,
+Inbox presentation, and Map form routing now consume those shared contracts.
+The reference SuperSpotter 2.6 catalog was reviewed directly: all 30 definitions
+are discovered, including `F!BDN`; all 214 questions, 1,405 options, 90
+structured prompts, 42 prompt codes, and 62 explicit source defaults are
+covered by executable tests. Every catalog form is serialized and parsed back
+with its choice answers, bracket prompts, optional Comments, and datecode.
+
+JS8Call and FIOSpotter Compose now expose an explicit, off-by-default `Send as
+MSG` control. It is draft-local per compose mode and reflows below the target at
+bounded setup-rail widths. The exact previewed command is the exact command
+given to the established guarded JS8 worker. Save to Expect persists only the
+target-neutral MCForm response and no longer depends on a configured radio.
+Operator callsign/state/grid defaults are limited to the reviewed allowlist;
+affected, incident, assessment, destination, wildfire, medivac, and prompts
+that explicitly allow another area remain empty.
+
+Acceptance: the final focused parser/codec, catalog, Compose/Expect, JS8
+ingest, Message Intelligence, projection, SitRep, UI reflow, and draft-state
+matrix passes **398 tests**. A process-isolated full repository sweep produced
+**3,805 passes and 42 skips** before the one feature-related setup-width failure
+was corrected; its focused 51-test recheck passes. Four unrelated baseline
+failures remain outside this package: one Local Nets timing threshold, two
+Settings source-shape assertions against already-refactored theme code, and one
+native-Map test harness missing an attribute already accessed by `HEAD`.
+Changed Python modules compile and `git diff --check` passes. No migration,
+runtime data write, network call, RF/device command, application restart,
+commit, or push occurred. Live JS8Call stored-message round-trip and packaged
+macOS/Linux/Windows visual qualification remain operator-assisted release
+gates.
+
+## Compose workspace UI-contract correction
+
+The FLMsg/FLAmp, JS8Call, FIOSpotter, and CommStat RF modes share one Compose
+workspace in both Messages and the pop-out workbench. Their mode selector is a
+compact, font-derived control: every label remains complete, the selector wraps
+only when its real content width requires it, and its titled container owns only
+that natural content height. It must never retain a list viewport's default
+size hint as blank vertical space.
+
+At a wide desktop viewport, every mode uses the same task sequence: a readable
+setup rail on the left and the dominant editor/preview work surface on the
+right. This includes JS8Call; its small setup form must not expand into a tall
+empty band above the editor. At medium and compact widths the setup promotes
+above the work surface and owns vertical overflow without manufacturing a
+horizontal scrollbar. The embedded surface and workbench use this same
+decision function, control metrics, theme, and retained draft widgets rather
+than parallel layouts.
+
+Acceptance requires all four modes at 1920x1080, 1000x700, and 900x560 in
+Normal and Large Text, Light and Dark themes. The mode container remains at its
+natural font-derived height, mode names do not elide, wide layouts keep the
+work surface larger than the setup rail, compact layouts remain vertically
+scrollable, and changing mode, theme, font, or parent window never ratchets a
+container minimum upward. Opening and closing the workbench preserves the
+selected mode and draft and never introduces page-level horizontal scrolling.
+
+The JS8Call and FIOSpotter destination block is explicitly a two-row unit:
+destination label/editor first, then the optional `Send as MSG` delivery mode
+aligned with that editor. A wide rail must preserve the block's multi-row
+natural height; a generic one-line row cap may not compress or overlap it. The
+setup rail itself ends at its natural content height when the viewport is
+taller. Blank space may remain as quiet rail background, but it must not be
+painted as a large empty setup card that implies missing controls or unused
+work surface. When the viewport is shorter, the setup scroll area—not clipped
+children or an expanded container—owns overflow.

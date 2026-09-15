@@ -423,12 +423,12 @@ def test_nbems_compose_uses_sidebar_and_popout_body_splitter() -> None:
     assert 'for widget_name in ("compose_type_box", "compose_body_splitter", "compose_output_box")' in source
     assert "setup_box.setMinimumWidth(sidebar_w)" in source
     assert "setup_scroll.setMaximumWidth(sidebar_w)" in source
-    assert "setup_box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)" in source
+    assert "setup_box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Maximum)" in source
     assert "self.compose_splitter.setOrientation(Qt.Vertical)" in source
     assert "desired_body = Qt.Horizontal if compose_sidebar else Qt.Vertical" in source
     assert "self.compose_body_splitter.orientation() != desired_body" in source
     assert "self.compose_body_splitter.setOrientation(desired_body)" in source
-    assert 'mode not in {"nbems", "spotter", "commstat_rf"}' in source
+    assert 'mode not in {"nbems", "js8", "spotter", "commstat_rf"}' in source
     assert 'if mode == "spotter":' in source
     assert 'elif mode == "commstat_rf":' in source
 

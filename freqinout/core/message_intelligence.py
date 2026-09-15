@@ -5,7 +5,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from freqinout.core.js8_spotter_decode import parse_spotter_bracket_fields, summarize_spotter_form_text
+from freqinout.core.js8_spotter_decode import (
+    parse_spotter_bracket_fields,
+    split_spotter_form_text,
+    summarize_spotter_form_text,
+)
+from freqinout.core.js8_spotter_forms import FORM_TOKEN_RE
+from freqinout.core.js8_spotter_status import classify_spotter_status
 from freqinout.core.commstat_sitrep import resolve_commstat_reported_for_state
 from freqinout.core.message_search_values import searchable_text_values
 
@@ -156,6 +162,12 @@ def analyze_spotter_text(
 ) -> MessageIntelligence:
     raw = str(text or "").strip()
     fields = parse_spotter_bracket_fields(raw)
+    parsed_form_code, response_code, _remainder, _datecode = split_spotter_form_text(raw)
+    status_key, status_label, status_evidence = classify_spotter_status(
+        parsed_form_code,
+        response_code,
+    )
+    status_summary = status_label if status_key != "unknown" else ""
     subject = _first_nonempty(
         fields.get("NA"),
         fields.get("CM"),
@@ -163,6 +175,7 @@ def analyze_spotter_text(
         fields.get("AV"),
         fields.get("NE"),
         _spotter_status_summary(raw),
+        status_summary,
     )
     state = _clean_state(_first_nonempty(fields.get("ST"), _field_after_label(raw, "State (2-letter code)"), _field_after_label(raw, "State")))
     grid = _clean_grid(_first_nonempty(fields.get("GR"), _field_after_label(raw, "Maidenhead Grid Square"), _field_after_label(raw, "Grid")))
@@ -173,6 +186,14 @@ def analyze_spotter_text(
     topic_evidence = collect_topic_evidence((("body", raw), ("form", form_title), ("subject", subject)))
     topics = tuple(topic_evidence.keys())
     metadata = {str(k): str(v) for k, v in fields.items()}
+    if status_summary:
+        metadata.update(
+            {
+                "operational_status": status_key,
+                "operational_status_label": status_label,
+                "operational_status_evidence": status_evidence,
+            }
+        )
     routing_candidate, routing_reasons = _routing_candidate(
         source_type=source_type,
         topics=topics,
@@ -684,7 +705,7 @@ def _commstat_groups_from_values(*values: object) -> tuple[str, ...]:
 
 
 def _spotter_form_code(text: str) -> str:
-    match = re.search(r"\bF![0-9]{3}[A-Z]?\b", text or "", flags=re.IGNORECASE)
+    match = FORM_TOKEN_RE.search(text or "")
     return match.group(0).upper() if match else ""
 
 

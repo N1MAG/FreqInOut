@@ -43,6 +43,8 @@ _SUBTYPE_LABELS = {
     "SPOTTER_301": "F!301",
     "SPOTTER_304": "F!304",
     "SPOTTER_104": "F!104",
+    "SPOTTER_701B": "F!701B",
+    "SPOTTER_701C": "F!701C",
 }
 
 

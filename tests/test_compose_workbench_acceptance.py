@@ -15,6 +15,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtTest import QTest
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QDialog
 from pathlib import Path
 
@@ -171,6 +172,52 @@ def test_workbench_round_trip_preserves_typed_js8_draft(monkeypatch, tmp_path) -
         assert tab.compose_js8_target_edit.text() == expected_target
         assert tab.compose_js8_plain_text_edit.toPlainText() == expected_body
         assert tab.compose_body_splitter.parent() is tab.compose_page
+    finally:
+        dialog = getattr(tab, "_compose_workbench_dialog", None)
+        if isinstance(dialog, QDialog):
+            dialog.close()
+        tab.close()
+        tab.deleteLater()
+
+
+def test_workbench_reuses_compact_mode_selector_for_every_compose_mode(
+    monkeypatch, tmp_path
+) -> None:
+    """Reparenting cannot restore the list viewport's old blank height."""
+    app = _app()
+    tab = _tab(monkeypatch, tmp_path)
+    try:
+        tab.show()
+        tab._set_messages_mode("Compose")
+        tab._open_compose_workbench_dialog()
+        app.processEvents()
+        dialog = tab._compose_workbench_dialog
+        assert isinstance(dialog, QDialog)
+        assert tab.compose_type_box.window() is dialog
+        for row in range(tab.compose_mode_selector.count()):
+            tab.compose_mode_selector.setCurrentRow(row)
+            tab._refresh_compose_layout_geometry_if_needed(force=True)
+            app.processEvents()
+            selector = tab.compose_mode_selector
+            assert selector.textElideMode() == Qt.ElideNone
+            assert selector.verticalScrollBar().maximum() == 0
+            assert tab.compose_type_box.minimumHeight() == tab.compose_type_box.maximumHeight()
+            assert tab.compose_type_box.height() <= selector.height() + 3 * selector.fontMetrics().lineSpacing()
+            expected = (
+                Qt.Horizontal
+                if tab._compose_sidebar_enabled(
+                    tab._compose_mode,
+                    dialog.width(),
+                    in_workbench=True,
+                )
+                else Qt.Vertical
+            )
+            assert tab.compose_body_splitter.orientation() == expected
+            if row in (1, 2):
+                assert (
+                    tab.compose_js8_target_edit.geometry().bottom()
+                    < tab.compose_js8_send_as_msg_chk.geometry().top()
+                )
     finally:
         dialog = getattr(tab, "_compose_workbench_dialog", None)
         if isinstance(dialog, QDialog):

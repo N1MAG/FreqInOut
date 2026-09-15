@@ -764,9 +764,21 @@ def apply_text_size_accessibility_guards(root, *, include_widths: bool = True) -
                 font_derived_widget_height(widget, vertical_padding=10, floor=28),
             )
         elif isinstance(widget, QGroupBox) and str(widget.title() or "").strip():
+            # A group's size hint includes its complete child layout.  It is
+            # therefore not a one-line font metric and may contain default
+            # item-view viewport hints (often about 192 px).  Raising the
+            # group's minimum height to that aggregate hint makes the value
+            # sticky across later responsive reflow and produces large blank
+            # regions.  Protect only the title line here; the owning layout
+            # and the guarded child controls own content height.
             _raise_widget_height_to_font(
                 widget,
-                font_derived_widget_height(widget, vertical_padding=12, floor=32),
+                font_derived_widget_height(
+                    widget,
+                    vertical_padding=12,
+                    floor=32,
+                    include_size_hints=False,
+                ),
             )
         elif isinstance(widget, QLabel) and not widget.wordWrap() and _widget_has_visible_text(widget):
             _raise_widget_height_to_font(widget, single_line_label_height(widget))

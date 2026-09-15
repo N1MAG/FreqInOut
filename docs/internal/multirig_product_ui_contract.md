@@ -285,6 +285,11 @@ Large Text mode must remain fully usable for operators with impaired vision.
 
 - Derive text-bearing control heights from font metrics; do not solve density by
   forcing one fixed height across text modes and platforms.
+- A container's font guard protects its own title or label, not the aggregate
+  size hint of its descendants. In particular, a titled group must never turn a
+  list, table, editor, or scroll viewport's default size hint into a sticky
+  minimum height. The owning responsive layout determines content height and
+  must be able to shrink again after a mode, font, theme, or viewport change.
 - Preserve readable text in Large Text mode, then adapt through wrapping,
   stacking, scrolling, or progressive disclosure.
 - Do not shrink the user's selected font to preserve a dense layout.

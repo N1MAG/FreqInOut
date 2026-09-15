@@ -15,13 +15,20 @@ from freqinout.core.js8_expect_dispatcher import dispatch_expect_auto_reply, rec
 from freqinout.core.group_utils import normalize_group_name
 from freqinout.core.operator_identity import callsigns_for_operator, canonical_callsign, ensure_operator_identity_schema, resolve_operator_identity
 from freqinout.core.js8_spotter_forms import (
+    FORM_TOKEN_RE,
     MAPPER_SETTINGS_KEY,
     form_id_enabled,
     form_codes_enabled_for,
     forms_enabled_for,
     normalize_form_code,
 )
-from freqinout.core.js8_spotter_decode import decode_spotter_form_text
+from freqinout.core.js8_spotter_decode import decode_spotter_form_text, split_spotter_form_text
+from freqinout.core.js8_spotter_codec import unwrap_native_js8_form_payload
+from freqinout.core.js8_spotter_status import (
+    classify_mcf304_status,
+    classify_spotter_status,
+    spotter_status_label,
+)
 from freqinout.core.js8_expect_store import (
     ExpectEvaluationResult,
     ExpectRequestClaimResult,
@@ -54,8 +61,7 @@ FLAMP_TRANSFER_INDEX_MAX_AGE_SECONDS = 10 * 60
 FLAMP_PARTIAL_SNAPSHOT_MAX_AGE_SECONDS = 10 * 60
 DYNAMIC_EXPECT_REQUEST_MAX_AGE_SECONDS = 30 * 60
 SPOTTER_STATUS_FORM_ID = "304"  # Kept for compatibility with older tests/callers.
-SPOTTER_STATUS_FORMS = {"104", "301", "304"}
-MCF304_EXPECTED_RESPONSES = 8
+SPOTTER_STATUS_FORMS = {"104", "301", "304", "701B", "701C"}
 SPOTTER_PROMPT_RE = re.compile(r"([A-Z0-9]{2})\[(.*?)\]\s*", re.IGNORECASE)
 SPOTTER_TOKEN_RE = re.compile(r"\s*#[A-Z0-9]{3,}\s*", re.IGNORECASE)
 
@@ -331,6 +337,9 @@ class MessageIngestor:
             if not decision.inbox_visible:
                 continue
             text = decision.canonical_text
+            form_payload = unwrap_native_js8_form_payload(text)
+            if form_payload:
+                text = form_payload
             utc_str = (params.get("UTC") or "").strip()
             try:
                 utc_ts = datetime.datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").timestamp()
@@ -340,7 +349,7 @@ class MessageIngestor:
                 continue
             msg_type = "MSG"
             decoded = text
-            if text.startswith("F!"):
+            if normalize_form_code((text.split() or [""])[0]):
                 form_part, resp, comment = self._parse_form_parts(text)
                 msg_type = f"F!{form_part}" if form_part else "MSG"
                 if form_part and not form_id_enabled(form_part, message_form_codes):
@@ -1584,13 +1593,11 @@ class MessageIngestor:
         if ":" not in msg:
             return None
         msg_upper = msg.upper()
-        if "?" in msg_upper or "E?" in msg_upper:
+        if re.search(r"(?:^|\s)E\?\s+F!", msg_upper):
             return None
-        if "..." in msg:
+        if re.search(r"\.\.\.\s*(?:\u2662)?$", msg):
             return None
-        if re.search(r"\bMSG\b", msg_upper):
-            return None
-        form_match = re.search(r"F!([0-9]{3}[A-Z]?)", msg_upper)
+        form_match = FORM_TOKEN_RE.search(msg_upper)
         if not form_match:
             return None
         try:
@@ -1608,16 +1615,13 @@ class MessageIngestor:
             return None
         de_match = re.search(r"\*DE\*\s*([A-Z0-9/]+)", msg_upper)
         from_call = de_match.group(1) if de_match else relay_via
-        form_start = msg_upper.find("F!")
-        if form_start < 0:
-            return None
-        raw_form = msg[form_start:].strip()
+        raw_form = unwrap_native_js8_form_payload(msg)
         raw_form = re.split(r"\*DE\*", raw_form, 1, flags=re.IGNORECASE)[0].strip()
         if raw_form.endswith("\u2662"):
             raw_form = raw_form[:-1].rstrip()
         token_match = re.search(r"(#[A-Z0-9]{3,})", raw_form.upper())
         token = token_match.group(1) if token_match else ""
-        form_id = form_match.group(1)
+        form_id = normalize_form_code(form_match.group(0))[2:]
         return {
             "utc_ts": ts.timestamp(),
             "utc_str": ts.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1637,15 +1641,15 @@ class MessageIngestor:
         if not text:
             return None
         text_upper = text.upper()
-        if "?" in text_upper or "E?" in text_upper or "..." in text:
+        if re.search(r"(?:^|\s)E\?\s+F!", text_upper) or re.search(
+            r"\.\.\.\s*(?:\u2662)?$", text
+        ):
             return None
-        if re.search(r"\bMSG\b", text_upper):
-            return None
-        form_match = re.search(r"F!([0-9]{3}[A-Z]?)", text_upper)
+        form_match = FORM_TOKEN_RE.search(text_upper)
         if not form_match:
             return None
-        form_start = text_upper.find("F!")
-        raw_form = text[form_start:].strip()
+        form_start = form_match.start()
+        raw_form = unwrap_native_js8_form_payload(text)
         raw_form = re.split(r"\*DE\*", raw_form, 1, flags=re.IGNORECASE)[0].strip()
         if raw_form.endswith("\u2662"):
             raw_form = raw_form[:-1].rstrip()
@@ -1663,7 +1667,10 @@ class MessageIngestor:
             return None
         if not to_call:
             leading = text[:form_start].strip()
-            to_call = (leading.split()[-1] if leading.split() else "").strip().strip(",").upper()
+            leading_parts = leading.split()
+            if leading_parts and leading_parts[-1].upper() == "MSG":
+                leading_parts.pop()
+            to_call = (leading_parts[-1] if leading_parts else "").strip().strip(",").upper()
         if not to_call:
             to_call = str(params.get("CMD") or "").strip().upper()
         return {
@@ -1671,7 +1678,7 @@ class MessageIngestor:
             "utc_str": utc_str,
             "from_call": from_call,
             "to_call": to_call,
-            "form_id": form_match.group(1),
+            "form_id": normalize_form_code(form_match.group(0))[2:],
             "spotter_token": token_match.group(1) if token_match else "",
             "raw_form": raw_form,
             "relay_via": str(params.get("FROM") or "").strip().upper(),
@@ -1679,83 +1686,24 @@ class MessageIngestor:
 
     @staticmethod
     def _parse_form_parts(text: str) -> tuple[str, str, str]:
-        parts = (text or "").split()
-        if not parts or not parts[0].startswith("F!"):
-            return "", "", ""
-        form_code = normalize_form_code(parts[0])
-        form_part = form_code[2:] if form_code.startswith("F!") else ""
-        resp = parts[1] if len(parts) > 1 else ""
-        comment = " ".join(parts[2:]) if len(parts) > 2 else ""
-        return form_part, resp, comment
+        form_code, response, remainder, _token = split_spotter_form_text(
+            unwrap_native_js8_form_payload(text)
+        )
+        return (form_code[2:] if form_code.startswith("F!") else "", response, remainder)
 
     @staticmethod
     def _classify_mcf304_status(response_code: str) -> tuple[str, str]:
-        digits = [ch for ch in (response_code or "") if ch in "12345"]
-        if not digits:
-            return "unknown", "Unknown"
-        if "3" in digits:
-            return "red", "Not Functioning"
-        if "2" in digits:
-            return "yellow", "Partially Functioning"
-        # Only classify green if the full form was answered and every answer is "1".
-        if len(digits) >= MCF304_EXPECTED_RESPONSES and all(ch == "1" for ch in digits[:MCF304_EXPECTED_RESPONSES]):
-            return "green", "Functioning"
-        return "unknown", "Unknown"
+        return classify_mcf304_status(response_code)
 
     @staticmethod
     def _status_label(status_key: str) -> str:
-        key = (status_key or "").strip().lower()
-        if key == "red":
-            return "Not Functioning"
-        if key == "yellow":
-            return "Partially Functioning"
-        if key == "green":
-            return "Functioning"
-        return "Unknown"
+        return spotter_status_label(status_key)
 
     @classmethod
     def _classify_spotter_status(
         cls, form_id: str, response_code: str
     ) -> tuple[str, str, str]:
-        fid = (form_id or "").strip()
-        if fid == "104":
-            code = (response_code or "").strip().upper()[:1]
-            if code == "1":
-                return "green", cls._status_label("green"), "Q1"
-            if code == "2":
-                return "yellow", cls._status_label("yellow"), "Q1"
-            if code == "3":
-                return "red", cls._status_label("red"), "Q1"
-            return "unknown", cls._status_label("unknown"), "Q1"
-
-        if fid == "301":
-            codes = list((response_code or "").strip().upper())
-            # Field Situation Report: evaluate Q2-Q9 only.
-            q2_map = {"1": "green", "2": "yellow", "3": "red", "4": "unknown"}
-            q3_map = {"1": "green", "2": "yellow", "3": "yellow", "4": "red", "5": "unknown"}
-            q4_q9_map = {"1": "green", "2": "yellow", "3": "red", "4": "unknown"}
-            eval_statuses: List[str] = []
-            for idx in range(1, 9):
-                code = codes[idx] if idx < len(codes) else ""
-                if idx == 1:
-                    eval_statuses.append(q2_map.get(code, "unknown"))
-                elif idx == 2:
-                    eval_statuses.append(q3_map.get(code, "unknown"))
-                else:
-                    eval_statuses.append(q4_q9_map.get(code, "unknown"))
-            if any(s == "red" for s in eval_statuses):
-                return "red", cls._status_label("red"), "Q2-Q9 aggregate"
-            if any(s == "yellow" for s in eval_statuses):
-                return "yellow", cls._status_label("yellow"), "Q2-Q9 aggregate"
-            if eval_statuses and all(s == "green" for s in eval_statuses):
-                return "green", cls._status_label("green"), "Q2-Q9 aggregate"
-            return "unknown", cls._status_label("unknown"), "Q2-Q9 aggregate"
-
-        if fid == "304":
-            status_key, status_label = cls._classify_mcf304_status(response_code)
-            return status_key, status_label, "Aggregate"
-
-        return "unknown", cls._status_label("unknown"), ""
+        return classify_spotter_status(form_id, response_code)
 
     def _mapped_status_form_ids(self) -> set[str]:
         try:
@@ -1837,33 +1785,35 @@ class MessageIngestor:
 
     def _backfill_spotter_station_status(self, cur: sqlite3.Cursor) -> None:
         try:
-            cur.execute("SELECT COUNT(1) FROM spotter_station_status")
-            row = cur.fetchone()
-            has_rows = bool(row and int(row[0] or 0) > 0)
-            if has_rows:
-                cur.execute(
-                    "SELECT COUNT(1) FROM spotter_station_status WHERE form_id IN ('104','301')"
-                )
-                upgraded = cur.fetchone()
-                if upgraded and int(upgraded[0] or 0) > 0:
-                    return
             forms = sorted(self._mapped_status_form_ids())
             if not forms:
+                return
+            signature = "v2:" + ",".join(forms)
+            if str(getattr(self, "_spotter_status_backfill_signature", "") or "") == signature:
                 return
             placeholders = ",".join(["?"] * len(forms))
             cur.execute(
                 f"""
+                WITH ranked AS (
+                    SELECT from_call, form_id, raw_text, utc_ts, utc_str, ingested_ts,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY from_call
+                               ORDER BY COALESCE(utc_ts, 0) DESC,
+                                        COALESCE(ingested_ts, 0) DESC,
+                                        id DESC
+                           ) AS rank_number
+                    FROM spotter_traffic
+                    WHERE form_id IN ({placeholders})
+                )
                 SELECT from_call, form_id, raw_text, utc_ts, utc_str, ingested_ts
-                FROM spotter_traffic
-                WHERE form_id IN ({placeholders})
-                ORDER BY from_call ASC, COALESCE(utc_ts, 0) DESC, COALESCE(ingested_ts, 0) DESC, id DESC
+                FROM ranked
+                WHERE rank_number = 1
                 """,
                 tuple(forms),
             )
-            seen: set[str] = set()
             for from_call, form_id, raw_text, utc_ts, utc_str, ingested_ts in cur.fetchall():
                 call = (from_call or "").strip().upper()
-                if not call or call in seen:
+                if not call:
                     continue
                 parsed_form_id, response_code, _ = self._parse_form_parts(str(raw_text or ""))
                 self._upsert_spotter_station_status(
@@ -1877,7 +1827,7 @@ class MessageIngestor:
                     ingested_ts=float(ingested_ts or 0.0),
                     status_source=f"F!{str(form_id or parsed_form_id or '').strip()}",
                 )
-                seen.add(call)
+            self._spotter_status_backfill_signature = signature
         except Exception as e:
             log.debug("MessageIngest: spotter status backfill failed: %s", e)
 
@@ -2310,7 +2260,7 @@ class MessageIngestor:
         payload = decision.canonical_text
         if parse_dynamic_flamp_query(payload) is not None:
             return None
-        if re.search(r"\bF![0-9]{3}[A-Z]?\b", raw_text, flags=re.IGNORECASE):
+        if FORM_TOKEN_RE.search(raw_text):
             return None
         de_match = re.search(r"\*DE\*\s*([A-Z0-9/]+)", raw_text.upper())
         if de_match:
@@ -2382,7 +2332,7 @@ class MessageIngestor:
         payload = decision.canonical_text
         if parse_dynamic_flamp_query(payload or text) is not None:
             return None
-        if re.search(r"\bF![0-9]{3}[A-Z]?\b", text, flags=re.IGNORECASE):
+        if FORM_TOKEN_RE.search(text):
             return None
         de_match = re.search(r"\*DE\*\s*([A-Z0-9/]+)", text.upper())
         if de_match:

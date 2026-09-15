@@ -70,9 +70,33 @@ def test_shared_guard_covers_input_indicator_tab_and_group_families() -> None:
                 widget,
                 vertical_padding=12 if isinstance(widget, (QCheckBox, QRadioButton, QGroupBox, QTabBar)) else 10,
                 floor=30 if isinstance(widget, (QCheckBox, QRadioButton)) else 28,
+                include_size_hints=not isinstance(widget, QGroupBox),
             )
             assert widget.minimumHeight() >= target
             assert widget.maximumHeight() >= target
+    finally:
+        root.deleteLater()
+
+
+def test_group_guard_protects_title_without_promoting_child_viewport_hint() -> None:
+    """A group's aggregate child hint must not become a sticky font floor."""
+    _app()
+    root = QWidget()
+    group = QGroupBox("Mode", root)
+    child = QTableWidget(0, 1, group)
+    child.setMinimumHeight(0)
+    group.setMinimumHeight(0)
+    try:
+        aggregate_hint = group.sizeHint().height()
+        apply_text_size_accessibility_guards(root, include_widths=False)
+        title_floor = font_derived_widget_height(
+            group,
+            vertical_padding=12,
+            floor=32,
+            include_size_hints=False,
+        )
+        assert group.minimumHeight() == title_floor
+        assert group.minimumHeight() < max(aggregate_hint, child.sizeHint().height())
     finally:
         root.deleteLater()
 

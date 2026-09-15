@@ -11,6 +11,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from freqinout.core.checkins_db import ensure_operator_checkins_schema
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.group_utils import normalize_group_name
+from freqinout.core.js8_spotter_status import classify_spotter_status
 from freqinout.core.logger import log
 from freqinout.core.operator_activity import newer_timestamp_text
 from freqinout.core.sitrep_metadata import (
@@ -71,6 +72,8 @@ _GEO_CONFIDENCE_ORDER = {
 _SUBTYPE_ORDER = {
     "COMMSTAT_12": 5,
     "COMMSTAT_FWD": 4,
+    "SPOTTER_701B": 3,
+    "SPOTTER_701C": 3,
     "SPOTTER_301": 3,
     "SPOTTER_304": 2,
     "SPOTTER_104": 1,
@@ -676,6 +679,24 @@ def _canonicalize_row(row: Sequence) -> Optional[Dict]:
             fields[key] = map_fields[key]
         fields["overall_status"] = _aggregate_status(fields[k] for k in ("communications", "internet", "water", "power"))
 
+    elif subtype_txt in {"SPOTTER_701B", "SPOTTER_701C"}:
+        responses = str(status_payload.get("responses") or "").strip()
+        form_id = subtype_txt.removeprefix("SPOTTER_")
+        overall, _label, _evidence = classify_spotter_status(form_id, responses)
+        fields["overall_status"] = _canonicalize_value(overall)
+        if form_id == "701B":
+            codes = list(responses)
+            if len(codes) > 4:
+                fields["power"] = _canonicalize_value(
+                    {"1": "green", "2": "red", "3": "yellow"}.get(codes[4])
+                )
+            if len(codes) > 5:
+                communications = _canonicalize_value(codes[5])
+                fields["communications"] = communications
+                fields["internet"] = communications
+            if len(codes) > 6:
+                fields["travel"] = _canonicalize_value(codes[6])
+
     else:
         return None
 
@@ -1097,6 +1118,8 @@ def _refresh_latest_for_call(conn: sqlite3.Connection, callsign: str) -> bool:
                  CASE subtype
                     WHEN 'COMMSTAT_12' THEN 5
                     WHEN 'COMMSTAT_FWD' THEN 4
+                    WHEN 'SPOTTER_701B' THEN 3
+                    WHEN 'SPOTTER_701C' THEN 3
                     WHEN 'SPOTTER_301' THEN 3
                     WHEN 'SPOTTER_304' THEN 2
                     WHEN 'SPOTTER_104' THEN 1

@@ -6118,3 +6118,96 @@ host is not presented until after the originating dispatch returns. The full
 post-correction Map, lifecycle, first-render, theme, font, startup, and
 multi-rig matrix passes the same **303 tests in 11 clean processes**; changed
 Python files compile and `git diff --check` passes.
+
+### Complete MCForms and native JS8 stored-message interoperability
+
+The supported offline SuperSpotter surface now uses one shared MCForm grammar,
+parser, payload codec, and operational-status classifier. This closes the
+observed `[ST]`/`[GR]` field loss and extends the same handling to every
+structured prompt in the reference catalog. Explicit starred defaults are
+honored, unmarked choices remain unanswered, every form has a multiline
+Comments control, and saved Expect responses round-trip choices, bracket
+fields, Comments, and datecodes without collapsing them into one opaque string.
+Alphabetic `F!BDN` is supported consistently across discovery, filters, date
+maintenance, native ingest, and presentation.
+
+Operator identity defaults use a reviewed form-and-field allowlist. Callsign,
+state, and grid are filled only for the operator/reporting-station semantics;
+incident, affected-area, assessment-area, destination, wildfire, medivac, and
+`other area` prompts remain operator-entered. JS8Call and FIOSpotter Compose now
+offer an explicit, off-by-default `Send as MSG`. Each compose mode retains its
+own local draft value, the option reflows below the destination in the bounded
+setup rail, and preview and guarded-worker command are byte-for-byte aligned.
+Native JS8 inbox and live/directed ingestion remove the MSG transport wrapper
+before classifying the form. Save to Expect remains target-neutral and can be
+completed before a radio exists.
+
+MAGNET `F!701B` and `F!701C` now share conservative Green/Yellow/Red status
+classification across ingestion, Activity/Inbox intelligence, SitRep fusion,
+and Map routing. Richer existing decoded summaries retain precedence over the
+generic normalized label. Catalog parsing remains cached off field-edit,
+resize, paint, and theme paths; status backfill uses one latest-per-station
+window query and runs once per ingestor/mapping signature.
+
+Work packages and models: `gpt-5.6-sol` (high), primary, owned the catalog and
+legacy-code audit, grammar/codec architecture, persistence and RF safety
+contracts, implementation, cross-consumer integration, regression correction,
+specification, and exit review. The package remained primary-owned because its
+parser, persistence, ingest, guarded-send, and shared-status boundaries were
+not safely separable; no delegated diff was integrated.
+
+Acceptance evidence: the final focused MCForm, Compose/Expect, JS8 ingest,
+Message Intelligence, projection, SitRep, UI reflow, and per-mode draft matrix
+passes **398 tests**. A full process-isolated repository sweep produced **3,805
+passes and 42 skips** before its one package-related setup-width failure was
+corrected; the affected 51-test recheck passes. Four unrelated baseline
+failures remain: one Local Nets timing threshold, two Settings source-shape
+assertions against already-refactored theme code, and one native-Map harness
+missing an attribute accessed by the committed implementation. Changed Python
+files compile and `git diff --check` passes. Live JS8Call stored-message
+round-trip and packaged macOS/Linux/Windows visual confirmation remain
+operator-assisted. No migration, runtime data write, external endpoint action,
+RF/device command, application restart, commit, or push occurred.
+
+### Compose shared-layout conformance correction
+
+The Messages Compose and pop-out Compose Workbench mode selector had inherited
+an aggregate `QGroupBox.sizeHint()` through the shared font-accessibility pass.
+Because that aggregate included `QListWidget`'s default viewport hint, a compact
+four-mode selector acquired a sticky 230–443 px minimum and fragmented every
+compose task with blank vertical space. The shared guard now protects a group
+title from font clipping without promoting descendant viewport hints into the
+container minimum. Compose additionally releases and recalculates the selector
+container from its actual wrapped rows, so an already-laid-out surface can
+recover after font and theme changes.
+
+The four complete mode labels reserve their delegate padding and explicitly
+disable elision. JS8Call now joins FLMsg/FLAmp, FIOSpotter, and CommStat RF in
+the readable setup-rail layout when a wide viewport can support both the rail
+and a dominant work surface; all modes retain the existing vertical promotion
+at medium and compact sizes. The implementation changes only geometry and
+does not rebuild forms, discover endpoints, mutate drafts, persist settings, or
+send RF traffic.
+
+Acceptance evidence: the process-isolated affected Compose, workbench, Expect,
+CommStat, theme, and font-derived geometry set passes **138 tests**. The broader cross-tab
+UI audit passes **81 tests**, and the rapid Large Text mode-switch regression
+passes in five fresh processes. The 1920x1080 live-widget probe holds the mode
+container at 78 px in all four modes, with a zero selector scroll range and a
+larger work surface than setup rail. Changed Python files compile and
+`git diff --check` passes. A monolithic repository sweep reached the existing
+Settings source-shape failure after **1,436 passes and 3 skips**; continuing in
+one process later reproduced the repository's unrelated native-Map Qt crash,
+which is why Map qualification remains process-isolated. No application
+restart, persistence mutation, endpoint discovery, network call, RF/device
+command, commit, or push occurred.
+
+Follow-up live screenshots exposed a second wide-rail defect hidden by the
+former oversized mode selector. The shared row-reflow helper capped every
+non-compact row to one control line even when the row used a deliberate
+two-line grid. JS8Call and FIOSpotter therefore painted `Send as MSG` over the
+destination editor. Grid-backed rows now retain their natural multi-row height;
+only genuine one-line box layouts receive the one-line cap. The setup card also
+stops at its derived content height instead of stretching its border through
+the full work-surface height. The surrounding scroll rail continues to own
+bounded overflow and resize behavior.

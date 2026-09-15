@@ -84,6 +84,91 @@ def test_compose_setup_reflows_without_horizontal_scroll_at_audit_viewports(monk
         tab.deleteLater()
 
 
+def test_send_as_msg_is_available_only_for_js8_and_spotter_and_keeps_each_draft(
+    monkeypatch, tmp_path
+) -> None:
+    """Stored-message delivery is explicit and remains local to each mode draft."""
+    tab = _compose_tab(monkeypatch, tmp_path)
+    try:
+        tab.show()
+        tab._set_messages_mode("Compose")
+        tab.compose_mode_selector.setCurrentRow(1)
+        _settle(tab)
+        assert tab.compose_js8_send_as_msg_chk.isVisible()
+        assert not tab.compose_js8_send_as_msg_chk.isChecked()
+        tab.compose_js8_send_as_msg_chk.setChecked(True)
+
+        tab.compose_mode_selector.setCurrentRow(2)
+        _settle(tab)
+        assert tab.compose_js8_send_as_msg_chk.isVisible()
+        assert not tab.compose_js8_send_as_msg_chk.isChecked()
+        tab.compose_js8_send_as_msg_chk.setChecked(True)
+
+        tab.compose_mode_selector.setCurrentRow(3)
+        _settle(tab)
+        assert not tab.compose_js8_send_as_msg_chk.isVisible()
+
+        tab.compose_mode_selector.setCurrentRow(1)
+        _settle(tab)
+        assert tab.compose_js8_send_as_msg_chk.isChecked()
+        tab.compose_mode_selector.setCurrentRow(2)
+        _settle(tab)
+        assert tab.compose_js8_send_as_msg_chk.isChecked()
+    finally:
+        tab.close()
+        tab.deleteLater()
+
+
+def test_compose_type_selector_stays_content_height_and_labels_do_not_elide(
+    monkeypatch, tmp_path
+) -> None:
+    """The shared mode selector is compact in every mode and owns full labels."""
+    tab = _compose_tab(monkeypatch, tmp_path)
+    try:
+        tab.resize(1920, 1080)
+        tab.show()
+        tab._set_messages_mode("Compose")
+        for row in range(tab.compose_mode_selector.count()):
+            tab.compose_mode_selector.setCurrentRow(row)
+            _settle(tab)
+            selector = tab.compose_mode_selector
+            assert selector.textElideMode() == Qt.ElideNone
+            assert tab.compose_type_box.minimumHeight() == tab.compose_type_box.maximumHeight()
+            assert tab.compose_type_box.height() <= selector.height() + 3 * selector.fontMetrics().lineSpacing()
+            for item_index in range(selector.count()):
+                item = selector.item(item_index)
+                rect = selector.visualItemRect(item)
+                text_width = selector.fontMetrics().horizontalAdvance(item.text())
+                assert rect.width() >= text_width + 2 * selector.fontMetrics().lineSpacing()
+    finally:
+        tab.close()
+        tab.deleteLater()
+
+
+def test_all_compose_modes_use_readable_side_rail_at_wide_desktop(
+    monkeypatch, tmp_path
+) -> None:
+    """Wide inline Compose gives its primary work surface the remaining width."""
+    tab = _compose_tab(monkeypatch, tmp_path)
+    try:
+        tab.resize(1920, 1080)
+        tab.show()
+        tab._set_messages_mode("Compose")
+        for row in range(tab.compose_mode_selector.count()):
+            tab.compose_mode_selector.setCurrentRow(row)
+            _settle(tab)
+            assert tab.compose_body_splitter.orientation() == Qt.Horizontal
+            setup_width, work_width = tab.compose_body_splitter.sizes()
+            assert setup_width >= tab._compose_sidebar_readable_minimum_width(
+                tab._compose_mode,
+                in_workbench=False,
+            )
+            assert work_width > setup_width
+    finally:
+        tab.close()
+        tab.deleteLater()
+
+
 def test_compose_large_font_stacks_controls_and_preserves_draft_during_rapid_switching(
     monkeypatch, tmp_path
 ) -> None:

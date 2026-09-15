@@ -167,7 +167,7 @@ def test_message_inbox_uses_adaptive_spotter_sitrep_views() -> None:
     assert "_message_display_profile_for_type" in source
     assert 'text == "Spotter"' in row_source
     assert 'text == "SitRep" or text.startswith("SitRep/")' in row_source
-    assert 're.match(r"^F![0-9]{3}[A-Z]?$", text)' in row_source
+    assert "normalize_form_code(text)" in row_source
     assert '"MCF", "Status", "From", "To", "State / Grid", "Age"' in row_source
     assert "parse_spotter_bracket_fields" in row_source
     assert "_field_report_area" in source

@@ -8919,7 +8919,11 @@ class StationsMapTab(QWidget):
         try:
             codes = forms_enabled_for(self.settings, purpose=PURPOSE_INFRASTRUCTURE, flag="map") or set()
             status_codes = forms_enabled_for(self.settings, flag="status") or set()
-            codes |= {code for code in status_codes if code in {"F!301", "F!304", "F!306"}}
+            codes |= {
+                code
+                for code in status_codes
+                if code in {"F!301", "F!304", "F!306", "F!701B", "F!701C"}
+            }
             return codes
         except Exception:
             return set()

@@ -13,6 +13,7 @@ from freqinout.core.config_paths import get_config_dir
 from freqinout.core.db_initializer import _ensure_js8_expect_tables
 from freqinout.core.group_utils import normalize_group_name
 from freqinout.core.js8_msg_auth import DATECODE_RE, encode_short_datecode
+from freqinout.core.js8_spotter_forms import FORM_TOKEN_RE
 from freqinout.core.operator_identity import (
     canonical_callsign,
     resolve_operator_identity,
@@ -157,10 +158,10 @@ class ExpectDatecodeRefreshResult:
         return values[key]
 
 
-# MCForms use F! followed by exactly three digits and, for a small set of
-# forms, one letter suffix (for example F!702A).  Keep this stricter than the
-# general form-token search so Q/dynamic and malformed rules are untouched.
-_MCFORM_EXPECT_KEY_RE = re.compile(r"^F![0-9]{3}[A-Z]?$", re.IGNORECASE)
+# Keep bulk date maintenance on the shared MCForm grammar so numeric,
+# letter-suffixed, and catalog-supported alphabetic forms (for example F!BDN)
+# behave identically. Q/dynamic and malformed rules remain untouched.
+_MCFORM_EXPECT_KEY_RE = re.compile(rf"^{FORM_TOKEN_RE.pattern}$", re.IGNORECASE)
 _MCFORM_DATECODE_TOKEN_RE = re.compile(r"(?<!\S)#[A-Z0-9]{4}(?!\S)", re.IGNORECASE)
 _JS8_RESPONSE_TARGET_RE = re.compile(r"^@?[A-Z0-9/_-]{2,32}$", re.IGNORECASE)
 
