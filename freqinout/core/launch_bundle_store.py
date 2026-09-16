@@ -9,6 +9,11 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from freqinout.core.config_backup import ConfigBackupResult, create_config_backup
 from freqinout.core.multi_radio_store import settings_db_path
+from freqinout.core.receiver_software_stack import (
+    RECEIVE_ONLY_EXECUTION_SCOPE,
+    STANDARD_EXECUTION_SCOPE,
+    execution_scope,
+)
 from freqinout.core.sqlite_utils import connect_sqlite
 
 
@@ -51,6 +56,14 @@ def normalize_launch_items(items: Any) -> List[Dict[str, Any]]:
         readiness = raw.get("readiness_policy", {})
         if not isinstance(readiness, Mapping):
             readiness = {}
+        normalized_scope = execution_scope(raw)
+        if normalized_scope not in {STANDARD_EXECUTION_SCOPE, RECEIVE_ONLY_EXECUTION_SCOPE}:
+            normalized_scope = STANDARD_EXECUTION_SCOPE
+        normalized_readiness = dict(readiness)
+        # ``readiness_json`` is the existing durable extension seam.  Carry the
+        # scope there as well as exposing it at the model boundary, so no
+        # database migration is required for receiver-specific launch rows.
+        normalized_readiness["execution_scope"] = normalized_scope
         out.append(
             {
                 "name": name,
@@ -61,7 +74,8 @@ def normalize_launch_items(items: Any) -> List[Dict[str, Any]]:
                 "launch_path_override": str(raw.get("launch_path_override", "") or "").strip(),
                 "launch_command_override": str(raw.get("launch_command_override", "") or "").strip(),
                 "dependencies": [str(value).strip() for value in dependencies if str(value).strip()],
-                "readiness_policy": dict(readiness),
+                "readiness_policy": normalized_readiness,
+                "execution_scope": normalized_scope,
             }
         )
     return out
@@ -220,6 +234,9 @@ class LaunchBundleStore:
                         "launch_path_override": str(item.get("path_override") or ""),
                         "dependencies": dependencies if isinstance(dependencies, list) else [],
                         "readiness_policy": readiness if isinstance(readiness, dict) else {},
+                        "execution_scope": execution_scope(
+                            {"readiness_policy": readiness if isinstance(readiness, dict) else {}}
+                        ),
                     }
                 )
             return {

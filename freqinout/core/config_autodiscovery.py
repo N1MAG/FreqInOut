@@ -29,6 +29,7 @@ APP_DISPLAY_NAMES: Mapping[str, str] = {
     "external_js8spotter": "External JS8Spotter",
     "commstat": "CommStat",
     "varac": "VarAC",
+    "sdrpp": "SDR++",
 }
 
 DEFAULT_RADIO_INSTANCE_NAMES: Tuple[str, ...] = ("fio-a", "fio-b", "fio-c", "fio-d")
@@ -190,6 +191,7 @@ def default_app_search_paths(
             ),
             "js8spotter": _mac_app_candidates(base_dirs, ("JS8Spotter", "js8spotter")),
             "commstat": _mac_app_candidates(base_dirs, ("CommStat", "commstat")),
+            "sdrpp": _mac_app_candidates(base_dirs, ("SDR++", "sdrpp")),
             "varac": _mac_app_candidates(base_dirs, ("VarAC", "varac"))
             + (
                 user_home / "RadioTools" / "Programs" / "VarAC_files",
@@ -245,6 +247,11 @@ def default_app_search_paths(
                 program_files_x86 / "CommStat" / "CommStat.exe",
                 local_app_data / "Programs" / "CommStat" / "CommStat.exe",
             ),
+            "sdrpp": (
+                program_files / "SDR++" / "sdrpp.exe",
+                program_files_x86 / "SDR++" / "sdrpp.exe",
+                local_app_data / "SDR++" / "sdrpp.exe",
+            ),
             "varac": (
                 program_files / "VarAC",
                 program_files_x86 / "VarAC",
@@ -287,6 +294,12 @@ def default_app_search_paths(
             user_home / ".local" / "bin" / "commstat",
             user_home / "bin" / "commstat",
         ),
+        "sdrpp": (
+            Path("/usr/bin/sdrpp"),
+            Path("/usr/local/bin/sdrpp"),
+            Path("/opt/sdrpp/sdrpp"),
+            user_home / ".local" / "bin" / "sdrpp",
+        ),
         "varac": (
             user_home / "RadioTools" / "Programs" / "VarAC_files",
             user_home / ".wine" / "drive_c" / "VarAC",
@@ -323,6 +336,7 @@ def app_search_paths_with_radio_apps_base(
             "js8call": _mac_app_candidates((root,), JS8CALL_APP_NAMES) + (root / "js8_22" / "js8call",),
             "js8spotter": _mac_app_candidates((root,), ("JS8Spotter", "js8spotter")),
             "commstat": _mac_app_candidates((root,), ("CommStat", "commstat")),
+            "sdrpp": _mac_app_candidates((root,), ("SDR++", "sdrpp")),
             "varac": _mac_app_candidates((root,), ("VarAC", "varac")) + (root / "VarAC_files", root / "VarAC"),
         }
     elif system == "Windows":
@@ -338,6 +352,7 @@ def app_search_paths_with_radio_apps_base(
             ),
             "js8spotter": (root / "JS8Spotter" / "JS8Spotter.exe",),
             "commstat": (root / "CommStat" / "CommStat.exe",),
+            "sdrpp": (root / "SDR++" / "sdrpp.exe", root / "sdrpp.exe"),
             "varac": (root / "VarAC_files", root / "VarAC", root / "VarAC" / "VarAC.exe"),
         }
     else:
@@ -359,6 +374,7 @@ def app_search_paths_with_radio_apps_base(
             ),
             "js8spotter": (root / "js8spotter", root / "JS8Spotter" / "js8spotter"),
             "commstat": (root / "commstat", root / "CommStat" / "commstat"),
+            "sdrpp": (root / "sdrpp", root / "SDR++" / "sdrpp"),
             "varac": (root / "VarAC_files", root / "VarAC"),
         }
     merged: Dict[str, Tuple[Path, ...]] = {}
@@ -1140,6 +1156,8 @@ def _command_names(app_id: str) -> Tuple[str, ...]:
         return ("JS8Spotter", "js8spotter")
     if app_id == "commstat":
         return ("CommStat", "commstat")
+    if app_id == "sdrpp":
+        return ("SDR++", "sdrpp", "sdrpp.exe")
     if app_id == "varac":
         return ("VarAC", "varac", "VarAC.exe")
     return (APP_DISPLAY_NAMES.get(app_id, app_id), app_id)

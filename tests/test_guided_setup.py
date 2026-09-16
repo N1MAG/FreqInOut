@@ -1398,6 +1398,24 @@ def test_guided_setup_wizard_view_handles_hidden_connection_step() -> None:
     assert [step_id for step_id, _label in software.steps] == ["radio", "software", "guard", "schedule", "review"]
 
 
+def test_guided_setup_wizard_view_skips_empty_software_step_for_receiver() -> None:
+    from freqinout.core.guided_setup import guided_setup_wizard_view
+
+    radio = guided_setup_wizard_view("radio", software_visible=False)
+    assert radio.next_label == "Connection"
+    assert [step_id for step_id, _label in radio.steps] == [
+        "radio",
+        "connection",
+        "guard",
+        "schedule",
+        "review",
+    ]
+
+    redirected = guided_setup_wizard_view("software", software_visible=False)
+    assert redirected.current_step_id == "connection"
+    assert redirected.visible_sections == ("connection",)
+
+
 def test_guided_setup_schedule_decision_is_single_source_for_wizard_copy() -> None:
     selected = guided_setup_schedule_decision(
         scheduler_assignment_allowed=True,
@@ -1786,8 +1804,10 @@ def test_guided_add_radio_reviewed_fields_are_in_single_draft_save_payload() -> 
 
     assert "payload = _draft_radio_profile()" in save_block
     assert "out.update(normalize_guided_radio_profile_payload(payload))" in save_block
+    profile_save_block = save_block.split('out["receiver_launch_bundle"]', 1)[0]
     for key in reviewed_keys:
-        assert f'"{key}"' not in save_block
+        assert f'"{key}"' not in profile_save_block
+    assert 'out["receiver_launch_bundle"]' in save_block
     assert "app_setup_plan_label.setVisible(False)" in dialog_block
     assert '"spotter_launch_path": (js8spotter_launch_edit, "External JS8Spotter app")' in dialog_block
     assert 'QGroupBox("Setup Status")' in dialog_block

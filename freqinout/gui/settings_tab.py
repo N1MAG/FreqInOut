@@ -101,6 +101,7 @@ from freqinout.core.system_timezone import detect_system_timezone_name
 from freqinout.core.js8_defaults import coerce_js8_offset_hz
 from freqinout.core.sdr_compatibility import get_sdr_compatibility_registry
 from freqinout.core.receiver_control import receiver_control_verification_matches
+from freqinout.core.receiver_software_stack import build_receiver_launch_items
 from freqinout.core.software_administration_model import (
     SoftwareAdministrationSnapshot,
     build_software_administration_snapshot,
@@ -9331,13 +9332,29 @@ class SettingsTab(QWidget):
         btn.setToolTip(detail)
         btn.setMinimumHeight(button_height_for_font(btn))
         btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        btn.clicked.connect(lambda _checked=False, task_key=normalized: self._select_radio_profile_guided_task(task_key))
+        btn.clicked.connect(
+            lambda _checked=False, task_key=normalized: self._on_radio_profile_guided_task_requested(task_key)
+        )
         self.radio_profile_guided_task_buttons[normalized] = btn
         self.radio_profile_guided_task_targets[normalized] = tuple(str(attr) for attr in target_attrs)
         count = layout.count()
         columns = 4
         layout.addWidget(btn, count // columns, count % columns)
         self._refresh_radio_profile_guided_task_buttons()
+
+    def _on_radio_profile_guided_task_requested(self, key: str) -> None:
+        """Route an operator click without changing cache-only refresh behavior."""
+
+        normalized = str(key or "").strip().lower()
+        profile = self._selected_settings_radio_profile()
+        observer_mode = bool(
+            isinstance(profile, dict)
+            and str(profile.get("device_class", "") or "").strip().lower() == "observer"
+        )
+        if observer_mode and normalized == "connections":
+            self._open_selected_receiver_setup()
+            return
+        self._select_radio_profile_guided_task(normalized)
 
     def _radio_profile_guided_sections(self) -> Tuple[QGroupBox, ...]:
         section_attrs = (
@@ -9400,18 +9417,38 @@ class SettingsTab(QWidget):
         self._select_settings_section_group(target_group)
 
     def _open_selected_radio_apps_task(self) -> None:
-        if not self._selected_settings_radio_profile():
+        profile = self._selected_settings_radio_profile()
+        if not profile:
             QMessageBox.information(self, "Radio Apps", "Select one radio before editing its app stack.")
+            return
+        if str(profile.get("device_class", "") or "").strip().lower() == "observer":
+            self._open_selected_receiver_setup()
             return
         self._select_settings_section_group(getattr(self, "radio_profile_section_group", None))
         self._select_radio_profile_guided_task("apps")
         QTimer.singleShot(0, self._refresh_radio_profile_software_chips)
         QTimer.singleShot(0, self._sync_current_section_scroll_size)
 
+    def _open_selected_receiver_setup(self) -> None:
+        """Open an observer profile directly at its receiver-control task."""
+
+        selected = self._selected_device_profiles()
+        if len(selected) != 1:
+            QMessageBox.information(self, "Receiver Setup", "Select one receiver before reviewing its setup.")
+            return
+        existing = selected[0]
+        if str(existing.get("device_class", "") or "").strip().lower() != "observer":
+            self._edit_device_profile()
+            return
+        self._edit_device_profile_at_step(existing, initial_step="connection")
+
     def _open_selected_radio_software_details(self) -> None:
         profile = self._selected_settings_radio_profile()
         if not profile:
             QMessageBox.information(self, "Software Details", "Select one radio before reviewing its software configuration.")
+            return
+        if str(profile.get("device_class", "") or "").strip().lower() == "observer":
+            self._open_selected_receiver_setup()
             return
         family_key = self._first_software_family_for_profile(profile)
         self.open_software_administration(family_key=family_key, radio_id=int(profile.get("id", 0) or 0))
@@ -10223,6 +10260,7 @@ class SettingsTab(QWidget):
             return "primary"
         if not isinstance(profile, dict):
             return "secondary"
+        observer_mode = str(profile.get("device_class", "") or "").strip().lower() == "observer"
         radio_id = int(profile.get("id", 0) or 0)
         assignment = self._effective_assignment_map().get(radio_id, {}) if radio_id > 0 else {}
         issues = [
@@ -10232,8 +10270,13 @@ class SettingsTab(QWidget):
         ]
         if normalized == "radio" and self._profile_needs_operator_name(profile):
             return "eligible_warning"
-        if normalized == "apps" and not self._radio_profile_has_software_option(profile):
+        if normalized == "apps" and not observer_mode and not self._radio_profile_has_software_option(profile):
             return "eligible_warning"
+        if normalized == "connections" and observer_mode:
+            adapter = str(profile.get("sdr_adapter", "manual") or "manual").strip().lower()
+            if adapter == "sdrpp_rigctl" and not receiver_control_verification_matches(profile):
+                return "eligible_warning"
+            return "success_muted"
         if normalized == "plans" and not str(assignment.get("operating_profile_name", "") or "").strip():
             return "eligible_warning"
         if normalized in {"control", "connections"}:
@@ -10263,6 +10306,7 @@ class SettingsTab(QWidget):
         normalized = str(key or "").strip().lower()
         if not isinstance(profile, dict):
             return "Select Radio"
+        observer_mode = str(profile.get("device_class", "") or "").strip().lower() == "observer"
         radio_id = int(profile.get("id", 0) or 0)
         assignment = self._effective_assignment_map().get(radio_id, {}) if radio_id > 0 else {}
         issues = [
@@ -10274,9 +10318,23 @@ class SettingsTab(QWidget):
         if normalized == "radio":
             return "Needs Review" if self._profile_needs_operator_name(profile) else "Ready"
         if normalized == "apps":
+            if observer_mode:
+                return "Ready"
             if not self._radio_profile_has_software_option(profile):
                 return "Needs Setup"
             return "Needs Setup" if required else "Ready"
+        if normalized == "control" and observer_mode:
+            return (
+                "Tuning Ready"
+                if int(profile.get("sdr_control_enabled", 0) or 0)
+                and receiver_control_verification_matches(profile)
+                else "Receive Only"
+            )
+        if normalized == "connections" and observer_mode:
+            adapter = str(profile.get("sdr_adapter", "manual") or "manual").strip().lower()
+            if adapter == "sdrpp_rigctl" and not receiver_control_verification_matches(profile):
+                return "Test Control"
+            return "Ready"
         if normalized in {"control", "connections"}:
             related = {
                 "flrig",
@@ -10344,6 +10402,10 @@ class SettingsTab(QWidget):
         if readiness_report is None:
             readiness_report = getattr(self, "_last_station_readiness_report", None) or self._current_station_readiness_report()
         theme = resolve_theme(self.settings)
+        observer_mode = bool(
+            isinstance(profile, dict)
+            and str(profile.get("device_class", "") or "").strip().lower() == "observer"
+        )
         descriptions = {
             "radio": ("Radio", "Name, model, role, and basic radio identity."),
             "control": ("Rig Control", "How FIO controls or follows this radio."),
@@ -10354,6 +10416,17 @@ class SettingsTab(QWidget):
             "review": ("Review", "Readiness and the next setup action."),
             "advanced": ("Advanced Guard", "RF guard groups, close-frequency protection, notes, and full inventory details."),
         }
+        if observer_mode:
+            descriptions.update(
+                {
+                    "control": ("Receiver", "Receive-only role and manual or verified FIO tuning state."),
+                    "apps": ("Receiver App", "The application that owns this SDR and its receive stream."),
+                    "connections": (
+                        "Receiver Setup",
+                        "Review the receiver endpoint, test reversible tuning, and enable FIO tuning.",
+                    ),
+                }
+            )
         for key, btn in buttons.items():
             role = self._radio_profile_guided_task_role(key, profile, readiness_report)
             label, detail = descriptions.get(key, (btn.text(), btn.toolTip()))
@@ -18026,6 +18099,12 @@ class SettingsTab(QWidget):
     def _radio_profile_no_software_message(self, profile: Optional[Dict[str, Any]]) -> Tuple[str, str]:
         if not isinstance(profile, dict):
             return ("Select a radio before choosing the software used by that radio.", "muted")
+        if str(profile.get("device_class", "") or "").strip().lower() == "observer":
+            application = str(profile.get("sdr_application", "") or "").strip() or "the receiver application"
+            return (
+                f"{application} owns this receive-only SDR. Use Receiver Setup… to test or update FIO tuning; conventional radio app options are not required.",
+                "info",
+            )
         if int(profile.get("enabled", 1) or 0) != 1:
             return (
                 "No radio software is enabled yet. Enable software above when this radio should participate in FIO workflows.",
@@ -18045,6 +18124,8 @@ class SettingsTab(QWidget):
         self,
         profile: Optional[Dict[str, Any]],
     ) -> Tuple[str, str, str, str] | None:
+        if isinstance(profile, dict) and str(profile.get("device_class", "") or "").strip().lower() == "observer":
+            return None
         if self._radio_profile_has_software_option(profile):
             return None
         message, role = self._radio_profile_no_software_message(profile)
@@ -18219,6 +18300,34 @@ class SettingsTab(QWidget):
         if readiness_report is None:
             readiness_report = self._station_readiness_report_for_software_chips()
         radio_id = int(profile.get("id", 0) or 0) if isinstance(profile, dict) else 0
+        observer_mode = bool(
+            isinstance(profile, dict)
+            and str(profile.get("device_class", "") or "").strip().lower() == "observer"
+        )
+        if observer_mode:
+            application = str(profile.get("sdr_application", "") or "").strip() or "Receiver"
+            adapter = str(profile.get("sdr_adapter", "manual") or "manual").strip().lower()
+            tuning_ready = bool(
+                int(profile.get("sdr_control_enabled", 0) or 0)
+                and receiver_control_verification_matches(profile)
+            )
+            if tuning_ready:
+                status_label, role = ("FIO Tuning Ready", "success")
+            elif adapter == "sdrpp_rigctl":
+                status_label, role = ("Test Control", "warning")
+            else:
+                status_label, role = ("Manual Tuning", "info")
+            btn = QPushButton(f"{application}: {status_label}")
+            btn.setMinimumWidth(150)
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            btn.setStyleSheet(button_style(role, theme))
+            btn.setToolTip(
+                "Open Receiver Setup to review the application endpoint, run the reversible control test, and enable FIO tuning."
+            )
+            btn.setAccessibleName(f"Receiver Setup: {application}: {status_label}")
+            btn.clicked.connect(self._open_selected_receiver_setup)
+            layout.addWidget(btn, 0, 0)
+            return
         chip_defs = [
             ("JS8Call", "js8", "js8call", bool(isinstance(profile, dict) and (
                 self._radio_software_enabled(profile, "js8call")
@@ -21122,6 +21231,10 @@ class SettingsTab(QWidget):
         selected = self._selected_device_profiles()
         count = len(selected)
         selected_assignment_rows = self._selected_device_profiles_as_assignment_rows()
+        observer_selected = bool(
+            count == 1
+            and str(selected[0].get("device_class", "") or "").strip().lower() == "observer"
+        )
         has_enabled_profile = any(
             isinstance(row, dict) and int(row.get("enabled", 1) or 0) == 1 for row in self.operating_profiles
         )
@@ -21159,17 +21272,38 @@ class SettingsTab(QWidget):
         self.edit_device_profile_btn.setStyleSheet(button_style("info" if can_edit else "muted", theme))
         if hasattr(self, "selector_edit_apps_btn"):
             self.selector_edit_apps_btn.setEnabled(can_edit)
+            self.selector_edit_apps_btn.setText("Receiver Setup…" if observer_selected else "Edit Apps")
+            self.selector_edit_apps_btn.setToolTip(
+                "Review the receiver endpoint, test reversible tuning, and enable FIO tuning."
+                if observer_selected
+                else "Choose or change the software used by the selected radio."
+            )
+            self.selector_edit_apps_btn.setAccessibleName(
+                "Open selected receiver setup" if observer_selected else "Edit selected radio apps"
+            )
             self.selector_edit_apps_btn.setStyleSheet(button_style("info" if can_edit else "muted", theme))
         if hasattr(self, "selector_software_details_btn"):
             self.selector_software_details_btn.setEnabled(can_edit)
+            self.selector_software_details_btn.setVisible(not observer_selected)
             self.selector_software_details_btn.setStyleSheet(button_style("info" if can_edit else "muted", theme))
         if hasattr(self, "profile_edit_apps_btn"):
             self.profile_edit_apps_btn.setEnabled(can_edit)
             self.profile_edit_apps_btn.setVisible(count == 1)
+            self.profile_edit_apps_btn.setText("Receiver Setup…" if observer_selected else "Edit Apps")
+            self.profile_edit_apps_btn.setToolTip(
+                "Review the receiver endpoint, test reversible tuning, and enable FIO tuning."
+                if observer_selected
+                else "Open the selected radio's app choices so software can be added or removed."
+            )
+            self.profile_edit_apps_btn.setAccessibleName(
+                "Open selected receiver setup from profile"
+                if observer_selected
+                else "Edit selected radio apps from profile"
+            )
             self.profile_edit_apps_btn.setStyleSheet(button_style("info" if can_edit else "muted", theme))
         if hasattr(self, "profile_software_details_btn"):
             self.profile_software_details_btn.setEnabled(can_edit)
-            self.profile_software_details_btn.setVisible(count == 1)
+            self.profile_software_details_btn.setVisible(count == 1 and not observer_selected)
             self.profile_software_details_btn.setStyleSheet(button_style("info" if can_edit else "muted", theme))
         self.activate_device_profile_btn.setEnabled(can_activate)
         self.activate_device_profile_btn.setStyleSheet(button_style("info" if can_activate else "muted", theme))
@@ -23408,7 +23542,12 @@ class SettingsTab(QWidget):
     def _device_profile_dialog_save_text(existing: Optional[Dict[str, Any]] = None) -> str:
         return "Save Changes" if existing else "Save Radio"
 
-    def _open_device_profile_dialog(self, existing: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    def _open_device_profile_dialog(
+        self,
+        existing: Optional[Dict[str, Any]] = None,
+        *,
+        initial_step: str = "",
+    ) -> Optional[Dict[str, Any]]:
         dlg = QDialog(self)
         dlg_title = self._device_profile_dialog_title(existing)
         dlg.setWindowTitle(dlg_title)
@@ -23578,7 +23717,13 @@ class SettingsTab(QWidget):
             body_layout.addWidget(group)
             return group, form_layout
 
-        guided_wizard_step_id = "radio"
+        requested_initial_step = str(initial_step or "").strip().lower()
+        guided_wizard_step_id = (
+            requested_initial_step
+            if existing
+            and requested_initial_step in {"radio", "software", "connection", "guard", "schedule", "review"}
+            else "radio"
+        )
         guided_wizard_steps: Tuple[Tuple[str, str], ...] = guided_setup_wizard_view("radio").steps
         guided_wizard_max_index_seen = len(guided_wizard_steps) - 1 if existing else 0
         guided_wizard_group = QGroupBox("Guided Setup")
@@ -23656,6 +23801,83 @@ class SettingsTab(QWidget):
         software_form = QFormLayout()
         _configure_guided_form(software_form)
         software_group_layout.addLayout(software_form)
+
+        # Observer/SDR profiles use a receive-only stack rather than the
+        # transceiver software checklist below.  Keep this in the same guided
+        # Software step so the operator can choose the receiver application
+        # and its launch behavior once, before testing the endpoint.
+        receiver_stack_group = QGroupBox("Receive-only software stack")
+        receiver_stack_group.setObjectName("guidedReceiverSoftwareStack")
+        receiver_stack_layout = QFormLayout(receiver_stack_group)
+        _configure_guided_form(receiver_stack_layout)
+        receiver_stack_hint = QLabel(
+            "Choose the application FIO should start for this SDR. Receive-only integrations never enable PTT, transmit, or frequency scheduling."
+        )
+        receiver_stack_hint.setObjectName("guidedReceiverSoftwareStackHint")
+        receiver_stack_hint.setWordWrap(True)
+        _add_full_width_row(receiver_stack_layout, receiver_stack_hint)
+        existing_receiver_bundle: Dict[str, Any] = {}
+        existing_receiver_launch_item: Dict[str, Any] = {}
+        try:
+            existing_radio_id = int((existing or {}).get("id", 0) or 0)
+        except (TypeError, ValueError):
+            existing_radio_id = 0
+        if existing_radio_id > 0 and str((existing or {}).get("device_class", "") or "").strip().lower() == "observer":
+            try:
+                existing_receiver_bundle = dict(
+                    self.launch_orchestrator.get_radio_launch_bundle(existing_radio_id) or {}
+                )
+            except Exception:
+                log.debug("Unable to load the existing receiver launch bundle.", exc_info=True)
+            for launch_item in existing_receiver_bundle.get("items", []):
+                if isinstance(launch_item, dict) and str(launch_item.get("name", "") or "").strip() == "SDR++":
+                    existing_receiver_launch_item = dict(launch_item)
+                    break
+
+        receiver_application_combo = QComboBox()
+        receiver_application_combo.setObjectName("guidedReceiverLaunchApplication")
+        receiver_application_combo.addItem("No application launch", "")
+        receiver_application_combo.addItem("SDR++", "SDR++")
+        receiver_application_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        _add_form_row(
+            receiver_stack_layout,
+            "Receiver application:",
+            receiver_application_combo,
+            "Select the receive-only application FIO should launch for this profile.",
+        )
+        existing_receiver_launch_target = str(
+            existing_receiver_launch_item.get("launch_path_override", "")
+            or existing_receiver_launch_item.get("launch_command_override", "")
+            or (existing or {}).get("launch_path", "")
+            or ""
+        ).strip()
+        receiver_launch_path_edit = QLineEdit(existing_receiver_launch_target)
+        receiver_launch_path_edit.setObjectName("guidedReceiverLaunchPath")
+        receiver_launch_path_wrap = _make_browse_row(
+            receiver_launch_path_edit,
+            title="Select receiver application",
+            mode="app",
+        )
+        _add_form_row(
+            receiver_stack_layout,
+            "Launch target:",
+            receiver_launch_path_wrap,
+            "Use the suggested SDR++ command, or choose its executable/application bundle. FIO stores it only in this receiver's launch recipe.",
+        )
+        receiver_launch_enabled_chk = QCheckBox("Launch this receiver application with FIO")
+        receiver_launch_enabled_chk.setObjectName("guidedReceiverLaunchEnabled")
+        receiver_launch_enabled_chk.setChecked(
+            bool(
+                existing_receiver_bundle.get("launch_enabled", False)
+                and existing_receiver_launch_item.get("enabled", True)
+                and existing_receiver_launch_item.get("startup", True)
+            )
+            if existing_receiver_launch_item
+            else bool((existing or {}).get("launch_enabled", 0))
+        )
+        receiver_launch_enabled_chk.setToolTip("Start the selected receive-only application when this receiver is launched.")
+        _add_full_width_row(receiver_stack_layout, receiver_launch_enabled_chk)
+        software_group_layout.addWidget(receiver_stack_group)
         connection_group, connection_form = _make_section(
             "Connection Details",
             "Only the fields that matter for the selected role, backend, and software are shown.",
@@ -24278,6 +24500,12 @@ class SettingsTab(QWidget):
                 sdr_application_combo.addItem(existing_sdr_application, existing_sdr_application)
                 application_index = sdr_application_combo.count() - 1
             sdr_application_combo.setCurrentIndex(application_index)
+        existing_receiver_launch_application = str(existing_receiver_launch_item.get("name", "") or "").strip()
+        if not existing_receiver_launch_application and bool((existing or {}).get("launch_enabled", 0)):
+            existing_receiver_launch_application = existing_sdr_application
+        receiver_application_index = receiver_application_combo.findData(existing_receiver_launch_application)
+        if receiver_application_index >= 0:
+            receiver_application_combo.setCurrentIndex(receiver_application_index)
         _configure_combo_width(sdr_application_combo, minimum=260)
         sdr_form.addRow(
             _make_help_label("Receiver application:", "The application that owns this receiver hardware. Choosing it does not claim that FIO can tune it."),
@@ -24306,6 +24534,7 @@ class SettingsTab(QWidget):
             dict(parsed_receiver_evidence) if isinstance(parsed_receiver_evidence, dict) else {}
         )
         receiver_test_in_progress = False
+        receiver_test_request_id = ""
         adapter_index = sdr_adapter_combo.findData(existing_sdr_adapter)
         if adapter_index < 0:
             # The store will reject unknown adapters on save.  Showing the
@@ -24697,7 +24926,6 @@ class SettingsTab(QWidget):
             target = sdr_target_edit.text().strip()
             endpoint = sdr_host_edit.text().strip()
             port = sdr_port_edit.text().strip()
-            saved_profile_id = int((existing or {}).get("id", 0) or 0)
             endpoint_detail = ""
             if endpoint:
                 endpoint_detail = f" Saved application endpoint: {endpoint}{':' + port if port else ''}."
@@ -24759,9 +24987,9 @@ class SettingsTab(QWidget):
                 if receiver_test_in_progress:
                     verification_text = "Testing SDR++ control in the background; the selected VFO will move briefly and then be restored."
                 elif effective_state == "verified" and evidence_matches:
-                    verification_text = f"FIO tuning ready — tune/readback and restoration passed ({evidence_summary or 'saved evidence'})."
+                    verification_text = f"FIO tuning ready — tune/readback and restoration passed ({evidence_summary or 'verified evidence'})."
                 elif receiver_verification_state == "failed":
-                    verification_text = "Saved verification result: failed. Tune this receiver manually and correct setup before a later retry."
+                    verification_text = "The last control test failed. Tune this receiver manually, correct the setup, and try again."
                 elif receiver_verification_state == "verified" and evidence_present:
                     verification_text = "Verification pending — saved evidence does not match the current host, port, or target. Test this configuration again."
                 else:
@@ -24775,7 +25003,6 @@ class SettingsTab(QWidget):
             can_test = bool(
                 adapter == "sdrpp_rigctl"
                 and test_service_ready
-                and saved_profile_id > 0
                 and endpoint
                 and port
                 and target_is_canonical
@@ -24783,12 +25010,13 @@ class SettingsTab(QWidget):
             )
             sdr_test_control_btn.setEnabled(can_test)
             sdr_test_control_btn.setText("Testing…" if receiver_test_in_progress else "Test control")
+            sdr_test_control_btn.setStyleSheet(
+                button_style("primary" if can_test else "muted", resolve_theme(self.settings))
+            )
             if can_test:
                 sdr_test_control_btn.setToolTip(
                     "Run a background receive-only test. The selected VFO moves briefly, readback is checked, and the original frequency is restored and checked."
                 )
-            elif adapter == "sdrpp_rigctl" and saved_profile_id <= 0:
-                sdr_test_control_btn.setToolTip("Save this receiver profile, reopen it, then test SDR++ control.")
             elif adapter == "sdrpp_rigctl" and not target_is_canonical:
                 sdr_test_control_btn.setToolTip("Enter a receiver target without spaces, such as selected-vfo.")
             else:
@@ -24816,12 +25044,21 @@ class SettingsTab(QWidget):
                     + target_detail
                     + endpoint_detail
                 )
+                sdr_manual_guidance.setText(
+                    setup
+                    + " Control is verified. Select Enable FIO tuning, then continue through Review and save this radio."
+                )
             else:
                 sdr_manual_status.setText(
                     "Manual tuning — FIO is not controlling this receiver. Saved application details are configuration, not proof of control."
                     + target_detail
                     + endpoint_detail
                 )
+                if can_test:
+                    sdr_manual_guidance.setText(
+                        setup
+                        + " With the SDR++ RigCTL Server listening, choose Test control now. You will not need to repeat setup after saving."
+                    )
 
         def _browse_guided_app_choice(app_id: str) -> None:
             target = app_choice_targets.get(app_id)
@@ -25328,7 +25565,7 @@ class SettingsTab(QWidget):
             _set_combo_data(setup_type_combo, inferred)
 
         def _apply_setup_type_choice() -> None:
-            nonlocal applying_setup_type_choice
+            nonlocal applying_setup_type_choice, guided_wizard_max_index_seen
             lane = str(setup_type_combo.currentData() or "").strip()
             if not lane or lane == "custom":
                 _update_dialog_visibility()
@@ -25350,6 +25587,12 @@ class SettingsTab(QWidget):
                 _checkbox_set_checked(use_varac_chk, selected_apps.get("varac", False))
             finally:
                 applying_setup_type_choice = False
+            # Once the operator has selected a setup type, the software step
+            # is considered acknowledged and Connection remains a reachable
+            # quick path for experienced users; the normal Next action still
+            # presents Receiver Stack first.
+            if str(device_class_combo.currentData() or "").strip().lower() == "observer":
+                guided_wizard_max_index_seen = max(guided_wizard_max_index_seen, 1)
             _update_guided_app_setup_plan_review()
             _update_dialog_visibility()
 
@@ -25491,11 +25734,18 @@ class SettingsTab(QWidget):
                 "varac_bbs_dir": varac_bbs_edit.text().strip(),
                 "varac_bbs_archive_dir": varac_bbs_archive_edit.text().strip(),
                 "launch_cmd": varac_launch_cmd_edit.text().strip(),
+                # The observer choice is returned separately as a launch
+                # bundle request. These legacy profile fields remain untouched
+                # until _persist_device_profile routes that request to the
+                # canonical per-radio bundle store.
                 "launch_enabled": preserved_launch_enabled,
                 "launch_path": preserved_launch_path,
                 "sdr_host": sdr_host_edit.text().strip(),
                 "sdr_port": sdr_port_edit.text().strip(),
-                "sdr_application": str(sdr_application_combo.currentText() or "Other / manual").strip(),
+                "sdr_application": (
+                    str(receiver_application_combo.currentData() or "").strip()
+                    or str(sdr_application_combo.currentText() or "Other / manual").strip()
+                ),
                 "sdr_adapter": str(sdr_adapter_combo.currentData() or "manual").strip().lower(),
                 "sdr_target": sdr_target_edit.text().strip(),
                 "sdr_control_enabled": bool(sdr_control_enabled_chk.isChecked()),
@@ -26179,9 +26429,11 @@ class SettingsTab(QWidget):
             )
 
         def _guided_visible_wizard_steps() -> Tuple[Tuple[str, str], ...]:
+            observer_mode = str(device_class_combo.currentData() or "").strip().lower() == "observer"
             return guided_setup_wizard_view(
                 guided_wizard_step_id,
                 connection_visible=_guided_connection_step_visible(),
+                software_visible=True,
             ).steps
 
         def _guided_wizard_index(step_id: str) -> int:
@@ -26432,6 +26684,12 @@ class SettingsTab(QWidget):
                 app_labels.append("CommStat")
             if use_varac_chk.isChecked():
                 app_labels.append("VarAC")
+            if str(device_class_combo.currentData() or "").strip().lower() == "observer":
+                receiver_app = str(receiver_application_combo.currentData() or "").strip()
+                if receiver_app:
+                    app_labels.append(
+                        receiver_app + (" (launch with FIO)" if receiver_launch_enabled_chk.isChecked() else "")
+                    )
             backend_value = str(backend_combo.currentData() or "manual").strip().lower()
             backend_label = self._device_backend_label(backend_value)
             endpoint_lines: List[str] = []
@@ -26574,7 +26832,14 @@ class SettingsTab(QWidget):
         def _apply_guided_wizard_visibility(connection_visible: bool) -> None:
             nonlocal guided_wizard_step_id
             theme = resolve_theme(self.settings)
-            wizard_view = guided_setup_wizard_view(guided_wizard_step_id, connection_visible=connection_visible)
+            observer_mode = str(device_class_combo.currentData() or "").strip().lower() == "observer"
+            wizard_view = guided_setup_wizard_view(
+                guided_wizard_step_id,
+                connection_visible=connection_visible,
+                # Observers have a receive-only stack step; the normal
+                # transceiver checklist remains hidden within that step.
+                software_visible=True,
+            )
             guided_wizard_step_id = wizard_view.current_step_id
             current_idx = wizard_view.current_index
             visible_step_ids = {step_id for step_id, _label in wizard_view.steps}
@@ -26899,6 +27164,7 @@ class SettingsTab(QWidget):
                 _set_row_visible(widget, visibility.technical_identity_fields)
 
             if observer_mode:
+                _set_row_visible(receiver_stack_group, setup_started)
                 _set_row_visible(software_wrap, False)
                 _set_row_visible(radio_apps_base_wrap, False)
                 _set_row_visible(configure_auto_wrap, False)
@@ -26906,6 +27172,7 @@ class SettingsTab(QWidget):
                 app_setup_plan_group.setVisible(False)
                 app_setup_plan_label.setText("")
             else:
+                _set_row_visible(receiver_stack_group, False)
                 _set_row_visible(software_wrap, setup_started and not observer_mode)
                 for checkbox in (
                     use_flrig_chk,
@@ -26954,6 +27221,12 @@ class SettingsTab(QWidget):
             _update_port_prompt_visibility()
             _update_dialog_readiness()
             _apply_guided_wizard_visibility(visibility.connection_group)
+            # The receiver stack is nested in the Software page. Republish
+            # its visibility after the wizard page transition so a stale
+            # parent-layout pass cannot leave the selected stack hidden.
+            receiver_stack_group.setVisible(
+                bool(observer_mode and setup_started and guided_wizard_step_id == "software")
+            )
 
         def _on_varac_state_changed(_state: int) -> None:
             if not applying_setup_type_choice:
@@ -27087,6 +27360,47 @@ class SettingsTab(QWidget):
         sdr_application_combo.currentTextChanged.connect(lambda _text: _update_receiver_manual_card())
         sdr_application_combo.currentTextChanged.connect(lambda _text: _update_dialog_readiness())
 
+        def _on_receiver_launch_application_changed(_index: int) -> None:
+            """Keep the receiver stack choice and connection guidance aligned."""
+
+            selected = str(receiver_application_combo.currentData() or "").strip()
+            if selected:
+                app_index = sdr_application_combo.findData(selected)
+                if app_index < 0:
+                    sdr_application_combo.addItem(selected, selected)
+                    app_index = sdr_application_combo.count() - 1
+                sdr_application_combo.setCurrentIndex(app_index)
+                if not receiver_launch_path_edit.text().strip():
+                    system_name = platform.system()
+                    suggested_target = (
+                        "open -a SDR++"
+                        if system_name == "Darwin"
+                        else ("sdrpp.exe" if system_name == "Windows" else "sdrpp")
+                    )
+                    receiver_launch_path_edit.setText(suggested_target)
+                    receiver_launch_enabled_chk.setChecked(True)
+            else:
+                receiver_launch_enabled_chk.setChecked(False)
+            receiver_launch_enabled_chk.setEnabled(bool(selected and receiver_launch_path_edit.text().strip()))
+            _update_receiver_manual_card()
+            _update_dialog_readiness()
+
+        receiver_application_combo.currentIndexChanged.connect(_on_receiver_launch_application_changed)
+        receiver_launch_path_edit.textChanged.connect(
+            lambda _text: receiver_launch_enabled_chk.setEnabled(
+                bool(
+                    str(receiver_application_combo.currentData() or "").strip()
+                    and receiver_launch_path_edit.text().strip()
+                )
+            )
+        )
+        receiver_launch_enabled_chk.setEnabled(
+            bool(
+                str(receiver_application_combo.currentData() or "").strip()
+                and receiver_launch_path_edit.text().strip()
+            )
+        )
+
         def _on_receiver_adapter_changed(_index: int) -> None:
             if str(sdr_adapter_combo.currentData() or "manual") == "sdrpp_rigctl":
                 if sdr_application_combo.currentText().strip() in {"", "Other / manual"}:
@@ -27111,25 +27425,37 @@ class SettingsTab(QWidget):
         def _queue_receiver_control_test() -> None:
             """Publish a draft to an installed worker without endpoint I/O here."""
 
-            nonlocal receiver_test_in_progress
+            nonlocal receiver_test_in_progress, receiver_test_request_id
             if not sdr_test_control_btn.isEnabled():
                 return
             draft = _draft_radio_profile()
             draft["id"] = int((existing or {}).get("id", 0) or 0)
+            receiver_test_request_id = uuid.uuid4().hex
+            draft["qualification_request_id"] = receiver_test_request_id
             receiver_test_in_progress = True
             _update_receiver_manual_card()
             QTimer.singleShot(0, lambda payload=draft: self.receiver_control_test_requested.emit(payload))
 
         def _on_receiver_control_test_completed(result: Dict[str, Any]) -> None:
-            nonlocal receiver_test_in_progress, receiver_verification_state, receiver_verification_evidence
+            nonlocal receiver_test_in_progress, receiver_test_request_id, receiver_verification_state, receiver_verification_evidence
             expected_profile_id = int((existing or {}).get("id", 0) or 0)
             try:
                 result_profile_id = int(result.get("profile_id", 0) or 0)
             except (TypeError, ValueError):
                 result_profile_id = 0
-            if expected_profile_id <= 0 or result_profile_id != expected_profile_id:
+            result_request_id = str(result.get("qualification_request_id", "") or "").strip()
+            if (
+                not receiver_test_in_progress
+                or not receiver_test_request_id
+                or result_request_id != receiver_test_request_id
+            ):
+                return
+            if expected_profile_id > 0 and result_profile_id != expected_profile_id:
+                return
+            if expected_profile_id <= 0 and result_profile_id != 0:
                 return
             receiver_test_in_progress = False
+            receiver_test_request_id = ""
             state = str(result.get("verification_state") or "failed").strip().lower()
             receiver_verification_state = state if state in {"verified", "failed"} else "failed"
             evidence = result.get("verification")
@@ -27199,6 +27525,26 @@ class SettingsTab(QWidget):
             payload["id"] = (existing or {}).get("id")
             payload["name"] = name
             out.update(normalize_guided_radio_profile_payload(payload))
+            if str(device_class_combo.currentData() or "").strip().lower() == "observer":
+                launch_app = str(receiver_application_combo.currentData() or "").strip()
+                launch_path = receiver_launch_path_edit.text().strip()
+                launch_requested = bool(receiver_launch_enabled_chk.isChecked() and launch_app and launch_path)
+                # This is intentionally a dialog result, not a database field.
+                # The owning settings flow persists it through LaunchBundleStore
+                # only after the radio profile has a real id.
+                out["receiver_launch_bundle"] = {
+                    "launch_enabled": launch_requested,
+                    "items": build_receiver_launch_items(
+                        payload,
+                        [{
+                            "name": launch_app,
+                            "launch_path_override": launch_path,
+                            "startup": launch_requested,
+                        }]
+                        if launch_app and launch_path
+                        else [],
+                    ),
+                }
             try:
                 guided_plan_id = int(schedule_plan_combo.currentData() or 0)
             except Exception:
@@ -27268,6 +27614,13 @@ class SettingsTab(QWidget):
         is_active_edit = bool(existing and int(existing.get("runtime_active", 0) or 0) == 1)
         is_primary_edit = bool(existing and int(existing.get("runtime_primary", 0) or 0) == 1)
         payload = dict(values)
+        receiver_launch_bundle = payload.pop("receiver_launch_bundle", None)
+        if receiver_launch_bundle is not None:
+            # LaunchBundleStore is the canonical home for receiver launch
+            # recipes.  Do not leave a second, partially persisted copy in the
+            # legacy profile launch fields if bundle persistence later fails.
+            payload["launch_enabled"] = False
+            payload["launch_path"] = ""
         radio_name = str(payload.get("name", (existing or {}).get("name", "Radio")) or "Radio").strip() or "Radio"
         target_backend = str(payload.get("control_backend", (existing or {}).get("control_backend", "")) or "").strip().lower()
         existing_profile = existing or {}
@@ -27393,6 +27746,31 @@ class SettingsTab(QWidget):
             log.exception("Failed to save device profile.")
             QMessageBox.warning(self, "Radio Profiles", "Unable to save the radio profile.")
             return False
+
+        if receiver_launch_bundle is not None:
+            try:
+                receiver_items = [
+                    dict(item)
+                    for item in receiver_launch_bundle.get("items", [])
+                    if isinstance(item, dict)
+                ]
+                self.launch_orchestrator.set_radio_launch_bundle(
+                    int(saved.get("id", 0) or 0),
+                    receiver_items,
+                    bool(receiver_launch_bundle.get("launch_enabled", False)),
+                )
+            except Exception:
+                log.exception("Radio profile saved, but its receive-only launch bundle could not be saved.")
+                self._last_persisted_device_profile = dict(saved)
+                self._refresh_multi_radio_tables()
+                self._emit_device_profiles_changed()
+                QMessageBox.warning(
+                    self,
+                    "Receiver Launch Setup",
+                    "The receiver profile was saved, but FIO could not save its software launch setup. "
+                    "Open Receiver Setup and save the launch choice again.",
+                )
+                return False
 
         if first_radio or is_primary_edit or int(saved.get("runtime_primary", 0) or 0) == 1:
             try:
@@ -27538,8 +27916,15 @@ class SettingsTab(QWidget):
         if len(selected) > 1:
             QMessageBox.warning(self, "Radio Details", "Please select only one radio to edit.")
             return
-        existing = selected[0]
-        updated = self._open_device_profile_dialog(existing=existing)
+        self._edit_device_profile_at_step(selected[0])
+
+    def _edit_device_profile_at_step(
+        self,
+        existing: Dict[str, Any],
+        *,
+        initial_step: str = "",
+    ) -> None:
+        updated = self._open_device_profile_dialog(existing=existing, initial_step=initial_step)
         if not updated:
             return
         guided_plan_id = int(updated.pop("guided_frequency_plan_id", 0) or 0)

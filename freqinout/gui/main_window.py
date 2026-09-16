@@ -6,6 +6,7 @@ import re
 import sqlite3
 import sys
 import time
+import uuid
 from typing import Callable, Mapping, Sequence
 
 from PySide6.QtWidgets import (
@@ -64,7 +65,10 @@ from freqinout.core.condition_sop_audit import (
 )
 from freqinout.core.station_runtime_manager import StationRuntimeManager
 from freqinout.core.scheduler_engine import SchedulerEngine
-from freqinout.core.receiver_qualification_service import ReceiverQualificationCoordinator
+from freqinout.core.receiver_qualification_service import (
+    QUALIFICATION_REQUEST_ID_FIELD,
+    ReceiverQualificationCoordinator,
+)
 from freqinout.core.scheduler_coordination import EndpointResult
 from freqinout.core.background_ingest import BackgroundIngestController
 from freqinout.core.message_projection_maintenance import MessageProjectionMaintenanceService
@@ -249,7 +253,11 @@ class MainWindow(QMainWindow):
         self._message_projection_catchup_pending = False
         self._message_projection_followup_reason = ""
         self._message_projection_refresh_sequence = 0
-        self._receiver_qualification_profiles: dict[int, dict[str, object]] = {}
+        # Request IDs, rather than database IDs, own pending qualification
+        # state.  Guided setup can test an unsaved receiver draft (profile 0),
+        # and a newer test must not let a late endpoint-lane completion update
+        # the dialog that initiated it.
+        self._receiver_qualification_profiles: dict[str, dict[str, object]] = {}
         self._message_projection_cycle_finished.connect(
             self._on_message_projection_cycle_finished
         )
@@ -12346,6 +12354,9 @@ class MainWindow(QMainWindow):
         )
         payload = {
             "profile_id": profile_id,
+            QUALIFICATION_REQUEST_ID_FIELD: str(
+                profile.get(QUALIFICATION_REQUEST_ID_FIELD) or ""
+            ).strip(),
             "verification_state": str(verification_state or "failed").strip().lower(),
             "detail": str(detail or "").strip(),
             "verification": evidence,
@@ -12360,18 +12371,24 @@ class MainWindow(QMainWindow):
         if self._shutting_down or not isinstance(profile, Mapping):
             return
         snapshot = dict(profile)
-        try:
-            profile_id = int(snapshot.get("id") or snapshot.get("device_profile_id") or 0)
-        except (TypeError, ValueError):
-            profile_id = 0
-        if profile_id > 0:
-            self._receiver_qualification_profiles[profile_id] = snapshot
+        request_id = str(snapshot.get(QUALIFICATION_REQUEST_ID_FIELD) or "").strip()
+        if not request_id:
+            request_id = uuid.uuid4().hex
+        snapshot[QUALIFICATION_REQUEST_ID_FIELD] = request_id
+        # A repeated queued signal is not a second operator action.  Keeping
+        # the original snapshot avoids a duplicate completion racing its own
+        # correlation token on the UI thread.
+        if request_id in self._receiver_qualification_profiles:
+            return
+        self._receiver_qualification_profiles[request_id] = snapshot
         try:
             submission = self.receiver_qualification.request(
                 snapshot,
                 self._receiver_qualification_finished.emit,
+                qualification_request_id=request_id,
             )
         except Exception as exc:
+            self._receiver_qualification_profiles.pop(request_id, None)
             detail = str(exc).strip() or "Receiver qualification could not start."
             self._publish_receiver_qualification_result(
                 snapshot,
@@ -12380,6 +12397,7 @@ class MainWindow(QMainWindow):
             )
             return
         if not submission.accepted:
+            self._receiver_qualification_profiles.pop(request_id, None)
             detail = f"Receiver qualification was not started ({submission.disposition}); manual tuning remains available."
             self._publish_receiver_qualification_result(
                 snapshot,
@@ -12393,11 +12411,17 @@ class MainWindow(QMainWindow):
         if not isinstance(result, EndpointResult):
             return
         actual = result.actual_state()
-        try:
-            profile_id = int(actual.get("profile_id") or 0)
-        except (TypeError, ValueError):
-            profile_id = 0
-        profile = self._receiver_qualification_profiles.pop(profile_id, {"id": profile_id})
+        request_id = str(actual.get(QUALIFICATION_REQUEST_ID_FIELD) or "").strip()
+        if not request_id:
+            # An endpoint result without the captured token is not safe to
+            # associate with an unsaved draft or an in-flight newer request.
+            return
+        profile = self._receiver_qualification_profiles.pop(request_id, None)
+        if profile is None:
+            # The request already completed, was rejected, or was superseded.
+            # Ignore duplicate/stale lane callbacks rather than changing UI
+            # evidence for a newer configuration.
+            return
         verification = actual.get("verification")
         verified = bool(
             result.status in {"applied_and_verified", "applied_unverified"}

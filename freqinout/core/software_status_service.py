@@ -36,6 +36,9 @@ PROGRAM_TOKENS: Dict[str, Sequence[str]] = {
     ),
     "JS8Spotter": ("js8spotter", "js8spotter.exe", "js8spotter.py"),
     "CommStat": ("commstat", "commstat.exe", "commstat.py"),
+    # SDR++ is only added to a receiver-scoped launch bundle.  It has no
+    # global settings path because a station can host multiple receiver apps.
+    "SDR++": ("sdrpp", "sdrpp.exe", "sdr++.exe"),
 }
 
 PROGRAM_PATH_KEYS: Dict[str, str] = {
@@ -390,7 +393,12 @@ class SoftwareStatusService:
         path_parts = [Path(os.path.expanduser(os.path.expandvars(value))) for value in parts[:4] if value and not value.startswith("-")]
         target_paths = {str(path.resolve(strict=False)).casefold() for path in path_parts if path.is_absolute() or "/" in str(path) or "\\" in str(path)}
         if not target_paths:
-            return False
+            # A launch recipe may intentionally use a PATH-resolved command
+            # (``sdrpp``) or a platform launcher (``open -a SDR++``).  In that
+            # case there is no durable filesystem target to compare, so use
+            # the cached, program-specific token set rather than forcing a
+            # readiness timeout after a successful launch.
+            return self.cached_program_is_running(program_name)
         cls = type(self)
         for record in cls._shared_proc_records:
             candidates = [str(record.get("exe_path") or "")]

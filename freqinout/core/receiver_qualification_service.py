@@ -9,8 +9,11 @@ commands, so an explicit setup test cannot race an active schedule tune.
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
+import re
 import threading
 import time
+import uuid
 from typing import Callable, Mapping, Optional
 
 from freqinout.core.receiver_control import (
@@ -27,6 +30,32 @@ from freqinout.core.scheduler_endpoint_lane import EndpointLaneRegistry, LaneSub
 
 ReceiverClientFactory = Callable[[Mapping[str, object]], Optional[ReceiverControlClient]]
 QualificationCompletion = Callable[[EndpointResult], None]
+
+
+# This is deliberately transient.  A qualification can be useful while the
+# guided-radio dialog still holds an unsaved draft, but only a saved profile
+# may retain its resulting evidence.  The token lets the UI distinguish that
+# draft from another open dialog (and from an earlier click on the same
+# dialog) without inventing a database identity.
+QUALIFICATION_REQUEST_ID_FIELD = "qualification_request_id"
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+
+
+def _qualification_request_id(value: object = None) -> str:
+    """Return a bounded opaque correlation token for one test request.
+
+    UI callers normally provide a UUID-like value.  Generating one here as a
+    fallback keeps the coordinator safe for non-UI callers and existing saved
+    profile flows.  Rejecting malformed caller values prevents an unbounded
+    display/input string from becoming lane metadata or an endpoint result.
+    """
+
+    token = str(value or "").strip()
+    if token:
+        if _REQUEST_ID_RE.fullmatch(token) is None:
+            raise ValueError("Receiver test request ID is invalid.")
+        return token
+    return uuid.uuid4().hex
 
 
 class ReceiverQualificationCoordinator:
@@ -52,11 +81,41 @@ class ReceiverQualificationCoordinator:
         self,
         profile: Mapping[str, object],
         completion: QualificationCompletion,
+        *,
+        qualification_request_id: object = None,
     ) -> LaneSubmission:
         """Queue one explicit test without opening an endpoint on the caller."""
 
         snapshot = dict(profile)
-        identity = receiver_identity_from_profile(snapshot)
+        request_id = _qualification_request_id(
+            qualification_request_id
+            if qualification_request_id is not None
+            else snapshot.get(QUALIFICATION_REQUEST_ID_FIELD)
+        )
+        snapshot[QUALIFICATION_REQUEST_ID_FIELD] = request_id
+        raw_profile_id = snapshot.get("id") or snapshot.get("device_profile_id")
+        if raw_profile_id in (None, ""):
+            profile_id = 0
+        else:
+            try:
+                profile_id = int(raw_profile_id)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("receiver profile ID is invalid") from exc
+        if profile_id < 0:
+            raise ValueError("receiver profile ID is invalid")
+        # The existing adapter contract correctly requires a positive profile
+        # identity.  Supply one only to the in-memory adapter snapshot for a
+        # draft; the operator snapshot and all evidence below retain ID 0.
+        # A deterministic, bounded hash avoids both database allocation and a
+        # fake stable profile identity.
+        factory_snapshot = snapshot
+        if profile_id == 0:
+            transient_id = int.from_bytes(
+                hashlib.sha256(request_id.encode("utf-8")).digest()[:8], "big"
+            )
+            factory_snapshot = dict(snapshot)
+            factory_snapshot["id"] = max(1, transient_id)
+        identity = receiver_identity_from_profile(factory_snapshot)
         adapter = str(snapshot.get("sdr_adapter") or "manual").strip().lower().replace("-", "_")
         if adapter in {"", "manual", "none"}:
             raise ValueError("Select a receive-only FIO control adapter before testing.")
@@ -68,17 +127,17 @@ class ReceiverQualificationCoordinator:
         endpoint_key = EndpointKey.network(adapter, host, port, target=target)
         if self._cancelled.is_set():
             return LaneSubmission(endpoint_key, 0, "stopped", False)
-        profile_id = int(snapshot.get("id") or snapshot.get("device_profile_id") or 0)
-        if profile_id <= 0:
-            raise ValueError("Save this receiver profile before testing control.")
-        occurrence_id = f"receiver-qualification:{profile_id}:{time.monotonic_ns()}"
+        # A draft is intentionally allowed to run this reversible test.  Its
+        # evidence remains transient until the enclosing guided setup saves
+        # the profile and explicitly writes it through normal validation.
+        occurrence_id = f"receiver-qualification:{request_id}"
 
         def _is_cancelled() -> bool:
             return self._cancelled.is_set()
 
         def _operation() -> Mapping[str, object]:
             deadline = self._monotonic() + self._timeout_s
-            client = self._factory(snapshot)
+            client = self._factory(factory_snapshot)
             if client is None:
                 return {
                     "ok": False,
@@ -155,6 +214,7 @@ class ReceiverQualificationCoordinator:
                     "detail": qualified.detail,
                     "actual_state": {
                         "profile_id": profile_id,
+                        QUALIFICATION_REQUEST_ID_FIELD: request_id,
                         "verification_state": "verified" if qualified.success else "failed",
                         "operator_state": qualified.operator_state,
                         "verification": evidence,
@@ -171,6 +231,10 @@ class ReceiverQualificationCoordinator:
         def _complete(result: EndpointResult) -> None:
             actual = result.actual_state()
             actual.setdefault("profile_id", profile_id)
+            # Lane-generated timeout/superseded results do not retain the
+            # operation's actual state.  Reattach the captured request token
+            # so every completion is safely correlatable on the UI thread.
+            actual.setdefault(QUALIFICATION_REQUEST_ID_FIELD, request_id)
             completion(
                 EndpointResult.create(
                     endpoint_key=result.endpoint_key,
@@ -210,4 +274,4 @@ class ReceiverQualificationCoordinator:
             return self._cancelled.is_set() and not self._active_clients
 
 
-__all__ = ["ReceiverQualificationCoordinator"]
+__all__ = ["QUALIFICATION_REQUEST_ID_FIELD", "ReceiverQualificationCoordinator"]

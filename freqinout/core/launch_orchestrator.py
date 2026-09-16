@@ -106,6 +106,13 @@ LAUNCH_APP_META: Dict[str, Dict[str, Any]] = {
         "fallback_cmds": ["commstat", "CommStat"],
         "folder_candidates": ["commstat.exe", "CommStat.exe", "commstat.py", "commstat", "CommStat"],
     },
+    # Receiver-only setup uses a per-radio path/command override.  This entry
+    # intentionally stays out of ``LAUNCH_APP_ORDER`` so conventional radio
+    # launch configuration does not gain an unrelated SDR application.
+    "SDR++": {
+        "fallback_cmds": ["sdrpp", "SDR++"],
+        "folder_candidates": ["sdrpp.exe", "SDR++.exe", "sdrpp", "SDR++"],
+    },
 }
 
 

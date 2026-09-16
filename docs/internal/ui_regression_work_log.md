@@ -6571,3 +6571,107 @@ The Actions cell has no section-wide tooltip; guidance appears only for the
 specific icon under the pointer.
 Changed Python modules compile and `git diff --check` passes. No runtime state,
 endpoint, commit, or remote repository was changed.
+
+## 2026-09-16 — One-session SDR++ receiver setup
+
+Status: implementation gate passed; live RTL-SDR/SDR++ qualification remains
+operator-assisted and is required before the hardware combination is labeled
+FIO-verified.
+
+The receive-only wizard now performs its reversible SDR++ RigCTL qualification
+before the first profile save. It skips the empty conventional Software step,
+keeps the receiver application, adapter, target, endpoint, verification result,
+and tuning opt-in in one scan path, and tells the operator to continue through
+Review after a pass. The result is persisted only when Save Radio completes;
+Cancel creates no profile or evidence.
+
+Draft qualification uses a bounded opaque request ID through the shared
+receiver endpoint lane. Profile ID zero remains a draft rather than a database
+identity. MainWindow tracks pending work by request ID, every lane outcome
+reattaches that correlation, and the dialog accepts only its current request.
+Late, duplicate, stale, malformed-ID, negative-ID, timeout, and superseded
+results cannot update newer evidence. Existing saved-profile validation,
+readback requirements, exact host/port/target evidence matching, receive-only
+adapter isolation, and the absence of PTT/transmit capability remain unchanged.
+
+Saved observer profiles now expose a direct **Receiver Setup…** action and a
+receiver-specific application/control chip. **Receiver Setup: Test Control**
+opens the receiver connection card directly. Observer profiles no longer claim
+that conventional radio apps are required, while ordinary transceivers retain
+their existing Apps warning and software-administration behavior. All visual
+treatment uses shared theme button roles and existing font-derived layout
+helpers.
+
+Work packages and model ownership:
+
+- Primary Codex GPT-5, high reasoning: workflow architecture, concurrency and
+  stale-result review, UI integration, specification/work-log reconciliation,
+  delegated-diff review, and final exit gate.
+- `gpt-5.6-terra`, high reasoning: bounded receiver-qualification coordinator,
+  MainWindow correlation integration, and focused concurrency tests.
+- `gpt-5.6-luna`, medium reasoning: bounded UI/test-design audit covering the
+  one-session path, saved-observer route, and transceiver non-regression.
+
+Acceptance evidence: the focused guided receiver, qualification coordinator,
+MainWindow correlation, guided setup, and radio-profile UI partition passes
+**245 tests**. The broader receiver-control, scheduler-lane, SDR compatibility,
+SDR++ adapter, guided setup, and radio-profile partition passes **292 tests**.
+Changed modules compile and `git diff --check` passes. Native Light/Dark,
+Normal/Large Text, compact-window, and live RTL-SDR/SDR++ verification remain
+operator-assisted. No runtime database, endpoint, commit, or remote repository
+was changed by the automated gate.
+
+## 2026-09-16 — Receive-only SDR++ software launch during guided setup
+
+Status: implementation exit gate passed; live Linux/Windows/macOS launch and
+RTL-SDR/SDR++ qualification remain operator-assisted acceptance items.
+
+The observer workflow now includes a dedicated **Receiver Stack** step. The
+operator can choose SDR++ and opt into **Launch this receiver application with
+FIO** while creating or editing the receiver. Selection proposes a portable
+launch target (`sdrpp`, `sdrpp.exe`, or `open -a SDR++`), while retaining a
+browseable override for packaged executables and application bundles. The
+ordinary FLRig/FLDigi/FLMsg/FLAmp/JS8/VarAC checklist remains absent from the
+observer path.
+
+Launch intent remains dialog-local until Save Radio. FIO saves the observer
+profile first, then writes the approved launch item to the existing radio-scoped
+launch-bundle store using the real profile ID. Cancel writes nothing. Bundle
+failure reports that the profile was saved and instructs the operator to reopen
+Receiver Setup; it is never reported as complete. Existing observer bundles
+reload into the guided controls.
+
+The runtime boundary is capability-enforced. Observer launch rows carry
+`execution_scope=receive_only`; the planner rejects conventional or unapproved
+items for observer profiles. The initial allowlist contains SDR++ only, and its
+target validator rejects an approved label paired with an arbitrary executable.
+Receiver items add no PTT, transmit, scheduler, radio-control, or conventional
+app dependencies. Test control remains independent of launch ownership and
+continues to work with an operator-started SDR++. PATH-resolved and platform
+launcher commands use cached SDR++ process tokens, preventing duplicate launch
+and false readiness timeouts without adding a UI-thread process scan.
+
+No database schema migration was required. The existing readiness JSON extension
+stores the receive-only execution scope. Conventional transceiver launch
+planning and default launch catalogs remain unchanged.
+
+Work packages and model ownership:
+
+- Primary Codex high-reasoning model: architecture and safety boundary,
+  integration/persistence, arbitrary-command hardening, specification and work
+  log, delegated-diff review, and final acceptance gate.
+- `gpt-5.6-terra`, high reasoning: Qt-free receive-only launch contract,
+  launch-bundle serialization, planner enforcement, SDR++ discovery/readiness,
+  and focused core tests.
+- `gpt-5.6-luna`, medium reasoning: bounded Receiver Stack guided UI, responsive
+  shared-theme controls, staging metadata, and focused UI coverage.
+- `gpt-5.6-terra`, medium reasoning: independent persistence, capability,
+  readiness, and migration audit.
+
+Acceptance evidence: the core launch, persistence, discovery, process status,
+planner, receiver adapter, and concurrency partition passes **212 tests** with
+**4 environment-dependent skips**. The guided receiver UI, radio-scoped
+software settings, launch persistence, and guided setup partition passes **242
+tests**. Changed Python modules compile and `git diff --check` passes. No runtime
+database, receiver endpoint, commit, or remote repository was changed by the
+automated gate.

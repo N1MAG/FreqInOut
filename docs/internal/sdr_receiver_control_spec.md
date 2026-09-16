@@ -243,6 +243,97 @@ Configuration begins with the hardware the operator recognizes:
    lane.
 5. Only a passed test produces **FIO tuning ready** for that exact configuration.
 
+### One-session guided receiver setup
+
+The receive-only setup is a guided-workflow redesign governed by
+`task_oriented_workspace_design_guideline.md` and
+`multirig_product_ui_contract.md`.
+
+- **Primary operator task:** Configure and verify an SDR receiver once, then save
+  a usable FIO receiver profile.
+- **Starting context:** The operator has selected receive-only SDR hardware and
+  has its receiver application, normally SDR++, running with the intended VFO.
+- **Completion outcome:** One saved observer profile retains either explicit
+  manual-tuning state or matching reversible tune/readback/restore evidence and
+  the operator's FIO-tuning opt-in.
+- **Normal sequence:** `Radio -> Receiver Stack -> Receiver connection -> Test
+  control -> Enable FIO tuning -> RF Guard -> Schedule -> Review -> Save Radio`.
+  The Software page is receiver-specific: it contains only the approved
+  receive-only application and launch choice, never the conventional
+  transceiver checklist.
+- **Primary actions:** `Test control` is primary while the endpoint is ready for
+  qualification. `Save Radio` becomes primary on Review. A passed test visibly
+  directs the operator to enable FIO tuning and continue; a failed test leaves
+  the profile editable and manual tuning available.
+- **Essential state and Why:** Application, adapter, target, endpoint, test in
+  progress, failure, verified evidence, and FIO-tuning state remain together on
+  the receiver card. A disabled action explains the missing prerequisite in
+  visible guidance or its focused tooltip.
+- **Secondary and advanced work:** Raw host, port, and stable target identity
+  remain editable on the receiver card. RF sharing/guard details and schedule
+  assignment remain later guided steps. Conventional app flags, launch paths,
+  and transceiver controls do not appear in the receiver's primary scan path.
+- **Workspace archetype:** Guided workflow, because endpoint qualification is a
+  staged, safety-sensitive operation followed by review and persistence.
+- **Responsive behavior:** One dialog scroll owner preserves the task order.
+  Step buttons wrap using font-derived controls; form rows wrap at compact
+  widths; evidence and failure copy grow naturally without fixed heights.
+- **Shared theme/components:** The workflow uses the shared application theme,
+  semantic `button_style` roles, guided forms, font-derived controls, existing
+  verification summary, and the normal dialog button box. It adds no local
+  palette or fixed text-bearing height.
+- **Performance boundary:** Field edits, validation, navigation, paint, resize,
+  and evidence rendering are cache-only. Only explicit `Test control` submits
+  bounded work to the receiver endpoint lane.
+
+An unsaved receiver draft may run the reversible test without creating a
+temporary database row. A bounded opaque qualification request ID correlates
+the draft, endpoint-lane result, and open dialog. Late, duplicate, or mismatched
+results are ignored. Verification evidence remains dialog-local until the
+operator saves through normal profile validation; Cancel leaves no profile or
+verification state behind. Saved-profile tests use the same request correlation
+in addition to profile identity.
+
+After save, an observer profile exposes one direct **Receiver Setup…** action
+and a receiver-specific status chip. It must not report **Apps: Needs Setup**
+merely because no conventional FLRig, JS8Call, Fast Light, CommStat, or VarAC
+flag is enabled. Opening Receiver Setup returns directly to the connection and
+verification card rather than an empty app-connections page.
+
+### Receive-only software launch
+
+Receiver application launch is opt-in and radio-scoped. The first supported
+application is **SDR++**. Selecting SDR++ in Receiver Stack creates a suggested
+platform launch target (`sdrpp`, `sdrpp.exe`, or `open -a SDR++`); the operator
+may browse to a specific executable or application bundle and may disable FIO
+launch while retaining manual startup.
+
+- The saved launch recipe uses the existing per-radio launch-bundle store; no
+  schema migration or conventional `use_*` application flag is required.
+- Every observer launch item carries `execution_scope=receive_only`. The launch
+  planner rejects ordinary or transmit-capable entries for observer profiles,
+  including entries injected outside guided setup. SDR++ is the only approved
+  item until another receiver application receives its own capability review.
+- A receiver launch item has no PTT, transmit, scheduler, radio-control, or
+  FLRig/JS8 dependency. Selecting it does not enable FIO tuning; reversible
+  tune/readback/restore qualification remains a separate explicit action.
+- Test control does not launch SDR++ and does not require FIO launch ownership.
+  It can test an application the operator started independently. At runtime,
+  an already-running SDR++ process satisfies cached process readiness and is
+  not launched a second time.
+- The dialog holds launch intent only in memory. Cancel writes nothing. On Save
+  Radio, FIO first obtains the real observer profile ID and then creates or
+  replaces that profile's launch bundle. A bundle-save failure reports the
+  recoverable partial outcome: the receiver profile was saved, but Receiver
+  Setup must be reopened to retry the launch choice.
+- The launch target remains editable because packaging varies by operating
+  system. FIO creates the launch recipe; it does not rewrite SDR++'s native
+  device or module configuration. The operator still selects the RTL-SDR and
+  enables SDR++'s RigCTL Server as described below.
+- All controls use shared theme roles, font-derived heights, and responsive
+  form wrapping. Selection and paint remain cache-only; no process scan,
+  endpoint call, or filesystem crawl occurs during rendering.
+
 For SDR++, the operator first selects the intended VFO inside SDR++ and enables
 the RigCTL Server module's tuning control. FIO uses the saved `selected-vfo`
 label only as stable endpoint identity; SDR++ RigCTL does not expose a named VFO

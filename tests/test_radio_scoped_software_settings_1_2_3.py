@@ -5217,6 +5217,13 @@ def test_radio_profile_no_software_message_warns_for_enabled_radios() -> None:
         "No software options are enabled for this radio. Enable at least one software option above so FIO can operate it.",
         "warning",
     )
+    observer_message, observer_role = SettingsTab._radio_profile_no_software_message(
+        tab,
+        {"device_class": "observer", "sdr_application": "SDR++", "enabled": 1},
+    )
+    assert "SDR++ owns this receive-only SDR" in observer_message
+    assert "conventional radio app options are not required" in observer_message
+    assert observer_role == "info"
     assert SettingsTab._radio_software_enabled({"control_backend": "flrig"}, "flrig") is True
     assert SettingsTab._radio_software_enabled({"control_backend": "js8call"}, "js8call") is True
     assert SettingsTab._radio_software_enabled({"control_backend": "rigctld"}, "rigctld") is True
@@ -5249,6 +5256,56 @@ def test_radio_profile_no_software_stack_guidance_item_warns_only_when_actionabl
     )
     assert SettingsTab._radio_profile_has_software_option(tab, {"control_backend": "rigctld"}) is True
     assert SettingsTab._radio_profile_no_software_stack_guidance_item(tab, {"enabled": 1, "use_varac": True}) is None
+    assert SettingsTab._radio_profile_no_software_stack_guidance_item(
+        tab,
+        {"device_class": "observer", "enabled": 1, "sdr_application": "SDR++"},
+    ) is None
+
+
+def test_observer_profile_tasks_point_to_receiver_setup_without_app_warning() -> None:
+    from freqinout.gui.settings_tab import SettingsTab
+
+    tab = SettingsTab.__new__(SettingsTab)
+    tab._effective_assignment_map = lambda: {}
+    profile = {
+        "id": 81,
+        "device_class": "observer",
+        "sdr_application": "SDR++",
+        "sdr_adapter": "sdrpp_rigctl",
+        "sdr_host": "127.0.0.1",
+        "sdr_port": 4532,
+        "sdr_target": "selected-vfo",
+        "sdr_control_enabled": 0,
+        "sdr_verification_state": "unverified",
+    }
+
+    assert SettingsTab._radio_profile_guided_task_role(tab, "apps", profile, None) == "success_muted"
+    assert SettingsTab._radio_profile_guided_task_state_label(tab, "apps", profile, None) == "Ready"
+    assert SettingsTab._radio_profile_guided_task_state_label(tab, "control", profile, None) == "Receive Only"
+    assert SettingsTab._radio_profile_guided_task_state_label(tab, "connections", profile, None) == "Test Control"
+    assert SettingsTab._radio_profile_guided_task_role(tab, "connections", profile, None) == "eligible_warning"
+
+    transceiver = {"id": 82, "device_class": "tx_rx", "enabled": 1}
+    assert SettingsTab._radio_profile_guided_task_state_label(tab, "apps", transceiver, None) == "Needs Setup"
+    assert SettingsTab._radio_profile_guided_task_role(tab, "apps", transceiver, None) == "eligible_warning"
+
+
+def test_observer_receiver_setup_task_opens_receiver_editor_directly() -> None:
+    from freqinout.gui.settings_tab import SettingsTab
+
+    tab = SettingsTab.__new__(SettingsTab)
+    calls: list[str] = []
+    tab._selected_settings_radio_profile = lambda: {"id": 81, "device_class": "observer"}
+    tab._open_selected_receiver_setup = lambda: calls.append("receiver")
+    tab._select_radio_profile_guided_task = lambda key: calls.append(str(key))
+
+    SettingsTab._on_radio_profile_guided_task_requested(tab, "connections")
+    assert calls == ["receiver"]
+
+    calls.clear()
+    tab._selected_settings_radio_profile = lambda: {"id": 82, "device_class": "tx_rx"}
+    SettingsTab._on_radio_profile_guided_task_requested(tab, "connections")
+    assert calls == ["connections"]
 
 
 def test_radio_profile_no_software_guardrail_is_wired_to_empty_chip_state() -> None:

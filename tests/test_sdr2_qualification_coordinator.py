@@ -20,7 +20,10 @@ from freqinout.core.receiver_control import (
     ReceiverState,
     receiver_identity_from_profile,
 )
-from freqinout.core.receiver_qualification_service import ReceiverQualificationCoordinator
+from freqinout.core.receiver_qualification_service import (
+    QUALIFICATION_REQUEST_ID_FIELD,
+    ReceiverQualificationCoordinator,
+)
 from freqinout.core.scheduler_coordination import EndpointKey, EndpointResult
 from freqinout.core.scheduler_endpoint_lane import EndpointLaneRegistry
 
@@ -187,6 +190,40 @@ def test_unavailable_factory_result_falls_back_without_claiming_verified_control
         registry.shutdown(wait=True)
 
 
+def test_unsaved_draft_qualification_preserves_transient_request_id() -> None:
+    """A profile-0 guided draft can be tested but has no persistence identity."""
+
+    profile = _profile(0)
+    profile["id"] = 0
+    request_id = "draft-rtl-sdr-001"
+    registry = EndpointLaneRegistry()
+    completed = threading.Event()
+    results: list[EndpointResult] = []
+
+    coordinator = ReceiverQualificationCoordinator(
+        registry,
+        lambda snapshot: _QualificationReceiver(snapshot),
+        timeout_s=2.0,
+    )
+    try:
+        submission = coordinator.request(
+            profile,
+            lambda result: (results.append(result), completed.set()),
+            qualification_request_id=request_id,
+        )
+        assert submission.accepted is True
+        _wait(completed, "unsaved draft qualification did not complete")
+        actual = results[0].actual_state()
+        assert actual["profile_id"] == 0
+        assert actual[QUALIFICATION_REQUEST_ID_FIELD] == request_id
+        assert actual["verification_state"] == "verified"
+        # The coordinator must not make an unsaved draft look persistent.
+        assert profile.get(QUALIFICATION_REQUEST_ID_FIELD) is None
+    finally:
+        coordinator.stop()
+        registry.shutdown(wait=True)
+
+
 def test_same_target_requests_share_one_lane_and_newer_request_supersedes_old() -> None:
     profile = _profile(73)
     registry = EndpointLaneRegistry()
@@ -202,16 +239,32 @@ def test_same_target_requests_share_one_lane_and_newer_request_supersedes_old() 
 
     coordinator = ReceiverQualificationCoordinator(registry, factory, timeout_s=2.0)
     try:
-        first = coordinator.request(profile, results.append)
+        first_request_id = "saved-73-first"
+        second_request_id = "saved-73-second"
+        first = coordinator.request(
+            profile,
+            results.append,
+            qualification_request_id=first_request_id,
+        )
         assert first.accepted
         _wait(receivers[0].started, "first qualification did not enter shared lane")
-        second = coordinator.request(profile, lambda result: (results.append(result), completed.set()))
+        second = coordinator.request(
+            profile,
+            lambda result: (results.append(result), completed.set()),
+            qualification_request_id=second_request_id,
+        )
         assert second.accepted
         assert second.disposition == "coalesced"
         assert len(registry) == 1
         first_gate.set()
         _wait(completed, "newer qualification did not complete")
         assert any(result.status == "superseded" for result in results)
+        request_ids_by_status = {
+            result.status: result.actual_state()[QUALIFICATION_REQUEST_ID_FIELD]
+            for result in results
+        }
+        assert request_ids_by_status["superseded"] == first_request_id
+        assert request_ids_by_status["applied_unverified"] == second_request_id
         assert len(receivers) == 2
         assert receivers[0].close_calls >= 1
         assert receivers[1].closed is True

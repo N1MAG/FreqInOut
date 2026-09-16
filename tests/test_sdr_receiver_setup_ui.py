@@ -19,7 +19,7 @@ def _application_or_skip():
 def _open_receiver_dialog(
     monkeypatch,
     tmp_path,
-    profile: dict[str, object],
+    profile: dict[str, object] | None,
     inspect,
     *,
     service_ready: bool = False,
@@ -51,6 +51,71 @@ def _open_receiver_dialog(
     finally:
         tab.deleteLater()
         app.processEvents()
+
+
+def test_unsaved_receiver_can_test_and_keep_verified_evidence_in_one_session(monkeypatch, tmp_path) -> None:
+    emitted: list[dict[str, object]] = []
+
+    def configure(tab) -> None:
+        def complete(payload) -> None:
+            snapshot = dict(payload)
+            emitted.append(snapshot)
+            tab.receiver_control_test_completed.emit(
+                {
+                    "profile_id": 0,
+                    "qualification_request_id": snapshot["qualification_request_id"],
+                    "verification_state": "verified",
+                    "detail": "Frequency tuning and restoration were verified.",
+                    "verification": {
+                        "schema_version": 1,
+                        "adapter": snapshot["sdr_adapter"],
+                        "host": snapshot["sdr_host"],
+                        "port": int(snapshot["sdr_port"]),
+                        "target": snapshot["sdr_target"],
+                        "tested_at_utc": "2026-09-16T18:00:00+00:00",
+                        "tune_readback_verified": True,
+                        "restore_readback_verified": True,
+                    },
+                }
+            )
+
+        tab.receiver_control_test_requested.connect(complete)
+
+    def inspect(dialog) -> None:
+        from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QLabel, QPushButton
+
+        setup_type = dialog.findChild(QComboBox, "guidedSetupType")
+        adapter = dialog.findChild(QComboBox, "guidedReceiverAdapter")
+        connection_step = dialog.findChild(QPushButton, "guidedWizardStep_connection")
+        button = dialog.findChild(QPushButton, "guidedReceiverTestControl")
+        enabled = dialog.findChild(QCheckBox, "guidedReceiverControlEnabled")
+        verification = dialog.findChild(QLabel, "guidedReceiverVerificationSummary")
+        assert setup_type is not None
+        setup_type.setCurrentIndex(setup_type.findData("sdr_observer"))
+        assert adapter is not None
+        adapter.setCurrentIndex(adapter.findData("sdrpp_rigctl"))
+        QApplication.processEvents()
+        assert connection_step is not None and connection_step.isEnabled()
+        connection_step.click()
+        QApplication.processEvents()
+        assert button is not None and not button.isHidden() and button.isEnabled()
+        assert enabled is not None and not enabled.isEnabled()
+        button.click()
+        QApplication.processEvents()
+        QApplication.processEvents()
+        assert emitted and emitted[0]["id"] == 0
+        assert str(emitted[0]["qualification_request_id"])
+        assert verification is not None and "FIO tuning ready" in verification.text()
+        assert enabled.isEnabled()
+
+    _open_receiver_dialog(
+        monkeypatch,
+        tmp_path,
+        None,
+        inspect,
+        service_ready=True,
+        configure_tab=configure,
+    )
 
 
 def test_receiver_setup_shows_adapter_choice_and_keeps_future_control_disabled(monkeypatch, tmp_path) -> None:
@@ -88,6 +153,35 @@ def test_receiver_setup_shows_adapter_choice_and_keeps_future_control_disabled(m
         },
         inspect,
     )
+
+
+def test_receiver_setup_exposes_receive_only_launch_stack_in_guided_flow(monkeypatch, tmp_path) -> None:
+    """Observer setup offers an RX-only app launch choice before Connection."""
+
+    def inspect(dialog) -> None:
+        from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QGroupBox, QLineEdit, QPushButton
+
+        setup_type = dialog.findChild(QComboBox, "guidedSetupType")
+        software_step = dialog.findChild(QPushButton, "guidedWizardStep_software")
+        stack = dialog.findChild(QGroupBox, "guidedReceiverSoftwareStack")
+        application = dialog.findChild(QComboBox, "guidedReceiverLaunchApplication")
+        launch_path = dialog.findChild(QLineEdit, "guidedReceiverLaunchPath")
+        launch_enabled = dialog.findChild(QCheckBox, "guidedReceiverLaunchEnabled")
+        assert setup_type is not None and software_step is not None
+        setup_type.setCurrentIndex(setup_type.findData("sdr_observer"))
+        QApplication.processEvents()
+        software_step.click()
+        QApplication.processEvents()
+        assert stack is not None and not stack.isHidden()
+        assert application is not None and application.findData("SDR++") >= 0
+        assert launch_path is not None and launch_enabled is not None
+        application.setCurrentIndex(application.findData("SDR++"))
+        QApplication.processEvents()
+        assert launch_path.text().strip()
+        assert launch_enabled.isEnabled()
+        assert launch_enabled.isChecked()
+
+    _open_receiver_dialog(monkeypatch, tmp_path, None, inspect)
 
 
 def test_receiver_setup_rejects_stale_persisted_evidence(monkeypatch, tmp_path) -> None:
@@ -203,6 +297,7 @@ def test_async_test_result_enables_opt_in_without_endpoint_io_on_ui_thread(monke
             tab.receiver_control_test_completed.emit(
                 {
                     "profile_id": int(payload["id"]),
+                    "qualification_request_id": payload["qualification_request_id"],
                     "verification_state": "verified",
                     "detail": "Frequency tuning and restoration were verified.",
                     "verification": evidence,

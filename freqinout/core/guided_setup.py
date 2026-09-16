@@ -540,6 +540,7 @@ def guided_setup_wizard_view(
     current_step_id: str,
     *,
     connection_visible: bool = True,
+    software_visible: bool = True,
 ) -> GuidedSetupWizardView:
     """Return UI-ready state for the Add Radio guided setup wizard."""
 
@@ -547,11 +548,15 @@ def guided_setup_wizard_view(
     visible_steps = tuple(
         item
         for item in ADD_RADIO_WIZARD_STEPS
-        if bool(connection_visible) or item[0] != "connection"
+        if (bool(connection_visible) or item[0] != "connection")
+        and (bool(software_visible) or item[0] != "software")
     )
     step_ids = [step_id for step_id, _label in visible_steps]
     if requested not in step_ids:
-        requested = "guard" if requested == "connection" and "guard" in step_ids else "radio"
+        if requested in {"software", "connection"}:
+            requested = "connection" if "connection" in step_ids else "guard"
+        if requested not in step_ids:
+            requested = "radio"
     current_index = step_ids.index(requested)
     previous_label = visible_steps[current_index - 1][1] if current_index > 0 else ""
     next_label = visible_steps[current_index + 1][1] if current_index < len(visible_steps) - 1 else ""

@@ -8,6 +8,12 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from freqinout.core.launch_bundle_store import normalize_launch_items
+from freqinout.core.receiver_software_stack import (
+    STANDARD_EXECUTION_SCOPE,
+    execution_scope,
+    is_observer_profile,
+    validate_observer_launch_items,
+)
 from freqinout.core.js8_storage import (
     expected_storage_mode,
     normalize_rig_name,
@@ -55,6 +61,7 @@ class PlannedInstance:
     dependencies: Tuple[str, ...] = ()
     readiness_policy: Tuple[Tuple[str, Any], ...] = ()
     configuration_paths: Tuple[Tuple[str, str], ...] = ()
+    execution_scope: str = STANDARD_EXECUTION_SCOPE
 
     def as_queue_item(self) -> Dict[str, Any]:
         return {
@@ -75,6 +82,7 @@ class PlannedInstance:
             "dependencies": list(self.dependencies),
             "readiness_policy": dict(self.readiness_policy),
             "configuration_paths": dict(self.configuration_paths),
+            "execution_scope": self.execution_scope,
         }
 
 
@@ -113,7 +121,10 @@ class StationLaunchPlanner:
             bundle = bundles.get(radio_id, {})
             if not _truthy(bundle.get("launch_enabled", False)):
                 continue
-            for order, raw_item in enumerate(normalize_launch_items(bundle.get("items", []))):
+            normalized_items = normalize_launch_items(bundle.get("items", []))
+            if is_observer_profile(profile):
+                validate_observer_launch_items(normalized_items)
+            for order, raw_item in enumerate(normalized_items):
                 item = self._with_profile_overrides(profile, raw_item)
                 if not item["enabled"] or not item["startup"]:
                     continue
@@ -158,6 +169,7 @@ class StationLaunchPlanner:
                     dependencies=dependencies,
                     readiness_policy=tuple(sorted(readiness.items())),
                     configuration_paths=self._configuration_paths(name, profile),
+                    execution_scope=execution_scope(item),
                 )
                 candidates.append((int(profile.get("display_order", 0) or 0), order, instance))
         deduped: Dict[str, Tuple[int, int, PlannedInstance]] = {}
@@ -185,6 +197,7 @@ class StationLaunchPlanner:
                 dependencies=existing.dependencies,
                 readiness_policy=existing.readiness_policy,
                 configuration_paths=existing.configuration_paths,
+                execution_scope=existing.execution_scope,
             )
             deduped[instance.instance_identity] = (prior[0], prior[1], merged)
         ordered = self._dependency_order(list(deduped.values()))
