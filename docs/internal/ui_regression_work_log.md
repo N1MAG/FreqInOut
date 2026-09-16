@@ -4,6 +4,46 @@ All new entries must follow the authoritative multi-model delivery contract in
 `docs/internal/project_delivery_rules.md` and record the required package/model,
 primary-review, acceptance, and exit-gate evidence.
 
+## 2026-09-16 — Inbox Spotter filtering, actions, selection, and comments
+
+Status: implementation complete; focused automated acceptance passed; native
+light/dark and normal/large-text visual qualification remains operator-assisted.
+
+Historical Spotter projections stored under the internal `sitrep` source were
+loaded by the MAGNET query but rejected by the public Spotter focus predicate,
+which produced an empty result. Focus and source filtering now share semantic
+source aliases, including the existing rule that CommStat evidence removes the
+legacy Spotter alias. A focused regression proves Spotter + MAGNET preserves
+the historical row while projected CommStat remains separated.
+
+The crowded View/flag/Relay/BBS/Delete text cluster is now one themed
+`Actions…` disclosure whose menu is built only on activation. The selection
+header is a real visible `Select all`/`Clear all` button with font-derived
+geometry, shared theme inheritance, accessible naming, and bounded-visible-page
+semantics even when no extra filter is active. Optional Spotter comments now
+match SuperSpotter's compact 34-column presentation and enforce a documented
+50-character authored limit without truncating received legacy evidence.
+
+Work packages and model: the primary GPT-5 model at high reasoning owned the
+filter semantics, UI redesign, comment compatibility review, specification,
+implementation, review, and acceptance gate. The active execution contract
+prohibited subagent delegation, so no delegated diff was produced.
+
+Attached logs showed bounded Inbox filter applications, generally 40–108 ms
+with isolated 145–182 ms applications while scopes were changing; no Inbox
+filter loop or UI hang appeared. A hotspot sample identified a cache-contract
+violation in Station Control Bar health refresh: it reopened the device-profile
+store on the GUI thread. That lookup now uses the already-maintained immutable
+profile/choice caches, with a source-level no-database regression. Other samples
+captured bounded background Spotter form discovery, Mesh adapter work, and a
+station-shell reflow; none implicated the Inbox predicate or action renderer.
+
+Acceptance evidence: 446 Inbox, Spotter, Compose, reader, BBS/Relay, projection,
+main-shell, responsive-layout, codec, and cache-contract tests passed. Changed
+Python files compile and the diff whitespace gate passes. Native visual
+qualification remains open. Existing unrelated documentation changes and
+rendered artifacts were preserved.
+
 ## 2026-09-15 — Settings Use Radio native-window stability
 
 Status: implementation and focused automated acceptance complete; native

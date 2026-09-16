@@ -7,6 +7,7 @@ from typing import Mapping, Sequence
 from freqinout.core.js8_spotter_forms import (
     FORM_TOKEN_RE,
     SPOTTER_COMMENTS_KEY,
+    SPOTTER_COMMENTS_MAX_LENGTH,
     SpotterFormField,
     normalize_form_code,
 )
@@ -174,6 +175,10 @@ def serialize_spotter_form_payload(
                 raise ValueError(f"Remove the closing bracket from {field.label}.")
             prompt_parts.append(f"{field.key.upper()}[{value}]")
     comment_text = _clean_inline(comments or values.get(SPOTTER_COMMENTS_KEY, ""))
+    if len(comment_text) > SPOTTER_COMMENTS_MAX_LENGTH:
+        raise ValueError(
+            f"Comments must be {SPOTTER_COMMENTS_MAX_LENGTH} characters or fewer."
+        )
     date_text = _clean_inline(datecode).upper()
     if date_text and not date_text.startswith("#"):
         date_text = f"#{date_text}"

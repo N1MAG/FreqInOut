@@ -228,6 +228,15 @@ def test_station_control_bar_refresh_is_cache_only() -> None:
     assert offenders == [], f"cache-only control-bar refresh performs I/O: {offenders}"
 
 
+def test_station_control_bar_health_profile_is_cache_only() -> None:
+    """Timer-driven health summaries must not reopen the profile database."""
+
+    path = Path(__file__).parents[1] / "freqinout" / "gui" / "main_window.py"
+    source = _function_source(path, "_station_command_health_profile")
+    assert "list_device_profiles" not in source
+    assert "_station_command_profile_cache" in source
+
+
 def test_settings_save_refreshes_only_relevant_active_consumers() -> None:
     """Inactive Settings-save consumers stay lazy; active SOP gets a bounded refresh."""
 

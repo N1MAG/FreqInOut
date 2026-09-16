@@ -2442,6 +2442,38 @@ def test_commstat_source_filter_matches_projected_commstat_sitreps() -> None:
     assert row_matches_inbox_focus(row, "commstat") is True
 
 
+def test_spotter_focus_and_group_filter_include_historical_sitrep_projection() -> None:
+    payload = SimpleNamespace(
+        source_family="sitrep",
+        source_label="SitRep",
+        source_family_label="Spotter",
+        message_type="F!701C",
+        report_group="MAGNET",
+    )
+    row = UnifiedMessage(
+        "F!701C",
+        "NEW",
+        "K7ETC",
+        "MAGNET",
+        1.0,
+        "",
+        "Basic check-in",
+        "sitrep",
+        payload,
+    )
+
+    assert "spotter" in message_source_aliases(row)
+    assert "commstat" not in message_source_aliases(row)
+    assert row_matches_type_filter(row, "Spotter") is True
+    assert row_matches_inbox_focus(row, "spotter") is True
+    assert row_matches_workspace_scope(
+        row,
+        selected_sources={"spotter"},
+        selected_groups={"MAGNET"},
+        configured_groups={"MAGNET"},
+    ) is True
+
+
 def test_message_filter_recovery_selects_all_when_stale_scope_hides_loaded_rows() -> None:
     class FakeDropdown:
         def __init__(self, options: list[tuple[str, str]]) -> None:
@@ -3685,6 +3717,33 @@ def test_header_select_all_only_selects_deletable_filtered_rows(tmp_path) -> Non
     tab = MessageViewerTab.__new__(MessageViewerTab)
     tab._messages_model = model
     tab._is_filter_active = lambda: True
+    tab._update_bulk_delete_buttons = lambda: None
+
+    MessageViewerTab._on_header_checkbox_toggled(tab, Qt.Checked.value)
+
+    assert model.calls == [([supported], True)]
+
+
+def test_header_select_all_is_available_without_requiring_a_filter(tmp_path) -> None:
+    msg_path = tmp_path / "message.k2s"
+    msg_path.write_text("message", encoding="utf-8")
+    rec = FileRecord(path=msg_path, origin="flmsg", size=msg_path.stat().st_size, mtime=msg_path.stat().st_mtime)
+    supported = UnifiedMessage("FLMSG", "NEW", "", "", 1.0, "", "File", "flmsg", rec)
+
+    class Model:
+        def __init__(self):
+            self.calls = []
+
+        def rows(self):
+            return [supported]
+
+        def set_selected_for_rows(self, rows, selected):
+            self.calls.append((list(rows), bool(selected)))
+
+    model = Model()
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    tab._messages_model = model
+    tab._is_filter_active = lambda: False
     tab._update_bulk_delete_buttons = lambda: None
 
     MessageViewerTab._on_header_checkbox_toggled(tab, Qt.Checked.value)

@@ -63,7 +63,11 @@ def row_matches_type_filter(row: MessageRowLike, type_sel: str) -> bool:
     if type_sel == "CommStat":
         return "commstat" in message_source_aliases(row)
     if type_sel == "Spotter":
-        return origin == "spotter"
+        # Historical Spotter projections were stored under the internal
+        # ``sitrep`` family. Source aliases also apply the semantic CommStat
+        # exclusion, so legacy Spotter rows cannot leak into CommStat or vice
+        # versa.
+        return "spotter" in message_source_aliases(row)
     if type_sel == "JS8Call":
         return origin == "js8"
     if type_sel == "FLMSG/FLAMP":

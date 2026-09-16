@@ -64,6 +64,7 @@ from PySide6.QtWidgets import (
     QAbstractScrollArea,
     QSplitter,
     QStyledItemDelegate,
+    QStyleOptionButton,
     QStyleOptionViewItem,
     QStyle,
     QMenu,
@@ -128,6 +129,29 @@ class _ComposeSetupGroupBox(QGroupBox):
             super().setMinimumHeight(max(0, int(height)))
         finally:
             self._compose_derived_height_update = False
+
+
+class _FontBoundedLineEdit(QLineEdit):
+    """Single-line editor whose compact width follows the active font."""
+
+    def __init__(self, *, display_columns: int, max_length: int, parent: QWidget | None = None):
+        self._display_columns = max(1, int(display_columns))
+        super().__init__(parent)
+        self.setMaxLength(max(1, int(max_length)))
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self._refresh_font_width()
+
+    def _refresh_font_width(self) -> None:
+        metrics = self.fontMetrics()
+        width = metrics.horizontalAdvance("0" * self._display_columns) + metrics.horizontalAdvance("MM")
+        self.setMinimumWidth(width)
+        self.setMaximumWidth(width)
+
+    def event(self, event) -> bool:
+        handled = super().event(event)
+        if event.type() in {QEvent.FontChange, QEvent.ApplicationFontChange, QEvent.StyleChange}:
+            self._refresh_font_width()
+        return handled
 
     @property
     def explicit_minimum_height(self) -> int:
@@ -341,6 +365,7 @@ from freqinout.gui.plan_context_label import PlanContextLabel
 from freqinout.core.js8_spotter_forms import (
     FORM_TOKEN_RE,
     SPOTTER_COMMENTS_KEY,
+    SPOTTER_COMMENTS_MAX_LENGTH,
     SpotterFormField,
     discover_spotter_forms,
     factory_mapping_for_form,
@@ -2667,7 +2692,7 @@ class MessageTableModel(QAbstractTableModel):
         self._row_index_by_key: Dict[tuple, int] = {}
         self._select_column_index = 0
         self._display_profile = "triage"
-        self._headers = ["", "Source", "Status", "From", "To", "Age", "Kind / Message", ""]
+        self._headers = ["", "Source", "Status", "From", "To", "Age", "Kind / Message", "Actions"]
         self._semantic_cache = self._build_semantic_cache(self._rows)
 
     @staticmethod
@@ -2753,13 +2778,7 @@ class MessageTableModel(QAbstractTableModel):
                 if col == 6:
                     return self._semantic_labels_for_row(row)[1]
             if col == 7:
-                if isinstance(row.payload, FileRecord) and (row.origin or "").strip().lower() == "bbs":
-                    return "View | Archive | Delete"
-                if isinstance(row.payload, FileRecord) and (row.origin or "").strip().lower() == "bbs_archive":
-                    return "View | Delete"
-                if isinstance(row.payload, (JS8Message, FileRecord, VarACMessage, SpotterMessage, CommStatArtifact, ProjectedMessagePayload)):
-                    return "View | Delete"
-                return "View"
+                return "Actions…"
         if role == Qt.UserRole:
             return row
         if role == Qt.DecorationRole and col == 1:
@@ -2778,6 +2797,8 @@ class MessageTableModel(QAbstractTableModel):
             if col == age_column:
                 exact = str(getattr(row, "rcv_display", "") or "").strip()
                 return f"Received: {exact}" if exact else None
+        if role == Qt.ToolTipRole and col == 7:
+            return "Open actions for this message."
         if role == Qt.ToolTipRole and col in (1, 6):
             details = [
                 str(row.title or "").strip() if col in (1, 6) else "",
@@ -3100,8 +3121,7 @@ class MessageActionDelegate(QStyledItemDelegate):
     def __init__(self, parent, danger_color: QColor | None = None):
         super().__init__(parent)
         self._danger = danger_color or QColor(Qt.red)
-        self._flag_color_red = QColor("#d32f2f")
-        self._flag_color_green = QColor("#2e7d32")
+        self._open_menu: QMenu | None = None
 
     @staticmethod
     def _is_live_bbs_file_row(row: UnifiedMessage | None) -> bool:
@@ -3122,196 +3142,134 @@ class MessageActionDelegate(QStyledItemDelegate):
             or isinstance(getattr(row, "payload", None), (JS8Message, FileRecord, VarACMessage, SpotterMessage))
         )
 
-    @staticmethod
-    def _action_rects(
-        rect: QRect,
-        fm,
-        live_bbs_row: bool,
-        archived_bbs_row: bool,
-        bbs_copy_row: bool,
-        relay_copy_row: bool,
-    ) -> tuple[QRect, QRect, QRect, QRect, QRect]:
-        view_text = "View"
-        view_width = fm.horizontalAdvance(view_text)
-        view_left = rect.left() + 6
-        view_rect = QRect(view_left, rect.y(), view_width, rect.height())
-
-        del_text = "Delete"
-        del_width = fm.horizontalAdvance(del_text)
-        del_right = rect.right() - 6
-        del_left = del_right - del_width + 1
-        del_rect = QRect(del_left, rect.y(), del_width, rect.height())
-
-        if live_bbs_row:
-            arch_text = "Archive"
-            arch_width = fm.horizontalAdvance(arch_text)
-            arch_right = del_left - 12
-            arch_left = arch_right - arch_width + 1
-            aux_rect = QRect(arch_left, rect.y(), arch_width, rect.height())
-            return view_rect, aux_rect, QRect(), QRect(), del_rect
-
-        if archived_bbs_row:
-            return view_rect, QRect(), QRect(), QRect(), del_rect
-
-        bbs_rect = QRect()
-        relay_rect = QRect()
-        gap_right = del_left - 10
-        if bbs_copy_row:
-            bbs_text = "+BBS"
-            bbs_width = fm.horizontalAdvance(bbs_text)
-            bbs_right = del_left - 10
-            bbs_left = bbs_right - bbs_width + 1
-            bbs_rect = QRect(bbs_left, rect.y(), bbs_width, rect.height())
-            gap_right = bbs_left - 10
-        if relay_copy_row:
-            relay_text = "+Relay"
-            relay_width = fm.horizontalAdvance(relay_text)
-            relay_right = gap_right
-            relay_left = relay_right - relay_width + 1
-            relay_rect = QRect(relay_left, rect.y(), relay_width, rect.height())
-            gap_right = relay_left - 10
-
-        flag_text = "\u2691"
-        flag_width = fm.horizontalAdvance(flag_text)
-        gap_left = view_left + view_width + 10
-        flag_center = (gap_left + gap_right) // 2
-        flag_left = max(gap_left, flag_center - (flag_width // 2))
-        aux_rect = QRect(flag_left, rect.y(), flag_width, rect.height())
-        return view_rect, aux_rect, relay_rect, bbs_rect, del_rect
-
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
         if index.column() != 7:
             super().paint(painter, option, index)
             return
-        row = index.data(Qt.UserRole)
-        if row is None:
-            return
+        button = QStyleOptionButton()
+        if option.widget is not None:
+            button.initFrom(option.widget)
+        button.rect = option.rect.adjusted(4, 3, -4, -3)
+        button.text = "Actions…"
+        button.palette = option.palette
+        button.state = QStyle.State_Enabled
+        if option.state & QStyle.State_MouseOver:
+            button.state |= QStyle.State_MouseOver
+        if option.state & QStyle.State_HasFocus:
+            button.state |= QStyle.State_HasFocus
+        style = option.widget.style() if option.widget is not None else QApplication.style()
+        style.drawControl(QStyle.CE_PushButton, button, painter, option.widget)
+
+    @staticmethod
+    def _add_menu_action(menu: QMenu, text: str, callback: Callable[[], None], *, enabled: bool = True):
+        action = menu.addAction(text)
+        action.setEnabled(bool(enabled))
+        action.triggered.connect(callback)
+        return action
+
+    def _build_action_menu(self, row: UnifiedMessage) -> QMenu:
         parent_widget = self.parent()
+        menu = QMenu(parent_widget)
+        self._add_menu_action(menu, "View", lambda: parent_widget._on_view_message(row))
+
         projected_file_row = bool(
             hasattr(parent_widget, "_projected_file_record")
             and isinstance(getattr(row, "payload", None), ProjectedMessagePayload)
             and parent_widget._projected_file_record(row.payload, allow_detail_lookup=False) is not None
         )
-        painter.save()
-        painter.setRenderHint(QPainter.Antialiasing, False)
-        rect = option.rect
-        link_color = option.palette.color(QPalette.Link)
-        painter.setPen(link_color)
-        fm = option.fontMetrics
         live_bbs_row = bool(
             (isinstance(row.payload, FileRecord) or projected_file_row)
             and hasattr(parent_widget, "_is_bbs_manageable_file_row")
             and parent_widget._is_bbs_manageable_file_row(row)
         )
         archived_bbs_row = self._is_archived_bbs_file_row(row)
-        bbs_copy_row = bool(
-            (not archived_bbs_row)
-            and (not live_bbs_row)
-            and
-            hasattr(parent_widget, "_can_copy_row_to_varac_bbs")
-            and parent_widget._can_copy_row_to_varac_bbs(row)
-        )
         relay_copy_row = bool(
-            (not archived_bbs_row)
-            and (not live_bbs_row)
+            not archived_bbs_row
+            and not live_bbs_row
             and hasattr(parent_widget, "_can_copy_row_to_flamp_relay")
             and parent_widget._can_copy_row_to_flamp_relay(row)
         )
-        bbs_copy_enabled = bool(
-            bbs_copy_row
-            and (
-                not hasattr(parent_widget, "_is_row_bbs_copy_action_enabled")
-                or parent_widget._is_row_bbs_copy_action_enabled(row)
-            )
+        bbs_copy_row = bool(
+            not archived_bbs_row
+            and not live_bbs_row
+            and hasattr(parent_widget, "_can_copy_row_to_varac_bbs")
+            and parent_widget._can_copy_row_to_varac_bbs(row)
         )
-        bbs_copy_present = bool(
-            bbs_copy_row
-            and hasattr(parent_widget, "_is_row_already_in_varac_bbs")
-            and parent_widget._is_row_already_in_varac_bbs(row)
-        )
-        relay_copy_enabled = bool(
-            relay_copy_row
-            and (
-                not hasattr(parent_widget, "_is_row_relay_copy_action_enabled")
-                or parent_widget._is_row_relay_copy_action_enabled(row)
-            )
-        )
-        relay_copy_present = bool(
-            relay_copy_row
-            and hasattr(parent_widget, "_is_row_already_in_flamp_relay")
-            and parent_widget._is_row_already_in_flamp_relay(row)
-        )
-        view_rect, aux_rect, relay_rect, bbs_rect, del_rect = self._action_rects(
-            rect,
-            fm,
-            live_bbs_row,
-            archived_bbs_row,
-            bbs_copy_row,
-            relay_copy_row,
-        )
-        painter.drawText(view_rect, Qt.AlignVCenter | Qt.AlignLeft, "View")
+
         if live_bbs_row:
-            painter.setPen(link_color)
-            painter.drawText(aux_rect, Qt.AlignVCenter | Qt.AlignLeft, "Archive")
-            painter.setPen(self._danger)
-            painter.drawText(del_rect, Qt.AlignVCenter | Qt.AlignLeft, "Delete")
-            painter.restore()
-            return
-        if archived_bbs_row:
-            painter.setPen(self._danger)
-            painter.drawText(del_rect, Qt.AlignVCenter | Qt.AlignLeft, "Delete")
-            painter.restore()
-            return
-
-        if isinstance(row.payload, SitrepMessage) or (
-            isinstance(row.payload, ProjectedMessagePayload) and not projected_file_row
-        ):
-            painter.setPen(self._danger)
-            painter.setFont(option.font)
-            painter.drawText(del_rect, Qt.AlignVCenter | Qt.AlignLeft, "Delete")
-            painter.restore()
-            return
-
-        if self._supports_standard_management_actions(row, projected_file_row=projected_file_row):
-            flag_state = getattr(row.payload, "flag_state", 0)
-            if flag_state == 1:
-                painter.setPen(self._flag_color_red)
-            elif flag_state == 2:
-                painter.setPen(self._flag_color_green)
+            menu.addSeparator()
+            if projected_file_row:
+                archive = lambda: parent_widget._archive_projected_file_message(row)
             else:
-                painter.setPen(option.palette.color(QPalette.Disabled, QPalette.Text))
-            font = QFont(option.font)
-            font.setBold(True)
-            painter.setFont(font)
-            painter.drawText(aux_rect, Qt.AlignVCenter | Qt.AlignLeft, "\u2691")
+                archive = lambda: parent_widget._archive_file_record(row.payload)
+            self._add_menu_action(menu, "Archive", archive)
+        elif (
+            not archived_bbs_row
+            and not projected_file_row
+            and self._supports_standard_management_actions(row, projected_file_row=False)
+        ):
+            flag_state = int(getattr(row.payload, "flag_state", 0) or 0)
+            flag_label = ("Mark for review", "Mark resolved", "Clear flag")[min(flag_state, 2)]
+            self._add_menu_action(menu, flag_label, lambda: parent_widget._cycle_flag_state(row.payload))
 
-            if relay_copy_row:
-                if relay_copy_present:
-                    painter.setPen(self._flag_color_green)
-                elif relay_copy_enabled:
-                    painter.setPen(link_color)
-                else:
-                    painter.setPen(option.palette.color(QPalette.Disabled, QPalette.Text))
-                painter.setFont(option.font)
-                painter.drawText(relay_rect, Qt.AlignVCenter | Qt.AlignLeft, "+Relay")
+        if relay_copy_row:
+            present = bool(
+                hasattr(parent_widget, "_is_row_already_in_flamp_relay")
+                and parent_widget._is_row_already_in_flamp_relay(row)
+            )
+            enabled = bool(
+                not present
+                and (
+                    not hasattr(parent_widget, "_is_row_relay_copy_action_enabled")
+                    or parent_widget._is_row_relay_copy_action_enabled(row)
+                )
+            )
+            self._add_menu_action(
+                menu,
+                "Already in FLAMP Relay" if present else "Add to FLAMP Relay",
+                lambda: parent_widget._copy_row_to_flamp_relay(row),
+                enabled=enabled,
+            )
+        if bbs_copy_row:
+            present = bool(
+                hasattr(parent_widget, "_is_row_already_in_varac_bbs")
+                and parent_widget._is_row_already_in_varac_bbs(row)
+            )
+            enabled = bool(
+                not present
+                and (
+                    not hasattr(parent_widget, "_is_row_bbs_copy_action_enabled")
+                    or parent_widget._is_row_bbs_copy_action_enabled(row)
+                )
+            )
+            self._add_menu_action(
+                menu,
+                "Already in BBS" if present else "Add to BBS",
+                lambda: parent_widget._copy_row_to_varac_bbs(row),
+                enabled=enabled,
+            )
 
-            if bbs_copy_row:
-                if bbs_copy_present:
-                    painter.setPen(self._flag_color_green)
-                    bbs_text = "+BBS"
-                elif bbs_copy_enabled:
-                    painter.setPen(link_color)
-                    bbs_text = "+BBS"
-                else:
-                    painter.setPen(option.palette.color(QPalette.Disabled, QPalette.Text))
-                    bbs_text = "+BBS"
-                painter.setFont(option.font)
-                painter.drawText(bbs_rect, Qt.AlignVCenter | Qt.AlignLeft, bbs_text)
-
-            painter.setPen(self._danger)
-            painter.setFont(option.font)
-            painter.drawText(del_rect, Qt.AlignVCenter | Qt.AlignLeft, "Delete")
-        painter.restore()
+        delete_callback: Callable[[], None] | None = None
+        if isinstance(row.payload, FileRecord):
+            delete_callback = lambda: parent_widget._delete_file_record(row.payload)
+        elif isinstance(row.payload, ProjectedMessagePayload) and projected_file_row:
+            delete_callback = lambda: parent_widget._delete_projected_file_message(row)
+        elif isinstance(row.payload, JS8Message):
+            delete_callback = lambda: parent_widget._delete_js8_message(row.payload)
+        elif isinstance(row.payload, SpotterMessage):
+            delete_callback = lambda: parent_widget._delete_spotter_message(row.payload)
+        elif isinstance(row.payload, VarACMessage):
+            delete_callback = lambda: parent_widget._delete_varac_message(row.payload)
+        elif isinstance(row.payload, SitrepMessage):
+            delete_callback = lambda: parent_widget._delete_sitrep_message(row.payload)
+        elif isinstance(row.payload, CommStatArtifact):
+            delete_callback = lambda: parent_widget._delete_commstat_message(row.payload)
+        elif isinstance(row.payload, ProjectedMessagePayload):
+            delete_callback = lambda: parent_widget._delete_projected_message(row)
+        if delete_callback is not None:
+            menu.addSeparator()
+            self._add_menu_action(menu, "Delete…", delete_callback)
+        return menu
 
     def editorEvent(self, event, model, option, index):
         if index.column() != 7:
@@ -3323,130 +3281,24 @@ class MessageActionDelegate(QStyledItemDelegate):
         row = index.data(Qt.UserRole)
         if row is None:
             return False
-        rect = option.rect
-        if hasattr(event, "position"):
-            pos = event.position().toPoint()
+        if self._open_menu is not None:
+            self._open_menu.close()
+            self._open_menu.deleteLater()
+        menu = self._build_action_menu(row)
+        self._open_menu = menu
+        menu.aboutToHide.connect(lambda: QTimer.singleShot(0, self._clear_open_menu))
+        if hasattr(event, "globalPosition"):
+            global_pos = event.globalPosition().toPoint()
         else:
-            pos = event.pos()
-        fm = option.fontMetrics
-        parent_widget = self.parent()
-        projected_file_row = bool(
-            hasattr(parent_widget, "_projected_file_record")
-            and isinstance(getattr(row, "payload", None), ProjectedMessagePayload)
-            and parent_widget._projected_file_record(row.payload, allow_detail_lookup=False) is not None
-        )
-        live_bbs_row = bool(
-            (isinstance(row.payload, FileRecord) or projected_file_row)
-            and hasattr(parent_widget, "_is_bbs_manageable_file_row")
-            and parent_widget._is_bbs_manageable_file_row(row)
-        )
-        archived_bbs_row = self._is_archived_bbs_file_row(row)
-        bbs_copy_row = bool(
-            (not archived_bbs_row)
-            and (not live_bbs_row)
-            and
-            hasattr(parent_widget, "_can_copy_row_to_varac_bbs")
-            and parent_widget._can_copy_row_to_varac_bbs(row)
-        )
-        relay_copy_row = bool(
-            (not archived_bbs_row)
-            and (not live_bbs_row)
-            and hasattr(parent_widget, "_can_copy_row_to_flamp_relay")
-            and parent_widget._can_copy_row_to_flamp_relay(row)
-        )
-        bbs_copy_enabled = bool(
-            bbs_copy_row
-            and (
-                not hasattr(parent_widget, "_is_row_bbs_copy_action_enabled")
-                or parent_widget._is_row_bbs_copy_action_enabled(row)
-            )
-        )
-        relay_copy_enabled = bool(
-            relay_copy_row
-            and (
-                not hasattr(parent_widget, "_is_row_relay_copy_action_enabled")
-                or parent_widget._is_row_relay_copy_action_enabled(row)
-            )
-        )
-        view_rect, aux_rect, relay_rect, bbs_rect, del_rect = self._action_rects(
-            rect,
-            fm,
-            live_bbs_row,
-            archived_bbs_row,
-            bbs_copy_row,
-            relay_copy_row,
-        )
-        if isinstance(row.payload, FileRecord):
-            if live_bbs_row and aux_rect.contains(pos):
-                self.parent()._archive_file_record(row.payload)
-            elif relay_copy_row and relay_rect.contains(pos):
-                if relay_copy_enabled:
-                    self.parent()._copy_row_to_flamp_relay(row)
-                return True
-            elif bbs_copy_row and bbs_rect.contains(pos):
-                if bbs_copy_enabled:
-                    self.parent()._copy_row_to_varac_bbs(row)
-                return True
-            elif not live_bbs_row and not archived_bbs_row and aux_rect.contains(pos):
-                self.parent()._cycle_flag_state(row.payload)
-            elif del_rect.contains(pos):
-                self.parent()._delete_file_record(row.payload)
-            else:
-                self.parent()._on_view_message(row)
-        elif isinstance(row.payload, ProjectedMessagePayload) and projected_file_row:
-            if live_bbs_row and aux_rect.contains(pos):
-                self.parent()._archive_projected_file_message(row)
-            elif bbs_copy_row and bbs_rect.contains(pos):
-                if bbs_copy_enabled:
-                    self.parent()._copy_row_to_varac_bbs(row)
-                return True
-            elif del_rect.contains(pos):
-                self.parent()._delete_projected_file_message(row)
-            else:
-                self.parent()._on_view_message(row)
-        elif isinstance(row.payload, JS8Message):
-            if aux_rect.contains(pos):
-                self.parent()._cycle_flag_state(row.payload)
-            elif del_rect.contains(pos):
-                self.parent()._delete_js8_message(row.payload)
-            else:
-                self.parent()._on_view_message(row)
-        elif isinstance(row.payload, SpotterMessage):
-            if aux_rect.contains(pos):
-                self.parent()._cycle_flag_state(row.payload)
-            elif del_rect.contains(pos):
-                self.parent()._delete_spotter_message(row.payload)
-            else:
-                self.parent()._on_view_message(row)
-        elif isinstance(row.payload, VarACMessage):
-            if relay_copy_row and relay_rect.contains(pos):
-                if relay_copy_enabled:
-                    self.parent()._copy_row_to_flamp_relay(row)
-                return True
-            if aux_rect.contains(pos):
-                self.parent()._cycle_flag_state(row.payload)
-            elif del_rect.contains(pos):
-                self.parent()._delete_varac_message(row.payload)
-            else:
-                self.parent()._on_view_message(row)
-        elif isinstance(row.payload, SitrepMessage):
-            if del_rect.contains(pos):
-                self.parent()._delete_sitrep_message(row.payload)
-            else:
-                self.parent()._on_view_message(row)
-        elif isinstance(row.payload, CommStatArtifact):
-            if del_rect.contains(pos):
-                self.parent()._delete_commstat_message(row.payload)
-            else:
-                self.parent()._on_view_message(row)
-        elif isinstance(row.payload, ProjectedMessagePayload):
-            if del_rect.contains(pos):
-                self.parent()._delete_projected_message(row)
-            else:
-                self.parent()._on_view_message(row)
-        else:
-            self.parent()._on_view_message(row)
+            global_pos = option.widget.mapToGlobal(option.rect.bottomLeft())
+        menu.popup(global_pos)
         return True
+
+    def _clear_open_menu(self) -> None:
+        menu = self._open_menu
+        self._open_menu = None
+        if menu is not None:
+            menu.deleteLater()
 
 
 class MessageCheckboxDelegate(QStyledItemDelegate):
@@ -3472,85 +3324,74 @@ class MessageHeaderWithCheckbox(QHeaderView):
         super().__init__(orientation, parent)
         self._checkbox_state = Qt.Unchecked
         self._checkbox_enabled = False
-        self._cb_bg = QColor("#ffffff")
-        self._cb_border = QColor("#777777")
-        self._cb_accent = QColor("#2d8cf0")
-        self._cb_mark = QColor("#ffffff")
         self.setSectionsClickable(True)
+        self._select_all_button = QPushButton("Select all", self.viewport())
+        self._select_all_button.setAccessibleName("Select all visible messages")
+        self._select_all_button.setToolTip("Select all selectable messages currently visible in the Inbox.")
+        self._select_all_button.clicked.connect(self._toggle_select_all)
+        self.setMinimumHeight(button_height_for_font(self._select_all_button) + 4)
+        self.sectionResized.connect(lambda *_args: self._position_select_all_button())
+        self.sectionMoved.connect(lambda *_args: self._position_select_all_button())
+        QTimer.singleShot(0, self._position_select_all_button)
+
+    def select_button_width_hint(self) -> int:
+        metrics = self._select_all_button.fontMetrics()
+        return max(
+            int(self._select_all_button.sizeHint().width()),
+            int(metrics.horizontalAdvance("Clear all")) + int(metrics.horizontalAdvance("MM")) + 16,
+        )
+
+    def _position_select_all_button(self) -> None:
+        if self.count() <= 0:
+            self._select_all_button.hide()
+            return
+        section_x = self.sectionViewportPosition(0)
+        section_width = self.sectionSize(0)
+        margin = max(2, int(self.fontMetrics().height() // 6))
+        height = max(1, self.height() - (2 * margin))
+        self._select_all_button.setGeometry(
+            section_x + margin,
+            margin,
+            max(1, section_width - (2 * margin)),
+            height,
+        )
+        self._select_all_button.show()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._position_select_all_button()
+
+    def _toggle_select_all(self) -> None:
+        if not self._checkbox_enabled:
+            return
+        state = Qt.Unchecked if self._checkbox_state == Qt.Checked else Qt.Checked
+        self.set_checkbox_state(state)
+        self.checkboxToggled.emit(int(state.value))
 
     def set_checkbox_state(self, state: Qt.CheckState, enabled: Optional[bool] = None) -> None:
         if enabled is not None:
             self._checkbox_enabled = bool(enabled)
         self._checkbox_state = state
-        self.updateSection(0)
+        self._select_all_button.setEnabled(self._checkbox_enabled)
+        self._select_all_button.setText("Clear all" if state == Qt.Checked else "Select all")
+        self._select_all_button.setAccessibleName(
+            "Clear selection for visible messages" if state == Qt.Checked else "Select all visible messages"
+        )
+        self._select_all_button.setToolTip(
+            "Clear the visible message selection."
+            if state == Qt.Checked
+            else "Select all selectable messages currently visible in the Inbox."
+        )
+        self._position_select_all_button()
 
     def set_checkbox_colors(
         self, *, bg: QColor, border: QColor, accent: QColor, mark: QColor
     ) -> None:
-        self._cb_bg = bg
-        self._cb_border = border
-        self._cb_accent = accent
-        self._cb_mark = mark
-        self.updateSection(0)
-
-    def _checkbox_rect(self, rect: QRect) -> QRect:
-        style = self.style()
-        width = style.pixelMetric(QStyle.PM_IndicatorWidth)
-        height = style.pixelMetric(QStyle.PM_IndicatorHeight)
-        x = rect.x() + 4
-        y = rect.y() + (rect.height() - height) // 2
-        return QRect(x, y, width, height)
-
-    def paintSection(self, painter: QPainter, rect: QRect, logicalIndex: int) -> None:
-        super().paintSection(painter, rect, logicalIndex)
-        if logicalIndex != 0:
-            return
-        box = self._checkbox_rect(rect)
-        border = self._cb_accent if self._checkbox_enabled else self._cb_border
-        painter.save()
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setPen(border)
-        painter.setBrush(self._cb_bg)
-        painter.drawRoundedRect(box.adjusted(0, 0, -1, -1), 2, 2)
-        if self._checkbox_state in (Qt.Checked, Qt.PartiallyChecked):
-            inner = box.adjusted(3, 3, -3, -3)
-            painter.setBrush(self._cb_accent)
-            painter.setPen(Qt.NoPen)
-            painter.drawRoundedRect(inner, 1, 1)
-            painter.setPen(self._cb_mark)
-            if self._checkbox_state == Qt.PartiallyChecked:
-                y = inner.center().y()
-                painter.drawLine(inner.left() + 2, y, inner.right() - 2, y)
-            else:
-                x1 = inner.left() + 2
-                y1 = inner.center().y()
-                x2 = inner.center().x()
-                y2 = inner.bottom() - 2
-                x3 = inner.right() - 2
-                y3 = inner.top() + 2
-                painter.drawLine(x1, y1, x2, y2)
-                painter.drawLine(x2, y2, x3, y3)
-        painter.restore()
-
-    def mousePressEvent(self, event) -> None:
-        if self._checkbox_enabled:
-            idx = self.logicalIndexAt(event.pos())
-            if idx == 0:
-                rect = QRect(
-                    self.sectionViewportPosition(0),
-                    0,
-                    self.sectionSize(0),
-                    self.height(),
-                )
-                if self._checkbox_rect(rect).contains(event.pos()):
-                    if self._checkbox_state == Qt.Checked:
-                        self._checkbox_state = Qt.Unchecked
-                    else:
-                        self._checkbox_state = Qt.Checked
-                    self.updateSection(0)
-                    self.checkboxToggled.emit(int(self._checkbox_state.value))
-                    return
-        super().mousePressEvent(event)
+        # Kept for callers that refresh screen-specific colors.  The real
+        # QPushButton inherits the shared application theme automatically.
+        del bg, border, accent, mark
+        self._select_all_button.style().unpolish(self._select_all_button)
+        self._select_all_button.style().polish(self._select_all_button)
 
 
 class MessageViewerTab(QWidget):
@@ -5766,13 +5607,16 @@ class MessageViewerTab(QWidget):
         msg_header.setSectionResizeMode(5, QHeaderView.Interactive)
         msg_header.setSectionResizeMode(6, QHeaderView.Stretch)
         msg_header.setSectionResizeMode(7, QHeaderView.Fixed)
-        self.messages_table.setColumnWidth(0, 32)
+        self.messages_table.setColumnWidth(0, msg_header.select_button_width_hint())
         self.messages_table.setColumnWidth(1, 76)
         self.messages_table.setColumnWidth(2, 82)
         self.messages_table.setColumnWidth(3, 104)
         self.messages_table.setColumnWidth(4, 104)
         self.messages_table.setColumnWidth(5, 148)
-        self.messages_table.setColumnWidth(7, 220)
+        self.messages_table.setColumnWidth(
+            7,
+            max(96, self.messages_table.fontMetrics().horizontalAdvance("Actions…") + 32),
+        )
         # Publish the final empty-model profile before the first frame.  Later
         # row snapshots may request one coalesced atomic refit, but the native
         # table never paints an obsolete fixed-width profile first.
@@ -9974,10 +9818,9 @@ class MessageViewerTab(QWidget):
                 ComposeFieldDefinition(
                     key=SPOTTER_COMMENTS_KEY,
                     label="Comments (optional)",
-                    description="Add context not captured by the structured form fields.",
-                    field_type="textarea",
-                    placeholder="Additional text for this form",
-                    rows=3,
+                    description=f"Add brief context not captured by the form (up to {SPOTTER_COMMENTS_MAX_LENGTH} characters).",
+                    field_type="text",
+                    placeholder="Brief additional context",
                 )
             )
             identity_values = {
@@ -10150,10 +9993,14 @@ class MessageViewerTab(QWidget):
         for field in rows:
             initial = str(values.get(field.key, "") or "")
             upper_label = f"{field.label} {field.description}".upper()
+            is_spotter_comment = spotter_mode and field.key == SPOTTER_COMMENTS_KEY
             is_long_field = (
-                field.field_type == "textarea"
-                or field.key == "MESSAGE"
-                or any(token in upper_label for token in long_labels)
+                not is_spotter_comment
+                and (
+                    field.field_type == "textarea"
+                    or field.key == "MESSAGE"
+                    or any(token in upper_label for token in long_labels)
+                )
             )
             field_wrap = QWidget()
             field_wrap.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding if is_long_field else QSizePolicy.Fixed)
@@ -10205,8 +10052,14 @@ class MessageViewerTab(QWidget):
                 widget.setPlainText(initial)
                 widget.textChanged.connect(self._on_compose_form_field_changed)
             else:
-                widget = QLineEdit()
-                widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                if is_spotter_comment:
+                    widget = _FontBoundedLineEdit(
+                        display_columns=34,
+                        max_length=SPOTTER_COMMENTS_MAX_LENGTH,
+                    )
+                else:
+                    widget = QLineEdit()
+                    widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
                 widget.setPlaceholderText(field.placeholder)
                 widget.setText(initial)
                 widget.textChanged.connect(self._on_compose_form_field_changed)
@@ -12186,13 +12039,6 @@ class MessageViewerTab(QWidget):
                 self.more_actions_btn.setToolTip("Open message export, summaries, maintenance, and help.")
 
     def _select_visible_messages(self) -> None:
-        if not self._is_filter_active():
-            QMessageBox.information(
-                self,
-                "Select Matching Rows",
-                "Apply a focus, group, source, age, search, or advanced filter before selecting matching rows.",
-            )
-            return
         rows = self._messages_model.rows() if hasattr(self, "_messages_model") else []
         deletable = self._collect_deletable_rows(rows)
         if not deletable:
@@ -18473,7 +18319,12 @@ class MessageViewerTab(QWidget):
             return
         font_metrics = table.fontMetrics()
         padding = max(24, int(font_metrics.horizontalAdvance("MM")))
-        indicator_width = max(32, int(font_metrics.height()) + 16)
+        header = table.horizontalHeader()
+        indicator_width = (
+            header.select_button_width_hint()
+            if isinstance(header, MessageHeaderWithCheckbox)
+            else max(32, int(font_metrics.height()) + 16)
+        )
         measured: list[int] = []
         for column in range(model.columnCount()):
             header_text = str(model.headerData(column, Qt.Horizontal, Qt.DisplayRole) or "")
@@ -18481,7 +18332,8 @@ class MessageViewerTab(QWidget):
             if column == 0:
                 minimum, cap = indicator_width, indicator_width
             elif column == model.columnCount() - 1:
-                minimum, cap = 118, 230
+                action_width = font_metrics.horizontalAdvance("Actions…") + padding
+                minimum, cap = action_width, action_width
             elif semantic == "source":
                 minimum, cap = 78, 180
             elif semantic in {"status", "age"}:
@@ -20294,7 +20146,11 @@ class MessageViewerTab(QWidget):
             return
         header = self.messages_table.horizontalHeader()
         fallback_widths = {
-            0: 32,
+            0: (
+                header.select_button_width_hint()
+                if isinstance(header, MessageHeaderWithCheckbox)
+                else 96
+            ),
             1: 164,
             2: 88,
             3: 104,
@@ -20315,7 +20171,11 @@ class MessageViewerTab(QWidget):
             if int(width) <= 1:
                 width = fallback_widths.get(idx, 60)
             if idx == 0:
-                min_width = 30
+                min_width = (
+                    header.select_button_width_hint()
+                    if isinstance(header, MessageHeaderWithCheckbox)
+                    else 96
+                )
             elif idx == 7:
                 min_width = 132
             elif idx in (3, 4):
@@ -20423,7 +20283,7 @@ class MessageViewerTab(QWidget):
         selectable_rows = self._collect_deletable_rows(rows)
         keys = [MessageTableModel._row_key(r) for r in selectable_rows]
         keys = [k for k in keys if k is not None]
-        enabled = self._is_filter_active() and bool(keys)
+        enabled = bool(keys)
         if not keys:
             header.set_checkbox_state(Qt.Unchecked, enabled=False)
             return
@@ -20439,9 +20299,6 @@ class MessageViewerTab(QWidget):
             header.set_checkbox_state(Qt.PartiallyChecked, enabled=enabled)
 
     def _on_header_checkbox_toggled(self, state: int) -> None:
-        if not self._is_filter_active():
-            self._sync_select_all_checkbox()
-            return
         rows = self._messages_model.rows()
         state_val = int(getattr(state, "value", state))
         if state_val == Qt.PartiallyChecked.value:

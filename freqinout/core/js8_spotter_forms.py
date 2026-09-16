@@ -62,6 +62,7 @@ class SpotterFormField:
 
 
 SPOTTER_COMMENTS_KEY = "COMMENTS"
+SPOTTER_COMMENTS_MAX_LENGTH = 50
 
 # These are intentionally explicit form semantics.  A generic label match can
 # incorrectly put the operator's QTH into an incident, affected-area, or

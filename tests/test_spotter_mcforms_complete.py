@@ -12,6 +12,7 @@ from freqinout.core.js8_spotter_codec import (
 )
 from freqinout.core.js8_spotter_forms import (
     SPOTTER_COMMENTS_KEY,
+    SPOTTER_COMMENTS_MAX_LENGTH,
     discover_spotter_forms,
     form_id_enabled,
     normalize_form_code,
@@ -95,6 +96,30 @@ def test_codec_blocks_incomplete_choices_and_illegal_prompt_delimiter() -> None:
                 "SITUATION_REPORT": "0",
             },
         )
+
+
+def test_codec_enforces_bounded_optional_comment_without_truncating_received_text() -> None:
+    fields = parse_spotter_form_fields(SAMPLE)
+    values = {
+        "ST": "CO",
+        "GR": "DN70AA",
+        "CURRENT_OPERATIONAL_STATUS_QTH": "1",
+        "SITUATION_REPORT": "0",
+    }
+    with pytest.raises(ValueError, match="50 characters or fewer"):
+        serialize_spotter_form_payload(
+            "F!701C",
+            fields,
+            values,
+            comments="X" * (SPOTTER_COMMENTS_MAX_LENGTH + 1),
+        )
+
+    received = parse_spotter_form_payload(
+        "F!701C 10 ST[CO] GR[DN70AA] " + ("X" * (SPOTTER_COMMENTS_MAX_LENGTH + 5)),
+        fields,
+        expected_form_code="F!701C",
+    )
+    assert received.comments == "X" * (SPOTTER_COMMENTS_MAX_LENGTH + 5)
 
 
 @pytest.mark.parametrize(

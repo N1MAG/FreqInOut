@@ -127,6 +127,38 @@ Source-management actions such as View, Delete, Archive, BBS, or Relay retain
 their existing safety and confirmation contracts. Consolidation does not
 silently remove or broaden them.
 
+### Bounded selection and row actions
+
+- The selection column header contains a visible, keyboard-focusable
+  `Select all` button. It selects every selectable row in the current bounded
+  visible snapshot, including the default unfiltered view; it never selects
+  records outside the retained page. When all eligible visible rows are
+  selected, its label becomes `Clear all`.
+- The button uses shared theme styling, an accessible name, a descriptive
+  tooltip, and font-derived width and height. It is disabled when no visible
+  row supports selection.
+- A row exposes one stable `Actions…` disclosure instead of several adjacent
+  text links. The on-demand shared-theme menu contains only actions valid for
+  that row: View first, nondestructive workflow actions next, destinations
+  such as FLAMP Relay/BBS after that, and Delete last after a separator.
+- Existing action eligibility, disabled-state explanation, confirmation,
+  deletion, archive, Relay, BBS, and flag-state contracts remain authoritative.
+  Building or painting the disclosure performs no source I/O.
+
+### Spotter group and comment compatibility
+
+- The public Spotter focus and source filter include historical Spotter rows
+  stored under the internal `sitrep` projection family. Semantic CommStat
+  evidence always wins, so a projected CommStat report is never admitted to
+  Spotter merely because its storage family is `sitrep`.
+- Group filtering is applied to the same normalized projected Spotter row.
+  A legacy Spotter row addressed to or projected with `MAGNET` remains visible
+  when Focus is Spotter and Group is MAGNET.
+- Optional MCForm comments are a single-line, 34-character-wide control with
+  a 50-character authored limit. The control and validation state the limit;
+  serialization rejects over-limit authored content rather than silently
+  truncating it. Parsing retains longer received legacy comments as evidence.
+
 ## Adaptive Column Sizing Contract
 
 Column sizing must optimize for rapid scanning rather than equal distribution.
@@ -243,6 +275,14 @@ No destructive schema migration is authorized or required by this slice.
 - Focus, search, intelligence filters, reader navigation, resize, font changes,
   and theme changes perform no source/file/database work.
 - Existing Inbox delete/archive/read/flag/BBS/relay and Compose tests pass.
+- Spotter plus a configured group such as MAGNET retains matching historical
+  `sitrep` projections while semantically classified CommStat rows remain out.
+- The visible Select all/Clear all button operates on eligible rows in the
+  bounded visible snapshot even when no additional filter is active.
+- Each row presents one Actions disclosure; its menu preserves all eligible
+  View, flag, Relay, BBS, Archive, and Delete paths without horizontal crowding.
+- Spotter comments render as a bounded single-line field, accept at most 50
+  authored characters, and do not truncate received legacy evidence.
 - Focused projection, watch, source presentation, reader, responsive layout,
   and performance guardrail tests pass before the implementation gate closes.
 
@@ -271,6 +311,13 @@ legacy `SitRep`/`FIOSpotter` wording to `Spotter`, retained bounded historical
 header/width publication atomic before first paint. The Watch editor retains a
 font-derived width floor without allowing long placeholder copy to consume the
 table's dominant wide-screen allocation.
+
+The 2026-09-16 correction makes legacy `sitrep` source normalization the single
+authority for Spotter focus, source, and group filtering while retaining the
+CommStat exclusion. It replaces crowded per-row text links with one on-demand
+Actions menu, replaces the unlabeled selection-header checkbox with a visible
+Select all/Clear all button, and aligns optional MCForm comments with the
+SuperSpotter 34-column entry while enforcing a 50-character authoring limit.
 
 The active execution contract prohibited spawning new subagents for this turn,
 so no delegated diff was produced or integrated. Existing unrelated work and

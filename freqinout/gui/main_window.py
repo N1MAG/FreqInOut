@@ -8619,12 +8619,16 @@ class MainWindow(QMainWindow):
                 widget.deleteLater()
 
     def _station_command_health_profile(self, selected: object | None, selected_id: int) -> dict | None:
-        try:
-            for profile in self.multi_radio_store.list_device_profiles():
-                if self._station_command_snapshot_id(profile) == int(selected_id or 0):
+        # Health summaries are part of the command-bar repaint path.  The
+        # profile cache is refreshed by the runtime/settings lifecycle; never
+        # reopen the device-profile database from a timer-driven paint/update.
+        for profile in (
+            list(getattr(self, "_station_command_profile_cache", []) or [])
+            + list(getattr(self, "_station_command_last_choices", []) or [])
+        ):
+            if self._station_command_snapshot_id(profile) == int(selected_id or 0):
+                if isinstance(profile, Mapping):
                     return dict(profile)
-        except Exception:
-            pass
         return dict(selected) if isinstance(selected, Mapping) else None
 
     def _station_command_health_items(self, profile: object | None) -> list[tuple[str, str]]:

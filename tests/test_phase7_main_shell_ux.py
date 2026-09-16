@@ -2155,6 +2155,8 @@ def test_phase7_station_command_health_snapshot_idle_configured_app_is_not_green
     window = MainWindow.__new__(MainWindow)
     window.settings = SimpleNamespace(all=lambda: {})
     window.multi_radio_store = FakeStore()
+    window._station_command_profile_cache = window.multi_radio_store.list_device_profiles()
+    window._station_command_last_choices = []
     window._station_command_off_schedule_by_radio = {}
     window._station_command_assignment_rf_guard_issues = lambda _profile: []
     window.dependency_status_service = SimpleNamespace(
@@ -2776,7 +2778,8 @@ def test_phase7_messages_filter_row_and_compose_splitter_reflow(monkeypatch, tmp
         assert 78 <= tab.messages_table.columnWidth(1) <= 300
         assert tab.messages_table.columnWidth(5) <= 520
         assert tab.messages_table.columnWidth(6) <= 90
-        assert 118 <= tab.messages_table.columnWidth(7) <= 230
+        action_floor = tab.messages_table.fontMetrics().horizontalAdvance("Actions…") + 20
+        assert action_floor <= tab.messages_table.columnWidth(7) <= action_floor + 48
         assert tab.messages_table.minimumWidth() == 0
 
         tab.resize(900, 560)
@@ -2952,6 +2955,8 @@ def test_phase7_station_command_bar_refresh_selects_primary_radio(monkeypatch) -
     window = MainWindow.__new__(MainWindow)
     window.station_runtime_manager = FakeManager()
     window.multi_radio_store = FakeStore()
+    window._station_command_profile_cache = window.multi_radio_store.list_runtime_active_device_profiles()
+    window._station_command_last_choices = []
     window._station_command_selected_profile_id = None
     window._station_command_bar_loading = False
     window.station_command_radio_combo = QComboBox()
