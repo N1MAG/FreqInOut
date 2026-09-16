@@ -3,6 +3,8 @@ from __future__ import annotations
 import time
 from concurrent.futures import Future
 
+import pytest
+
 import freqinout.core.background_ingest as background_ingest
 from freqinout.core.background_ingest import BackgroundIngestController
 from freqinout.core.ingest_health import source_health_key
@@ -15,6 +17,22 @@ class _Settings:
 
     def get(self, key, default=None):
         return self._values.get(key, default)
+
+
+class _PersistingSettings(_Settings):
+    """Small settings double that records durable cursor writes."""
+
+    def __init__(self, values=None):
+        super().__init__(values)
+        self.set_calls: list[tuple[str, object]] = []
+        self.save_calls = 0
+
+    def set(self, key, value):
+        self.set_calls.append((str(key), value))
+        self._values[str(key)] = value
+
+    def save(self):
+        self.save_calls += 1
 
 
 class _PlannerOnlyController(BackgroundIngestController):
@@ -164,6 +182,31 @@ def test_profile_settings_expose_profile_specific_flamp_receive_root():
         "mesh": "/mesh",
     }
     assert adapter.get("varac_bbs_vault_flamp_relay_dir") == "/fallback/relay"
+
+
+@pytest.mark.parametrize(
+    "offset_key",
+    [
+        "spotter_directed_offset_source-a",
+        "expect_directed_offset_source-a",
+    ],
+)
+def test_profile_settings_persist_directed_offsets_for_spotter_and_expect(offset_key):
+    """Both dynamic JS8 consumers must advance the same durable cursor path."""
+
+    fallback = _PersistingSettings()
+    adapter = background_ingest._DeviceProfileVaultSettings(
+        {"id": 7},
+        fallback,  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+    )
+
+    adapter.set(offset_key, 42)
+
+    assert fallback.get(offset_key) == 42
+    assert adapter.get(offset_key) == 42
+    assert fallback.set_calls == [(offset_key, 42)]
+    assert fallback.save_calls == 1
 
 
 def test_dynamic_flamp_manual_refresh_resets_readiness_and_queues_projection(monkeypatch):

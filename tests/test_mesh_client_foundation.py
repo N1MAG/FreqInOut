@@ -3190,6 +3190,27 @@ def test_mesh_health_projects_source_connection_lifecycle(tmp_path) -> None:
     assert source["source_family"] == "meshcore"
     assert source["display_name"] == "MeshCore-N1MAG MOBL1"
 
+    upsert_mesh_health(
+        db_path,
+        MeshHealthSnapshot(
+            adapter_id="meshcore-mobl1",
+            transport="meshcore",
+            enabled=True,
+            connected=False,
+            connection_type="ble",
+            device_name="MeshCore-N1MAG MOBL1",
+            last_error="BLE device unavailable",
+            lifecycle_state="needs_attention",
+            required=True,
+            guidance="Reconnect paused after 3 failed attempts - select Connect to try again.",
+        ),
+        updated_utc="2026-09-01T12:01:00+00:00",
+    )
+    paused = list_mesh_health(db_path)[0]
+    assert paused["lifecycle_state"] == "needs_attention"
+    assert paused["required"] is True
+    assert "select Connect" in paused["guidance"]
+
 
 def test_mesh_manager_can_publish_directly_to_store_sink(tmp_path) -> None:
     db_path = tmp_path / "mesh-sink.db"

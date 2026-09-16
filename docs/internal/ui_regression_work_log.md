@@ -4,6 +4,47 @@ All new entries must follow the authoritative multi-model delivery contract in
 `docs/internal/project_delivery_rules.md` and record the required package/model,
 primary-review, acceptance, and exit-gate evidence.
 
+## 2026-09-15 — Release-candidate control, ingest, and Mesh stability
+
+Status: automated implementation gate passed; native rig/Mesh hardware and
+Linux/macOS/Windows soak qualification remain open before public release.
+
+Ordinary application focus loss no longer destroys scheduler endpoint intent or
+turns a valid FLRig/rigctld frequency readback into `Applied - verification
+unavailable`. Native hidden/suspended and detected clock-discontinuity paths
+retain their stale-completion fencing. A complete fresh matching readback now
+reconstructs the verified endpoint read model without sending a duplicate rig
+command. PTT is explicitly limited to pre-retune safety, and JS8 offset evidence
+is required only for entries where JS8 has offset authority.
+
+Dynamic FLAMP Expect offsets now persist through the same durable worker-owned
+settings path as Spotter offsets, preventing historical DIRECTED records from
+being replayed on each ingest cycle. Enabled unavailable Mesh adapters now stop
+after three consecutive failures. The third failure persists a visible
+needs-attention state; timer polls remain quiet until explicit Connect/Reconnect
+resets only the selected adapter and starts one fresh bounded series. Success
+resets the series; retained Inbox/Map data is untouched.
+
+Work packages and models:
+
+- high-reasoning primary GPT-5 model: runtime-stability spec, scheduler and
+  lifecycle architecture, persistence/Mesh production changes, primary diff
+  review and corrections, integration, and gate decision;
+- `gpt-5.6-terra`, high reasoning: read-only Mesh retry/lifecycle audit;
+- `gpt-5.6-luna`, high reasoning: focused cursor/lifecycle/dedup regression
+  package.
+
+Primary review added readback intent adoption, PTT-versus-frequency proof, JS8
+authority scoping, retry-exhaustion health persistence, live per-adapter manual
+reset, connection-signature coverage, and multi-adapter isolation tests.
+Acceptance: 69 focused scheduler/ingest/lifecycle tests; 291 adjacent scheduler,
+dynamic Expect, and background-ingest tests (2 skipped); 144 focused and 167
+adjacent Mesh/source-connection tests; Python compilation; and clean diff
+whitespace. A full-repository attempt hit the existing shared-QApplication/
+worker-thread Qt abort in an early Compose test; that exact test passes alone and
+the changed modules are absent from its stack. This harness limitation and the
+remaining native hardware/soak gate are not waived.
+
 ## 2026-09-13 — Whole-application UI design-control conformance audit
 
 Status: audit and all UIA-0 through UIA-5 remediation exit gates passed; native

@@ -25,6 +25,7 @@ from freqinout.core.mesh import (
     MeshOperationCancelled,
     archive_mesh_channel_policy,
     discover_meshcore_ble_devices,
+    list_mesh_health,
     list_mesh_channel_policies,
     next_mesh_connection_name,
     update_automatic_connection_name,
@@ -194,13 +195,16 @@ def test_mesh_retry_policy_caps_exponential_delay_and_supports_manual_retry() ->
     assert state.due(0) is True
     assert state.record_failure(1_000, policy) == 500
     assert state.record_failure(1_500, policy) == 1_000
-    assert state.record_failure(2_500, policy) == 1_200
-    assert state.remaining_ms(3_000) == 700
+    assert state.record_failure(2_500, policy) == 0
+    assert state.operator_action_required is True
+    assert state.due(3_000) is False
+    assert state.remaining_ms(3_000) == 0
 
     state.retry_now()
 
     assert state.due(3_000) is True
     assert state.remaining_ms(3_000) == 0
+    assert state.failure_count == 0
 
     state.record_success()
 
@@ -222,14 +226,14 @@ def test_mesh_retry_state_operator_action_contract_requires_manual_retry() -> No
 
     state.retry_now()
 
-    assert state.failure_count == 1
+    assert state.failure_count == 0
     assert state.operator_action_required is False
     assert state.due(10_000) is True
     assert state.remaining_ms(10_000) == 0
 
     state.record_operator_action_required()
 
-    assert state.failure_count == 2
+    assert state.failure_count == 1
     assert state.operator_action_required is True
     assert state.due(10_000) is False
 
@@ -268,6 +272,105 @@ def test_mesh_worker_blocks_code14_auto_retry_until_manual_retry() -> None:
 
         worker.poll_once()
         assert adapter.connect_calls == 2
+    finally:
+        worker.stop()
+        worker.deleteLater()
+        app.processEvents()
+
+
+def test_mesh_worker_stops_after_three_failures_until_manual_connect(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    operations: list[tuple[str, str, int]] = []
+    clock = {"value": 0}
+
+    class MissingAdapter(FakeLifecycleAdapter):
+        def connect(self) -> None:
+            self.connect_calls += 1
+            raise RuntimeError("mesh device unavailable")
+
+    worker = MeshConnectionWorker(
+        [MeshConnectionConfig(adapter_id="missing", enabled=True, tcp_host="192.0.2.20")],
+        poll_interval_ms=250,
+        reconnect_interval_ms=250,
+        reconnect_max_interval_ms=1200,
+        adapter_factory=MissingAdapter,
+        db_path=tmp_path / "mesh-retry.db",
+    )
+    worker._elapsed_ms = lambda: clock["value"]  # type: ignore[method-assign]
+    worker.operation_state.connect(
+        lambda adapter_id, state, value: operations.append((adapter_id, state, value))
+    )
+
+    try:
+        worker.start()
+        adapter = worker.manager()._adapters["missing"]
+        assert adapter.connect_calls == 1
+
+        clock["value"] = 250
+        worker.poll_once()
+        assert adapter.connect_calls == 2
+
+        clock["value"] = 750
+        worker.poll_once()
+        assert adapter.connect_calls == 3
+        assert worker._retry_states["missing"].operator_action_required is True
+        assert operations[-1] == ("missing", "needs-attention", 0)
+        health = list_mesh_health(tmp_path / "mesh-retry.db")[0]
+        assert health["lifecycle_state"] == "needs_attention"
+        assert "select Connect" in health["guidance"]
+
+        clock["value"] = 60_000
+        for _ in range(5):
+            worker.poll_once()
+        assert adapter.connect_calls == 3
+
+        worker.retry_now("missing")
+        assert adapter.connect_calls == 4
+        assert worker._retry_states["missing"].failure_count == 1
+        assert worker._retry_states["missing"].operator_action_required is False
+    finally:
+        worker.stop()
+        worker.deleteLater()
+        app.processEvents()
+
+
+def test_mesh_retry_budgets_are_isolated_per_adapter() -> None:
+    app = QApplication.instance() or QApplication([])
+    clock = {"value": 0}
+
+    class MissingAdapter(FakeLifecycleAdapter):
+        def connect(self) -> None:
+            self.connect_calls += 1
+            raise RuntimeError("mesh device unavailable")
+
+    configs = (
+        MeshConnectionConfig(adapter_id="missing-a", enabled=True, tcp_host="192.0.2.21"),
+        MeshConnectionConfig(adapter_id="missing-b", enabled=True, tcp_host="192.0.2.22"),
+    )
+    worker = MeshConnectionWorker(
+        configs,
+        poll_interval_ms=250,
+        reconnect_interval_ms=250,
+        reconnect_max_interval_ms=1200,
+        adapter_factory=MissingAdapter,
+    )
+    worker._elapsed_ms = lambda: clock["value"]  # type: ignore[method-assign]
+
+    try:
+        worker.start()
+        clock["value"] = 250
+        worker.poll_once()
+        clock["value"] = 750
+        worker.poll_once()
+        assert worker._retry_states["missing-a"].operator_action_required is True
+        assert worker._retry_states["missing-b"].operator_action_required is True
+
+        worker.retry_now("missing-a")
+
+        assert worker._retry_states["missing-a"].failure_count == 1
+        assert worker._retry_states["missing-a"].operator_action_required is False
+        assert worker._retry_states["missing-b"].failure_count == 3
+        assert worker._retry_states["missing-b"].operator_action_required is True
     finally:
         worker.stop()
         worker.deleteLater()
@@ -558,6 +661,42 @@ def test_mesh_connection_worker_preserves_backoff_across_replacement() -> None:
     assert replacement._retry_states[config.adapter_id].remaining_ms(replacement._elapsed_ms()) > 0
 
     replacement.stop()
+    app.processEvents()
+
+
+def test_manual_connect_clears_exhausted_handoff_before_replacement_start() -> None:
+    app = QApplication.instance() or QApplication([])
+    created: list[FakeLifecycleAdapter] = []
+
+    class MissingAdapter(FakeLifecycleAdapter):
+        def connect(self) -> None:
+            self.connect_calls += 1
+            raise RuntimeError("mesh device unavailable")
+
+    def factory(config: MeshConnectionConfig) -> MissingAdapter:
+        adapter = MissingAdapter(config)
+        created.append(adapter)
+        return adapter
+
+    config = MeshConnectionConfig(adapter_id="manual-handoff", enabled=True, tcp_host="192.0.2.23")
+    first = MeshConnectionWorker([config], adapter_factory=factory)
+    for now_ms in (0, 250, 750):
+        first._record_connection_result(config.adapter_id, False, now_ms, "mesh device unavailable")
+    assert first._retry_states[config.adapter_id].operator_action_required is True
+
+    replacement = MeshConnectionWorker([config], adapter_factory=factory)
+    assert replacement._retry_states[config.adapter_id].operator_action_required is True
+
+    replacement.reset_retry_budget(config.adapter_id)
+    replacement.start()
+
+    assert len(created) == 1
+    assert created[0].connect_calls == 1
+    assert replacement._retry_states[config.adapter_id].failure_count == 1
+    assert replacement._retry_states[config.adapter_id].operator_action_required is False
+
+    replacement.stop()
+    first.stop()
     app.processEvents()
 
 

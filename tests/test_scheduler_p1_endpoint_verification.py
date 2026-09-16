@@ -228,6 +228,115 @@ def test_target_endpoint_completion_cannot_release_peer_intent(monkeypatch, tmp_
         _close(engine)
 
 
+def test_matching_readback_deduplicates_schedule_writes_but_manual_qsy_forces_apply(
+    monkeypatch, tmp_path
+) -> None:
+    """A matching schedule is quiet; an explicit QSY remains an override."""
+
+    engine = _engine(monkeypatch, tmp_path)
+    rig = _Rig(port=12_484, frequency_hz=14_115_000)
+    _target_context(engine, {7: rig})
+    engine._scheduler_enabled = lambda: True
+    engine._maybe_refresh_external_status_snapshot = lambda **_kwargs: None
+    endpoint = _key(rig)
+    engine._endpoint_status.publish(
+        endpoint,
+        {"frequency_hz": 14_115_000, "vfo": "A"},
+        source="ordinary_poll",
+    )
+    queued = _capture_control(engine)
+    scheduled_entry = _entry(7)
+    try:
+        first_result = engine._apply_schedule_entry(
+            scheduled_entry,
+            "HF",
+            ignore_wait_prompt=True,
+            ignore_coordination_prompt=True,
+            ignore_fldigi_busy=True,
+        )
+        assert first_result == "already_applied"
+        assert queued == []
+        assert endpoint.canonical in engine._expected_state_by_endpoint
+        assert engine._expected_state_by_endpoint[endpoint.canonical]["js8_offset_hz"] is None
+        assert engine.get_endpoint_operational_summaries()[7]["state"] == "on_schedule_verified"
+
+        # A subsequent ordinary evaluation must remain quiet merely because
+        # the UI or scheduler was refreshed.
+        second_result = engine._apply_schedule_entry(
+            scheduled_entry,
+            "HF",
+            ignore_wait_prompt=True,
+            ignore_coordination_prompt=True,
+            ignore_fldigi_busy=True,
+        )
+        assert second_result == "already_applied"
+        assert queued == []
+
+        # An explicit manual QSY is an operator command and must remain able
+        # to change the endpoint even when the schedule cache is populated.
+        engine._endpoint_status.publish(
+            endpoint,
+            {"frequency_hz": 14_115_000, "ptt_known": True, "ptt_active": False, "vfo": "A"},
+            source="pre_qsy_safety_poll",
+        )
+        manual_entry = dict(scheduled_entry, frequency="7.115", band="40M")
+        engine._apply_schedule_entry(
+            manual_entry,
+            "QSY",
+            force=True,
+            ignore_wait_prompt=True,
+            ignore_coordination_prompt=True,
+            ignore_fldigi_busy=True,
+        )
+        assert len(queued) == 1
+        assert queued[0]["source"] == "QSY"
+        assert queued[0]["freq_hz"] == 7_115_000
+    finally:
+        _close(engine)
+
+
+def test_targeted_flrig_schedule_still_sets_configured_js8_offset(monkeypatch, tmp_path) -> None:
+    """RF dedup must not suppress FIO-owned JS8 offset correction."""
+
+    engine = _engine(monkeypatch, tmp_path)
+    engine.settings.set("js8_offset_hz", 1_500)
+    rig = _Rig(port=12_485, frequency_hz=14_115_000)
+    js8 = _JS8(offset_hz=1_000)
+    settings = _Settings()
+    engine._control_context_for_entry = lambda _entry: (rig, js8, None, settings, 7)
+    engine._control_mode_for_context = lambda _settings, *, rig, js8: "FLRIG"
+    engine._scheduler_enabled = lambda: True
+    engine._maybe_refresh_external_status_snapshot = lambda **_kwargs: None
+    endpoint = _key(rig)
+    engine._endpoint_status.publish(
+        endpoint,
+        {
+            "frequency_hz": 14_115_000,
+            "ptt_known": True,
+            "ptt_active": False,
+            "vfo": "A",
+            "js8_offset_hz": 1_000,
+        },
+        source="ordinary_poll",
+    )
+    queued = _capture_control(engine)
+    try:
+        result = engine._apply_schedule_entry(
+            _entry(7),
+            "HF",
+            ignore_wait_prompt=True,
+            ignore_coordination_prompt=True,
+            ignore_fldigi_busy=True,
+        )
+
+        assert result == "queued"
+        assert len(queued) == 1
+        assert queued[0]["freq_hz"] == 14_115_000
+        assert queued[0]["js8_offset"] == 1_500
+    finally:
+        _close(engine)
+
+
 def test_stale_status_does_not_release_held_intent(monkeypatch, tmp_path) -> None:
     """A stale cached read remains a safety hold until fresh evidence arrives."""
 

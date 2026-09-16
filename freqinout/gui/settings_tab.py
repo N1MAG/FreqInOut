@@ -11903,6 +11903,8 @@ class SettingsTab(QWidget):
             bool(getattr(health, "connected", False)),
             str(getattr(health, "device_name", "") or ""),
             str(getattr(health, "last_error", "") or ""),
+            str(getattr(health, "lifecycle_state", "") or ""),
+            str(getattr(health, "guidance", "") or ""),
         )
         if signature == getattr(self, "_mesh_health_ui_signature", None):
             return
@@ -12689,6 +12691,19 @@ class SettingsTab(QWidget):
             label.setText(f"Needs setup: {first.message}")
             return
         health_row = getattr(self, "_mesh_last_health_row", {})
+        lifecycle_state = (
+            str(health_row.get("lifecycle_state") or "").strip()
+            if isinstance(health_row, Mapping)
+            else ""
+        )
+        guidance = (
+            str(health_row.get("guidance") or "").strip()
+            if isinstance(health_row, Mapping)
+            else ""
+        )
+        if lifecycle_state == "needs_attention" and guidance:
+            label.setText(guidance)
+            return
         last_error = str(health_row.get("last_error") or "").strip() if isinstance(health_row, Mapping) else ""
         if last_error:
             label.setText(last_error)
@@ -12749,7 +12764,11 @@ class SettingsTab(QWidget):
         last_error = str(row.get("last_error") or "").strip()
         if last_error:
             indicator.setText("Needs attention")
-            indicator.setToolTip(f"Saved connection: {self._mesh_saved_connection_label(config)}")
+            guidance = str(row.get("guidance") or "").strip()
+            tooltip = guidance or last_error
+            indicator.setToolTip(
+                f"Saved connection: {self._mesh_saved_connection_label(config)} · {tooltip}"
+            )
             color = "#FFE3A3" if is_dark else "#8a4b00"
             border = "#A06F18" if is_dark else "#e0b15b"
             background = "#35260F" if is_dark else "#fff4cf"

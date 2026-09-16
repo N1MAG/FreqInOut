@@ -7,6 +7,7 @@ from freqinout.core.source_connection import (
     SOURCE_CONNECTION_CONFIG_ERROR,
     SOURCE_CONNECTION_CONNECTED,
     SOURCE_CONNECTION_DISABLED,
+    SOURCE_CONNECTION_NEEDS_ATTENTION,
     SOURCE_CONNECTION_RECONNECTING,
     source_connection_from_mesh_health,
 )
@@ -95,6 +96,25 @@ def test_mesh_health_disabled_projects_disabled_lifecycle() -> None:
 
     assert snapshot.lifecycle_state == SOURCE_CONNECTION_DISABLED
     assert snapshot.attention is False
+
+
+def test_mesh_health_retry_exhaustion_stays_paused_until_manual_connect() -> None:
+    snapshot = source_connection_from_mesh_health(
+        {
+            "adapter_id": "meshcore-missing",
+            "transport": "meshcore",
+            "enabled": True,
+            "connected": False,
+            "last_error": "BLE device unavailable",
+            "lifecycle_state": "needs_attention",
+            "guidance": "Reconnect paused after 3 failed attempts - select Connect to try again.",
+            "updated_utc": "2026-09-01T11:59:40+00:00",
+        },
+        now_utc=NOW,
+    )
+
+    assert snapshot.lifecycle_state == SOURCE_CONNECTION_NEEDS_ATTENTION
+    assert "select Connect" in snapshot.guidance
 
 
 def test_mesh_connection_snapshot_keeps_protocol_family_and_saved_name() -> None:

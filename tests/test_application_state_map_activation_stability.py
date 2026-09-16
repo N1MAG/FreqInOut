@@ -86,7 +86,7 @@ def test_sustained_inactivity_still_pauses_after_grace_period() -> None:
     assert host.pauses == ["pause"]
     assert host.child_states == [False]
     assert host.dirty == ["app_inactive"]
-    assert host._ui_scheduler_resume_required is True
+    assert host._ui_scheduler_resume_required is False
 
     MainWindow._on_application_state_changed(host, Qt.ApplicationActive)
 
@@ -97,7 +97,7 @@ def test_sustained_inactivity_still_pauses_after_grace_period() -> None:
 
     MainWindow._on_ui_resume_settled(host)
 
-    assert host.scheduler_resumes == ["resume"]
+    assert host.scheduler_resumes == []
     assert host._ui_scheduler_resume_required is False
 
 
@@ -112,6 +112,7 @@ def test_hidden_application_pauses_immediately_without_grace_delay() -> None:
     assert host.pauses == ["pause"]
     assert host.child_states == [False]
     assert host.dirty == ["app_inactive"]
+    assert host._ui_scheduler_resume_required is True
 
 
 def test_initial_activation_does_not_run_scheduler_resume_recovery() -> None:

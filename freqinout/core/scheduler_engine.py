@@ -1005,7 +1005,13 @@ class SchedulerEngine(QObject):
         except Exception:
             return 0
 
-    def _js8_offset_authority_active(self, entry: Optional[Dict], control_mode: Optional[str] = None) -> bool:
+    def _js8_offset_authority_active(
+        self,
+        entry: Optional[Dict],
+        control_mode: Optional[str] = None,
+        *,
+        js8_client: Optional[JS8ControlClient] = None,
+    ) -> bool:
         mode = (control_mode or self._cached_control_mode()).strip().upper()
         if mode not in {"FLRIG", "RIGCTLD", "JS8CALL"}:
             return False
@@ -1017,6 +1023,11 @@ class SchedulerEngine(QObject):
         if str(row.get("primary_js8call_group") or "").strip():
             return True
         if str(row.get("js8_offset") or row.get("js8call_offset") or "").strip():
+            return True
+        # A target-scoped multi-rig JS8 client is direct authority even when it
+        # is not the legacy primary self.js8 client. FIO must still set and
+        # verify the configured offset for that radio.
+        if js8_client is not None:
             return True
         return bool(self.js8 and self._js8_running())
 
@@ -1687,25 +1698,58 @@ class SchedulerEngine(QObject):
         )
         return reason
 
-    def handle_resume(self) -> None:
-        """Re-evaluate current authority after the host UI/OS resumes."""
+    def handle_resume(self, *, force_recompute: bool = False) -> None:
+        """Re-evaluate authority after a real OS resume/clock discontinuity.
+
+        A defensive direct call after an ordinary focus return is deliberately
+        non-destructive.  Native hidden/suspended state callers pass
+        ``force_recompute=True``; sleep/clock discontinuities are also detected
+        from elapsed monotonic and wall time.
+        """
 
         if self._shutdown_requested:
             return
         now_utc = self._utc_now()
         now_monotonic = self._monotonic_clock()
         previous_monotonic = self._last_lifecycle_monotonic
-        monotonic_gap = (
-            max(0.0, now_monotonic - previous_monotonic)
+        previous_utc = self._last_lifecycle_utc
+        raw_monotonic_gap = (
+            now_monotonic - previous_monotonic
             if previous_monotonic is not None
             else 0.0
         )
+        monotonic_gap = max(0.0, raw_monotonic_gap)
+        wall_gap = (
+            (now_utc - previous_utc).total_seconds()
+            if previous_utc is not None
+            else monotonic_gap
+        )
+        wall_drift = wall_gap - monotonic_gap
+        interval_s = max(0.1, float(self.timer.interval()) / 1000.0)
+        discontinuity = bool(
+            raw_monotonic_gap < 0.0
+            or monotonic_gap > max(15.0, interval_s * 3.0)
+            or abs(wall_drift) > max(5.0, interval_s * 2.0)
+        )
         self._last_lifecycle_monotonic = now_monotonic
         self._last_lifecycle_utc = now_utc
+        if not force_recompute and not discontinuity:
+            self._record_scheduler_event(
+                "lifecycle",
+                "ordinary_focus_resume_ignored",
+                source="scheduler",
+                action="Preserved endpoint state after ordinary application focus return",
+                detail="No sleep or clock discontinuity was detected.",
+                throttle_sec=30.0,
+                monotonic_gap_s=monotonic_gap,
+                wall_drift_s=wall_drift,
+            )
+            return
         self._prepare_lifecycle_recompute(
             now_utc=now_utc,
             reason_code="application_resume",
             monotonic_gap_s=monotonic_gap,
+            wall_drift_s=wall_drift,
         )
         if not self._apply_active_schedule_lanes(now_utc=now_utc, force=False):
             self._evaluate(now_utc=now_utc, force=False)
@@ -5098,6 +5142,7 @@ class SchedulerEngine(QObject):
         actual: StationActualState,
         *,
         control_mode: Optional[str] = None,
+        js8_client: Optional[JS8ControlClient] = None,
         check_frequency: bool = True,
         check_mode: bool = True,
         check_offset: bool = True,
@@ -5196,7 +5241,11 @@ class SchedulerEngine(QObject):
                 throttle_sec=60.0,
             )
 
-        if check_offset and self._js8_offset_authority_active(entry, active_control_mode):
+        if check_offset and self._js8_offset_authority_active(
+            entry,
+            active_control_mode,
+            js8_client=js8_client,
+        ):
             desired_js8 = self._js8_offset_setting()
             current_js8 = actual.js8_offset_hz
             if current_js8 is None:
@@ -5514,6 +5563,7 @@ class SchedulerEngine(QObject):
             entry,
             actual,
             control_mode=effective_mode,
+            js8_client=_js8_client,
             check_frequency=check_frequency,
             check_mode=check_mode,
             check_offset=check_offset,
@@ -9286,6 +9336,7 @@ class SchedulerEngine(QObject):
             effective_entry,
             actual_state,
             control_mode=control_mode,
+            js8_client=js8_client,
         )
         current_freq_hz = off_state.actual_frequency_hz
         freq_matches = (
@@ -9688,6 +9739,56 @@ class SchedulerEngine(QObject):
             js8_client=js8_client,
             entry_key=entry_key,
         )
+        js8_offset = (
+            self._js8_offset_setting()
+            if apply_js8_offset
+            and self._js8_offset_authority_active(
+                effective_entry,
+                control_mode,
+                js8_client=js8_client,
+            )
+            else None
+        )
+        # Lifecycle recovery and cache refreshes may legitimately lose the
+        # scheduler's in-memory apply key while a fresh endpoint readback still
+        # proves that the rig already matches the complete active intent.  In
+        # that case rebuild the read model instead of manufacturing a device
+        # write.  PTT is intentionally absent here: it gates a required retune,
+        # but it is not evidence for or against an already matching frequency.
+        readback_matches_intent = bool(
+            not force
+            and not scheduler_transition
+            and not actual_state.stale
+            and not off_state.status_unknown
+            and not off_state.off_schedule
+            and freq_matches
+        )
+        if readback_matches_intent:
+            self._expected_state_by_endpoint[endpoint_key.canonical] = {
+                "frequency_hz": int(freq_hz),
+                "vfo": str(vfo or "").strip().upper()[:1],
+                "js8_offset_hz": int(js8_offset) if js8_offset is not None else None,
+                "control_mode": str(control_mode or "").strip().upper(),
+                "source": str(source or ""),
+            }
+            self._last_applied_by_endpoint[endpoint_key.canonical] = (entry_key, source)
+            self._last_entry_key = entry_key
+            self._last_source = source
+            self._clear_coordination_prompt()
+            self._record_scheduler_event(
+                "verified",
+                "matching_readback_adopted",
+                source=source,
+                entry=effective_entry,
+                entry_key=entry_key,
+                action="Fresh endpoint readback already matches the active schedule",
+                detail="FIO restored verified scheduler state without sending a duplicate rig command.",
+                frequency_hz=freq_hz,
+                throttle_sec=120.0,
+                endpoint_key=endpoint_key.canonical,
+            )
+            self.active_entry_changed.emit(effective_entry, source)
+            return "already_applied"
         pending_by_endpoint = getattr(self, "_pending_entry_keys_by_endpoint", {})
         pending_for_endpoint = (
             pending_by_endpoint.get(endpoint_key.canonical)
@@ -9798,7 +9899,6 @@ class SchedulerEngine(QObject):
                 freq_hz,
             )
 
-        js8_offset = self._js8_offset_setting() if apply_js8_offset else None
         log.info(
             "SchedulerEngine applying entry (%s) from %s: radio=%s band=%s freq=%s vfo=%s mode=%s comment=%s",
             control_mode,

@@ -156,6 +156,44 @@ def test_mes5_wall_clock_jump_recomputes_current_transition_without_replay() -> 
     )
 
 
+def test_mes5_ordinary_application_resume_preserves_usable_endpoint_state(monkeypatch, tmp_path) -> None:
+    """A normal focus return must not discard a matching readback pair."""
+
+    engine = _isolated_engine(monkeypatch, tmp_path)
+    now_utc = datetime.datetime(2026, 9, 10, 15, 30, tzinfo=datetime.timezone.utc)
+    endpoint = _key(57_02)
+    expected = {
+        "frequency_hz": 14_078_000,
+        "control_mode": "RIGCTLD",
+        "vfo": "A",
+    }
+    applied = ((1, "20M", 14_078_000), "HF")
+    engine._expected_state_by_endpoint = {endpoint.canonical: dict(expected)}
+    engine._last_applied_by_endpoint = {endpoint.canonical: applied}
+    before_status = engine._endpoint_status.publish(
+        endpoint,
+        {"frequency_hz": 14_078_000, "ptt_known": True, "ptt_active": False, "vfo": "A"},
+        source="ordinary_poll",
+    )
+    engine._utc_now = lambda: now_utc
+    engine._monotonic_clock = lambda: 102.0
+    engine._last_lifecycle_monotonic = 100.0
+    engine._last_lifecycle_utc = now_utc - datetime.timedelta(seconds=2)
+
+    try:
+        engine.handle_resume()
+
+        assert engine._expected_state_by_endpoint == {endpoint.canonical: expected}
+        assert engine._last_applied_by_endpoint == {endpoint.canonical: applied}
+        after_status = engine._endpoint_status.latest(endpoint)
+        assert after_status.generation == before_status.generation
+        assert after_status.frequency_hz == 14_078_000
+        assert after_status.invalidated is False
+        assert after_status.closed is False
+    finally:
+        _shutdown_engine(engine)
+
+
 def test_mes5_unavailable_endpoint_is_isolated_from_healthy_peer() -> None:
     unavailable = _key(57_00, family="sdrpp", target="vfo-a")
     healthy = _key(57_01)
@@ -545,11 +583,15 @@ def test_mes5_resume_reoffers_only_current_intent_after_invalidating_cache(monke
     engine._last_lifecycle_monotonic = 100.0
     engine._last_lifecycle_utc = now_utc - datetime.timedelta(hours=2)
     engine._last_applied_by_endpoint = {"expired-route": ((1,), "HF")}
+    engine._expected_state_by_endpoint = {
+        "expired-route": {"frequency_hz": 14_078_000, "control_mode": "RIGCTLD"}
+    }
     engine._apply_active_schedule_lanes = lambda **kwargs: (applied.append(kwargs) or True)
     engine._evaluate = lambda **kwargs: evaluated.append(kwargs)
     try:
         engine.handle_resume()
         assert engine._last_applied_by_endpoint == {}
+        assert engine._expected_state_by_endpoint == {}
         assert engine._last_lifecycle_event["reason_code"] == "application_resume"
         assert applied == [{"now_utc": now_utc, "force": False}]
         assert evaluated == []

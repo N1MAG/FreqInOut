@@ -231,6 +231,7 @@ class MainWindow(QMainWindow):
     _message_projection_cycle_finished = Signal(object)
     _message_projection_progressed = Signal(object)
     _receiver_qualification_finished = Signal(object)
+    _mesh_retry_requested = Signal(str)
 
     def __init__(self, startup_status: Callable[[str], None] | None = None):
         super().__init__()
@@ -1811,7 +1812,12 @@ class MainWindow(QMainWindow):
             try:
                 scheduler = getattr(self, "scheduler", None)
                 if scheduler is not None and hasattr(scheduler, "handle_resume"):
-                    scheduler.handle_resume()
+                    try:
+                        scheduler.handle_resume(force_recompute=True)
+                    except TypeError:
+                        # Keep compatibility with test doubles and external
+                        # scheduler facades that predate the lifecycle hint.
+                        scheduler.handle_resume()
             except Exception as exc:
                 log.debug("UI_LIFECYCLE|scheduler_resume_failed err=%s", exc)
         else:
@@ -1831,10 +1837,27 @@ class MainWindow(QMainWindow):
         if not bool(getattr(self, "_app_active", True)):
             return
         self._app_active = False
-        self._ui_scheduler_resume_required = True
+        # Losing desktop focus is not an operating-system resume boundary.
+        # Retiring scheduler lanes for an ordinary ApplicationInactive event
+        # discards valid expected/readback state and can provoke a redundant
+        # rig write when focus returns.  Only native hidden/suspended states
+        # request destructive scheduler lifecycle recovery; the scheduler's
+        # monotonic/wall-clock observer independently detects sleep/wake on
+        # platforms that do not report ApplicationSuspended reliably.
+        observed_state = getattr(
+            self,
+            "_observed_application_state",
+            Qt.ApplicationInactive,
+        )
+        scheduler_resume_states = {
+            getattr(Qt, "ApplicationHidden", None),
+            getattr(Qt, "ApplicationSuspended", None),
+        }
+        self._ui_scheduler_resume_required = observed_state in scheduler_resume_states
         log.info(
-            "UI_LIFECYCLE|app_active=False state=%s",
-            getattr(self, "_observed_application_state", Qt.ApplicationInactive),
+            "UI_LIFECYCLE|app_active=False state=%s scheduler_resume_required=%s",
+            observed_state,
+            self._ui_scheduler_resume_required,
         )
         self._ui_resume_pending = False
         self._ui_resume_settle_timer.stop()
@@ -3184,6 +3207,12 @@ class MainWindow(QMainWindow):
                         str(config.connection_type.value),
                         str(config.endpoint_address),
                         str(config.ble_device_name),
+                        int(config.tcp_port),
+                        int(config.serial_baud),
+                        int(config.ble_scan_timeout_sec),
+                        str(config.http_base_url),
+                        str(config.mqtt_broker),
+                        str(config.mqtt_topic_root),
                         bool(config.send_enabled),
                         bool(config.store_messages_enabled),
                         bool(config.map_positions_enabled),
@@ -3210,6 +3239,11 @@ class MainWindow(QMainWindow):
         try:
             thread = QThread(self)
             worker = MeshConnectionWorker(configs, db_path=default_mesh_db_path())
+            manual_retry_ids = set(
+                getattr(self, "_mesh_manual_retry_adapter_ids", set()) or set()
+            )
+            for adapter_id in manual_retry_ids:
+                worker.reset_retry_budget(str(adapter_id))
             worker.moveToThread(thread)
             thread.started.connect(worker.start)
             worker.error_ready.connect(self._on_mesh_runtime_error)
@@ -3221,6 +3255,7 @@ class MainWindow(QMainWindow):
             worker.channels_ready.connect(self.settings_tab.on_mesh_channels_ready)
             worker.channel_capabilities_ready.connect(self.settings_tab.on_mesh_channel_capabilities_ready)
             worker.operation_ready.connect(self.settings_tab.on_mesh_operation_ready)
+            self._mesh_retry_requested.connect(worker.retry_now, Qt.QueuedConnection)
             self.settings_tab.mesh_channel_refresh_requested.connect(worker.refresh_channels, Qt.QueuedConnection)
             self.settings_tab.mesh_channel_configure_requested.connect(worker.configure_channel, Qt.QueuedConnection)
             self.settings_tab.mesh_channel_remove_device_requested.connect(
@@ -3240,6 +3275,7 @@ class MainWindow(QMainWindow):
             self._mesh_worker = worker
             self._mesh_runtime_stopping = False
             thread.start()
+            self._mesh_manual_retry_adapter_ids = set()
             log.info("MainWindow: local mesh runtime starting for %s configured source(s).", len(configs))
         except Exception as e:
             self._mesh_worker_thread = None
@@ -3284,6 +3320,24 @@ class MainWindow(QMainWindow):
             self._mesh_runtime_stopping = False
         if configs:
             QTimer.singleShot(0, self._start_mesh_runtime_if_enabled)
+
+    def _manual_reconnect_mesh_runtime_now(self) -> None:
+        """Retry configured adapters without replacing a healthy live worker."""
+
+        worker = getattr(self, "_mesh_worker", None)
+        thread = getattr(self, "_mesh_worker_thread", None)
+        configs = tuple(self._mesh_runtime_configs())
+        if worker is not None and thread is not None and thread.isRunning():
+            for config in configs:
+                if bool(getattr(config, "enabled", False)):
+                    self._mesh_retry_requested.emit(str(config.adapter_id))
+            return
+        self._mesh_manual_retry_adapter_ids = {
+            str(config.adapter_id)
+            for config in configs
+            if bool(getattr(config, "enabled", False))
+        }
+        self._restart_mesh_runtime_now()
 
     def _disconnect_mesh_runtime(self) -> None:
         """Stop the live mesh worker without scheduling an automatic restart."""
@@ -9716,7 +9770,7 @@ class MainWindow(QMainWindow):
         restart_btn.setToolTip("Restart the local mesh worker for the configured connection.")
         restart_btn.clicked.connect(
             lambda _checked=False: (
-                self._restart_mesh_runtime_now(),
+                self._manual_reconnect_mesh_runtime_now(),
                 self._refresh_station_command_bar(force=True),
             )
         )
@@ -9776,10 +9830,39 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             log.warning("MainWindow: failed to save activated mesh connection %s: %s", selected_key, exc)
             return
-        # This is an explicit operator Connect action. Disconnect deliberately
-        # preserves the saved configuration, so a signature-only restart check
-        # would see no settings change and turn Connect into a no-op.
-        self._restart_mesh_runtime_now()
+        # This is an explicit operator Connect action. Reset only the selected
+        # adapter's bounded retry series when the live worker still owns the
+        # same configuration; otherwise replace the runtime normally.
+        configs = tuple(self._mesh_runtime_configs())
+        new_signature = self._mesh_runtime_signature_from_configs(configs)
+        selected_config = next(
+            (
+                config
+                for config in configs
+                if mesh_connection_config_key(config) == selected_key
+                or str(config.adapter_id) == selected_key
+            ),
+            None,
+        )
+        worker = getattr(self, "_mesh_worker", None)
+        thread = getattr(self, "_mesh_worker_thread", None)
+        live_same_runtime = bool(
+            selected_config is not None
+            and worker is not None
+            and thread is not None
+            and thread.isRunning()
+            and new_signature == getattr(self, "_mesh_runtime_signature", tuple())
+        )
+        if live_same_runtime:
+            self._mesh_retry_requested.emit(str(selected_config.adapter_id))
+        else:
+            if selected_config is not None:
+                pending_manual = set(
+                    getattr(self, "_mesh_manual_retry_adapter_ids", set()) or set()
+                )
+                pending_manual.add(str(selected_config.adapter_id))
+                self._mesh_manual_retry_adapter_ids = pending_manual
+            self._restart_mesh_runtime_now()
         self._refresh_station_command_bar(force=True)
         settings_tab = getattr(self, "settings_tab", None)
         if settings_tab is not None and hasattr(settings_tab, "_load_mesh_settings_from_data"):

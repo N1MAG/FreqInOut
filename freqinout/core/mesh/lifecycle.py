@@ -29,6 +29,7 @@ class MeshRetryPolicy:
     initial_delay_ms: int = 15_000
     maximum_delay_ms: int = 300_000
     multiplier: float = 2.0
+    maximum_failures: int = 3
 
     def delay_ms(self, failure_count: int) -> int:
         failures = max(1, int(failure_count))
@@ -50,6 +51,10 @@ class MeshRetryState:
     def record_failure(self, now_ms: int, policy: MeshRetryPolicy) -> int:
         self.operator_action_required = False
         self.failure_count += 1
+        if self.failure_count >= max(1, int(policy.maximum_failures)):
+            self.next_retry_ms = 0
+            self.operator_action_required = True
+            return 0
         delay = policy.delay_ms(self.failure_count)
         self.next_retry_ms = int(now_ms) + delay
         return delay
@@ -65,6 +70,9 @@ class MeshRetryState:
         self.operator_action_required = False
 
     def retry_now(self) -> None:
+        """Start a fresh bounded series after an explicit operator action."""
+
+        self.failure_count = 0
         self.next_retry_ms = 0
         self.operator_action_required = False
 

@@ -10,6 +10,7 @@ SOURCE_CONNECTION_RECONNECTING = "reconnecting"
 SOURCE_CONNECTION_AWAY = "away"
 SOURCE_CONNECTION_DISABLED = "disabled"
 SOURCE_CONNECTION_CONFIG_ERROR = "config_error"
+SOURCE_CONNECTION_NEEDS_ATTENTION = "needs_attention"
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,8 @@ def source_connection_from_mesh_health(
     last_error = _clean(row.get("last_error"))
     warnings = _warnings(row.get("warnings", row.get("warnings_json")))
     required = _truthy(row.get("required"))
+    explicit_state = _clean(row.get("lifecycle_state"))
+    explicit_guidance = _clean(row.get("guidance"))
 
     if not enabled:
         state = SOURCE_CONNECTION_DISABLED
@@ -80,6 +83,9 @@ def source_connection_from_mesh_health(
     elif connected:
         state = SOURCE_CONNECTION_CONNECTED
         guidance = "Connected."
+    elif explicit_state == SOURCE_CONNECTION_NEEDS_ATTENTION:
+        state = SOURCE_CONNECTION_NEEDS_ATTENTION
+        guidance = explicit_guidance or "Select Connect to retry this mesh source."
     elif _looks_like_config_error(last_error):
         state = SOURCE_CONNECTION_CONFIG_ERROR
         guidance = "Open Settings > Local Mesh to fix the connection."

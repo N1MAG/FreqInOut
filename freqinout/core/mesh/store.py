@@ -692,6 +692,7 @@ def upsert_mesh_health(db_path: str | Path, snapshot: MeshHealthSnapshot, *, upd
                     last_error=excluded.last_error,
                     warnings_json=excluded.warnings_json,
                     lifecycle_state=excluded.lifecycle_state,
+                    required=excluded.required,
                     guidance=excluded.guidance,
                     updated_utc=excluded.updated_utc
                 """,
@@ -709,9 +710,9 @@ def upsert_mesh_health(db_path: str | Path, snapshot: MeshHealthSnapshot, *, upd
                     snapshot.last_tx.isoformat() if snapshot.last_tx else "",
                     _clean(snapshot.last_error),
                     _json_dumps(tuple(_clean(warning) for warning in snapshot.warnings if _clean(warning))),
-                    "",
-                    0,
-                    "",
+                    _clean(snapshot.lifecycle_state),
+                    1 if snapshot.required else 0,
+                    _clean(snapshot.guidance),
                     stamp,
                 ),
             )

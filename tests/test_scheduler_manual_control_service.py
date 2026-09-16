@@ -1276,7 +1276,10 @@ def test_scheduler_targeted_hold_does_not_suspend_other_radios(monkeypatch, tmp_
 
     class _Rig:
         def get_vfo_frequency(self):
-            return 7_115_000
+            # Keep the non-held radio off-frequency so this test exercises
+            # endpoint isolation through a real queued correction. A matching
+            # fresh readback is intentionally deduplicated.
+            return 7_100_000
 
         def get_ptt(self):
             return False

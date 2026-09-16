@@ -33,6 +33,9 @@ class MeshHealthSnapshot:
     last_tx: datetime | None = None
     last_error: str = ""
     warnings: tuple[str, ...] = ()
+    lifecycle_state: str = ""
+    required: bool = False
+    guidance: str = ""
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from time import monotonic_ns
 from pathlib import Path
 import threading
@@ -34,6 +35,10 @@ class MeshConnectionWorker(QObject):
     channels_ready = Signal(str, tuple)
     channel_capabilities_ready = Signal(str, object)
     operation_ready = Signal(object)
+
+    RETRY_EXHAUSTED_GUIDANCE = (
+        "Reconnect paused after 3 failed attempts - select Connect to try again."
+    )
 
     def __init__(
         self,
@@ -159,10 +164,15 @@ class MeshConnectionWorker(QObject):
     def retry_now(self, adapter_id: str) -> None:
         if not self._running or self._stop_event.is_set():
             return
+        self.reset_retry_budget(adapter_id)
+        self._attempt_connection(str(adapter_id), self._elapsed_ms(), force=True, emit_connecting=True)
+
+    def reset_retry_budget(self, adapter_id: str) -> None:
+        """Clear one adapter's inherited pause before an explicit Connect."""
+
         state = self._retry_states.setdefault(str(adapter_id), MeshRetryState())
         state.retry_now()
         self._persist_retry_state(str(adapter_id))
-        self._attempt_connection(str(adapter_id), self._elapsed_ms(), force=True, emit_connecting=True)
 
     @Slot(str)
     def refresh_channels(self, adapter_id: str) -> None:
@@ -323,34 +333,67 @@ class MeshConnectionWorker(QObject):
             self.operation_state.emit(adapter_id, "connecting", 0)
         try:
             snapshot = self._manager.start_adapter(adapter_id)
-            self._record_connection_result(adapter_id, snapshot.connected, now_ms, snapshot.last_error)
+            connection_detail = self._record_connection_result(
+                adapter_id,
+                snapshot.connected,
+                now_ms,
+                snapshot.last_error,
+            )
+            if connection_detail == self.RETRY_EXHAUSTED_GUIDANCE:
+                paused_snapshot = replace(
+                    snapshot,
+                    lifecycle_state="needs_attention",
+                    guidance=self.RETRY_EXHAUSTED_GUIDANCE,
+                )
+                if self._store_sink is not None:
+                    self._store_sink(
+                        MeshAdapterEvent(
+                            event_type="health",
+                            adapter_id=paused_snapshot.adapter_id,
+                            transport=paused_snapshot.transport,
+                            health=paused_snapshot,
+                        )
+                    )
+                self._handle_health(paused_snapshot)
             self._publish_operation(
                 operation,
                 "complete" if snapshot.connected else "error",
-                detail=snapshot.last_error,
+                detail=connection_detail or snapshot.last_error,
             )
         finally:
             release_mesh_connect_attempt(context_key)
 
-    def _record_connection_result(self, adapter_id: str, connected: bool, now_ms: int, error: str = "") -> None:
+    def _record_connection_result(
+        self,
+        adapter_id: str,
+        connected: bool,
+        now_ms: int,
+        error: str = "",
+    ) -> str:
         state = self._retry_states.setdefault(adapter_id, MeshRetryState())
         if connected:
             state.record_success()
             self._persist_retry_state(adapter_id, clear=True)
             self.operation_state.emit(adapter_id, "connected", 0)
-            return
+            return ""
         if mesh_error_requires_operator_action(error):
             state.record_operator_action_required()
             self._persist_retry_state(adapter_id)
             self.operation_state.emit(adapter_id, "needs-attention", 0)
             if error:
                 self.error_ready.emit(str(error))
-            return
+            return str(error or "Mesh pairing requires operator attention.")
         delay = state.record_failure(now_ms, self._retry_policy)
         self._persist_retry_state(adapter_id)
-        self.operation_state.emit(adapter_id, "retrying", delay)
+        if state.operator_action_required:
+            self.operation_state.emit(adapter_id, "needs-attention", 0)
+        else:
+            self.operation_state.emit(adapter_id, "retrying", delay)
         if error:
             self.error_ready.emit(str(error))
+        if state.operator_action_required:
+            return self.RETRY_EXHAUSTED_GUIDANCE
+        return str(error or "")
 
     def _begin_operation(self, source_id: str, request_class: str) -> MeshOperationSnapshot:
         key = (str(source_id), str(request_class))
@@ -419,6 +462,12 @@ class MeshConnectionWorker(QObject):
             str(config.protocol),
             str(config.connection_type.value),
             str(config.endpoint_address),
+            int(config.tcp_port),
+            int(config.serial_baud),
+            int(config.ble_scan_timeout_sec),
+            str(config.http_base_url),
+            str(config.mqtt_broker),
+            str(config.mqtt_topic_root),
         )
 
     def _persist_retry_state(self, adapter_id: str, *, clear: bool = False) -> None:

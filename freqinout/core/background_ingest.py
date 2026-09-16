@@ -92,7 +92,7 @@ class _DeviceProfileVaultSettings:
         return self.fallback_settings.get(key, default)
 
     def set(self, key: str, value) -> None:
-        if str(key or "").startswith("spotter_directed_offset"):
+        if str(key or "").startswith(("spotter_directed_offset", "expect_directed_offset")):
             try:
                 self.fallback_settings.set(key, value)
                 if hasattr(self.fallback_settings, "save"):
