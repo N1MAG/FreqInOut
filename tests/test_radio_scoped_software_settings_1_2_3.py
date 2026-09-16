@@ -858,7 +858,7 @@ def test_settings_operating_model_table_owns_its_scroll_geometry_without_legacy_
     assert "def _auto_classify_spotter_forms" not in source
 
     save_block = source[source.index("def _save_settings(") : source.index("def _on_theme_changed")]
-    assert "_refresh_runtime_projection_ui(refresh_multi_radio=False, emit_saved=False)" in save_block
+    assert "_refresh_runtime_projection_ui(refresh_multi_radio=False)" in save_block
     assert "MAPPER_SETTINGS_KEY: data.get(MAPPER_SETTINGS_KEY, [])" in save_block
 
 
@@ -901,7 +901,7 @@ def test_unrelated_settings_save_preserves_spotter_mappings_without_legacy_mappe
         saved = SettingsManager()
         assert saved.get(MAPPER_SETTINGS_KEY) == mappings
         assert [row["form_code"] for row in effective_mapping_rows(saved)] == ["F!103"]
-        assert projection_calls == [{"refresh_multi_radio": False, "emit_saved": False}]
+        assert projection_calls == [{"refresh_multi_radio": False}]
         assert not hasattr(tab, "spotter_mapper_table")
     finally:
         tab.deleteLater()
@@ -1411,6 +1411,45 @@ def test_settings_save_success_uses_feedback_instead_of_success_popup() -> None:
     assert "Settings saved." in save_block
     assert "_publish_settings_action_feedback(" in save_block
     assert 'QMessageBox.information(self, "Settings", "Settings saved.")' not in save_block
+
+
+def test_settings_scoped_changes_do_not_broadcast_global_settings_saved() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+
+    # Only the explicit Save Settings dispatcher owns the broad signal. Theme,
+    # radio/runtime, migration, schedule assignment, and operating-group saves
+    # must use their narrower domain signals.
+    assert source.count("self.settings_saved.emit()") == 1
+    assert "appearance_changed = Signal()" in source
+    assert "operating_groups_changed = Signal()" in source
+
+    theme_block = source[source.index("def _on_theme_changed") : source.index("def _request_open_logs")]
+    assert theme_block.count("self._emit_appearance_changed()") == 2
+    assert "settings_saved.emit" not in theme_block
+
+    defer_block = source[source.index("def _defer_multi_rig_setup") : source.index("def _copy_multi_rig_status_summary")]
+    assert "self._emit_device_profiles_changed()" in defer_block
+    assert "settings_saved.emit" not in defer_block
+
+    projection_block = source[
+        source.index("def _refresh_runtime_projection_ui") : source.index("def _persist_device_profile")
+    ]
+    assert "emit_saved" not in projection_block
+    assert "settings_saved.emit" not in projection_block
+
+    operating_group_blocks = (
+        source[source.index("def _upsert_operating_group") : source.index("def _load_known_operating_group_catalog")],
+        source[source.index("def _persist_operating_groups_quiet") : source.index("def _refresh_operating_groups_table")],
+        source[source.index("def _delete_operating_groups") : source.index("# ---------- Local Net Profiles")],
+    )
+    assert all("self._emit_operating_groups_changed()" in block for block in operating_group_blocks)
+    assert all("settings_saved.emit" not in block for block in operating_group_blocks)
+
+    main_source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
+    assert '"appearance_changed -> apply theme"' in main_source
+    assert '"settings_saved -> apply theme"' not in main_source
+    assert "operating_groups_changed -> settings consumers" in main_source
+    assert "UI_THEME|unchanged application theme refresh skipped" in main_source
 
 
 def test_settings_prompt_interval_validation_uses_blocked_feedback() -> None:

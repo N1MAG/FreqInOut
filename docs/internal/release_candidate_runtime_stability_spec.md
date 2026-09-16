@@ -108,6 +108,37 @@ authoritative; this document narrows their behavior for these release defects.
 - External Linux/macOS/Windows hardware and long-soak validation remain a
   release gate; automated tests do not claim native BLE or rig-hardware proof.
 
+## RCS-6: radio activation UI stability
+
+1. Settings > Radios > Use Radio changes only runtime radio activation state.
+   It must not publish the global `settings_saved` event, reapply the
+   application-wide theme, or refresh unrelated tabs.
+2. A successful activation publishes exactly one `device_profiles_changed`
+   event so runtime clients, the scheduler projection, navigation availability,
+   and radio status update through their radio-specific path.
+3. The Settings workspace remains visible and in its existing window state and
+   placement while activation completes. No top-level window is hidden,
+   recreated, minimized, moved, or resized.
+4. Activation failure retains the existing warning and refresh behavior and
+   does not publish a successful radio-profile change event.
+5. The broad `settings_saved` event is reserved for the explicit Save Settings
+   action. Immediate appearance changes publish `appearance_changed`; radio,
+   migration, and assignment changes publish `device_profiles_changed`; HF
+   operating-group edits publish `operating_groups_changed`.
+6. Appearance changes may reapply the shared application theme exactly once.
+   Other scoped saves must not reapply the application stylesheet, restart
+   Mesh, or rebuild unrelated tab presentation.
+7. Radio-profile changes must still refresh runtime clients, Settings runtime
+   status, background-ingest source configuration, station-health scope, plan
+   context, Map's JS8 listener, and scheduler state through the dedicated
+   handler.
+8. Operating-group changes refresh only loaded schedule, planner, message,
+   ControlFreq, SOP, and NCS consumers plus the scheduler. They must not invoke
+   application-wide appearance or radio-client reconstruction.
+9. The application theme receiver keeps an appearance signature and rejects an
+   unchanged reapplication as a final defensive guard against native-window
+   repaint instability.
+
 ## Implementation and acceptance evidence
 
 The implementation now distinguishes ordinary desktop focus loss from native
@@ -123,6 +154,12 @@ worker replacement, resets only through explicit per-adapter Connect/Reconnect
 or success/config identity change, and projects visible `needs_attention`
 guidance through the existing health store. Retained message/map data is not
 mutated.
+
+The Settings signal audit reserves the broad save event for the explicit Save
+Settings action. Appearance, radio/runtime, and HF operating-group mutations
+now have separate signals and bounded consumers. An unchanged appearance
+signature is rejected before the application stylesheet or child-theme pass is
+started.
 
 Work packages and models:
 
@@ -148,6 +185,8 @@ Acceptance results:
   2 skips and one existing Qt signal-disconnect warning.
 - 144 focused Mesh/source-connection tests passed in isolated Qt groups; the
   broader adjacent Mesh collection passed 167 tests.
+- 170 scoped-save, multi-rig/settings, and application-lifecycle tests passed;
+  19 additional targeted main-shell/runtime/settings tests passed.
 - Python compilation and `git diff --check` passed.
 - A full repository run reached the early Compose Qt group, then aborted in the
   known shared-QApplication/thread test-harness failure. The exact reported

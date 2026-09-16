@@ -278,6 +278,7 @@ class MainWindow(QMainWindow):
         self._station_command_layout_pending = False
         self._action_feedback_geometry_pending = False
         self._settings_saved_refresh_pending = False
+        self._applied_appearance_signature = None
         self._help_dialog_settle_until = 0.0
         self._ui_resume_settle_timer = QTimer(self)
         self._ui_resume_settle_timer.setSingleShot(True)
@@ -1293,7 +1294,9 @@ class MainWindow(QMainWindow):
             log.debug("MainWindow signal wiring failed: sop_data_changed -> main_window: %s", e)
         # Message tab settings saved handled by _on_settings_saved_for_lazy_tabs
         self._wire_lazy_local_data_links()
-        _connect_or_log("settings_saved -> apply theme", self.settings_tab.settings_saved, self._apply_app_theme)
+        appearance_signal = getattr(self.settings_tab, "appearance_changed", None)
+        if appearance_signal is not None:
+            _connect_or_log("appearance_changed -> apply theme", appearance_signal, self._apply_app_theme)
         _connect_or_log("settings_saved -> runtime settings", self.settings_tab.settings_saved, self._on_runtime_settings_saved)
         _connect_or_log("settings_saved -> sync runtime status", self.settings_tab.settings_saved, self._sync_settings_runtime_status)
         try:
@@ -1301,6 +1304,11 @@ class MainWindow(QMainWindow):
                 self.settings_tab.device_profiles_changed.connect(self._on_runtime_device_profiles_changed)
         except Exception as e:
             log.debug("MainWindow signal wiring failed: device_profiles_changed -> runtime profile: %s", e)
+        try:
+            if hasattr(self.settings_tab, "operating_groups_changed"):
+                self.settings_tab.operating_groups_changed.connect(self._on_operating_groups_changed)
+        except Exception as e:
+            log.debug("MainWindow signal wiring failed: operating_groups_changed -> settings consumers: %s", e)
         _connect_or_log("settings_saved -> log indicator", self.settings_tab.settings_saved, self._update_log_indicator)
         _connect_or_log("settings_saved -> background ingest", self.settings_tab.settings_saved, self.background_ingest.refresh_runtime_settings)
         _connect_or_log("settings_saved -> station health", self.settings_tab.settings_saved, self._on_station_health_settings_saved)
@@ -5750,7 +5758,7 @@ class MainWindow(QMainWindow):
             layout.setColumnStretch(9, 1)
             layout.setColumnStretch(15, 2)
 
-    def _apply_app_theme(self):
+    def _apply_app_theme(self, *, force: bool = False):
         app = QApplication.instance()
         try:
             self.settings.reload()
@@ -5758,7 +5766,15 @@ class MainWindow(QMainWindow):
             pass
         theme = resolve_theme(self.settings)
         ui_text_scale = resolve_ui_text_scale(self.settings)
+        appearance_signature = (
+            tuple(sorted((str(key), repr(value)) for key, value in theme.items())),
+            round(float(ui_text_scale), 4),
+        )
+        if not force and appearance_signature == getattr(self, "_applied_appearance_signature", None):
+            log.debug("UI_THEME|unchanged application theme refresh skipped")
+            return
         apply_app_theme(app, theme, ui_text_scale=ui_text_scale)
+        self._applied_appearance_signature = appearance_signature
         fit_child_combo_boxes(self)
         self._set_logo_pixmap()
         self._update_log_indicator()
@@ -6570,6 +6586,26 @@ class MainWindow(QMainWindow):
                 pass
         elif sop_tab is not None:
             self._sop_settings_refresh_pending = True
+
+    def _on_operating_groups_changed(self) -> None:
+        """Refresh only consumers of HF operating-group configuration."""
+
+        self._on_settings_saved_for_lazy_tabs()
+        for label, tab in (
+            ("operating_groups.hf_schedule", getattr(self, "hf_schedule_tab", None)),
+            ("operating_groups.net_schedule", getattr(self, "net_tab", None)),
+            ("operating_groups.fldigi_ncs", getattr(self, "fldigi_tab", None)),
+            ("operating_groups.js8_ncs", getattr(self, "js8_tab", None)),
+        ):
+            callback = getattr(tab, "on_settings_saved", None)
+            if callable(callback):
+                self._run_timed_ui_refresh(label, callback)
+        try:
+            scheduler = getattr(self, "scheduler", None)
+            if scheduler is not None:
+                scheduler.force_refresh()
+        except Exception:
+            log.debug("MainWindow: operating-group scheduler refresh failed", exc_info=True)
 
     def _plan_context_consumer_widgets(self) -> tuple[object | None, ...]:
         return (
@@ -12396,6 +12432,7 @@ class MainWindow(QMainWindow):
 
     def _on_runtime_device_profiles_changed(self) -> None:
         self._rebuild_runtime_clients()
+        self._sync_settings_runtime_status(refresh_store=False)
         try:
             self._station_command_profile_cache = list(
                 self.multi_radio_store.list_runtime_active_device_profiles()
@@ -12404,6 +12441,15 @@ class MainWindow(QMainWindow):
             pass
         self._apply_runtime_profile_state()
         self._refresh_plan_context_labels("runtime_device_profiles_changed")
+        self._on_settings_saved_for_lazy_tabs()
+        try:
+            self.background_ingest.refresh_runtime_settings()
+        except Exception:
+            log.debug("MainWindow: radio-profile ingest refresh failed", exc_info=True)
+        try:
+            self._on_station_health_settings_saved()
+        except Exception:
+            log.debug("MainWindow: radio-profile station-health refresh failed", exc_info=True)
         try:
             if self.stations_map_tab is not None and hasattr(self.stations_map_tab, "_start_js8_rx_listener"):
                 self.stations_map_tab._start_js8_rx_listener()

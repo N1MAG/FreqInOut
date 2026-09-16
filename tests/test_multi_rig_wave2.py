@@ -308,6 +308,10 @@ def test_settings_tab_supports_multi_active_profiles_and_primary_selection(monke
     monkeypatch.setattr(SettingsTab, "_refresh_running_status", lambda self: None)
 
     tab = SettingsTab()
+    settings_saved_events = []
+    device_profile_events = []
+    tab.settings_saved.connect(lambda: settings_saved_events.append(True))
+    tab.device_profiles_changed.connect(lambda: device_profile_events.append(True))
     try:
         _select_device_profiles(tab, [int(remote_flrig["id"]), int(remote_rigctld["id"])])
         tab._activate_selected_device_profiles()
@@ -323,6 +327,8 @@ def test_settings_tab_supports_multi_active_profiles_and_primary_selection(monke
         assert primary is not None
         assert int(primary["id"]) == int(remote_rigctld["id"])
         assert tab.control_combo.currentText() == "RIGCTLD"
+        assert settings_saved_events == []
+        assert device_profile_events == [True, True]
     finally:
         tab.deleteLater()
         app.processEvents()
@@ -360,7 +366,7 @@ def test_runtime_command_focus_radio_is_also_active(monkeypatch, tmp_path):
     assert {int(radio_a["id"]), int(radio_b["id"])} <= active_ids
 
 
-def test_settings_use_radio_refreshes_runtime_projection(monkeypatch, tmp_path):
+def test_settings_use_radio_refreshes_only_radio_runtime_projection(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
     app = _qapplication_or_skip()
@@ -382,7 +388,11 @@ def test_settings_use_radio_refreshes_runtime_projection(monkeypatch, tmp_path):
 
     tab = SettingsTab()
     refresh_calls = []
+    settings_saved_events = []
+    device_profile_events = []
     monkeypatch.setattr(tab, "_refresh_runtime_projection_ui", lambda **kwargs: refresh_calls.append(dict(kwargs)))
+    tab.settings_saved.connect(lambda: settings_saved_events.append(True))
+    tab.device_profiles_changed.connect(lambda: device_profile_events.append(True))
     try:
         _select_device_profiles(tab, [int(radio_b["id"])])
         tab._activate_selected_device_profiles()
@@ -390,7 +400,9 @@ def test_settings_use_radio_refreshes_runtime_projection(monkeypatch, tmp_path):
         refreshed = store.get_device_profile(int(radio_b["id"]))
         assert refreshed is not None
         assert int(refreshed["runtime_active"]) == 1
-        assert refresh_calls == [{"refresh_multi_radio": True, "emit_saved": True}]
+        assert refresh_calls == [{"refresh_multi_radio": True}]
+        assert settings_saved_events == []
+        assert device_profile_events == [True]
     finally:
         tab.deleteLater()
         app.processEvents()

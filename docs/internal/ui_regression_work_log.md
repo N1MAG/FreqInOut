@@ -4,6 +4,35 @@ All new entries must follow the authoritative multi-model delivery contract in
 `docs/internal/project_delivery_rules.md` and record the required package/model,
 primary-review, acceptance, and exit-gate evidence.
 
+## 2026-09-15 — Settings Use Radio native-window stability
+
+Status: implementation and focused automated acceptance complete; native
+macOS activation retest remains open.
+
+Activating a newly configured radio incorrectly published both the global
+`settings_saved` signal and the radio-specific `device_profiles_changed` signal.
+The global fan-out reapplied the application theme and refreshed unrelated tabs,
+causing a visible swipe/vanish event on macOS even though FIO remained running.
+
+A full emitter audit found the same broad signal in immediate theme/text-size,
+radio create/edit/default, Multi-Rig migration/defer, guided plan assignment,
+and HF operating-group save paths. Signal ownership is now explicit:
+`settings_saved` belongs only to the explicit Save Settings action;
+`appearance_changed`, `device_profiles_changed`, and
+`operating_groups_changed` drive their scoped consumers. The appearance handler
+also rejects an unchanged theme signature, preventing an accidental future
+stylesheet reapplication. Radio changes retain runtime-client, ingest,
+station-health, Map listener, plan-context, and scheduler refreshes without the
+global repaint. Operating-group changes retain schedule/planner/message/NCS
+refreshes without rebuilding radio clients or unrelated presentation.
+
+Regression coverage proves that activation persists, the global settings
+signal remains silent for scoped actions, domain signals fire once, and the
+source contains only one global emitter. Acceptance passed 170 scoped-save,
+multi-rig/settings, and application-lifecycle tests plus 19 targeted
+main-shell/runtime/settings tests, Python compilation, and the diff whitespace
+gate. Native macOS activation and scoped-save retesting remain open.
+
 ## 2026-09-15 — Release-candidate control, ingest, and Mesh stability
 
 Status: automated implementation gate passed; native rig/Mesh hardware and

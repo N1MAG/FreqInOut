@@ -938,7 +938,9 @@ class SettingsTab(QWidget):
     """
 
     settings_saved = Signal()
+    appearance_changed = Signal()
     device_profiles_changed = Signal()
+    operating_groups_changed = Signal()
     local_net_profiles_changed = Signal()
     open_logs_requested = Signal()
     log_level_changed = Signal(str)
@@ -14747,6 +14749,18 @@ class SettingsTab(QWidget):
         except Exception:
             pass
 
+    def _emit_appearance_changed(self) -> None:
+        try:
+            self.appearance_changed.emit()
+        except Exception:
+            pass
+
+    def _emit_operating_groups_changed(self) -> None:
+        try:
+            self.operating_groups_changed.emit()
+        except Exception:
+            pass
+
     def _save_settings_quiet(self):
         """Auto-save on application exit (no dialog)."""
         if self._defer_initial_load and not self._initial_settings_loaded:
@@ -15401,7 +15415,7 @@ class SettingsTab(QWidget):
             self.settings._data = data  # type: ignore[attr-defined]
 
         log.info("SettingsTab: settings saved.")
-        self._refresh_runtime_projection_ui(refresh_multi_radio=False, emit_saved=False)
+        self._refresh_runtime_projection_ui(refresh_multi_radio=False)
         self._ensure_fldigi_checkin_files()
         if show_message:
             radio_id, target = self._selected_settings_feedback_target()
@@ -15443,10 +15457,7 @@ class SettingsTab(QWidget):
                     self.settings.save()
         except Exception:
             pass
-        try:
-            self.settings_saved.emit()
-        except Exception:
-            pass
+        self._emit_appearance_changed()
         self._mark_settings_dirty()
         # apply_theme will clear the toast once the app theme is applied
 
@@ -15462,10 +15473,7 @@ class SettingsTab(QWidget):
                     self.settings.save()
         except Exception:
             pass
-        try:
-            self.settings_saved.emit()
-        except Exception:
-            pass
+        self._emit_appearance_changed()
         self._mark_settings_dirty()
         # apply_theme will clear the toast once the app theme is applied
 
@@ -20095,10 +20103,7 @@ class SettingsTab(QWidget):
             "Multi-Rig Setup",
             "Multi-Rig setup is paused. FIO will keep using your current station setup.",
         )
-        try:
-            self.settings_saved.emit()
-        except Exception:
-            pass
+        self._emit_device_profiles_changed()
 
     def _copy_multi_rig_status_summary(self) -> None:
         status = self._current_multi_rig_runtime_status()
@@ -20532,10 +20537,6 @@ class SettingsTab(QWidget):
         self._refresh_multi_radio_tables(refresh_section_titles=False)
         self._refresh_cached_multi_rig_runtime_status()
         self._emit_device_profiles_changed()
-        try:
-            self.settings_saved.emit()
-        except Exception:
-            pass
         self._set_multi_rig_setup_preview_text(
             f"Multi-Rig setup is ready. Backup saved to {backup_result.backup_dir}",
             f"Backup manifest: {backup_result.manifest_path}",
@@ -27239,7 +27240,7 @@ class SettingsTab(QWidget):
         self._load_selected_launch_radio_state()
         self._refresh_launch_control_table()
 
-    def _refresh_runtime_projection_ui(self, *, refresh_multi_radio: bool = False, emit_saved: bool = False) -> None:
+    def _refresh_runtime_projection_ui(self, *, refresh_multi_radio: bool = False) -> None:
         try:
             self.settings.reload()
         except Exception:
@@ -27261,11 +27262,6 @@ class SettingsTab(QWidget):
         self._refresh_section_titles()
         self._refresh_contextual_autofill_buttons()
         self._refresh_running_status_compat(force=True)
-        if emit_saved:
-            try:
-                self.settings_saved.emit()
-            except Exception:
-                pass
 
     def _persist_device_profile(self, values: Dict[str, Any], *, existing: Optional[Dict[str, Any]] = None) -> bool:
         self._last_persisted_device_profile = None
@@ -27412,7 +27408,7 @@ class SettingsTab(QWidget):
                 QMessageBox.warning(self, "Radio Profiles", "Unable to refresh the runtime compatibility projection.")
                 self._refresh_multi_radio_tables()
                 return False
-            self._refresh_runtime_projection_ui(refresh_multi_radio=True, emit_saved=True)
+            self._refresh_runtime_projection_ui(refresh_multi_radio=True)
         else:
             self._refresh_multi_radio_tables()
         self._last_persisted_device_profile = dict(saved)
@@ -27451,10 +27447,6 @@ class SettingsTab(QWidget):
         self._refresh_multi_radio_tables()
         self._refresh_schedule_assignments_table(refresh_section_titles=False)
         self._emit_device_profiles_changed()
-        try:
-            self.settings_saved.emit()
-        except Exception:
-            pass
         validation: Dict[str, Any] = {}
         try:
             validation = json.loads(str((saved_assignment or {}).get("validation_status_json", "") or "{}"))
@@ -27586,7 +27578,7 @@ class SettingsTab(QWidget):
             QMessageBox.warning(self, "Make Default", "Unable to update the selected radio.")
             self._refresh_multi_radio_tables()
             return
-        self._refresh_runtime_projection_ui(refresh_multi_radio=True, emit_saved=True)
+        self._refresh_runtime_projection_ui(refresh_multi_radio=True)
         self._emit_device_profiles_changed()
         self._set_save_button_state("info" if self._settings_dirty else "success")
 
@@ -27611,7 +27603,13 @@ class SettingsTab(QWidget):
                 QMessageBox.warning(self, "Use Now", "Unable to activate the selected radios.")
                 self._refresh_multi_radio_tables()
                 return
-        self._refresh_runtime_projection_ui(refresh_multi_radio=True, emit_saved=activated > 0)
+        # Runtime activation changes the radio inventory, not the global Settings
+        # document.  Emitting settings_saved here reapplies the application-wide
+        # theme and fans out refreshes to unrelated tabs before the dedicated
+        # device_profiles_changed event performs the required runtime rebuild.
+        # On native desktop compositors that full style/layout pass can make the
+        # main window visibly swipe or vanish while it is still running.
+        self._refresh_runtime_projection_ui(refresh_multi_radio=True)
         if activated:
             self._emit_device_profiles_changed()
         self._set_save_button_state("info" if self._settings_dirty else "success")
@@ -29633,10 +29631,7 @@ class SettingsTab(QWidget):
             self._save_settings_quiet()
             self._settings_dirty = False
             self._set_save_button_state("success")
-            try:
-                self.settings_saved.emit()
-            except Exception:
-                pass
+            self._emit_operating_groups_changed()
         except Exception:
             log.exception("Failed to persist Operating Group; will remain in-memory only.")
 
@@ -30049,10 +30044,7 @@ class SettingsTab(QWidget):
             self.settings.set("operating_groups", self._table_to_operating_groups())
             self._settings_dirty = False
             self._set_save_button_state("success")
-            try:
-                self.settings_saved.emit()
-            except Exception:
-                pass
+            self._emit_operating_groups_changed()
         except Exception:
             log.exception("Failed to persist Operating Groups.")
 
@@ -30877,10 +30869,7 @@ class SettingsTab(QWidget):
             self._save_settings_quiet()
             self._settings_dirty = False
             self._set_save_button_state("success")
-            try:
-                self.settings_saved.emit()
-            except Exception:
-                pass
+            self._emit_operating_groups_changed()
         except Exception:
             log.exception("Failed to persist Operating Group deletions; will remain in-memory only.")
         QMessageBox.information(self, "Delete Groups", f"Deleted {len(to_remove)} HF Operating Group(s).")

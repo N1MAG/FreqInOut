@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from PySide6.QtCore import Qt
 
+import freqinout.gui.main_window as main_window_module
 from freqinout.gui.main_window import MainWindow
 
 
@@ -136,3 +137,48 @@ def test_initial_activation_does_not_run_scheduler_resume_recovery() -> None:
     assert host.resumes == ["resume"]
     assert host.child_states == [False, True]
     assert host.visible_refreshes == ["app_resume"]
+
+
+def test_unchanged_appearance_never_reapplies_application_stylesheet(monkeypatch) -> None:
+    theme = {"bg": "#101010", "text": "#eeeeee"}
+    signature = (
+        tuple(sorted((str(key), repr(value)) for key, value in theme.items())),
+        1.0,
+    )
+    applied: list[bool] = []
+    host = SimpleNamespace(
+        settings=SimpleNamespace(reload=lambda: None),
+        _applied_appearance_signature=signature,
+    )
+    monkeypatch.setattr(main_window_module, "resolve_theme", lambda _settings: dict(theme))
+    monkeypatch.setattr(main_window_module, "resolve_ui_text_scale", lambda _settings: 1.0)
+    monkeypatch.setattr(main_window_module, "apply_app_theme", lambda *_args, **_kwargs: applied.append(True))
+
+    MainWindow._apply_app_theme(host)
+
+    assert applied == []
+
+
+def test_operating_group_change_refreshes_only_domain_consumers() -> None:
+    refreshed: list[str] = []
+    lazy_refreshes: list[str] = []
+    scheduler_refreshes: list[str] = []
+
+    def _tab(label: str) -> SimpleNamespace:
+        return SimpleNamespace(on_settings_saved=lambda: refreshed.append(label))
+
+    host = SimpleNamespace(
+        hf_schedule_tab=_tab("hf"),
+        net_tab=_tab("net"),
+        fldigi_tab=_tab("fldigi"),
+        js8_tab=_tab("js8"),
+        scheduler=SimpleNamespace(force_refresh=lambda: scheduler_refreshes.append("scheduler")),
+        _on_settings_saved_for_lazy_tabs=lambda: lazy_refreshes.append("lazy"),
+        _run_timed_ui_refresh=lambda _label, callback: callback(),
+    )
+
+    MainWindow._on_operating_groups_changed(host)
+
+    assert refreshed == ["hf", "net", "fldigi", "js8"]
+    assert lazy_refreshes == ["lazy"]
+    assert scheduler_refreshes == ["scheduler"]
