@@ -122,6 +122,20 @@ def js8_endpoint_from_radio_profile(profile: Mapping[str, Any], *, fallback_sett
     return JS8ApiEndpoint(host or "127.0.0.1", port).normalized()
 
 
+def js8_profile_allows_transmit(profile: Mapping[str, Any]) -> bool:
+    """Return whether a radio profile may be offered as a JS8 transmit source.
+
+    Observer/SDR profiles may own an isolated JS8Call instance so FIO can ingest
+    receive traffic and report its health.  That ownership must never make the
+    observer eligible for Compose, Expect auto-reply, QSY, or any other transmit
+    path.  Endpoint resolution intentionally remains available for receive-only
+    consumers; transmit callers must apply this capability predicate.
+    """
+
+    device_class = str((profile or {}).get("device_class", "tx_rx") or "tx_rx").strip().lower()
+    return device_class != "observer"
+
+
 def _param_bool(value: object) -> Optional[bool]:
     if isinstance(value, bool):
         return bool(value)

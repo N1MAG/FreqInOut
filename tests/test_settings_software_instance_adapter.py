@@ -60,6 +60,12 @@ class _Store:
             raise self.fail
         return {"radio": {"id": int(kwargs["radio_profile_id"]), "name": "FIO-A"}}
 
+    def adopt_observer_js8_instance(self, **kwargs):
+        self.adoptions.append({"observer_js8": True, **kwargs})
+        if self.fail is not None:
+            raise self.fail
+        return {"radio": {"id": int(kwargs["radio_profile_id"]), "name": "RTL-SDR"}}
+
     def disassociate_software_instance(self, **kwargs):
         self.disassociations.append(kwargs)
         if self.fail is not None:
@@ -204,6 +210,47 @@ def test_settings_instance_add_error_reports_failure_without_replacing_cached_pr
     assert replaced == []
     assert refreshed == []
     assert profile == before
+
+
+def test_settings_observer_js8_add_uses_receive_only_adoption_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _Store()
+    profile = {
+        "id": 1,
+        "name": "RTL-SDR",
+        "device_class": "observer",
+        "control_backend": "manual",
+        "js8_instance_id": None,
+    }
+    tab, workspace, replaced, refreshed, _profile = _tab(
+        monkeypatch,
+        store=store,
+        profile=profile,
+    )
+
+    tab._on_software_instance_add_requested(
+        {
+            "family_key": "js8call",
+            "radio_id": 1,
+            "instance_name": "RTL-SDR JS8Call",
+            "host": "127.0.0.1",
+            "port": 2448,
+            "storage_path": "/data/rtl-sdr-js8",
+            "launch_at_startup": True,
+        }
+    )
+
+    assert len(store.adoptions) == 1
+    adoption = store.adoptions[0]
+    assert adoption["observer_js8"] is True
+    assert "family_key" not in adoption
+    assert adoption["replace_existing"] is False
+    assert adoption["expected_current_instance_id"] is None
+    assert adoption["launch_at_startup"] is True
+    assert workspace.completed[-1][0] is True
+    assert replaced == [{"id": 1, "name": "RTL-SDR"}]
+    assert refreshed == [True]
 
 
 def test_instance_discovery_completion_is_bound_to_the_originating_assistant(

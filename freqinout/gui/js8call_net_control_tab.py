@@ -48,7 +48,11 @@ from freqinout.core.js8_spotter_forms import (
 from freqinout.core.message_ingest import MessageIngestor
 from freqinout.core.ingest_runtime_status import active_runtime_ingest_inventory
 from freqinout.core.js8_ncs_offsets import ncs_offset_keys_for_directed_path
-from freqinout.core.js8_send_service import js8_speed_name, send_js8_message_guarded
+from freqinout.core.js8_send_service import (
+    js8_profile_allows_transmit,
+    js8_speed_name,
+    send_js8_message_guarded,
+)
 from freqinout.core.js8_source_context import resolve_js8_source_context
 from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.ncs_session_contract import NcsSessionSnapshot, write_ncs_session_snapshot
@@ -262,6 +266,7 @@ class JS8CallNetControlTab(QWidget):
         except Exception as exc:
             log.debug("JS8 NCS: failed to read runtime radio profiles: %s", exc)
             profiles = []
+        profiles = [p for p in profiles if js8_profile_allows_transmit(p)]
         js8_profiles = [p for p in profiles if bool(p.get("use_js8call", False))]
         if js8_profiles:
             profiles = js8_profiles

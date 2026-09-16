@@ -4,9 +4,9 @@ Observer / SDR profiles use the regular per-radio launch bundle, but their
 launch entries are deliberately capability-scoped.  This module is Qt-free so
 the guided setup, Settings, and launch planner all apply the same contract.
 
-It does not attempt to configure an SDR driver or a transmit-capable radio
-application.  The first supported receiver application is SDR++, whose RigCTL
-endpoint is already represented by the observer profile.
+It does not attempt to configure an SDR driver or grant transmit authority to
+an application. SDR++ supplies the receiver endpoint; an isolated JS8Call
+instance may additionally be launched for receive-only ingest.
 """
 
 from __future__ import annotations
@@ -29,6 +29,12 @@ RECEIVER_STACK_APPLICATIONS: Mapping[str, Mapping[str, Any]] = {
         "default_readiness": {"readiness": "process"},
     },
 }
+
+# JS8Call is not a receiver application selection. It is created through the
+# reviewed software-instance adoption flow, which owns its endpoint, profile,
+# storage, and launch identity. The planner still recognizes that resulting
+# launch row when it is explicitly receive-only scoped.
+OBSERVER_LAUNCH_APPLICATIONS = frozenset({*RECEIVER_STACK_APPLICATIONS, "JS8Call"})
 
 
 def is_observer_profile(profile: Mapping[str, Any]) -> bool:
@@ -60,7 +66,7 @@ def _validate_receiver_launch_target(name: str, launch_path: str, launch_command
 
     LaunchOrchestrator deliberately supports free-form commands for ordinary
     radio tools. Observer profiles make a stronger promise, so the executable
-    itself must also match the reviewed receive-only adapter.
+    itself must also match a reviewed observer-stack application.
     """
 
     target = launch_command or launch_path
@@ -100,7 +106,7 @@ def is_receive_only_launch_item(item: Mapping[str, Any]) -> bool:
     """Whether an item is explicitly declared and approved for observer use."""
 
     name = _clean(item.get("name"))
-    return execution_scope(item) == RECEIVE_ONLY_EXECUTION_SCOPE and name in RECEIVER_STACK_APPLICATIONS
+    return execution_scope(item) == RECEIVE_ONLY_EXECUTION_SCOPE and name in OBSERVER_LAUNCH_APPLICATIONS
 
 
 def build_receiver_launch_items(
@@ -174,7 +180,7 @@ def validate_observer_launch_items(items: Iterable[Mapping[str, Any]]) -> None:
             name = _clean(raw.get("name")) or "Unnamed application"
             raise ValueError(
                 f"{name} is not approved for a receive-only SDR launch stack. "
-                "Observer profiles cannot launch transmit-capable radio software."
+                "Observer profiles cannot launch unreviewed or standard-scoped radio software."
             )
 
 

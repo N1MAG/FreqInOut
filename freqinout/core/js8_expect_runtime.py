@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping, Optional
 
-from freqinout.core.js8_send_service import js8_endpoint_from_radio_profile
+from freqinout.core.js8_send_service import js8_endpoint_from_radio_profile, js8_profile_allows_transmit
 from freqinout.core.multi_radio_store import normalize_rf_guard_mode, stricter_rf_guard_mode
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.radio_interface.js8_api_client import JS8ApiClient, JS8ApiClientRegistry, JS8ApiEndpoint
@@ -282,6 +282,13 @@ class ExpectAutomationCoordinator:
             return ExpectAutomationSourceStatus(
                 False,
                 "No JS8-capable radio profile matches this Expect source.",
+                radio_id=radio_key,
+                js8_instance_id=js8_key,
+            )
+        if not js8_profile_allows_transmit(profile):
+            return ExpectAutomationSourceStatus(
+                False,
+                "Observer / SDR JS8Call instances are receive-only and cannot send Expect replies.",
                 radio_id=radio_key,
                 js8_instance_id=js8_key,
             )

@@ -1705,11 +1705,16 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "def _guided_visible_wizard_steps() -> Tuple[Tuple[str, str], ...]:" in dialog_block
     assert 'guided_wizard_next_btn.setText(f"Next: {next_label}" if next_label else "Next")' in dialog_block
     assert 'guided_wizard_back_btn.setText(f"Back: {previous_label}" if previous_label else "Back")' in dialog_block
-    assert "btn.setVisible(step_id in visible_step_ids)" in dialog_block
+    assert "def _guided_wizard_step_applicability() -> Dict[str, bool]:" in dialog_block
+    assert 'btn.setProperty("guidedStepApplicable", applicable)' in dialog_block
+    assert "btn.setVisible(True)" in dialog_block
+    assert 'else f"{display_index}. {label} · N/A"' in dialog_block
     assert 'identity_group.setVisible(guided_wizard_step_id == "radio")' in dialog_block
     assert 'software_group.setVisible(guided_wizard_step_id == "software")' in dialog_block
     assert 'connection_group.setVisible(guided_wizard_step_id == "connection")' in dialog_block
-    assert 'schedule_group.setVisible(guided_wizard_step_id == "schedule" or rf_guard_needs_review)' in dialog_block
+    assert 'schedule_group.setVisible(' in dialog_block
+    assert '(not observer_mode)' in dialog_block
+    assert 'and (guided_wizard_step_id == "schedule" or rf_guard_needs_review)' in dialog_block
     assert 'save_review_group.setVisible(guided_wizard_step_id == "review")' in dialog_block
     assert "launch_group.setVisible(False)" not in dialog_block
     assert 'guided_next_action_label.setObjectName("guidedSetupNextAction")' in dialog_block
@@ -1870,8 +1875,10 @@ def test_guided_add_radio_assigns_selected_plan_after_profile_save() -> None:
     assert "optional_toggle.setArrowType(Qt.DownArrow if" in source
     assert "optional_body.setVisible(True)" in source
     assert "rf_guard_needs_review = bool(rf_guard_tone)" in source
-    assert "rf_guard_visible = guided_wizard_step_id == \"guard\" or rf_guard_needs_review" in source
-    assert 'schedule_group.setVisible(guided_wizard_step_id == "schedule" or rf_guard_needs_review)' in source
+    assert "rf_guard_visible = (not observer_mode) and (" in source
+    assert 'guided_wizard_step_id == "guard" or rf_guard_needs_review' in source
+    assert 'schedule_group.setVisible(' in source
+    assert 'and (guided_wizard_step_id == "schedule" or rf_guard_needs_review)' in source
     assert "_apply_guided_schedule_assignment_warning_ui()" in source
     assert "def _refresh_guided_schedule_guard_review() -> None:" in source
     assert "schedule_plan_combo.currentIndexChanged.connect(lambda _index: _refresh_guided_schedule_guard_review())" in source

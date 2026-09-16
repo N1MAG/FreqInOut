@@ -270,6 +270,32 @@ choice is visibly active at each applicable level, including after a repeated
 click. If no radio exists, the instance workflow stops at `Create a radio
 first`; it never creates an operational orphan.
 
+The Settings > Radios > Add Radio navigator has a stable seven-position
+contract: `Radio -> Operating Model -> Software -> Connection -> RF Guard ->
+Schedule -> Review`. All seven numbered controls remain visible from first
+render through Review. Applicability may change as the operator chooses a radio
+role, setup type, software, or control route, but that must not remove a numbered
+control or leave gaps such as `1, 3, 5`. A non-applicable step remains visible,
+disabled, and explicitly identified by its tooltip/accessibility description as
+not required for the current setup. Back, Next, direct-step eligibility, and
+save gating traverse only applicable steps. In particular, a receive-only SDR
+uses Operating Model and Connection while RF Guard and Schedule remain visible
+as not applicable; a conventional radio keeps Operating Model visible as a
+separate post-save assignment and keeps Connection visible even before a
+software/control choice makes endpoint fields necessary. Every step control
+uses a font-derived height and the complete strip wraps without clipping at the
+supported compact size.
+
+The embedded instance assistant must visibly present its complete guided path:
+`Purpose -> Find or create -> Identity -> Connections -> Files -> Launch ->
+Review`. The current step is themed and selected, prior steps remain available,
+and only the next eligible step is enabled so a required radio or replacement
+decision cannot be skipped. Step controls use font-derived heights and wrap as
+a compact grid at constrained width. When the caller supplies a radio context,
+that radio is selected before the first render and `Next` reflects it
+immediately. If the inventory contains exactly one valid radio, the assistant
+selects it automatically; multiple radios require an explicit operator choice.
+
 For an occupied family slot, the guided path offers an explicit reviewed
 replacement rather than requiring manual disassociation. Current and proposed
 identities remain visible through Review, and the persistence service uses the

@@ -4,6 +4,178 @@ All new entries must follow the authoritative multi-model delivery contract in
 `docs/internal/project_delivery_rules.md` and record the required package/model,
 primary-review, acceptance, and exit-gate evidence.
 
+## 2026-09-16 — Guided Add Radio stable seven-step navigator
+
+Status: implementation and focused automated acceptance complete. Exact-script
+startup was confirmed on native macOS; final visual confirmation after replacing
+the operator's already-running pre-fix process remains operator-assisted.
+
+The Settings > Radios > Add Radio dialog assigned stable numbers before it
+filtered steps by applicability. It then hid Operating Model for a conventional
+radio and hid Connection until a software/control selection required endpoint
+fields. The resulting first render showed `1, 3, 5, 6, 7`, which incorrectly
+looked like missing setup work and was unrelated to the launcher or Settings >
+Software assistant.
+
+The navigator now always renders the complete contract: Radio, Operating Model,
+Software, Connection, RF Guard, Schedule, and Review. A step that does not apply
+remains in its stable position, is disabled and theme-muted, carries an explicit
+`N/A` label, and explains why it is skipped through its tooltip and accessibility
+description. Back, Next, direct navigation, and save gating continue to traverse
+only applicable steps. If a role or software choice changes applicability while
+the dialog is open, focus moves to the nearest following applicable stable slot
+instead of jumping to the beginning or leaving stale guidance visible. Controls
+use font-derived heights and the three-column grid wraps at constrained width.
+
+Work packages and models: `gpt-5` primary/high reasoning owned root-cause
+analysis, architecture, specification, delegated-diff review, transition
+hardening, contract correction, and the exit gate. `gpt-5.6-luna` medium implemented the bounded
+wizard presentation correction and focused UI expectations. `gpt-5.6-terra`
+medium added the production-route regression through the real SettingsTab Add
+Radio action at desktop and constrained sizes. The primary rejected the earlier
+Settings > Software evidence as the wrong workflow and reviewed the corrected
+route before acceptance. A final `gpt-5.6-luna` medium read-only contract audit
+identified the exact-state and geometry gaps; `gpt-5.6-terra` medium extended
+the test, and the primary corrected its optional-Hamlib assumption before the
+final gate.
+
+Acceptance evidence: 356 guided setup, SDR receiver, operating-model,
+radio-scoped software, Settings adapter, and production-route tests pass. The
+production-route test requires exactly seven visible stable controls and checks
+Operating Model and Connection explicitly for both observer and conventional
+radios at 1920x1080 and 900x560. Its observer path selects or types `RTLSDR`,
+chooses the actual `Receive-only SDR` setup type, verifies the resulting observer
+role, and checks navigator containment and non-overlap. The exact operator launcher
+`/Users/bill/RadioCode/FreqInOut-multi-rig/start-multi-rig.sh` resolves to this
+worktree and successfully started a separate isolated validation runtime. The
+already-running pre-fix Python process remained the macOS accessibility target,
+so it correctly continued to display the old missing-step UI; Python does not
+hot-reload this change. No launcher change, migration, or persisted user-setting
+change is required.
+
+Process correction: `project_delivery_rules.md` now makes the operator-feedback
+interpretation gate explicit. A named navigation route is binding acceptance
+scope, an adjacent workflow is not valid evidence, an unreproduced report remains
+real pending exact-route investigation, and material ambiguity requires one
+concise clarifying question. Native relaunch evidence must also prove that the
+pre-fix Python process exited before current-code visual evidence is accepted.
+
+Final commands and outcomes:
+
+- `QT_QPA_PLATFORM=offscreen ./.venv/bin/python -m pytest -q -o faulthandler_timeout=20 tests/test_software_admin_radio_first_ui.py -k settings_add_radio_dialog_keeps_guided_steps_available` — 4 passed, 17 deselected.
+- `QT_QPA_PLATFORM=offscreen ./.venv/bin/python -m pytest -q tests/test_sdr_operating_model_core.py tests/test_sdr_operating_model_assignment_ui.py tests/test_compose_observer_safety.py tests/test_sdr_receiver_setup_ui.py tests/test_guided_setup.py tests/test_radio_scoped_software_settings_1_2_3.py tests/test_software_admin_radio_first_ui.py tests/test_settings_software_instance_adapter.py tests/test_js8_expect_runtime.py tests/test_receiver_software_launch.py tests/test_multi_rig_wave1_slice_a.py` — 356 passed.
+- `./.venv/bin/python -m py_compile ...` for every changed Python production and focused test file — passed.
+- `git diff --check` — passed.
+
+The implementation/WIP-push gate is closed. Native current-code macOS visual
+confirmation, Linux Light/Dark and Normal/Large Text geometry, and live
+RTL-SDR/SDR++ qualification remain explicit external testing gates; this is not
+a release qualification.
+
+## 2026-09-16 — Software-instance assistant visible step navigation
+
+Status: implementation, focused automated acceptance, and exact-launch native
+macOS visual confirmation complete; native Linux light/dark and
+normal/large-text visual confirmation remains operator-assisted.
+
+The embedded Software Administration assistant exposed only a `Step 1 of 7`
+label, so operators could not see the workflow ahead. It now presents all seven
+themed, font-height-derived steps in a compact grid: Purpose, Find or create,
+Identity, Connections, Files, Launch, and Review. The current step stays
+selected, prior steps are available, and only the next eligible step is enabled;
+radio and replacement gates cannot be skipped. Re-clicking the current step
+does not clear its selected state.
+
+A related initial-state defect matched the placeholder entry when the inventory
+contained exactly one available radio. The sole radio is now selected
+automatically, while multiple radios still require an explicit choice. A radio
+supplied by the invoking Settings context is selected before first render, and
+both `Next` and the next-step control refresh immediately after radio or
+replacement changes.
+
+Work packages and models: GPT-5 primary/high reasoning owned diagnosis,
+architecture/integration review, specification, delegated-diff review, and the
+exit gate. `gpt-5.6-luna` medium implemented the bounded assistant UI/state
+correction and focused tests. `gpt-5.6-terra` medium added the radio-scoped
+initial-state regression. The primary identified an invalid Qt visibility
+assertion; the focused test package corrected it, and the primary reviewed the
+checkable-step re-click behavior before acceptance.
+
+Acceptance evidence: 271 Software Administration, Settings adapter, SDR guided
+setup, assignment, and radio-scoped settings tests pass. A final focused
+production-route partition passes 41 tests, including the public Software
+Administration Add action at 1920x1080 and 900x560. The primary also launched
+the application through the operator's exact
+`/Users/bill/RadioCode/FreqInOut-multi-rig/start-multi-rig.sh` path, navigated
+Settings > Software > Create or use instance, and visually confirmed that all
+seven controls render in the live macOS application. The launcher resolves to
+this worktree, its `.venv`, and the established
+`/Users/bill/RadioCode/runtime/multi-rig` runtime; no launcher change is
+required. Changed Python files compile and the whitespace gate passes.
+Unrelated documentation/render artifacts were preserved.
+
+## 2026-09-16 — Receive-only SDR operating model and isolated JS8Call setup
+
+Status: implementation and focused automated acceptance complete; native Linux
+RTL-SDR, SDR++, and dual-JS8Call launch qualification remains operator-assisted.
+
+Guided Add Radio now gives an observer/SDR the same coherent ownership flow as
+a transceiver while preserving the receive-only boundary: `Radio -> Operating
+Model -> Software -> Connection -> Review`. Every installation receives one
+protected **Receive-only SDR** operating model. It enables receive-side
+Messages, Map, ingest, and Launch Control while disabling scheduler ownership,
+QSY, PTT, Compose, Expect replies, Net Control, and other transmit authority.
+An observer can be activated only after that model is assigned, and a first or
+only observer can never become the compatibility primary radio.
+
+The Software step now treats SDR++ and an optional observer-owned JS8Call as two
+separate applications. Both expose an explicit FIO autolaunch choice and appear
+separately in Review. A requested JS8Call is created only after the observer has
+a durable radio ID, uses its own profile/data paths and API endpoint, and is
+adopted with `replace_existing=False`. Endpoint/storage collisions are rejected;
+an existing primary-radio instance is never silently reused or replaced. The
+radio-scoped launch bundle preserves the SDR++ item when JS8Call is added, and
+all observer launch entries carry the `receive_only` execution scope.
+
+The same flow is available later through Settings > Software. Selecting an
+unassigned SDR now enables the new-instance assistant correctly. The quick
+JS8Call checkbox no longer surfaces the internal replacement-contract error; it
+reverts the incomplete toggle and opens the scoped setup assistant. Cancellation
+does not create a radio, assignment, manifest, or launch recipe. Recoverable
+post-radio failures leave the observer inactive with a route back to setup.
+
+Transmit safety is enforced twice: observer sources are absent from Compose,
+Spotter Expect, and JS8 Net Control choices, and final send/retrieval boundaries
+reject observer-owned JS8 provenance. Inbox retrieval continues to support
+legacy rows without provenance. The primary integration review also corrected
+case-insensitive matching of persisted JS8 instance IDs so a valid transceiver
+source such as `FIO-B` still routes correctly when evidence records `fio-b`.
+
+Work packages and models: GPT-5 primary/high reasoning owned architecture,
+migration policy, integration, concurrency/safety review, the Inbox boundary,
+specification, and the exit gate. `gpt-5.6-terra` high implemented the core
+model/migration, observer JS8 adoption, launch persistence, collision guards,
+and core tests. `gpt-5.6-luna` medium implemented the guided/settings UI and
+focused UI tests. `gpt-5.6-terra` medium performed the initial read-only gap and
+message-flow audit. `gpt-5.6-luna` medium added focused transmit-boundary tests.
+The primary reviewed every delegated diff, fixed the guided step order and quick
+toggle state capture, added final send-boundary enforcement, and preserved all
+unrelated working-tree changes.
+
+Acceptance evidence includes 115 focused core tests, 210 broader
+multi-radio/runtime tests, 132 additional migration/shared-state/launch tests
+with 4 skips, and 311 guided/settings/software UI tests. The adjacent Message
+Inbox suite passes 196 tests; selected-target/compose guidance passes 45 tests;
+pending-Inbox correction passes 18 tests; observer transmit safety passes 5
+tests. All 10 real-widget Compose acceptance probes pass in isolated processes;
+the existing macOS/PySide harness can segfault while tearing down multiple real
+Compose widgets in one interpreter, so that harness behavior is recorded
+separately and is not counted as a product failure. Changed Python files compile
+and the whitespace gate passes. The remaining exit gate is native Linux testing
+with unique SDR++/JS8 endpoints and data directories, restart/autolaunch proof,
+receive-only ingest provenance, and light/dark plus normal/large-text visual
+checks at desktop and constrained window sizes.
+
 ## 2026-09-16 — Inbox Spotter filtering, actions, selection, and comments
 
 Status: implementation complete; focused automated acceptance passed; native

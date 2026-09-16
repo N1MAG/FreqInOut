@@ -5059,8 +5059,11 @@ class SettingsTab(QWidget):
         assignment_editor_form.setFormAlignment(Qt.AlignTop | Qt.AlignLeft)
         assignment_editor_form.setLabelAlignment(Qt.AlignTop | Qt.AlignLeft)
         self.assignment_editor_plan_combo = QComboBox()
+        self.assignment_editor_plan_combo.setObjectName("operatingModelAssignmentChoice")
+        self.assignment_editor_plan_combo.setAccessibleName("Operating model assignment choice")
         self.assignment_editor_plan_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        assignment_editor_form.addRow("Operating Model:", self.assignment_editor_plan_combo)
+        self.assignment_editor_plan_label = QLabel("Operating Model:")
+        assignment_editor_form.addRow(self.assignment_editor_plan_label, self.assignment_editor_plan_combo)
         self.assignment_editor_state_combo = QComboBox()
         for label, value in OPERATING_ASSIGNMENT_STATE_OPTIONS:
             self.assignment_editor_state_combo.addItem(label, value)
@@ -5072,6 +5075,7 @@ class SettingsTab(QWidget):
         self.assignment_editor_ends_edit = QLineEdit()
         self.assignment_editor_ends_edit.setPlaceholderText("Optional UTC metadata only; no automatic expiry in this checkpoint")
         assignment_editor_form.addRow("Ends UTC:", self.assignment_editor_ends_edit)
+        self.assignment_editor_ends_label = assignment_editor_form.labelForField(self.assignment_editor_ends_edit)
         self.assignment_editor_hint_label = QLabel()
         self.assignment_editor_hint_label.setWordWrap(True)
         assignment_editor_form.addRow("", self.assignment_editor_hint_label)
@@ -10210,17 +10214,31 @@ class SettingsTab(QWidget):
             cluster_instance_number = int(payload.get("cluster_instance_number") or 0) or None
 
         try:
-            result = self.multi_radio_store.adopt_software_instance(
-                family_key=family,
-                radio_profile_id=radio_id,
-                application_values=app_values,
-                manifest_values=manifest_values,
-                replace_existing=replace_existing,
-                expected_current_instance_id=current_id,
-                launch_at_startup=bool(payload.get("launch_at_startup", False)),
-                varac_cluster_db_id=cluster_db_id,
-                varac_cluster_instance_number=cluster_instance_number,
+            observer_js8 = (
+                family == "js8call"
+                and str(profile.get("device_class", "") or "").strip().lower() == "observer"
             )
+            if observer_js8:
+                result = self.multi_radio_store.adopt_observer_js8_instance(
+                    radio_profile_id=radio_id,
+                    application_values=app_values,
+                    manifest_values=manifest_values,
+                    replace_existing=replace_existing,
+                    expected_current_instance_id=current_id,
+                    launch_at_startup=bool(payload.get("launch_at_startup", False)),
+                )
+            else:
+                result = self.multi_radio_store.adopt_software_instance(
+                    family_key=family,
+                    radio_profile_id=radio_id,
+                    application_values=app_values,
+                    manifest_values=manifest_values,
+                    replace_existing=replace_existing,
+                    expected_current_instance_id=current_id,
+                    launch_at_startup=bool(payload.get("launch_at_startup", False)),
+                    varac_cluster_db_id=cluster_db_id,
+                    varac_cluster_instance_number=cluster_instance_number,
+                )
         except (ValueError, KeyError) as exc:
             workspace.complete_instance_add(success=False, message=str(exc))
             return
@@ -18141,6 +18159,10 @@ class SettingsTab(QWidget):
             profile = self._selected_settings_radio_profile()
         has_profile = isinstance(profile, dict)
         locked = set(self._radio_profile_backend_locked_software(profile))
+        observer_mode = bool(
+            has_profile
+            and str(profile.get("device_class", "") or "").strip().lower() == "observer"
+        )
         self._refreshing_radio_profile_software_flags = True
         try:
             for key, chk in checks.items():
@@ -18149,11 +18171,28 @@ class SettingsTab(QWidget):
                 was_blocked = chk.blockSignals(True)
                 chk.setChecked(checked)
                 chk.blockSignals(was_blocked)
-                chk.setEnabled(has_profile and not locked_for_backend)
+                observer_allowed = not observer_mode or key == "js8call"
+                js8_already_assigned = bool(
+                    observer_mode
+                    and key == "js8call"
+                    and int(profile.get("js8_instance_id", 0) or 0) > 0
+                )
+                chk.setEnabled(
+                    has_profile
+                    and not locked_for_backend
+                    and observer_allowed
+                    and not js8_already_assigned
+                )
                 if not has_profile:
                     chk.setToolTip("Select a radio before changing the software used by that radio.")
                 elif locked_for_backend:
                     chk.setToolTip("This software is required by the selected radio's control backend.")
+                elif observer_mode and key != "js8call":
+                    chk.setToolTip("Unavailable for a receive-only SDR profile.")
+                elif js8_already_assigned:
+                    chk.setToolTip("Manage this receiver-owned JS8Call instance in Settings > Software.")
+                elif observer_mode and key == "js8call":
+                    chk.setToolTip("Open guided setup for a new, distinct receive-only JS8Call instance.")
                 else:
                     chk.setToolTip(f"Enable {chk.text()} for the selected radio.")
         finally:
@@ -18168,6 +18207,36 @@ class SettingsTab(QWidget):
             return
         field = self._radio_profile_software_flag_field(key)
         if not field:
+            return
+        observer_mode = str(profile.get("device_class", "") or "").strip().lower() == "observer"
+        requested_check = self._radio_profile_software_flag_checks.get(key)
+        requested_enable = bool(requested_check is not None and requested_check.isChecked())
+        if observer_mode:
+            self._refresh_radio_profile_software_flag_controls(profile)
+            if key == "js8call" and requested_enable:
+                radio_id = int(profile.get("id", 0) or 0)
+                if radio_id > 0 and int(profile.get("js8_instance_id", 0) or 0) <= 0:
+                    self.open_software_administration(family_key="js8call", radio_id=radio_id)
+                    workspace = getattr(self, "software_administration_workspace", None)
+                    if isinstance(workspace, SoftwareAdministrationWorkspace):
+                        QTimer.singleShot(
+                            0,
+                            lambda target=radio_id, surface=workspace: surface.begin_instance_setup(
+                                "js8call", target, source="managed"
+                            ),
+                        )
+                    return
+            self._publish_settings_action_feedback(
+                status="blocked",
+                summary="Use guided Software setup for this receive-only radio.",
+                detail=(
+                    "Observer software assignments require a distinct, reviewed instance and cannot be toggled directly. "
+                    "The saved receiver configuration was not changed."
+                ),
+                action_type="software_flags",
+                radio_profile_id=str(profile.get("id", "") or "") or None,
+                target_label=self._profile_display_name(profile),
+            )
             return
         payload = dict(profile)
         for software_key, _label in self._radio_profile_software_flag_defs():
@@ -21039,6 +21108,7 @@ class SettingsTab(QWidget):
         if row is None:
             return
         device_name = str(row.get("device_name", "") or "Radio").strip() or "Radio"
+        observer_mode = str(row.get("device_class", "") or "").strip().lower() == "observer"
         state = str(row.get("assignment_state", "") or "").strip().lower()
         operating_name = str(row.get("operating_profile_name", "") or "Unassigned").strip() or "Unassigned"
         if state == "temporary_override":
@@ -21049,15 +21119,27 @@ class SettingsTab(QWidget):
             level = "warning"
         elif row.get("operating_profile_id") in (None, "", 0):
             text = (
-                f"{device_name} is currently unassigned. Assign an operating model if this radio should participate in Station Default workflows."
+                (
+                    f"{device_name} is currently unassigned. Assign the Receive-only SDR model to enable observer-safe "
+                    "Messages, Map, background ingest, and Launch Control without transmit, QSY, or scheduler authority."
+                )
+                if observer_mode
+                else f"{device_name} is currently unassigned. Assign an operating model if this radio should participate in Station Default workflows."
             )
             level = "warning"
         else:
             assignment_text = self._assignment_display_text(operating_name, state)
-            text = (
-                f"{device_name} is using {assignment_text}. "
-                f"Endpoint summary: {str(row.get('endpoint_summary', '') or '--')}."
-            )
+            if observer_mode:
+                text = (
+                    f"{device_name} is using {assignment_text}. This receive-only assignment does not grant transmit, "
+                    "QSY, or scheduler authority. "
+                    f"Endpoint summary: {str(row.get('endpoint_summary', '') or '--')}."
+                )
+            else:
+                text = (
+                    f"{device_name} is using {assignment_text}. "
+                    f"Endpoint summary: {str(row.get('endpoint_summary', '') or '--')}."
+                )
             level = "success" if int(row.get("runtime_primary", 0) or 0) == 1 else "info"
         self._set_guidance_card_state(
             self.device_assignments_guidance_card,
@@ -22015,10 +22097,9 @@ class SettingsTab(QWidget):
         selection_includes_swap_devices = any(
             int(row.get("device_profile_id", 0) or 0) in swap_device_ids for row in selected
         )
-        has_enabled_profile = any(
-            isinstance(row, dict) and int(row.get("enabled", 1) or 0) == 1 for row in self.operating_profiles
-        )
-        can_assign = count > 0 and has_enabled_profile and not selection_includes_swap_devices
+        compatible_profiles = self._assignment_profiles_for_devices(self.operating_profiles, selected)
+        has_compatible_profile = bool(compatible_profiles)
+        can_assign = count > 0 and has_compatible_profile and not selection_includes_swap_devices
         can_restore = count > 0 and not selection_includes_swap_devices and any(
             str(row.get("assignment_state", "") or "").strip().lower() == "temporary_override"
             or str(row.get("operating_system_key", "") or "").strip() != "default_operating"
@@ -22033,6 +22114,20 @@ class SettingsTab(QWidget):
         )
         can_restore_swap = bool(active_swap)
         self.assign_device_operating_profile_btn.setEnabled(can_assign)
+        observer_selected = any(
+            str(row.get("device_class", "") or "").strip().lower() == "observer"
+            for row in selected
+        )
+        if observer_selected and count > 0 and not has_compatible_profile:
+            self.assign_device_operating_profile_btn.setToolTip(
+                "No enabled receive-only Operating Model is available. Restore or create one before assigning this SDR."
+            )
+        elif observer_selected:
+            self.assign_device_operating_profile_btn.setToolTip(
+                "Assign an enabled receive-only Operating Model to the selected observer / SDR."
+            )
+        else:
+            self.assign_device_operating_profile_btn.setToolTip("Assign an enabled Operating Model to the selected radio.")
         self.assign_device_operating_profile_btn.setStyleSheet(button_style("info" if can_assign else "muted", theme))
         self.temporary_profile_swap_btn.setEnabled(can_swap)
         self.temporary_profile_swap_btn.setStyleSheet(button_style("info" if can_swap else "muted", theme))
@@ -23099,6 +23194,33 @@ class SettingsTab(QWidget):
             None,
         )
 
+    @staticmethod
+    def _assignment_profiles_for_devices(
+        operating_profiles: Sequence[Mapping[str, Any]],
+        selected_devices: Sequence[Mapping[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Return only enabled models that are safe for every selected radio.
+
+        Compatibility is resolved before the operator can choose a value.  The
+        persistence guard remains authoritative, but an observer should never
+        have to select a transmit-capable model merely to learn at Save time
+        that the choice is invalid.
+        """
+
+        enabled = [
+            dict(row)
+            for row in operating_profiles
+            if isinstance(row, Mapping) and int(row.get("enabled", 1) or 0) == 1
+        ]
+        observer_selected = any(
+            str(row.get("device_class", "") or "").strip().lower() == "observer"
+            for row in selected_devices
+            if isinstance(row, Mapping)
+        )
+        if not observer_selected:
+            return enabled
+        return [row for row in enabled if int(row.get("receive_only", 0) or 0) == 1]
+
     def _set_assignment_editor_guidance(self, title: str, text: str, level: str = "info") -> None:
         if not hasattr(self, "device_assignments_guidance_card"):
             return
@@ -23148,17 +23270,25 @@ class SettingsTab(QWidget):
         *,
         source_title: str = "Operating Model Assignment",
     ) -> None:
-        enabled_profiles = [
-            row for row in self.operating_profiles if isinstance(row, dict) and int(row.get("enabled", 1) or 0) == 1
-        ]
+        selected_rows = [dict(row) for row in selected_devices if isinstance(row, Mapping)]
+        observer_selected = any(
+            str(row.get("device_class", "") or "").strip().lower() == "observer"
+            for row in selected_rows
+        )
+        enabled_profiles = self._assignment_profiles_for_devices(self.operating_profiles, selected_rows)
         if not enabled_profiles:
             self._set_assignment_editor_guidance(
                 source_title,
-                "Create or enable an operating model before assigning it to a radio.",
+                (
+                    "No enabled receive-only Operating Model is available for this observer / SDR. "
+                    "Restore the built-in Receive-only SDR model or create a receive-only model, then try again."
+                    if observer_selected
+                    else "Create or enable an operating model before assigning it to a radio."
+                ),
                 "warning",
             )
             return
-        self.assignment_editor_rows = [dict(row) for row in selected_devices if isinstance(row, dict)]
+        self.assignment_editor_rows = selected_rows
         radio_names = [
             str(row.get("device_name", "") or f"Radio {int(row.get('device_profile_id', 0) or 0)}").strip()
             for row in self.assignment_editor_rows
@@ -23168,8 +23298,18 @@ class SettingsTab(QWidget):
         if len(radio_names) > 3:
             target_text += f", +{len(radio_names) - 3}"
         count = len(self.assignment_editor_rows)
+        assignment_kind = "receive-only Operating Model" if observer_selected else "Operating Model"
         self.assignment_editor_summary_label.setText(
-            f"Assign one Operating Model to {count} selected radio{'s' if count != 1 else ''}: {target_text or 'selected radio'}."
+            f"Assign one {assignment_kind} to {count} selected radio{'s' if count != 1 else ''}: "
+            f"{target_text or 'selected radio'}."
+        )
+        self.assignment_editor_plan_label.setText(
+            "Receive-only Model:" if observer_selected else "Operating Model:"
+        )
+        self.assignment_editor_plan_combo.setAccessibleName(
+            "Receive-only operating model assignment choice"
+            if observer_selected
+            else "Operating model assignment choice"
         )
 
         current_profile_id = 0
@@ -23199,6 +23339,18 @@ class SettingsTab(QWidget):
             self.assignment_editor_state_combo.setCurrentIndex(state_idx if state_idx >= 0 else 0)
         else:
             self.assignment_editor_state_combo.setCurrentIndex(0)
+        if observer_selected:
+            active_index = self.assignment_editor_state_combo.findData("active")
+            self.assignment_editor_state_combo.setCurrentIndex(active_index if active_index >= 0 else 0)
+        self.assignment_editor_state_combo.setEnabled(not observer_selected)
+        self.assignment_editor_state_combo.setToolTip(
+            "Receive-only SDR assignments are active configuration; they do not grant scheduler, QSY, or transmit control."
+            if observer_selected
+            else "Choose whether this assignment is normal or a temporary override."
+        )
+        self.assignment_editor_ends_edit.setVisible(not observer_selected)
+        if self.assignment_editor_ends_label is not None:
+            self.assignment_editor_ends_label.setVisible(not observer_selected)
         self.assignment_editor_reason_edit.clear()
         self.assignment_editor_ends_edit.clear()
         self.assignment_editor_panel.setVisible(True)
@@ -23721,10 +23873,16 @@ class SettingsTab(QWidget):
         guided_wizard_step_id = (
             requested_initial_step
             if existing
-            and requested_initial_step in {"radio", "software", "connection", "guard", "schedule", "review"}
+            and requested_initial_step in {"radio", "model", "software", "connection", "guard", "schedule", "review"}
             else "radio"
         )
-        guided_wizard_steps: Tuple[Tuple[str, str], ...] = guided_setup_wizard_view("radio").steps
+        base_guided_wizard_steps = guided_setup_wizard_view("radio").steps
+        guided_wizard_step_items: List[Tuple[str, str]] = []
+        for step in base_guided_wizard_steps:
+            guided_wizard_step_items.append(step)
+            if step[0] == "radio":
+                guided_wizard_step_items.append(("model", "Operating Model"))
+        guided_wizard_steps: Tuple[Tuple[str, str], ...] = tuple(guided_wizard_step_items)
         guided_wizard_max_index_seen = len(guided_wizard_steps) - 1 if existing else 0
         guided_wizard_group = QGroupBox("Guided Setup")
         guided_wizard_group.setObjectName("guidedSetupWizard")
@@ -23741,7 +23899,8 @@ class SettingsTab(QWidget):
             btn.setObjectName(f"guidedWizardStep_{step_id}")
             btn.setCheckable(True)
             btn.setToolTip(f"Show the {label} setup step.")
-            btn.setMinimumWidth(120)
+            btn.setMinimumWidth(0)
+            btn.setMinimumHeight(button_height_for_font(btn))
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             guided_wizard_buttons[step_id] = btn
             guided_wizard_buttons_row.addWidget(btn, (idx - 1) // 3, (idx - 1) % 3)
@@ -23811,7 +23970,8 @@ class SettingsTab(QWidget):
         receiver_stack_layout = QFormLayout(receiver_stack_group)
         _configure_guided_form(receiver_stack_layout)
         receiver_stack_hint = QLabel(
-            "Choose the application FIO should start for this SDR. Receive-only integrations never enable PTT, transmit, or frequency scheduling."
+            "Choose the receiver application and any radio-owned receive software for this SDR. "
+            "The SDR remains receive-only: these choices never enable PTT, transmit, QSY, or frequency scheduling."
         )
         receiver_stack_hint.setObjectName("guidedReceiverSoftwareStackHint")
         receiver_stack_hint.setWordWrap(True)
@@ -24391,6 +24551,8 @@ class SettingsTab(QWidget):
 
         js8_host_edit = QLineEdit(str((existing or {}).get("js8_host", "") or ""))
         js8_port_edit = QLineEdit(str((existing or {}).get("js8_port", "") or ""))
+        js8_host_edit.setObjectName("guidedJs8Host")
+        js8_port_edit.setObjectName("guidedJs8Port")
         js8_port_edit.setValidator(QIntValidator(1, 65535, js8_port_edit))
         _configure_port_edit(js8_port_edit)
         js8_row = QHBoxLayout()
@@ -24404,6 +24566,7 @@ class SettingsTab(QWidget):
         _add_form_row(connection_form, "JS8Call TCP:", js8_wrap, "Host and port for the JS8Call TCP API for this radio.")
 
         js8_install_edit = QLineEdit(str((existing or {}).get("js8_install_path", "") or ""))
+        js8_install_edit.setObjectName("guidedJs8Application")
         js8_install_wrap = _make_browse_row(
             js8_install_edit,
             title="Select JS8Call application or executable",
@@ -24411,11 +24574,22 @@ class SettingsTab(QWidget):
         )
         _add_form_row(connection_form, "JS8Call App:", js8_install_wrap, "Optional JS8Call executable or app path associated with this radio.")
 
+        js8_launch_enabled_chk = QCheckBox("Launch this JS8Call instance with FIO")
+        js8_launch_enabled_chk.setObjectName("guidedObserverJs8LaunchEnabled")
+        js8_launch_enabled_chk.setChecked(False)
+        js8_launch_enabled_chk.setToolTip(
+            "Start only this radio-owned, receive-only JS8Call instance with FIO. "
+            "This does not grant Compose, Expect, QSY, PTT, or scheduler authority."
+        )
+        _add_full_width_row(connection_form, js8_launch_enabled_chk)
+
         js8_profile_edit = QLineEdit(str((existing or {}).get("js8_profile_path", "") or ""))
+        js8_profile_edit.setObjectName("guidedJs8Profile")
         js8_profile_wrap = _make_browse_row(js8_profile_edit, title="Select JS8Call profile folder", mode="folder")
         _add_form_row(connection_form, "JS8 Profile:", js8_profile_wrap, "Optional JS8Call profile folder for this radio.")
 
         js8_directed_edit = QLineEdit(str((existing or {}).get("js8_directed_path", "") or ""))
+        js8_directed_edit.setObjectName("guidedJs8Directed")
         js8_directed_wrap = _make_browse_row(
             js8_directed_edit,
             title="Select DIRECTED.TXT",
@@ -24426,6 +24600,51 @@ class SettingsTab(QWidget):
         js8_forms_edit = QLineEdit(str((existing or {}).get("js8_forms_path", "") or ""))
         js8_forms_wrap = _make_browse_row(js8_forms_edit, title="Select MCF forms folder", mode="folder")
         _add_form_row(connection_form, "MCF Forms Folder:", js8_forms_wrap, "MCF form definitions used by built-in FIO Spotter compose and decode workflows.")
+
+        operating_model_group, operating_model_form = _make_section(
+            "Operating Model",
+            "Observer / SDR radios use a receive-only model. It never enables transmit, QSY, or scheduling controls.",
+        )
+        observer_operating_model_combo = QComboBox()
+        observer_operating_model_combo.setObjectName("guidedObserverOperatingModel")
+        receive_only_models = [
+            dict(row)
+            for row in (getattr(self, "operating_profiles", ()) or ())
+            if isinstance(row, Mapping)
+            and int(row.get("enabled", 1) or 0) == 1
+            and int(row.get("receive_only", 0) or 0) == 1
+        ]
+        for row in receive_only_models:
+            observer_operating_model_combo.addItem(
+                str(row.get("name", "Receive-only SDR") or "Receive-only SDR"),
+                int(row.get("id", 0) or 0),
+            )
+        preferred_model_idx = next(
+            (
+                idx
+                for idx, row in enumerate(receive_only_models)
+                if str(row.get("system_key", "") or "").strip().lower() == "receive_only_sdr"
+            ),
+            0,
+        )
+        if observer_operating_model_combo.count() > 0:
+            observer_operating_model_combo.setCurrentIndex(preferred_model_idx)
+        observer_operating_model_combo.setEnabled(False)
+        observer_operating_model_combo.setToolTip(
+            "The built-in receive-only model is selected automatically for an SDR and cannot be changed to a transmit model."
+        )
+        _add_form_row(
+            operating_model_form,
+            "Assigned Model:",
+            observer_operating_model_combo,
+            "FIO assigns this model before the receiver can be activated.",
+        )
+        observer_model_capabilities = QLabel(
+            "Receive and import only · no Compose or Expect sending · no QSY/PTT · no scheduler control"
+        )
+        observer_model_capabilities.setObjectName("guidedObserverOperatingModelCapabilities")
+        observer_model_capabilities.setWordWrap(True)
+        _add_full_width_row(operating_model_form, observer_model_capabilities)
 
         js8spotter_launch_edit = QLineEdit(str((existing or {}).get("spotter_launch_path", "") or ""))
         js8spotter_launch_wrap = _make_browse_row(js8spotter_launch_edit, title="Select external JS8Spotter app", mode="folder")
@@ -25230,8 +25449,9 @@ class SettingsTab(QWidget):
                 target_text = str(target_edit.text() or "").strip() if target_edit is not None else ""
                 target_missing = target_edit is not None and not target_text
                 selected_for_radio = _app_choice_app_selected(app_id)
+                observer_js8 = bool(observer_mode and app_id == "js8call" and use_js8call_chk.isChecked())
                 visible = (
-                    not observer_mode
+                    (not observer_mode or observer_js8)
                     and selected_for_radio
                     and app_autoconfigure_attempted
                     and (combo.count() > 1 or bool(target_text) or target_missing)
@@ -25254,8 +25474,8 @@ class SettingsTab(QWidget):
                     browse_btn.setVisible(visible)
                 any_visible = any_visible or visible
             js8_profile_visible = (
-                not observer_mode
-                and _js8_app_selected()
+                _js8_app_selected()
+                and (not observer_mode or use_js8call_chk.isChecked())
                 and app_autoconfigure_attempted
                 and (
                     js8_profile_choice_combo.count() > 1
@@ -25289,9 +25509,9 @@ class SettingsTab(QWidget):
         def _detected_app_choice_needs_operator_selection() -> bool:
             nonlocal app_autoconfigure_attempted
             observer_mode = str(device_class_combo.currentData() or "").strip().lower() == "observer"
-            if observer_mode:
-                return False
             for app_id, combo in app_choice_combos.items():
+                if observer_mode and app_id != "js8call":
+                    continue
                 target_edit = app_choice_targets.get(app_id)
                 target_missing = target_edit is not None and not target_edit.text().strip()
                 if not _app_choice_app_selected(app_id):
@@ -25598,6 +25818,11 @@ class SettingsTab(QWidget):
 
         def _mark_custom_mix_from_software_edit() -> None:
             if applying_setup_type_choice:
+                return
+            if str(device_class_combo.currentData() or "").strip().lower() == "observer":
+                # Companion receive software does not turn an observer into a
+                # custom transmit-capable lane.
+                _update_dialog_visibility()
                 return
             lane = str(setup_type_combo.currentData() or "").strip()
             if lane and lane != "custom":
@@ -26428,19 +26653,52 @@ class SettingsTab(QWidget):
                 ).connection_group
             )
 
-        def _guided_visible_wizard_steps() -> Tuple[Tuple[str, str], ...]:
+        def _guided_wizard_step_applicability() -> Dict[str, bool]:
             observer_mode = str(device_class_combo.currentData() or "").strip().lower() == "observer"
-            return guided_setup_wizard_view(
-                guided_wizard_step_id,
-                connection_visible=_guided_connection_step_visible(),
-                software_visible=True,
-            ).steps
+            return {
+                "radio": True,
+                "model": observer_mode,
+                "software": True,
+                "connection": _guided_connection_step_visible(),
+                "guard": not observer_mode,
+                "schedule": not observer_mode,
+                "review": True,
+            }
+
+        def _guided_visible_wizard_steps() -> Tuple[Tuple[str, str], ...]:
+            """Return navigable steps while the navigator keeps all stable slots visible."""
+            applicability = _guided_wizard_step_applicability()
+            return tuple(
+                item
+                for item in guided_wizard_steps
+                if applicability.get(item[0], False)
+            )
 
         def _guided_wizard_index(step_id: str) -> int:
             for idx, (candidate, _label) in enumerate(_guided_visible_wizard_steps()):
                 if candidate == step_id:
                     return idx
             return 0
+
+        def _guided_nearest_applicable_step(step_id: str) -> str:
+            """Keep the operator near the same stable slot when applicability changes."""
+            applicable_ids = {
+                candidate for candidate, _label in _guided_visible_wizard_steps()
+            }
+            if step_id in applicable_ids:
+                return step_id
+            stable_ids = [candidate for candidate, _label in guided_wizard_steps]
+            try:
+                stable_index = stable_ids.index(step_id)
+            except ValueError:
+                stable_index = 0
+            for candidate in stable_ids[stable_index + 1 :]:
+                if candidate in applicable_ids:
+                    return candidate
+            for candidate in reversed(stable_ids[:stable_index]):
+                if candidate in applicable_ids:
+                    return candidate
+            return "radio"
 
         def _guided_wizard_step_label(index: int) -> str:
             try:
@@ -26675,7 +26933,13 @@ class SettingsTab(QWidget):
             if use_flamp_chk.isChecked():
                 app_labels.append("FLAmp")
             if use_js8call_chk.isChecked():
-                app_labels.append("JS8Call")
+                js8_label = "JS8Call"
+                if (
+                    str(device_class_combo.currentData() or "").strip().lower() == "observer"
+                    and js8_launch_enabled_chk.isChecked()
+                ):
+                    js8_label += " (receive-only; launch with FIO)"
+                app_labels.append(js8_label)
             if use_js8spotter_chk.isChecked():
                 app_labels.append("FIO Spotter")
             if use_external_js8spotter_chk.isChecked():
@@ -26807,6 +27071,14 @@ class SettingsTab(QWidget):
                     [
                         "Software: " + (", ".join(app_labels) if app_labels else "Monitor only"),
                         f"Frequency Control: {frequency_line}",
+                        *(
+                            [
+                                "Operating Model: Receive-only SDR (assigned before activation)",
+                                "Safety: no Compose/Expect sending, QSY, PTT, or scheduler authority",
+                            ]
+                            if str(device_class_combo.currentData() or "").strip().lower() == "observer"
+                            else []
+                        ),
                     ],
                     tone="info",
                 ),
@@ -26817,7 +27089,11 @@ class SettingsTab(QWidget):
                 ),
                 _review_card_html(
                     "RF Guard and Schedule",
-                    guard_lines + ["Schedule: " + schedule_line],
+                    (
+                        ["Not applicable to a receive-only observer; no transmit schedule is created."]
+                        if str(device_class_combo.currentData() or "").strip().lower() == "observer"
+                        else guard_lines + ["Schedule: " + schedule_line]
+                    ),
                     tone=guard_tone,
                 ),
                 _review_card_html(
@@ -26833,6 +27109,11 @@ class SettingsTab(QWidget):
             nonlocal guided_wizard_step_id
             theme = resolve_theme(self.settings)
             observer_mode = str(device_class_combo.currentData() or "").strip().lower() == "observer"
+            visible_steps = _guided_visible_wizard_steps()
+            visible_step_ids = {step_id for step_id, _label in visible_steps}
+            step_applicability = _guided_wizard_step_applicability()
+            if guided_wizard_step_id not in visible_step_ids:
+                guided_wizard_step_id = _guided_nearest_applicable_step(guided_wizard_step_id)
             wizard_view = guided_setup_wizard_view(
                 guided_wizard_step_id,
                 connection_visible=connection_visible,
@@ -26840,25 +27121,52 @@ class SettingsTab(QWidget):
                 # transceiver checklist remains hidden within that step.
                 software_visible=True,
             )
-            guided_wizard_step_id = wizard_view.current_step_id
-            current_idx = wizard_view.current_index
-            visible_step_ids = {step_id for step_id, _label in wizard_view.steps}
-            for step_id, btn in guided_wizard_buttons.items():
-                btn.setVisible(step_id in visible_step_ids)
-                checked = step_id == guided_wizard_step_id
+            current_idx = next(
+                (idx for idx, (step_id, _label) in enumerate(visible_steps) if step_id == guided_wizard_step_id),
+                0,
+            )
+            for display_index, (step_id, label) in enumerate(guided_wizard_steps, start=1):
+                btn = guided_wizard_buttons[step_id]
+                applicable = bool(step_applicability.get(step_id, False))
+                btn.setVisible(True)
+                btn.setProperty("guidedStepApplicable", applicable)
+                btn.setText(
+                    f"{display_index}. {label}"
+                    if applicable
+                    else f"{display_index}. {label} · N/A"
+                )
+                checked = applicable and step_id == guided_wizard_step_id
                 step_idx = next(
-                    (idx for idx, (item_step_id, _label) in enumerate(wizard_view.steps) if item_step_id == step_id),
+                    (idx for idx, (item_step_id, _label) in enumerate(visible_steps) if item_step_id == step_id),
                     0,
                 )
-                btn.setEnabled(step_idx <= guided_wizard_max_index_seen + 1)
+                btn.setEnabled(applicable and step_idx <= guided_wizard_max_index_seen + 1)
                 btn.setChecked(checked)
-                btn.setStyleSheet(button_style("primary" if checked else "secondary", theme))
-            guided_wizard_back_btn.setEnabled(wizard_view.can_go_back)
-            guided_wizard_next_btn.setEnabled(wizard_view.can_go_next)
+                btn.setStyleSheet(
+                    button_style("primary" if checked else "secondary" if applicable else "muted", theme)
+                )
+                if applicable:
+                    btn.setToolTip(f"Show the {label} setup step.")
+                    btn.setAccessibleDescription(f"Guided setup step {display_index}: {label}.")
+                else:
+                    if observer_mode and step_id in {"guard", "schedule"}:
+                        reason = "This step is skipped because a receive-only observer radio does not transmit or own a transmit schedule."
+                    elif step_id == "model":
+                        reason = "Transmit-capable radios receive operating-model assignments after save; this step is skipped here."
+                    elif step_id == "connection":
+                        reason = "The current software and control choices require no connection endpoint; this step is skipped."
+                    else:
+                        reason = "This step is not applicable to the selected radio setup and is skipped."
+                    btn.setToolTip(reason)
+                    btn.setAccessibleDescription(
+                        f"Guided setup step {display_index}: {label}. Not applicable; skipped."
+                    )
+            guided_wizard_back_btn.setEnabled(current_idx > 0)
+            guided_wizard_next_btn.setEnabled(current_idx < len(visible_steps) - 1)
             guided_wizard_back_btn.setStyleSheet(button_style("secondary", theme))
             guided_wizard_next_btn.setStyleSheet(button_style("primary", theme))
-            previous_label = wizard_view.previous_label
-            next_label = wizard_view.next_label
+            previous_label = visible_steps[current_idx - 1][1] if current_idx > 0 else ""
+            next_label = visible_steps[current_idx + 1][1] if current_idx < len(visible_steps) - 1 else ""
             guided_wizard_back_btn.setText(f"Back: {previous_label}" if previous_label else "Back")
             guided_wizard_next_btn.setText(f"Next: {next_label}" if next_label else "Next")
             guided_wizard_next_btn.setToolTip(
@@ -26871,23 +27179,33 @@ class SettingsTab(QWidget):
             identity_group.setVisible(guided_wizard_step_id == "radio")
             software_group.setVisible(guided_wizard_step_id == "software")
             connection_group.setVisible(guided_wizard_step_id == "connection")
+            operating_model_group.setVisible(observer_mode and guided_wizard_step_id == "model")
             rf_guard_tone, _rf_guard_title, _rf_guard_detail = _guided_schedule_assignment_warning_summary()
             rf_guard_needs_review = bool(rf_guard_tone)
-            rf_guard_visible = guided_wizard_step_id == "guard" or rf_guard_needs_review
+            rf_guard_visible = (not observer_mode) and (
+                guided_wizard_step_id == "guard" or rf_guard_needs_review
+            )
             optional_toggle.setVisible(False)
             with QSignalBlocker(optional_toggle):
                 optional_toggle.setChecked(rf_guard_visible)
                 optional_toggle.setArrowType(Qt.DownArrow if rf_guard_visible else Qt.RightArrow)
             optional_body.setVisible(rf_guard_visible)
             _apply_guided_schedule_assignment_warning_ui()
-            schedule_group.setVisible(guided_wizard_step_id == "schedule" or rf_guard_needs_review)
+            schedule_group.setVisible(
+                (not observer_mode)
+                and (guided_wizard_step_id == "schedule" or rf_guard_needs_review)
+            )
             save_review_group.setVisible(guided_wizard_step_id == "review")
             if guided_wizard_step_id != "review":
                 readiness_card.setVisible(False)
             else:
                 _update_dialog_readiness()
 
-            guided_wizard_detail_label.setText(wizard_view.detail)
+            guided_wizard_detail_label.setText(
+                "Confirm the immutable receive-only model and its safety boundaries."
+                if guided_wizard_step_id == "model"
+                else wizard_view.detail
+            )
             _update_guided_save_review()
             _update_guided_save_button()
 
@@ -26902,7 +27220,7 @@ class SettingsTab(QWidget):
             js8_results: Dict[str, PathDetectionResult] = {}
             varac_results: Dict[str, PathDetectionResult] = {}
             js8_file_profiles: Sequence[Any] = ()
-            if not observer_mode:
+            if not observer_mode or use_js8call_chk.isChecked():
                 try:
                     install_candidates = build_autoconfig_proposal(
                         radio_count=1,
@@ -26915,10 +27233,11 @@ class SettingsTab(QWidget):
                     ).candidates
                 except Exception:
                     install_candidates = ()
-                fast_results = self.software_path_detector.detect_fast_light()
                 js8_results = self.software_path_detector.detect_js8()
-                varac_results = self.software_path_detector.detect_varac()
                 js8_file_profiles = discover_js8call_file_profiles()
+                if not observer_mode:
+                    fast_results = self.software_path_detector.detect_fast_light()
+                    varac_results = self.software_path_detector.detect_varac()
             app_autoconfigure_attempted = True
             _update_detected_app_choices(install_candidates)
             _update_js8_profile_choices(js8_file_profiles)
@@ -27100,7 +27419,7 @@ class SettingsTab(QWidget):
             use_fldigi_chk.setEnabled(not observer_mode)
             use_flmsg_chk.setEnabled(not observer_mode)
             use_flamp_chk.setEnabled(not observer_mode)
-            use_js8call_chk.setEnabled(not observer_mode)
+            use_js8call_chk.setEnabled(True)
             use_js8spotter_chk.setEnabled(not observer_mode)
             use_external_js8spotter_chk.setEnabled(not observer_mode)
             use_commstat_chk.setEnabled(not observer_mode)
@@ -27135,7 +27454,11 @@ class SettingsTab(QWidget):
             for widget in rigctld_field_widgets:
                 _set_row_visible(widget, visibility.rigctld_fields)
             for widget in js8_field_widgets:
-                _set_row_visible(widget, visibility.js8_fields)
+                _set_row_visible(widget, visibility.js8_fields or (observer_mode and use_js8call_chk.isChecked()))
+            _set_row_visible(
+                js8_launch_enabled_chk,
+                observer_mode and use_js8call_chk.isChecked(),
+            )
             for widget in js8_forms_field_widgets:
                 _set_row_visible(widget, visibility.js8_fields and use_js8spotter)
             for widget in external_spotter_field_widgets:
@@ -27165,12 +27488,31 @@ class SettingsTab(QWidget):
 
             if observer_mode:
                 _set_row_visible(receiver_stack_group, setup_started)
-                _set_row_visible(software_wrap, False)
-                _set_row_visible(radio_apps_base_wrap, False)
-                _set_row_visible(configure_auto_wrap, False)
-                _set_row_visible(software_hint_label, False)
-                app_setup_plan_group.setVisible(False)
-                app_setup_plan_label.setText("")
+                _set_row_visible(software_wrap, setup_started)
+                for checkbox in (
+                    use_flrig_chk,
+                    use_fldigi_chk,
+                    use_flmsg_chk,
+                    use_flamp_chk,
+                    use_js8spotter_chk,
+                    use_external_js8spotter_chk,
+                    use_commstat_chk,
+                    use_varac_chk,
+                ):
+                    checkbox.setEnabled(False)
+                    checkbox.setToolTip("Unavailable for this receive-only SDR profile.")
+                use_js8call_chk.setEnabled(True)
+                use_js8call_chk.setToolTip(
+                    "Create or update a distinct JS8Call instance owned by this SDR. "
+                    "It remains excluded from transmit, compose, QSY, and scheduler targets."
+                )
+                _set_row_visible(radio_apps_base_wrap, setup_started and use_js8call_chk.isChecked())
+                _set_row_visible(configure_auto_wrap, setup_started and use_js8call_chk.isChecked())
+                _set_row_visible(software_hint_label, setup_started)
+                software_hint_label.setText(
+                    "Optional: select JS8Call to create a distinct receive/import instance for this SDR. "
+                    "Use Configure Automatically to choose its app, profile, message files, and a non-conflicting API port."
+                )
             else:
                 _set_row_visible(receiver_stack_group, False)
                 _set_row_visible(software_wrap, setup_started and not observer_mode)
@@ -27200,7 +27542,12 @@ class SettingsTab(QWidget):
                     _update_guided_app_setup_plan_review()
 
             role_hint_label.setText(guided_setup_role_hint(blueprint, visibility_state))
-            if visibility.connection_group:
+            if observer_mode and use_js8call_chk.isChecked():
+                connection_status_label.setText(
+                    "Configure the distinct JS8Call app, profile, message files, and API port owned by this SDR. "
+                    "The instance remains receive/import only in FIO."
+                )
+            elif visibility.connection_group:
                 connection_status_label.setText("Review the endpoint fields below for the selected software stack.")
             else:
                 connection_status_label.setText("No FIO frequency-control endpoint is required for this setup type.")
@@ -27264,6 +27611,19 @@ class SettingsTab(QWidget):
         def _on_guided_schedule_path_changed() -> None:
             _update_dialog_visibility()
 
+        def _on_js8call_selection_changed(_state: int) -> None:
+            observer_mode = str(device_class_combo.currentData() or "").strip().lower() == "observer"
+            if observer_mode and use_js8call_chk.isChecked():
+                if not js8_host_edit.text().strip():
+                    js8_host_edit.setText("127.0.0.1")
+                if not js8_port_edit.text().strip():
+                    js8_port_edit.setText(_default_instance_port("js8call"))
+                connection_status_label.setText(
+                    "Configure the distinct JS8Call app, profile, message files, and API port owned by this SDR. "
+                    "The instance remains receive/import only in FIO."
+                )
+            _mark_custom_mix_from_software_edit()
+
         setup_type_combo.currentIndexChanged.connect(lambda _index: _apply_setup_type_choice())
         for step_id, btn in guided_wizard_buttons.items():
             btn.clicked.connect(lambda _checked=False, sid=step_id: _set_guided_wizard_step(sid))
@@ -27275,7 +27635,7 @@ class SettingsTab(QWidget):
         use_fldigi_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
         use_flmsg_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
         use_flamp_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
-        use_js8call_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
+        use_js8call_chk.stateChanged.connect(_on_js8call_selection_changed)
         use_js8spotter_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
         use_external_js8spotter_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
         use_commstat_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
@@ -27526,6 +27886,52 @@ class SettingsTab(QWidget):
             payload["name"] = name
             out.update(normalize_guided_radio_profile_payload(payload))
             if str(device_class_combo.currentData() or "").strip().lower() == "observer":
+                try:
+                    operating_profile_id = int(observer_operating_model_combo.currentData() or 0)
+                except (TypeError, ValueError):
+                    operating_profile_id = 0
+                if operating_profile_id > 0:
+                    out["guided_operating_profile_id"] = operating_profile_id
+
+                existing_js8_id = int((existing or {}).get("js8_instance_id", 0) or 0)
+                if use_js8call_chk.isChecked() and existing_js8_id <= 0:
+                    js8_host = js8_host_edit.text().strip() or "127.0.0.1"
+                    try:
+                        js8_port = int(js8_port_edit.text().strip() or 2442)
+                    except (TypeError, ValueError):
+                        js8_port = 2442
+                    js8_profile_path = js8_profile_edit.text().strip()
+                    js8_directed_path = js8_directed_edit.text().strip()
+                    js8_data_root = (
+                        str(Path(js8_directed_path).expanduser().parent)
+                        if js8_directed_path
+                        else js8_profile_path
+                    )
+                    out["guided_js8_instance_draft"] = {
+                        "instance_name": f"{name} JS8Call",
+                        "host": js8_host,
+                        "port": js8_port,
+                        "application_path": js8_install_edit.text().strip(),
+                        "configuration_path": js8_profile_path,
+                        "directed_path": js8_directed_path,
+                        "forms_path": js8_forms_edit.text().strip(),
+                        "storage_path": js8_data_root,
+                        "launch_at_startup": bool(js8_launch_enabled_chk.isChecked()),
+                    }
+                    # The observer must first have a real radio id.  The
+                    # reviewed JS8 instance is atomically created and adopted
+                    # after that save; never create a provisional row here.
+                    out["use_js8call"] = False
+                    out["js8_instance_id"] = None
+                    for field_name in (
+                        "js8_host",
+                        "js8_port",
+                        "js8_install_path",
+                        "js8_profile_path",
+                        "js8_directed_path",
+                        "js8_forms_path",
+                    ):
+                        out[field_name] = ""
                 launch_app = str(receiver_application_combo.currentData() or "").strip()
                 launch_path = receiver_launch_path_edit.text().strip()
                 launch_requested = bool(receiver_launch_enabled_chk.isChecked() and launch_app and launch_path)
@@ -27735,9 +28141,16 @@ class SettingsTab(QWidget):
                 payload["varac_node_id"] = int(varac_saved.get("id", 0) or 0)
 
             first_radio = not bool(self.multi_radio_store.list_device_profiles())
-            if first_radio:
+            observer_profile = str(payload.get("device_class", "") or "").strip().lower() == "observer"
+            if first_radio and not observer_profile:
                 payload["runtime_active"] = 1
                 payload["runtime_primary"] = 1
+            elif observer_profile:
+                # A receive-only radio must acquire its safe model before it
+                # can become active and can never be the compatibility
+                # primary, including on an otherwise blank installation.
+                payload["runtime_active"] = 0
+                payload["runtime_primary"] = 0
             saved = self.multi_radio_store.save_device_profile(payload)
         except ValueError as exc:
             QMessageBox.warning(self, "Radio Profiles", str(exc))
@@ -27772,7 +28185,7 @@ class SettingsTab(QWidget):
                 )
                 return False
 
-        if first_radio or is_primary_edit or int(saved.get("runtime_primary", 0) or 0) == 1:
+        if (first_radio and not observer_profile) or is_primary_edit or int(saved.get("runtime_primary", 0) or 0) == 1:
             try:
                 self.multi_radio_store.sync_runtime_active_device_to_legacy_settings_if_single_active(
                     int(saved.get("id", 0) or 0)
@@ -27884,6 +28297,141 @@ class SettingsTab(QWidget):
             log.debug("Failed opening Plan Builder after guided radio setup.", exc_info=True)
         return False
 
+    def _finalize_guided_observer_profile(
+        self,
+        device_profile: Mapping[str, Any],
+        *,
+        operating_profile_id: int = 0,
+        js8_draft: Optional[Mapping[str, Any]] = None,
+        activate_after_assignment: bool = False,
+    ) -> bool:
+        """Assign the RX model, then adopt an optional distinct JS8 instance."""
+
+        radio_id = int(device_profile.get("id", 0) or 0)
+        if radio_id <= 0:
+            return False
+        try:
+            model_id = int(operating_profile_id or 0)
+            if model_id <= 0:
+                model = self.multi_radio_store.ensure_receive_only_operating_profile()
+                model_id = int(model.get("id", 0) or 0)
+            self.multi_radio_store.set_device_operating_profile(radio_id, model_id)
+        except (ValueError, KeyError) as exc:
+            QMessageBox.warning(
+                self,
+                "Receiver Operating Model",
+                "The receiver profile was saved, but its receive-only operating model could not be assigned. "
+                f"It remains inactive. {exc}",
+            )
+            self._refresh_multi_radio_tables()
+            return False
+        except Exception:
+            log.exception("Failed assigning the guided receive-only operating model.")
+            QMessageBox.warning(
+                self,
+                "Receiver Operating Model",
+                "The receiver profile was saved, but its receive-only operating model could not be assigned. "
+                "It remains inactive; open Operating Model Assignment to retry.",
+            )
+            self._refresh_multi_radio_tables()
+            return False
+
+        if js8_draft:
+            name = str(js8_draft.get("instance_name", "") or "").strip() or "Receiver JS8Call"
+            system_key = self._software_instance_system_key("js8call", name)
+            host = str(js8_draft.get("host", "") or "127.0.0.1").strip() or "127.0.0.1"
+            port = int(js8_draft.get("port", 0) or 2442)
+            executable = str(js8_draft.get("application_path", "") or "").strip()
+            profile_path = str(js8_draft.get("configuration_path", "") or "").strip()
+            data_root = str(js8_draft.get("storage_path", "") or profile_path).strip()
+            directed_path = str(js8_draft.get("directed_path", "") or "").strip()
+            forms_path = str(js8_draft.get("forms_path", "") or "").strip()
+            root = Path(data_root).expanduser() if data_root else None
+            application_values = {
+                "system_key": system_key,
+                "name": name,
+                "host": host,
+                "port": port,
+                "install_path": executable,
+                "profile_path": profile_path,
+                "application_data_root": data_root,
+                "directed_path": directed_path or (str(root / "DIRECTED.TXT") if root else ""),
+                "all_path": str(root / "ALL.TXT") if root else "",
+                "inbox_path": str(root / "inbox.db3") if root else "",
+                "forms_path": forms_path,
+                "storage_mode": "rig_scoped" if data_root else "unverified",
+                "rig_name_source": "managed",
+            }
+            resources = []
+            if profile_path:
+                resources.append({"kind": "settings_profile", "value": profile_path, "exclusive": True})
+            if data_root:
+                resources.append({"kind": "message_storage", "value": data_root, "exclusive": True})
+            manifest_values = {
+                "instance_key": f"js8call:{system_key}",
+                "management_mode": "fio_managed",
+                "provenance": "guided_receiver_setup",
+                "executable_path": executable,
+                "launch_command": "",
+                "data_root": data_root,
+                "host": host,
+                "ports": [
+                    {"name": "JS8Call API", "protocol": "tcp", "host": host, "port": port}
+                ],
+                "resource_claims": resources,
+                "verification_state": "configured",
+                "verification_summary": "Saved for this receiver; run Health to verify the live endpoint and files.",
+                "evidence": {"source": "guided_receiver_setup", "reviewed_radio_id": radio_id},
+            }
+            try:
+                result = self.multi_radio_store.adopt_observer_js8_instance(
+                    radio_profile_id=radio_id,
+                    application_values=application_values,
+                    manifest_values=manifest_values,
+                    replace_existing=False,
+                    expected_current_instance_id=None,
+                    launch_at_startup=bool(js8_draft.get("launch_at_startup", False)),
+                )
+                adopted_radio = result.get("radio") if isinstance(result, Mapping) else None
+                if isinstance(adopted_radio, Mapping):
+                    self._last_persisted_device_profile = dict(adopted_radio)
+            except (ValueError, KeyError) as exc:
+                QMessageBox.warning(
+                    self,
+                    "Receiver JS8Call Setup",
+                    "The receiver and receive-only model were saved, but its distinct JS8Call instance was not added. "
+                    f"Review the endpoint and profile paths in Settings > Software, then retry. {exc}",
+                )
+                self._refresh_multi_radio_tables()
+                return False
+            except Exception:
+                log.exception("Failed adopting the guided observer JS8Call instance.")
+                QMessageBox.warning(
+                    self,
+                    "Receiver JS8Call Setup",
+                    "The receiver and receive-only model were saved, but its distinct JS8Call instance was not added. "
+                    "Open Settings > Software > JS8Call to retry; the primary JS8Call instance was not changed.",
+                )
+                self._refresh_multi_radio_tables()
+                return False
+
+        if activate_after_assignment:
+            try:
+                active = self.multi_radio_store.set_device_profile_runtime_active(radio_id, True)
+                self._last_persisted_device_profile = dict(active)
+            except Exception:
+                log.exception("Failed activating the first guided observer after model assignment.")
+                QMessageBox.warning(
+                    self,
+                    "Receiver Activation",
+                    "The receiver setup was saved safely, but FIO could not activate it. Use Radio Settings > Use Radio to retry.",
+                )
+                self._refresh_multi_radio_tables()
+                return False
+        self._refresh_multi_radio_tables()
+        self._emit_device_profiles_changed()
+        return True
+
     def _add_device_profile(self) -> None:
         try:
             created = self._open_device_profile_dialog(existing=None)
@@ -27898,11 +28446,26 @@ class SettingsTab(QWidget):
         if not created:
             return
         guided_plan_id = int(created.pop("guided_frequency_plan_id", 0) or 0)
+        guided_operating_profile_id = int(created.pop("guided_operating_profile_id", 0) or 0)
+        guided_js8_instance_draft = created.pop("guided_js8_instance_draft", None)
         open_plan_manager = bool(created.pop("guided_open_plan_manager_after_save", False))
         schedule_choice = str(created.pop("guided_schedule_choice", "") or "").strip()
+        blank_before_save = not bool(self.multi_radio_store.list_device_profiles())
         if not self._persist_device_profile(created):
             return
         saved = getattr(self, "_last_persisted_device_profile", None) or {}
+        if str(saved.get("device_class", "") or "").strip().lower() == "observer":
+            self._finalize_guided_observer_profile(
+                saved,
+                operating_profile_id=guided_operating_profile_id,
+                js8_draft=(
+                    guided_js8_instance_draft
+                    if isinstance(guided_js8_instance_draft, Mapping)
+                    else None
+                ),
+                activate_after_assignment=blank_before_save,
+            )
+            return
         if guided_plan_id > 0:
             self._assign_guided_frequency_plan_after_profile_save(int(saved.get("id", 0) or 0), guided_plan_id)
         elif open_plan_manager:
@@ -27928,11 +28491,24 @@ class SettingsTab(QWidget):
         if not updated:
             return
         guided_plan_id = int(updated.pop("guided_frequency_plan_id", 0) or 0)
+        guided_operating_profile_id = int(updated.pop("guided_operating_profile_id", 0) or 0)
+        guided_js8_instance_draft = updated.pop("guided_js8_instance_draft", None)
         open_plan_manager = bool(updated.pop("guided_open_plan_manager_after_save", False))
         schedule_choice = str(updated.pop("guided_schedule_choice", "") or "").strip()
         if not self._persist_device_profile(updated, existing=existing):
             return
         saved = getattr(self, "_last_persisted_device_profile", None) or {}
+        if str(saved.get("device_class", "") or "").strip().lower() == "observer":
+            self._finalize_guided_observer_profile(
+                saved,
+                operating_profile_id=guided_operating_profile_id,
+                js8_draft=(
+                    guided_js8_instance_draft
+                    if isinstance(guided_js8_instance_draft, Mapping)
+                    else None
+                ),
+            )
+            return
         if guided_plan_id > 0:
             self._assign_guided_frequency_plan_after_profile_save(int(saved.get("id", 0) or 0), guided_plan_id)
         elif open_plan_manager:

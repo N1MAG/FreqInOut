@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -34,7 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from freqinout.gui.current_page_stack import CurrentPageStack
-from freqinout.gui.theme import active_app_theme, label_style
+from freqinout.gui.theme import active_app_theme, button_height_for_font, button_style, label_style
 
 
 SUPPORTED_INSTANCE_FAMILIES: tuple[tuple[str, str], ...] = (
@@ -538,6 +539,28 @@ class SoftwareInstanceAssistant(QWidget):
         self.step_label.setAccessibleName("Software instance setup step")
         root.addWidget(self.step_label)
 
+        self.step_buttons: list[QPushButton] = []
+        step_grid = QGridLayout()
+        step_grid.setContentsMargins(0, 0, 0, 0)
+        step_grid.setHorizontalSpacing(6)
+        step_grid.setVerticalSpacing(6)
+        for index, title in enumerate(self.STEP_TITLES):
+            button = QPushButton(f"{index + 1}. {title}")
+            button.setObjectName(f"softwareInstanceStep_{index + 1}")
+            button.setAccessibleName(f"Software instance step {index + 1}: {title}")
+            button.setToolTip(f"Show {title.lower()} setup")
+            button.setCheckable(True)
+            button.setMinimumHeight(button_height_for_font(button))
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            button.clicked.connect(
+                lambda _checked=False, target=index: self._select_step(target)
+            )
+            self.step_buttons.append(button)
+            step_grid.addWidget(button, index // 4, index % 4)
+        for column in range(4):
+            step_grid.setColumnStretch(column, 1)
+        root.addLayout(step_grid)
+
         self.pages = CurrentPageStack()
         self.pages.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self.pages.setAccessibleName("Software instance setup pages")
@@ -586,7 +609,7 @@ class SoftwareInstanceAssistant(QWidget):
         radio_layout.addWidget(self.radio_guidance_label)
         self.radio_combo = QComboBox()
         self.radio_combo.setAccessibleName("Radio for software instance")
-        self.radio_combo.currentIndexChanged.connect(lambda _index: self._refresh_radio_context())
+        self.radio_combo.currentIndexChanged.connect(self._on_radio_changed)
         radio_layout.addWidget(self.radio_combo)
         self.create_radio_button = QPushButton("Create a radio first…")
         self.create_radio_button.setAccessibleName("Create a radio before adding a software instance")
@@ -768,7 +791,8 @@ class SoftwareInstanceAssistant(QWidget):
         if hasattr(self, "title_label"):
             self.title_label.setText(f"Add {title}")
             self.guidance_label.setText(
-                detail
+                f"Set up one distinct {title.lower()} for the selected radio. "
+                + detail
                 + " Existing settings are evidence for review. FIO does not claim to write third-party application configuration unless a supported, explicit apply is provided."
             )
             if getattr(self, "_family_locked", False):
@@ -899,7 +923,11 @@ class SoftwareInstanceAssistant(QWidget):
             )
             self.radio_combo.setItemData(index, tooltip, Qt.ToolTipRole)
         if self.radio_combo.count():
-            index = self.radio_combo.findData(desired_id)
+            if desired_id is None and len(candidate_rows) == 1:
+                only_id = _int(candidate_rows[0].get("id") or candidate_rows[0].get("radio_id"))
+                index = self.radio_combo.findData(only_id)
+            else:
+                index = self.radio_combo.findData(desired_id)
             self.radio_combo.setCurrentIndex(index if index >= 0 else 0)
         self.radio_combo.blockSignals(False)
         self._selected_radio_id = _int(self.radio_combo.currentData())
@@ -907,6 +935,12 @@ class SoftwareInstanceAssistant(QWidget):
 
     def _set_replacement_confirmed(self, checked: bool) -> None:
         self._replacement_confirmed = bool(checked)
+        self._refresh_radio_context()
+        self._refresh()
+
+    def _on_radio_changed(self, _index: int) -> None:
+        """Refresh both guidance and step navigation for an explicit choice."""
+
         self._refresh_radio_context()
         self._refresh()
 
@@ -1226,10 +1260,40 @@ class SoftwareInstanceAssistant(QWidget):
             and not blocked_for_replacement
             and not (self._step == last_step and any(item.severity == "error" for item in self.validation()))
         )
+        theme = active_app_theme()
+        for index, button in enumerate(self.step_buttons):
+            current = index == self._step
+            next_available = index == self._step + 1 and self.next_button.isEnabled()
+            button.setChecked(current)
+            button.setEnabled(index <= self._step or next_available)
+            button.setStyleSheet(
+                button_style(
+                    "primary" if current else "secondary" if index < self._step else "muted",
+                    theme,
+                )
+            )
         if self._step == 1:
             self._refresh_source()
         if self._step == last_step:
             self._refresh_review()
+
+    def _select_step(self, target: int) -> None:
+        """Navigate through the visible step strip without skipping gates."""
+
+        index = int(target)
+        if index < 0 or index >= len(self.STEP_TITLES):
+            return
+        if index == self._step:
+            self._refresh()
+            return
+        if index > self._step + 1:
+            return
+        if index == self._step + 1 and not self.next_button.isEnabled():
+            return
+        if self._step == 2 and index > self._step:
+            self._apply_identity_defaults()
+        self._step = index
+        self._refresh()
 
     def _next(self) -> None:
         if self._step < len(self.STEP_TITLES) - 1:

@@ -44,6 +44,29 @@ artifacts:
 5. Begin automatically unless work is blocked by a destructive migration or a
    material decision requiring user input.
 
+### Operator-feedback interpretation gate
+
+Plain-language operator reports, named navigation paths, screenshots, logs, and
+recordings are authoritative product evidence. Treat the reported defect as real
+until the exact route and state have been investigated; failure to reproduce it
+does not invalidate the report.
+
+- Convert the report into a short observable reproduction statement before
+  implementation or validation.
+- When the operator names a route such as `Settings > Radios > Add Radio`, that
+  route is binding acceptance scope. An adjacent or visually similar workflow
+  cannot substitute for it and cannot be reported as validation evidence.
+- Confirm the active worktree, launcher, configuration root, and already-running
+  process when any of them can change what the operator sees.
+- If the reported route, starting state, or expected result has more than one
+  material interpretation, state the ambiguity and ask one concise clarifying
+  question before changing code or claiming success. Do not silently choose the
+  interpretation that is easiest to test.
+- A running Python process does not hot-reload edited modules. A relaunch gate
+  must prove that the old process exited and that the validated process loaded
+  the current worktree before a native visual result is treated as current-code
+  evidence.
+
 Use these ownership boundaries:
 
 - The high-reasoning primary model owns architecture; concurrency and lifecycle

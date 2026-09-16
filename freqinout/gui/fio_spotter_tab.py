@@ -27,6 +27,7 @@ from freqinout.core.js8_expect_dispatcher import list_expect_dispatch_audit
 from freqinout.core.js8_expect_runtime import (
     load_expect_automation_runtime_state, set_expect_automation_runtime_state,
 )
+from freqinout.core.js8_send_service import js8_profile_allows_transmit
 from freqinout.core.js8_expect_store import (
     bulk_set_expect_entry_auto_reply_state,
     bulk_refresh_expect_datecodes,
@@ -763,7 +764,8 @@ class FioSpotterTab(QWidget):
             log.warning("FIO Spotter: configured radio list unavailable: %s", exc)
         js8_profiles = [
             dict(profile) for profile in profiles
-            if profile.get("use_js8call") or profile.get("js8_instance_id")
+            if (profile.get("use_js8call") or profile.get("js8_instance_id"))
+            and js8_profile_allows_transmit(profile)
         ]
         self._policy_radio_name_to_id: dict[str, str] = {}
         self._policy_radio_id_to_name: dict[str, str] = {}

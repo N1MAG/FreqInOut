@@ -24,7 +24,7 @@ def _open_receiver_dialog(
     *,
     service_ready: bool = False,
     configure_tab=None,
-) -> None:
+) -> dict[str, object] | None:
     from PySide6.QtWidgets import QDialog
 
     from freqinout.core.settings_manager import SettingsManager
@@ -38,7 +38,7 @@ def _open_receiver_dialog(
 
     def fake_exec(dialog: QDialog) -> int:
         inspect(dialog)
-        return QDialog.Rejected
+        return dialog.result()
 
     monkeypatch.setattr(QDialog, "exec", fake_exec)
     app = _application_or_skip()
@@ -47,10 +47,109 @@ def _open_receiver_dialog(
     if configure_tab is not None:
         configure_tab(tab)
     try:
-        assert tab._open_device_profile_dialog(profile) is None
+        return tab._open_device_profile_dialog(profile)
     finally:
         tab.deleteLater()
         app.processEvents()
+
+
+def test_observer_guided_flow_orders_model_first_and_stages_distinct_js8(monkeypatch, tmp_path) -> None:
+    def inspect(dialog) -> None:
+        from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QLabel, QLineEdit, QPushButton
+
+        setup_type = dialog.findChild(QComboBox, "guidedSetupType")
+        assert setup_type is not None
+        setup_type.setCurrentIndex(setup_type.findData("sdr_observer"))
+        QApplication.processEvents()
+
+        visible_steps = [
+            button.objectName().removeprefix("guidedWizardStep_")
+            for button in dialog.findChildren(QPushButton)
+            if button.objectName().startswith("guidedWizardStep_") and not button.isHidden()
+        ]
+        assert visible_steps == [
+            "radio",
+            "model",
+            "software",
+            "connection",
+            "guard",
+            "schedule",
+            "review",
+        ]
+        guard_step = dialog.findChild(QPushButton, "guidedWizardStep_guard")
+        schedule_step = dialog.findChild(QPushButton, "guidedWizardStep_schedule")
+        assert guard_step is not None and schedule_step is not None
+        assert guard_step.text() == "5. RF Guard · N/A"
+        assert schedule_step.text() == "6. Schedule · N/A"
+        assert not guard_step.isEnabled() and not schedule_step.isEnabled()
+        assert guard_step.property("guidedStepApplicable") is False
+        assert "receive-only observer" in guard_step.toolTip()
+
+        js8_choice = next(
+            checkbox
+            for checkbox in dialog.findChildren(QCheckBox)
+            if checkbox.text() == "JS8Call"
+        )
+        assert js8_choice.isEnabled()
+        js8_choice.setChecked(True)
+        for step_id in ("model", "software", "connection"):
+            step = dialog.findChild(QPushButton, f"guidedWizardStep_{step_id}")
+            assert step is not None
+            step.click()
+            QApplication.processEvents()
+
+        js8_values = {
+            "guidedJs8Host": "127.0.0.1",
+            "guidedJs8Port": "2448",
+            "guidedJs8Application": "/opt/js8call/js8call",
+            "guidedJs8Profile": str(tmp_path / "js8-rx"),
+            "guidedJs8Directed": str(tmp_path / "js8-rx" / "DIRECTED.TXT"),
+        }
+        for object_name, value in js8_values.items():
+            edit = dialog.findChild(QLineEdit, object_name)
+            assert edit is not None
+            edit.setText(value)
+        launch = dialog.findChild(QCheckBox, "guidedObserverJs8LaunchEnabled")
+        assert launch is not None and not launch.isHidden()
+        launch.setChecked(True)
+
+        review = dialog.findChild(QPushButton, "guidedWizardStep_review")
+        assert review is not None
+        review.click()
+        QApplication.processEvents()
+        review_label = dialog.findChild(QLabel, "guidedSaveReview")
+        assert review_label is not None
+        assert "Operating Model: Receive-only SDR" in review_label.text()
+        assert "JS8Call (receive-only; launch with FIO)" in review_label.text()
+        assert "no Compose/Expect sending, QSY, PTT, or scheduler authority" in review_label.text()
+
+    result = _open_receiver_dialog(monkeypatch, tmp_path, None, inspect)
+    assert result is None
+
+
+def test_transceiver_guided_flow_keeps_stable_numbering_and_skips_model(monkeypatch, tmp_path) -> None:
+    def inspect(dialog) -> None:
+        from PySide6.QtWidgets import QApplication, QComboBox, QPushButton
+
+        setup_type = dialog.findChild(QComboBox, "guidedSetupType")
+        next_button = dialog.findChild(QPushButton, "guidedWizardNext")
+        assert setup_type is not None and next_button is not None
+        setup_type.setCurrentIndex(setup_type.findData("js8_only"))
+        QApplication.processEvents()
+
+        steps = [
+            dialog.findChild(QPushButton, f"guidedWizardStep_{step_id}")
+            for step_id in ("radio", "model", "software", "connection", "guard", "schedule", "review")
+        ]
+        assert all(step is not None and not step.isHidden() for step in steps)
+        model_step = steps[1]
+        assert model_step is not None
+        assert model_step.text() == "2. Operating Model · N/A"
+        assert not model_step.isEnabled()
+        assert model_step.property("guidedStepApplicable") is False
+        assert next_button.text() == "Next: Software"
+
+    _open_receiver_dialog(monkeypatch, tmp_path, None, inspect)
 
 
 def test_unsaved_receiver_can_test_and_keep_verified_evidence_in_one_session(monkeypatch, tmp_path) -> None:
@@ -95,6 +194,11 @@ def test_unsaved_receiver_can_test_and_keep_verified_evidence_in_one_session(mon
         assert adapter is not None
         adapter.setCurrentIndex(adapter.findData("sdrpp_rigctl"))
         QApplication.processEvents()
+        for step_name in ("model", "software"):
+            step = dialog.findChild(QPushButton, f"guidedWizardStep_{step_name}")
+            assert step is not None and step.isEnabled()
+            step.click()
+            QApplication.processEvents()
         assert connection_step is not None and connection_step.isEnabled()
         connection_step.click()
         QApplication.processEvents()

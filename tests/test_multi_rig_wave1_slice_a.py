@@ -132,7 +132,7 @@ def test_existing_legacy_settings_wait_for_explicit_migration(monkeypatch, tmp_p
     assert devices[0]["launch_enabled"] == 0
     assert devices[0]["varac_install_path"] == "C:/VarAC"
     assert devices[0]["varac_db_path"] == "C:/VarAC/VarAC.db"
-    assert len(operating) == 1
+    assert len(operating) == 2
     assert operating[0]["scheduler_enabled"] == 0
     assert operating[0]["use_launch_control"] == 0
 
@@ -875,7 +875,7 @@ def test_default_seed_is_idempotent(monkeypatch, tmp_path):
 
     store = MultiRadioStore(settings_db_path())
     assert len(store.list_device_profiles()) == 1
-    assert len(store.list_operating_profiles()) == 1
+    assert len(store.list_operating_profiles()) == 2
     assert len(store.list_assignments()) == 1
     assert len([row for row in store.list_device_profiles() if int(row.get("runtime_active", 0) or 0) == 1]) == 1
 

@@ -174,7 +174,11 @@ def test_settings_add_radio_marks_first_radio_active_before_projection() -> None
     assert "first_radio = not bool(self.multi_radio_store.list_device_profiles())" in persist_block
     assert 'payload["runtime_active"] = 1' in persist_block
     assert 'payload["runtime_primary"] = 1' in persist_block
-    assert 'if first_radio or is_primary_edit or int(saved.get("runtime_primary", 0) or 0) == 1:' in persist_block
+    assert 'if first_radio and not observer_profile:' in persist_block
+    assert 'elif observer_profile:' in persist_block
+    assert 'payload["runtime_active"] = 0' in persist_block
+    assert 'payload["runtime_primary"] = 0' in persist_block
+    assert '(first_radio and not observer_profile)' in persist_block
     assert "sync_runtime_active_device_to_legacy_settings" in persist_block
 
 
@@ -4575,6 +4579,52 @@ def test_radio_profile_inline_software_flags_persist_selected_radio_payload() ->
     assert "Software Used updated in Radio Profile for DX10." in events[0].detail
     assert events[0].radio_profile_id == "7"
     assert events[0].target_label == "DX10"
+
+
+def test_observer_js8_quick_choice_reverts_then_opens_scoped_add_assistant(monkeypatch) -> None:
+    from freqinout.gui.settings_tab import SettingsTab
+    from freqinout.gui.software_administration_workspace import SoftwareAdministrationWorkspace
+
+    app = QApplication.instance() or QApplication([])
+
+    class Check:
+        checked = True
+
+        def isChecked(self) -> bool:
+            return self.checked
+
+    check = Check()
+    profile = {
+        "id": 14,
+        "name": "RTL-SDR",
+        "device_class": "observer",
+        "control_backend": "manual",
+        "use_js8call": 0,
+        "js8_instance_id": None,
+    }
+    workspace = SoftwareAdministrationWorkspace()
+    routed: list[tuple[str, int, str]] = []
+    workspace.begin_instance_setup = (  # type: ignore[method-assign]
+        lambda family, radio_id, *, source="managed": routed.append((family, radio_id, source)) or True
+    )
+    tab = SettingsTab.__new__(SettingsTab)
+    tab._refreshing_radio_profile_software_flags = False
+    tab._selected_settings_radio_profile = lambda: profile
+    tab._radio_profile_software_flag_checks = {"js8call": check}
+    tab._refresh_radio_profile_software_flag_controls = lambda _profile: setattr(check, "checked", False)
+    tab.open_software_administration = lambda **_kwargs: None
+    tab.software_administration_workspace = workspace
+    monkeypatch.setattr(
+        "freqinout.gui.settings_tab.QTimer.singleShot",
+        lambda _delay, callback: callback(),
+    )
+    try:
+        SettingsTab._on_radio_profile_software_flag_changed(tab, "js8call")
+        assert check.checked is False
+        assert routed == [("js8call", 14, "managed")]
+    finally:
+        workspace.deleteLater()
+        app.processEvents()
 
 
 def test_radio_profile_inline_software_flag_controls_are_wired() -> None:

@@ -19,6 +19,7 @@ from freqinout.core.js8_storage import (
 )
 from freqinout.core.logger import log
 from freqinout.core.receiver_control import receiver_control_verification_matches
+from freqinout.core.receiver_software_stack import RECEIVE_ONLY_EXECUTION_SCOPE
 from freqinout.core.software_instance_manifest import (
     find_manifest_conflicts,
     manifest_from_mapping,
@@ -35,6 +36,8 @@ DEFAULT_DEVICE_SYSTEM_KEY = "default_device"
 DEFAULT_DEVICE_NAME = "Default Radio"
 DEFAULT_OPERATING_SYSTEM_KEY = "default_operating"
 DEFAULT_OPERATING_NAME = "Default Operating Profile"
+DEFAULT_RECEIVE_ONLY_OPERATING_SYSTEM_KEY = "receive_only_sdr"
+DEFAULT_RECEIVE_ONLY_OPERATING_NAME = "Receive-only SDR"
 DEFAULT_FREQUENCY_PLAN_SYSTEM_KEY = "default_frequency_plan"
 DEFAULT_FREQUENCY_PLAN_NAME = "Default Frequency Plan"
 DEFAULT_JS8_INSTANCE_SYSTEM_KEY = "default_js8_instance"
@@ -47,7 +50,7 @@ MULTI_RIG_MIGRATION_VERSION_KEY = "multi_rig_migration_version"
 MULTI_RIG_MIGRATION_DEFERRED_KEY = "multi_rig_migration_deferred"
 MULTI_RIG_MIGRATION_COMPLETED_AT_KEY = "multi_rig_migration_completed_at_utc"
 MULTI_RIG_MIGRATION_SUMMARY_PREFIX = "multi_rig_migration_summary_v"
-CURRENT_MULTI_RIG_MIGRATION_VERSION = 2
+CURRENT_MULTI_RIG_MIGRATION_VERSION = 3
 
 SUPPORTED_DEVICE_CONTROL_BACKENDS = frozenset({"flrig", "js8call", "manual", "rigctld"})
 # Keep the runtime compatibility projection aligned with 1.2.2.
@@ -3883,9 +3886,15 @@ def _restore_default_operating_profile_conn(
     created_by: str = "settings_ui",
     allow_active_swap_edit: bool = False,
 ) -> Dict[str, Any]:
-    operating = _record_by_system_key(conn, "operating_profiles", DEFAULT_OPERATING_SYSTEM_KEY)
-    if not operating:
-        operating = _save_operating_profile_conn(conn, _seed_operating_defaults(_load_kv_settings(conn)))
+    device = _record_by_id(conn, "device_profiles", int(device_profile_id))
+    if not device:
+        raise KeyError(f"Unknown device profile id: {device_profile_id}")
+    if _is_observer_device_class(device):
+        operating = _ensure_receive_only_operating_profile_conn(conn, commit=False)
+    else:
+        operating = _record_by_system_key(conn, "operating_profiles", DEFAULT_OPERATING_SYSTEM_KEY)
+        if not operating:
+            operating = _save_operating_profile_conn(conn, _seed_operating_defaults(_load_kv_settings(conn)))
     return _set_device_operating_profile_conn(
         conn,
         int(device_profile_id),
@@ -4016,9 +4025,15 @@ def _ensure_effective_assignment_for_device(conn: sqlite3.Connection, device_id:
     assignment = _effective_assignment_for_device(conn, int(device_id))
     if assignment:
         return dict(assignment)
-    operating = _record_by_system_key(conn, "operating_profiles", DEFAULT_OPERATING_SYSTEM_KEY)
-    if not operating:
-        operating = _save_operating_profile_conn(conn, _seed_operating_defaults(_load_kv_settings(conn)))
+    device = _record_by_id(conn, "device_profiles", int(device_id))
+    if not device:
+        raise KeyError(f"Unknown device profile id: {device_id}")
+    if _is_observer_device_class(device):
+        operating = _ensure_receive_only_operating_profile_conn(conn, commit=False)
+    else:
+        operating = _record_by_system_key(conn, "operating_profiles", DEFAULT_OPERATING_SYSTEM_KEY)
+        if not operating:
+            operating = _save_operating_profile_conn(conn, _seed_operating_defaults(_load_kv_settings(conn)))
     _ensure_default_assignment(conn, int(device_id), int(operating.get("id", 0) or 0))
     return _effective_assignment_for_device(conn, int(device_id)) or {}
 
@@ -4353,7 +4368,12 @@ def _normalize_runtime_primary_device(
     enabled_rows = [row for row in rows if int(row[1] or 0) == 1]
     candidates = [row for row in enabled_rows if _coerce_text(row[4], "tx_rx").lower() != "observer"]
     if not candidates:
-        candidates = enabled_rows or [rows[0]]
+        # A receive-only station may have active observers, but it has no
+        # compatibility-primary radio. Never promote an SDR merely because it
+        # is the first or only configured device.
+        conn.execute("UPDATE device_profiles SET runtime_primary=0 WHERE runtime_primary<>0")
+        conn.commit()
+        return None
     active_candidates = [row for row in candidates if int(row[2] or 0) == 1]
     chosen = next((row for row in active_candidates if int(row[3] or 0) == 1), None)
     if chosen is None and active_candidates:
@@ -4467,6 +4487,92 @@ def _seed_operating_defaults(settings_values: Mapping[str, Any]) -> Dict[str, An
         "receive_only": 0,
         "allow_profile_swap": 0,
     }
+
+
+def _seed_receive_only_operating_defaults() -> Dict[str, Any]:
+    """Return the safe built-in operating model for observer/SDR profiles."""
+
+    return {
+        "system_key": DEFAULT_RECEIVE_ONLY_OPERATING_SYSTEM_KEY,
+        "name": DEFAULT_RECEIVE_ONLY_OPERATING_NAME,
+        "description": (
+            "Receive-only monitoring for observer / SDR radios. No transmit, PTT, "
+            "QSY, net-control, scheduler, or profile-swap authority."
+        ),
+        "category": "rx_watch",
+        "status": "saved",
+        "scheduler_enabled": 0,
+        "scheduler_mode": "simple",
+        "preferred_band_set_json": "[]",
+        "source_refs_json": "[]",
+        "schedule_refs_json": "[]",
+        "frequency_refs_json": "[]",
+        "group_refs_json": "[]",
+        "notes": "Built-in safe operating model for receive-only SDR profiles.",
+        "use_messages": 1,
+        "use_map": 1,
+        "use_background_ingest": 1,
+        "use_launch_control": 1,
+        "use_net_control_tabs": 0,
+        "receive_only": 1,
+        "allow_profile_swap": 0,
+    }
+
+
+def _ensure_receive_only_operating_profile_conn(
+    conn: sqlite3.Connection,
+    *,
+    commit: bool = True,
+) -> Dict[str, Any]:
+    """Create or safety-repair the built-in receiver model idempotently."""
+
+    existing = _record_by_system_key(
+        conn,
+        "operating_profiles",
+        DEFAULT_RECEIVE_ONLY_OPERATING_SYSTEM_KEY,
+    )
+    if existing is None:
+        record = dict(_seed_receive_only_operating_defaults())
+        now_iso = _utc_now_iso()
+        record.update({"enabled": 1, "created_utc": now_iso, "updated_utc": now_iso})
+        columns = tuple(record)
+        conn.execute(
+            f"INSERT INTO operating_profiles ({', '.join(columns)}) "
+            f"VALUES ({', '.join('?' for _ in columns)})",
+            tuple(record[column] for column in columns),
+        )
+        if commit:
+            conn.commit()
+        return (
+            _record_by_system_key(
+                conn,
+                "operating_profiles",
+                DEFAULT_RECEIVE_ONLY_OPERATING_SYSTEM_KEY,
+            )
+            or {}
+        )
+
+    # These fields are capability boundaries, not preferences. Preserve the
+    # operator-facing name and optional feature preferences while repairing an
+    # older or manually altered row back to its non-transmitting contract.
+    conn.execute(
+        """
+        UPDATE operating_profiles
+           SET enabled=1,
+               category='rx_watch',
+               scheduler_enabled=0,
+               scheduler_mode='simple',
+               use_net_control_tabs=0,
+               receive_only=1,
+               allow_profile_swap=0,
+               updated_utc=?
+         WHERE id=?
+        """,
+        (_utc_now_iso(), int(existing["id"])),
+    )
+    if commit:
+        conn.commit()
+    return _record_by_id(conn, "operating_profiles", int(existing["id"])) or existing
 
 
 def _seed_device_defaults(
@@ -4892,6 +4998,7 @@ def ensure_default_multi_radio_records(conn: sqlite3.Connection, settings_values
     operating = _record_by_system_key(conn, "operating_profiles", DEFAULT_OPERATING_SYSTEM_KEY)
     if not operating:
         operating = _save_operating_profile_conn(conn, _seed_operating_defaults(settings_values))
+    _ensure_receive_only_operating_profile_conn(conn, commit=False)
     device = _record_by_system_key(conn, "device_profiles", DEFAULT_DEVICE_SYSTEM_KEY)
     if not device:
         device = MultiRadioStore._save_device_profile_conn(
@@ -5029,7 +5136,12 @@ def ensure_multi_rig_migration(
         )
 
     try:
-        ensure_default_multi_radio_records(conn, settings_values)
+        # Version 0 is the legacy single-rig conversion and owns creation of
+        # the compatibility baseline. Incremental migrations must never invent
+        # a transceiver/default assignment in an already migrated blank-slate
+        # or observer-only station.
+        if from_version <= 0:
+            ensure_default_multi_radio_records(conn, settings_values)
         device = _record_by_system_key(conn, "device_profiles", DEFAULT_DEVICE_SYSTEM_KEY)
         operating = _record_by_system_key(conn, "operating_profiles", DEFAULT_OPERATING_SYSTEM_KEY)
         js8 = _record_by_system_key(conn, "js8_instances", DEFAULT_JS8_INSTANCE_SYSTEM_KEY)
@@ -5090,6 +5202,10 @@ def ensure_multi_rig_migration(
         if from_version < 2 <= to_version:
             _apply_launch_safety_migration_v2(conn)
 
+        receiver_operating = None
+        if from_version < 3 <= to_version:
+            receiver_operating = _ensure_receive_only_operating_profile_conn(conn, commit=False)
+
         guardrail_warnings = multi_rig_guardrail_warnings(conn)
         all_warnings = warnings + tuple(warn for warn in guardrail_warnings if warn not in warnings)
         set_multi_rig_migration_deferred(conn, False)
@@ -5102,6 +5218,9 @@ def ensure_multi_rig_migration(
                 "created_device_profile_id": int(device["id"]) if device else None,
                 "created_operating_profile_id": int(operating["id"]) if operating else None,
                 "created_frequency_plan_id": int(migrated_frequency_plan["id"]) if migrated_frequency_plan else None,
+                "receive_only_operating_profile_id": (
+                    int(receiver_operating["id"]) if receiver_operating else None
+                ),
                 "enabled_software_roles": list(roles),
                 "warnings": list(all_warnings),
             },
@@ -6046,7 +6165,9 @@ class MultiRadioStore:
         _sync_derived_coordination_policies_conn(conn)
         if saved:
             _refresh_assigned_plan_validation_for_device_conn(conn, int(saved.get("id", 0) or 0), emit_events=False)
-            conn.commit()
+        if device_class == "observer":
+            _ensure_receive_only_operating_profile_conn(conn, commit=False)
+        conn.commit()
         if _coerce_bool_int(payload.get("runtime_active"), False):
             if record["runtime_primary"]:
                 return MultiRadioStore._set_runtime_primary_device_conn(
@@ -6182,6 +6303,12 @@ class MultiRadioStore:
         with self._connect() as conn:
             return _record_by_id(conn, "operating_profiles", int(operating_profile_id))
 
+    def ensure_receive_only_operating_profile(self) -> Dict[str, Any]:
+        """Return the assignable built-in observer/SDR operating model."""
+
+        with self._connect() as conn:
+            return _ensure_receive_only_operating_profile_conn(conn)
+
     def save_operating_profile(self, values: Mapping[str, Any]) -> Dict[str, Any]:
         payload = dict(values)
         requested_id = _coerce_optional_int(payload.get("id"))
@@ -6192,6 +6319,30 @@ class MultiRadioStore:
             if existing and str(existing.get("system_key", "") or "").strip() == DEFAULT_OPERATING_SYSTEM_KEY and enabled != 1:
                 raise ValueError("Cannot disable the default Operating Model.")
             receive_only = _coerce_bool_int(payload.get("receive_only", (existing or {}).get("receive_only", 0)), False)
+            if (
+                existing
+                and str(existing.get("system_key", "") or "").strip()
+                == DEFAULT_RECEIVE_ONLY_OPERATING_SYSTEM_KEY
+            ):
+                if enabled != 1:
+                    raise ValueError("Cannot disable the built-in receive-only SDR Operating Model.")
+                if receive_only != 1:
+                    raise ValueError("The built-in SDR Operating Model must remain receive-only.")
+                if _coerce_bool_int(
+                    payload.get("scheduler_enabled", existing.get("scheduler_enabled", 0)),
+                    False,
+                ):
+                    raise ValueError("The built-in SDR Operating Model cannot own the scheduler.")
+                if _coerce_bool_int(
+                    payload.get("use_net_control_tabs", existing.get("use_net_control_tabs", 0)),
+                    False,
+                ):
+                    raise ValueError("The built-in SDR Operating Model cannot enable transmit/net controls.")
+                if _coerce_bool_int(
+                    payload.get("allow_profile_swap", existing.get("allow_profile_swap", 0)),
+                    False,
+                ):
+                    raise ValueError("The built-in SDR Operating Model cannot participate in profile swaps.")
             if (
                 existing
                 and receive_only != 1
@@ -6228,8 +6379,11 @@ class MultiRadioStore:
             operating = _record_by_id(conn, "operating_profiles", int(operating_profile_id))
             if not operating:
                 raise KeyError(f"Unknown Operating Model id: {operating_profile_id}")
-            if str(operating.get("system_key", "") or "").strip() == DEFAULT_OPERATING_SYSTEM_KEY:
+            system_key = str(operating.get("system_key", "") or "").strip()
+            if system_key == DEFAULT_OPERATING_SYSTEM_KEY:
                 raise ValueError("Cannot delete the default Operating Model.")
+            if system_key == DEFAULT_RECEIVE_ONLY_OPERATING_SYSTEM_KEY:
+                raise ValueError("Cannot delete the built-in receive-only SDR Operating Model.")
             active_swap = _active_profile_swap_policy_conn(conn)
             if active_swap is not None:
                 restore_target = dict((active_swap.get("action") or {}).get("restore_target_assignment") or {})
@@ -6708,6 +6862,7 @@ class MultiRadioStore:
         launch_at_startup: bool = False,
         varac_cluster_db_id: Optional[int] = None,
         varac_cluster_instance_number: Optional[int] = None,
+        require_observer_receive_only: bool = False,
     ) -> Dict[str, Any]:
         """Persist one reviewed application instance and radio link atomically.
 
@@ -6726,6 +6881,12 @@ class MultiRadioStore:
                 profile = _record_by_id(conn, "device_profiles", radio_id)
                 if profile is None:
                     raise KeyError(f"Unknown radio profile id: {radio_id}")
+                if require_observer_receive_only and (
+                    family != "js8call" or not _is_observer_device_class(profile)
+                ):
+                    raise ValueError(
+                        "Receive-only JS8Call instances can only be assigned to observer / SDR profiles."
+                    )
                 family_link_column = _SOFTWARE_INSTANCE_ASSIGNMENTS[family][0]
                 expected_current = (
                     _coerce_optional_int(expected_current_instance_id)
@@ -6799,6 +6960,15 @@ class MultiRadioStore:
                 manifest_payload = dict(manifest_values or {})
                 manifest_payload["family_key"] = family
                 manifest_payload["application_system_key"] = str(saved_app.get("system_key", "") or "")
+                if family == "js8call" and _is_observer_device_class(profile):
+                    evidence = manifest_payload.get("evidence", manifest_payload.get("evidence_json", {}))
+                    if not isinstance(evidence, Mapping):
+                        evidence = {}
+                    manifest_payload["evidence"] = {
+                        **dict(evidence),
+                        "receive_only_ingest": True,
+                        "transmit_authority": False,
+                    }
                 manifest_payload.setdefault(
                     "instance_key",
                     f"{family}:{str(saved_app.get('system_key', '') or '')}",
@@ -6902,6 +7072,41 @@ class MultiRadioStore:
                 "radio": dict(resolved),
             }
 
+    def adopt_observer_js8_instance(
+        self,
+        *,
+        radio_profile_id: int,
+        application_values: Mapping[str, Any],
+        manifest_values: Mapping[str, Any],
+        replace_existing: bool = False,
+        expected_current_instance_id: Any = _SOFTWARE_INSTANCE_EXPECTATION_UNSET,
+        launch_at_startup: bool = False,
+    ) -> Dict[str, Any]:
+        """Assign an isolated JS8Call instance to an SDR for receive ingest.
+
+        This is an ownership and launch association only. It deliberately does
+        not change the observer's control backend and grants no Compose, Expect,
+        QSY, PTT, scheduler, or compatibility-primary authority.
+        """
+
+        radio_id = int(radio_profile_id or 0)
+        with self._connect_readonly() as conn:
+            profile = _record_by_id(conn, "device_profiles", radio_id)
+        if profile is None:
+            raise KeyError(f"Unknown radio profile id: {radio_id}")
+        if not _is_observer_device_class(profile):
+            raise ValueError("Receive-only JS8Call instances can only be assigned to observer / SDR profiles.")
+        return self.adopt_software_instance(
+            family_key="js8call",
+            radio_profile_id=radio_id,
+            application_values=application_values,
+            manifest_values=manifest_values,
+            replace_existing=replace_existing,
+            expected_current_instance_id=expected_current_instance_id,
+            launch_at_startup=launch_at_startup,
+            require_observer_receive_only=True,
+        )
+
     def disassociate_software_instance(
         self,
         *,
@@ -7002,6 +7207,8 @@ class MultiRadioStore:
         """Create launch identities; enabling is explicit and never disables peers."""
 
         now_iso = _utc_now_iso()
+        profile = _record_by_id(conn, "device_profiles", int(radio_profile_id)) or {}
+        observer_js8 = family_key == "js8call" and _is_observer_device_class(profile)
         conn.execute(
             """
             INSERT INTO radio_launch_bundles
@@ -7024,6 +7231,19 @@ class MultiRadioStore:
             if isinstance(item, Mapping)
         }
         if family_key == "js8call":
+            js8_readiness = {
+                "host": str(saved_app.get("host", "127.0.0.1") or "127.0.0.1"),
+                "port": int(saved_app.get("port", 2442) or 2442),
+                "require_api": True,
+            }
+            if observer_js8:
+                js8_readiness.update(
+                    {
+                        "execution_scope": RECEIVE_ONLY_EXECUTION_SCOPE,
+                        "receive_only_ingest": True,
+                        "transmit_authority": False,
+                    }
+                )
             rows = (
                 (
                     f"{manifest_key}:js8call",
@@ -7032,11 +7252,7 @@ class MultiRadioStore:
                     command,
                     str(saved_app.get("install_path", "") or ""),
                     [],
-                    {
-                        "host": str(saved_app.get("host", "127.0.0.1") or "127.0.0.1"),
-                        "port": int(saved_app.get("port", 2442) or 2442),
-                        "require_api": True,
-                    },
+                    js8_readiness,
                 ),
             )
         elif family_key == "fast_light":

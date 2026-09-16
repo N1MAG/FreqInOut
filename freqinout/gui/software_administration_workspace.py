@@ -379,6 +379,50 @@ class SoftwareAdministrationWorkspace(QWidget):
     def selected_task_key(self) -> str:
         return self._task_key
 
+    def begin_instance_setup(
+        self,
+        family_key: str,
+        radio_id: int,
+        *,
+        source: str = "managed",
+    ) -> bool:
+        """Open a new-instance assistant scoped to any cached radio.
+
+        A radio does not need an existing family assignment to be a valid
+        target.  This is the public continuation seam used by Guided Add Radio
+        after the radio itself has been saved.  Persistence remains owned by
+        the Settings host and the assistant keeps replacement mode off unless
+        the operator explicitly selects an occupied radio.
+        """
+
+        family = self._snapshot.family(str(family_key or "").strip().lower())
+        try:
+            target_radio_id = int(radio_id)
+        except (TypeError, ValueError):
+            return False
+        available_ids = {
+            int(row.get("id", 0) or 0)
+            for row in self._available_radios
+            if int(row.get("id", 0) or 0) > 0
+        }
+        if family is None or target_radio_id not in available_ids:
+            return False
+        if self._instance_assistant is not None:
+            self.keep_instance_assistant_visible(announce=True)
+            return False
+
+        self._family_key = family.key
+        self._radio_id = target_radio_id
+        tasks = _TASKS.get(self._family_key, ())
+        self._task_key = tasks[0][0] if tasks else ""
+        self._rebuild_family_buttons()
+        self._rebuild_radio_buttons(family)
+        self._rebuild_task_buttons(tasks)
+        self._update_context(family)
+        self._sync_checked_buttons()
+        self._open_instance_assistant(initial_source=source)
+        return self._instance_assistant is not None
+
     def set_dirty_contexts(
         self,
         contexts: Mapping[tuple[object, object], bool] | Iterable[tuple[object, object]],

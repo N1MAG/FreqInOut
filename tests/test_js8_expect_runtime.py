@@ -123,6 +123,30 @@ def test_expect_automation_can_be_explicitly_created_without_rf_guard_for_tests(
     assert status.endpoint is not None
 
 
+def test_expect_automation_never_supplies_transmit_client_for_observer_js8(monkeypatch, tmp_path: Path) -> None:
+    settings = _settings(monkeypatch, tmp_path)
+    coordinator = ExpectAutomationCoordinator(
+        settings,
+        profiles=[
+            {
+                "id": 18,
+                "name": "RTL-SDR",
+                "device_class": "observer",
+                "js8_instance_id": "rtl-sdr-js8",
+                "js8_host": "127.0.0.1",
+                "js8_port": 2448,
+            }
+        ],
+        require_guard_preflight=False,
+    )
+
+    status = coordinator.preflight_source("18", "rtl-sdr-js8")
+
+    assert status.ok is False
+    assert "receive-only" in status.reason
+    assert coordinator.client_for_source("18", "rtl-sdr-js8") is None
+
+
 def test_expect_automation_resolves_source_profile_and_caches_client(monkeypatch, tmp_path: Path) -> None:
     settings = _settings(monkeypatch, tmp_path)
     created: list[_Client] = []

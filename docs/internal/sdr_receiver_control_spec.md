@@ -256,11 +256,14 @@ The receive-only setup is a guided-workflow redesign governed by
 - **Completion outcome:** One saved observer profile retains either explicit
   manual-tuning state or matching reversible tune/readback/restore evidence and
   the operator's FIO-tuning opt-in.
-- **Normal sequence:** `Radio -> Receiver Stack -> Receiver connection -> Test
-  control -> Enable FIO tuning -> RF Guard -> Schedule -> Review -> Save Radio`.
-  The Software page is receiver-specific: it contains only the approved
-  receive-only application and launch choice, never the conventional
-  transceiver checklist.
+- **Normal sequence:** `Radio -> Operating Model -> Software -> Connection ->
+  Test control -> Enable FIO tuning -> Review -> Save Radio`. The immutable
+  receive-only model is confirmed before software is selected. The Software
+  page uses the same radio-owned application concept as a transceiver while
+  allowing only integrations that have a reviewed receive-only contract.
+  SDR++ remains the receiver application; an optional distinct JS8Call instance
+  may be configured for receive/import use. Transmit-only software choices,
+  RF Guard, and transmit schedule steps are unavailable for an observer.
 - **Primary actions:** `Test control` is primary while the endpoint is ready for
   qualification. `Save Radio` becomes primary on Review. A passed test visibly
   directs the operator to enable FIO tuning and continue; a failed test leaves
@@ -269,10 +272,10 @@ The receive-only setup is a guided-workflow redesign governed by
   progress, failure, verified evidence, and FIO-tuning state remain together on
   the receiver card. A disabled action explains the missing prerequisite in
   visible guidance or its focused tooltip.
-- **Secondary and advanced work:** Raw host, port, and stable target identity
-  remain editable on the receiver card. RF sharing/guard details and schedule
-  assignment remain later guided steps. Conventional app flags, launch paths,
-  and transceiver controls do not appear in the receiver's primary scan path.
+- **Secondary and advanced work:** Raw host, port, stable target identity,
+  executable/profile paths, and explicit launch-at-startup choices remain
+  editable in the guided flow. Transceiver controls and unsafe app choices do
+  not appear in the receiver's primary scan path.
 - **Workspace archetype:** Guided workflow, because endpoint qualification is a
   staged, safety-sensitive operation followed by review and persistence.
 - **Responsive behavior:** One dialog scroll owner preserves the task order.
@@ -300,6 +303,36 @@ merely because no conventional FLRig, JS8Call, Fast Light, CommStat, or VarAC
 flag is enabled. Opening Receiver Setup returns directly to the connection and
 verification card rather than an empty app-connections page.
 
+### Receive-only operating model and JS8Call ownership
+
+Every installation contains exactly one protected built-in **Receive-only SDR**
+Operating Model before Guided Add Radio needs it. It enables Messages, Map,
+background ingest, and Launch Control while disabling scheduler ownership, Net
+Control, profile swaps, QSY, PTT, Compose sending, Expect replies, and every
+other transmit path. Observer restore/default-assignment logic resolves to this
+model; it never falls back to the transceiver default.
+
+An SDR may own a distinct JS8Call instance for receive traffic. The instance has
+its own executable, profile/data paths, API endpoint, manifest resource claims,
+and launch-at-startup choice. It is created through the same reviewed software
+instance/adoption contract used by other radios, with `replace_existing=False`
+for a new assignment. It must never reuse or silently replace another radio's
+instance. SDR++ application launch and JS8Call instance launch are separate
+reviewed selections in one guided setup.
+
+The guided workflow creates the observer as non-primary, assigns the selected
+receive-only model, atomically creates/adopts the optional JS8Call instance, and
+only then may activate the receiver. A first/only observer never becomes the
+legacy compatibility primary. Cancel writes no radio, assignment, software
+instance, manifest, or launch recipe. A recoverable post-radio failure leaves
+the observer inactive and reports the precise Settings route for completion;
+it does not alter the primary radio's JS8Call configuration.
+
+Observer-owned JS8Call data retains `radio_id` and `js8_instance_id` provenance
+for Inbox, Map, and health. The observer is excluded both from all transmit
+selectors and at the final send/preflight boundary, including Compose, Expect,
+Net Control, and message-retrieval requests. UI hiding alone is not authority.
+
 ### Receive-only software launch
 
 Receiver application launch is opt-in and radio-scoped. The first supported
@@ -308,12 +341,18 @@ platform launch target (`sdrpp`, `sdrpp.exe`, or `open -a SDR++`); the operator
 may browse to a specific executable or application bundle and may disable FIO
 launch while retaining manual startup.
 
-- The saved launch recipe uses the existing per-radio launch-bundle store; no
-  schema migration or conventional `use_*` application flag is required.
+- The receiver-application launch recipe uses the existing per-radio
+  launch-bundle store; no conventional `use_*` application flag is required.
+  A JS8Call receive instance adds its own radio-scoped launch item through the
+  software-instance adoption contract without replacing the SDR++ item.
+- A checked launch-at-startup choice is persisted during guided setup and is
+  honored on the next FIO start once the receiver is active (`Use Radio`). An
+  inactive observer retains the recipe but is not launched in the background.
 - Every observer launch item carries `execution_scope=receive_only`. The launch
   planner rejects ordinary or transmit-capable entries for observer profiles,
-  including entries injected outside guided setup. SDR++ is the only approved
-  item until another receiver application receives its own capability review.
+  including entries injected outside guided setup. SDR++ is the approved
+  receiver application; JS8Call is separately approved only as a receive/import
+  companion instance.
 - A receiver launch item has no PTT, transmit, scheduler, radio-control, or
   FLRig/JS8 dependency. Selecting it does not enable FIO tuning; reversible
   tune/readback/restore qualification remains a separate explicit action.

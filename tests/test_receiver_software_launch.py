@@ -82,7 +82,7 @@ def test_receiver_stack_builds_a_durable_sdrpp_launch_item() -> None:
     ("profile", "selection", "match"),
     [
         ({"device_class": "tx_rx"}, {"application": "SDR++", "launch_path": "/opt/sdrpp/sdrpp"}, "observer"),
-        (_observer_profile(), {"application": "JS8Call", "launch_path": "/opt/js8call"}, "Unsupported"),
+        (_observer_profile(), {"application": "JS8Call", "launch_path": "/opt/js8call/js8call"}, "Unsupported"),
         (_observer_profile(), {"application": "SDR++", "launch_at_startup": True}, "needs an application path"),
         (
             _observer_profile(),

@@ -400,6 +400,7 @@ from freqinout.core.js8_spotter_codec import (
 from freqinout.core.js8_spotter_status import classify_spotter_status
 from freqinout.core.js8_send_service import (
     js8_endpoint_from_radio_profile,
+    js8_profile_allows_transmit,
     query_js8_selected_target,
     send_js8_message_guarded,
 )
@@ -10941,6 +10942,12 @@ class MessageViewerTab(QWidget):
         for profile in profiles:
             if not self._compose_profile_bool(profile, "enabled"):
                 continue
+            # Observer / SDR profiles may own an isolated JS8Call instance for
+            # receive ingestion and health reporting.  That ownership must not
+            # make the receiver a Compose destination or confer transmit
+            # authority through any other configured application path.
+            if not js8_profile_allows_transmit(profile):
+                continue
             try:
                 radio_id = int(profile.get("id", 0) or 0)
             except Exception:
@@ -13741,6 +13748,12 @@ class MessageViewerTab(QWidget):
         if "JS8Call" not in tuple(radio_target.capabilities):
             radio_short_label = self._compose_radio_target_short_label(radio_target) or radio_target.label
             self._set_compose_status(f"{radio_short_label} is not configured for JS8Call send.", role="warning")
+            return
+        if not js8_profile_allows_transmit(radio_target.profile):
+            self._set_compose_status(
+                "Observer / SDR JS8Call instances are receive-only and cannot send messages.",
+                role="warning",
+            )
             return
         if not self._compose_confirm_peer_schedule_before_send():
             return
@@ -16980,8 +16993,43 @@ class MessageViewerTab(QWidget):
         )
 
     def _send_js8_message(self, text: str, *, source_context: Mapping[str, object] | None = None) -> bool:
-        endpoint, source_label = self._pending_js8_endpoint(source_context or {})
+        context = source_context or {}
+        if not self._pending_js8_source_allows_transmit(context):
+            log.warning("MessageViewer: blocked JS8 transmit through receive-only observer source")
+            return False
+        endpoint, source_label = self._pending_js8_endpoint(context)
         return self._send_js8_message_to_endpoint(text, endpoint=endpoint, source_label=source_label)
+
+    def _pending_js8_source_allows_transmit(self, source_context: Mapping[str, object]) -> bool:
+        """Reject retrieval/send routing through an observer-owned JS8 source.
+
+        Historical rows may not carry radio or instance provenance; those keep
+        the legacy endpoint fallback.  When durable provenance is present, the
+        matching radio profile is authoritative and an observer must never be
+        used to transmit a retrieval request.
+        """
+
+        radio_id = str(source_context.get("source_radio_id", "") or "").strip()
+        js8_id = str(source_context.get("js8_instance_id", "") or "").strip().casefold()
+        if not radio_id and not js8_id:
+            return True
+        try:
+            profiles = MultiRadioStore().list_profiles(enabled_only=False)
+        except Exception:
+            # Failure to resolve a provenance-bearing source must not silently
+            # grant transmit authority.
+            return False
+        for profile in profiles:
+            if not isinstance(profile, Mapping):
+                continue
+            profile_radio = str(profile.get("id", "") or profile.get("radio_profile_id", "") or "").strip()
+            profile_js8 = str(profile.get("js8_instance_id", "") or "").strip().casefold()
+            if radio_id and profile_radio != radio_id:
+                continue
+            if js8_id and profile_js8 != js8_id:
+                continue
+            return js8_profile_allows_transmit(profile)
+        return False
 
     @staticmethod
     def _send_js8_message_to_endpoint(
