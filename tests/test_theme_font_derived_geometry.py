@@ -22,6 +22,8 @@ from PySide6.QtWidgets import (
 )
 
 from freqinout.gui.theme import (
+    action_chip_colors,
+    action_chip_metrics,
     active_app_theme,
     apply_app_theme,
     apply_text_size_accessibility_guards,
@@ -218,6 +220,32 @@ def test_shared_choice_chip_selector_wraps_and_uses_theme_tokens() -> None:
         assert selector.verticalScrollBarPolicy().name == "ScrollBarAlwaysOff"
     finally:
         selector.deleteLater()
+
+
+def test_shared_table_action_chip_treatment_is_theme_and_font_derived() -> None:
+    _app()
+    widget = QWidget()
+    try:
+        normal_metrics = action_chip_metrics(widget.fontMetrics())
+        _large_font(widget)
+        large_metrics = action_chip_metrics(widget.fontMetrics())
+        assert large_metrics[0] > normal_metrics[0]
+        assert large_metrics[3] > normal_metrics[3]
+
+        for theme_name in ("light", "dark"):
+            theme = get_theme(theme_name)
+            normal = action_chip_colors("secondary", theme)
+            danger = action_chip_colors("danger", theme)
+            danger_hover = action_chip_colors("danger", theme, hovered=True)
+            disabled = action_chip_colors("secondary", theme, enabled=False)
+            active = action_chip_colors("secondary", theme, active=True)
+            assert normal == (theme["surface_alt"], theme["text"], theme["border"])
+            assert danger == (theme["surface_alt"], theme["text"], theme["border"])
+            assert danger_hover[1:] == (theme["danger"], theme["danger"])
+            assert disabled == (theme["surface"], theme["text_muted"], theme["border"])
+            assert active[2] == theme["success"]
+    finally:
+        widget.deleteLater()
 
 
 def test_settings_theme_path_only_paints_cached_dependency_status() -> None:

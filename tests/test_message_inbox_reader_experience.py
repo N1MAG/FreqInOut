@@ -601,6 +601,43 @@ def test_projection_worker_counts_share_age_group_lane_not_active_focus(monkeypa
     assert results[0]["focus_counts"] == {"all": 4, "new": 4}
     assert results[0]["focus_counts_generation"] == 12
 
+
+def test_projected_query_expands_group_family_and_uses_bounded_age_band(monkeypatch) -> None:
+    day = 24 * 60 * 60
+    now_ts = 1_800_000_000.0
+    monkeypatch.setattr(viewer_module.time, "time", lambda: now_ts)
+
+    class Control:
+        def __init__(self, *, text: str = "", data=0) -> None:
+            self._text = text
+            self._data = data
+
+        def currentText(self) -> str:
+            return self._text
+
+        def currentData(self):
+            return self._data
+
+        def text(self) -> str:
+            return self._text
+
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    tab._inbox_focus = "spotter"
+    tab.received_filter = Control(data=(7 * day, 14 * day))
+    tab.rcv_search = Control()
+    tab.status_filter = Control(text="Status...")
+    tab.from_filter = Control()
+    tab.to_filter = Control()
+    tab.type_filter = Control(text="MSG Type...")
+    tab._projected_source_families_for_current_scope = lambda: ("sitrep", "spotter")
+    tab._expanded_selected_message_groups = lambda: {"MAGNET", "MR08", "MRHUB"}
+
+    query = MessageViewerTab._projected_query_parameters(tab)
+
+    assert query["group_names"] == ("MAGNET", "MR08", "MRHUB")
+    assert query["received_after_ts"] == now_ts - 14 * day
+    assert query["received_before_ts"] == now_ts - 7 * day
+
 def test_open_unread_message_updates_all_applicable_focus_counts_immediately(monkeypatch, tmp_path) -> None:
     app = _app()
     tab = _tab(monkeypatch, tmp_path)

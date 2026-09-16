@@ -137,13 +137,58 @@ silently remove or broaden them.
 - The button uses shared theme styling, an accessible name, a descriptive
   tooltip, and font-derived width and height. It is disabled when no visible
   row supports selection.
-- A row exposes one stable `Actions…` disclosure instead of several adjacent
-  text links. The on-demand shared-theme menu contains only actions valid for
-  that row: View first, nondestructive workflow actions next, destinations
-  such as FLAMP Relay/BBS after that, and Delete last after a separator.
+- A row exposes its valid actions directly as compact shared-theme icon chips:
+  eye/View first, outlined-or-filled Flag next when supported, destinations
+  such as Relay and `+BBS`/`-BBS` after that, Archive where applicable, and a
+  trash icon last. No additional disclosure click is required. Every icon has
+  an action-specific tooltip and accessible name; the Actions cell itself has
+  no master tooltip that can obscure or compete with an icon tooltip. The visible `BBS` text is
+  retained because that station concept is not conveyed reliably by a generic
+  glyph.
+- The source-aware matrix is authoritative:
+  - JS8, Spotter, and projected CommStat rows expose View, Flag, and Delete.
+  - FLMsg/FLAMP rows expose View, Flag, Managed BBS, applicable FLAMP Relay,
+    and Delete.
+  - Live BBS rows expose View, Archive, and Delete; archived BBS rows expose
+    only actions valid for archived evidence.
+  - VarAC attachment rows expose the compatible subset supported by their
+    cached file evidence.
+- Capability and readiness are separate. An action is hidden only when the
+  source can never support it. Missing configuration is resolved when the
+  operator invokes the action and produces concise guidance; it must not make
+  a normally-supported action disappear from the row.
+- `-BBS` removes publication from every currently known Managed BBS location
+  only after confirmation and never deletes the received source. Relay removal
+  follows the same source-preserving rule.
+- The fixed Actions column is font-derived from the widest valid chip set.
+  Chips retain padding and separation under Normal and Large text, never
+  overlap, and never cause action labels to paint over an adjacent column.
+- Completed destination actions remain visible and active with inverse state
+  (`-BBS` or Relay-remove) so the operator can understand and safely reverse
+  the publication without reopening a menu.
+- Delete uses neutral shared-theme chrome at rest so a table does not become a
+  visually dominant red stripe. Danger color appears on hover/focus and the
+  existing confirmation remains mandatory.
 - Existing action eligibility, disabled-state explanation, confirmation,
   deletion, archive, Relay, BBS, and flag-state contracts remain authoritative.
-  Building or painting the disclosure performs no source I/O.
+  Building or painting the chips performs no source I/O.
+
+### Message age filtering and cleanup
+
+- Recent choices remain inclusive rolling windows through `Last 7 days`.
+- Historical review choices are contiguous, non-overlapping bands:
+  `8–14 days`, `15–30 days`, `31–60 days`, `61–180 days`, and
+  `181 days and older`. No message age becomes unreachable between choices.
+- Explicit `Cleanup: … and older` choices are cumulative by design. Their
+  wording must make that inclusion clear before the operator uses Select all
+  and Delete; a cumulative scope must never be labeled as though it were a
+  discrete month bucket.
+- Both ends of a historical band are applied in the indexed projection query
+  (`received_after_ts` and `received_before_ts`). The UI must not load broad
+  history and then scan it to emulate a band.
+- Integer age values remain supported for existing Map/Ops integrations:
+  positive means a recent window, negative means that age and older, and zero
+  means any time. Inbox may additionally use a two-bound review band.
 
 ### Spotter group and comment compatibility
 
@@ -154,6 +199,17 @@ silently remove or broaden them.
 - Group filtering is applied to the same normalized projected Spotter row.
   A legacy Spotter row addressed to or projected with `MAGNET` remains visible
   when Focus is Spotter and Group is MAGNET.
+- A selected parent/operator family is expanded to its normalized child groups
+  before the indexed projection query and again under the shared predicate.
+  Removing an unrelated configured group must not make another family's
+  Spotter traffic disappear. The projection cache key includes the expanded
+  family so stale literal-parent results cannot be reused.
+- A Spotter/MCF projection may carry a transport destination, report group,
+  and query groups even though its primary `group_name` column holds one value.
+  The bounded query admits Spotter candidates from canonical projected search
+  evidence and the shared predicate confirms selected groups with exact token
+  boundaries. Substrings such as `MAGNETIC` do not match `MAGNET`, and no
+  source file or raw transport log is reopened during filtering.
 - Optional MCForm comments are a single-line, 34-character-wide control with
   a 50-character authored limit. The control and validation state the limit;
   serialization rejects over-limit authored content rather than silently
@@ -255,6 +311,8 @@ No destructive schema migration is authorized or required by this slice.
 - RRSR rows display as CommStat `Status receipt` with a human summary.
 - Age is relative in all Inbox/Spotter-derived list views; exact time is
   available in the tooltip or reader.
+- Age choices cover recent traffic, every historical day, and explicitly
+  cumulative cleanup scopes; bounded bands use both indexed timestamp limits.
 - CommStat Kind fits `CommStat`/its actual values and does not consume the
   maximized-window surplus width.
 - Narrative content receives surplus width; fixed/categorical columns remain
@@ -279,8 +337,10 @@ No destructive schema migration is authorized or required by this slice.
   `sitrep` projections while semantically classified CommStat rows remain out.
 - The visible Select all/Clear all button operates on eligible rows in the
   bounded visible snapshot even when no additional filter is active.
-- Each row presents one Actions disclosure; its menu preserves all eligible
-  View, flag, Relay, BBS, Archive, and Delete paths without horizontal crowding.
+- Each row presents source-eligible eye/View, Flag, Relay, `+BBS`/`-BBS`,
+  Archive, and trash actions directly. Their font-derived fixed column prevents
+  overlap without requiring a disclosure click; projected FLMsg/FLAMP rows do
+  not lose Flag or destination actions.
 - Spotter comments render as a bounded single-line field, accept at most 50
   authored characters, and do not truncate received legacy evidence.
 - Focused projection, watch, source presentation, reader, responsive layout,
@@ -312,12 +372,29 @@ header/width publication atomic before first paint. The Watch editor retains a
 font-derived width floor without allowing long placeholder copy to consume the
 table's dominant wide-screen allocation.
 
-The 2026-09-16 correction makes legacy `sitrep` source normalization the single
+The first 2026-09-16 correction makes legacy `sitrep` source normalization the single
 authority for Spotter focus, source, and group filtering while retaining the
 CommStat exclusion. It replaces crowded per-row text links with one on-demand
 Actions menu, replaces the unlabeled selection-header checkbox with a visible
 Select all/Clear all button, and aligns optional MCForm comments with the
 SuperSpotter 34-column entry while enforcing a 50-character authoring limit.
+
+The follow-up correction expands selected operator-group families before the
+bounded projection query, not only in the later visible-row predicate. It also
+replaces the intermediate Actions disclosure with always-visible compact chips
+and introduces complete, indexed age bands plus clearly cumulative cleanup
+scopes. Legacy integer age callers remain compatible.
+
+The direct-action visual correction removes the model's fallback action text
+instead of allowing the item delegate to paint a second copy behind the visible
+controls. Table actions no longer invoke platform-native push-button chrome.
+They use the shared theme layer's semantic action-chip colors and font-derived
+padding, gap, height, radius, and row floor, with exact painted rectangles also
+serving as click targets. The bounded hover path is cache-only. The icon pass
+adds eye, flag, Relay, Archive, and trash glyphs plus explicit `+BBS`/`-BBS`
+state. Delete is neutral until hover/focus, completed destinations expose a
+reversible active state, and Light/Dark plus Normal/Large Text share one
+centralized treatment.
 
 The active execution contract prohibited spawning new subagents for this turn,
 so no delegated diff was produced or integrated. Existing unrelated work and
@@ -346,6 +423,17 @@ untracked document-rendering artifacts were left untouched.
 
 ### Automated acceptance evidence
 
+- `510 passed` for the 2026-09-16 group-family/full-group correction, direct
+  action chips, age bands, Inbox/Spotter, projection-store/projector,
+  asynchronous reader, and responsive-shell regression partition.
+- `496 passed` in the process-isolated post-screenshot Inbox, projection,
+  Spotter, performance, responsive-shell, and shared-theme partition, including
+  `142 passed` in the focused action/geometry/theme subset. Offscreen
+  Light/Normal and Dark/Large renders confirm one non-overlapping label per chip
+  with no native-button or fallback-text overpaint. A combined macOS offscreen
+  process hit the repository's native Qt/worker lifecycle segfault during reader
+  paint settlement; all 19 reader tests pass when each owns a clean process.
+  Native Linux/macOS confirmation remains operator-assisted.
 - `441 passed` for the integrated Message Inbox, FIOSpotter, CommStat,
   projection, watch, reader, intelligence, responsive-shell, and legacy UI
   contract partition.

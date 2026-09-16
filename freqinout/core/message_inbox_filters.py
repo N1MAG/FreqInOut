@@ -343,6 +343,49 @@ def message_group_value(row: MessageRowLike, *, configured_groups: set[str] | fr
     return "unassigned"
 
 
+def message_group_values(
+    row: MessageRowLike,
+    *,
+    configured_groups: set[str] | frozenset[str] | None = None,
+    candidate_groups: set[str] | frozenset[str] | None = None,
+) -> set[str]:
+    """Return every canonical group evidenced by a projected message row.
+
+    ``group_name`` remains the fast primary projection field, but Spotter forms
+    can legitimately contain more than one group (transport destination,
+    report group, and query groups).  Projected ``search_text`` is already the
+    bounded canonical evidence cache, so exact token checks may recover those
+    additional groups without reopening a source or parsing a file on the UI
+    thread.
+    """
+
+    configured = {
+        normalize_message_group_filter_value(value)
+        for value in (configured_groups or set())
+        if normalize_message_group_filter_value(value)
+    }
+    candidates = configured | {
+        normalize_message_group_filter_value(value)
+        for value in (candidate_groups or set())
+        if normalize_message_group_filter_value(value)
+    }
+    primary = message_group_value(row, configured_groups=configured)
+    values = {primary} if primary and primary != "unassigned" else set()
+    payload = getattr(row, "payload", None)
+    texts = [str(getattr(row, "search_text", "") or "")]
+    for attr in ("raw_text", "decoded_text", "body_preview", "summary", "subject"):
+        texts.append(str(getattr(payload, attr, "") if payload is not None else ""))
+    evidence = " ".join(texts).upper()
+    for group in candidates:
+        if group == "unassigned":
+            continue
+        if re.search(rf"(?<![A-Z0-9_-])@?{re.escape(group)}(?![A-Z0-9_-])", evidence):
+            values.add(group)
+    if not values:
+        values.add("unassigned")
+    return values
+
+
 def row_matches_workspace_scope(
     row: MessageRowLike,
     *,
@@ -352,8 +395,14 @@ def row_matches_workspace_scope(
 ) -> bool:
     if not row_matches_source_filter(row, selected_sources):
         return False
-    if selected_groups is not None and message_group_value(row, configured_groups=configured_groups) not in selected_groups:
-        return False
+    if selected_groups is not None:
+        row_groups = message_group_values(
+            row,
+            configured_groups=configured_groups,
+            candidate_groups=selected_groups,
+        )
+        if not row_groups.intersection(selected_groups):
+            return False
     return True
 
 
@@ -619,17 +668,45 @@ def mesh_row_is_inbox_message(row: MessageRowLike) -> bool:
     return True
 
 
+def age_filter_bounds(age_filter: object) -> tuple[int, int]:
+    """Return inclusive ``(minimum_age, maximum_age)`` bounds in seconds.
+
+    ``0`` keeps the historic unbounded behavior, a positive integer means
+    "newer than this many seconds", and a negative integer means "this old or
+    older".  A two-item sequence expresses a non-overlapping review band.  A
+    zero endpoint is unbounded.  This compatibility contract lets existing
+    Map/Ops callers keep passing integers while Inbox can offer precise age
+    ranges without loading a larger, overlapping history into the UI.
+    """
+
+    if isinstance(age_filter, (tuple, list)) and len(age_filter) == 2:
+        try:
+            minimum = max(0, int(age_filter[0] or 0))
+            maximum = max(0, int(age_filter[1] or 0))
+        except Exception:
+            return 0, 0
+        if minimum and maximum and minimum > maximum:
+            minimum, maximum = maximum, minimum
+        return minimum, maximum
+    try:
+        seconds = int(age_filter or 0)
+    except Exception:
+        seconds = 0
+    if seconds > 0:
+        return 0, seconds
+    if seconds < 0:
+        return abs(seconds), 0
+    return 0, 0
+
+
 def row_matches_age_filter(
     row: MessageRowLike,
     age_filter_seconds: object,
     *,
     now_ts: float | None = None,
 ) -> bool:
-    try:
-        seconds = int(age_filter_seconds or 0)
-    except Exception:
-        seconds = 0
-    if seconds == 0:
+    minimum_age, maximum_age = age_filter_bounds(age_filter_seconds)
+    if minimum_age == 0 and maximum_age == 0:
         return True
     try:
         ts = float(getattr(row, "rcv_ts", 0.0) or 0.0)
@@ -640,9 +717,11 @@ def row_matches_age_filter(
     if now_ts is None:
         now_ts = datetime.datetime.now(datetime.timezone.utc).timestamp()
     age = max(0.0, float(now_ts) - ts)
-    if seconds > 0:
-        return age <= seconds
-    return age >= abs(seconds)
+    if minimum_age and age < minimum_age:
+        return False
+    if maximum_age and age > maximum_age:
+        return False
+    return True
 
 
 def row_matches_status_filter(row: MessageRowLike, status_sel: str) -> bool:

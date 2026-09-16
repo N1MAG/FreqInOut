@@ -367,6 +367,67 @@ def button_style(role: str, theme: Dict[str, str]) -> str:
     )
 
 
+def action_chip_metrics(font_metrics) -> Tuple[int, int, int, int, int]:
+    """Return shared font-derived geometry for compact table action chips.
+
+    The tuple is ``(horizontal_padding, gap, cell_margin, height, radius)``.
+    Keeping this treatment in the shared theme layer prevents delegates from
+    inventing platform-specific button sizes or local chip radii.
+    """
+
+    line_height = max(1, int(font_metrics.lineSpacing()))
+    em_width = max(1, int(font_metrics.horizontalAdvance("M")))
+    space_width = max(1, int(font_metrics.horizontalAdvance(" ")))
+    horizontal_padding = max(em_width, line_height)
+    gap = max(space_width, line_height // 3)
+    cell_margin = max(space_width, line_height // 4)
+    height = line_height + max(6, line_height // 2)
+    radius = max(3, line_height // 3)
+    return horizontal_padding, gap, cell_margin, height, radius
+
+
+def action_chip_colors(
+    role: str,
+    theme: Dict[str, str],
+    *,
+    enabled: bool = True,
+    active: bool = False,
+    hovered: bool = False,
+) -> Tuple[str, str, str]:
+    """Return shared ``(background, foreground, border)`` chip colors.
+
+    Painted item-view actions cannot consume a QWidget stylesheet directly,
+    so delegates use this cache-only semantic companion to :func:`button_style`.
+    It preserves the same theme roles without falling back to native push-button
+    chrome that differs across macOS, Linux, and Windows.
+    """
+
+    role_key = str(role or "secondary").strip().lower()
+    if not enabled:
+        return theme["surface"], theme["text_muted"], theme["border"]
+
+    if active:
+        base = theme["success"]
+        background = _blend_hex(base, theme["surface"], 0.30 if hovered else 0.22)
+        return background, theme["text"], base
+
+    if role_key == "danger":
+        base = theme["danger"]
+        if hovered:
+            background = _blend_hex(base, theme["surface"], 0.24)
+            return background, base, base
+        # Dense tables must not become a red stripe.  Destructive row actions
+        # use neutral chrome at rest and reveal danger semantics on hover/focus
+        # before their existing confirmation step.
+        return theme["surface_alt"], theme["text"], theme["border"]
+
+    if hovered:
+        background = _blend_hex(theme["accent"], theme["surface"], 0.34)
+        return background, theme["text"], theme["accent"]
+
+    return theme["surface_alt"], theme["text"], theme["border"]
+
+
 def choice_chip_selector_style(object_name: str, theme: Dict[str, str]) -> str:
     """Return the shared themed treatment for wrapping peer-choice chips."""
 

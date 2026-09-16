@@ -148,6 +148,49 @@ def test_query_worker_returns_bounded_rows_total_and_generation(tmp_path: Path) 
     assert not payload["error"]
 
 
+def test_query_worker_carries_bbs_membership_state_without_ui_lookup(tmp_path: Path) -> None:
+    from freqinout.gui.message_viewer_tab import _ProjectedMessageQueryWorker
+
+    db_path = tmp_path / "projection.sqlite"
+    _seed(db_path, count=1)
+    message_path = str(tmp_path / "report.k2s")
+    conn = sqlite3.connect(db_path)
+    try:
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO message_external_refs (
+                    message_id, source_id, external_kind, external_key,
+                    external_path, external_mtime, external_size, updated_utc
+                ) VALUES ('mip4-ui-0000', 'flamp:source', 'flamp_file',
+                          'file:1', ?, 1, 20, '2026-09-16T00:00:00Z')
+                """,
+                (message_path,),
+            )
+            conn.execute("CREATE TABLE bbs_artifacts (artifact_id TEXT, source_path TEXT)")
+            conn.execute(
+                "CREATE TABLE bbs_location_artifacts (artifact_id TEXT, publish_enabled INTEGER)"
+            )
+            conn.execute("INSERT INTO bbs_artifacts VALUES ('a1', ?)", (message_path,))
+            conn.execute("INSERT INTO bbs_location_artifacts VALUES ('a1', 1)")
+    finally:
+        conn.close()
+
+    payloads: list[dict] = []
+    worker = _ProjectedMessageQueryWorker(
+        db_path=str(db_path),
+        request_id=8,
+        scope_key=("all",),
+        query={"source_families": ("js8",)},
+    )
+    worker.finished.connect(payloads.append)
+    worker.run()
+
+    path_key = str(Path(message_path).absolute())
+    assert payloads[0]["bbs_published_counts"] == {path_key: 1}
+    assert not payloads[0]["error"]
+
+
 def test_stale_request_and_generation_results_are_rejected_without_render() -> None:
     from freqinout.gui.message_viewer_tab import MessageViewerTab
 

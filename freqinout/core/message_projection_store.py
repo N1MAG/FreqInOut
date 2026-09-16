@@ -1529,12 +1529,22 @@ def _projected_message_filter_sql(
     if group_name:
         requested_groups.append(str(group_name or "").strip().lstrip("@").upper())
     requested_groups = sorted(set(requested_groups))
-    if len(requested_groups) == 1:
-        clauses.append("group_name=?")
-        params.append(requested_groups[0])
-    elif requested_groups:
-        clauses.append(f"group_name IN ({','.join('?' for _ in requested_groups)})")
+    if requested_groups:
+        # Spotter/MCF traffic can carry a transport destination, report group,
+        # and multiple query groups while the primary projection column stores
+        # only one value.  Use that indexed primary value first, then admit
+        # bounded canonical search-text candidates for the shared predicate to
+        # verify with exact token boundaries.  This avoids source reads and
+        # prevents a configured query group from disappearing before the
+        # bounded 200-row page reaches the UI.
+        exact_marks = ",".join("?" for _ in requested_groups)
+        search_terms = " OR ".join("LOWER(COALESCE(search_text,'')) LIKE ?" for _ in requested_groups)
+        clauses.append(
+            f"(group_name IN ({exact_marks}) OR "
+            f"(source_family IN ('spotter','sitrep') AND ({search_terms})))"
+        )
         params.extend(requested_groups)
+        params.extend(f"%{group.lower()}%" for group in requested_groups)
     requested_statuses = [
         str(value or "").strip().upper()
         for value in (statuses or ())
@@ -1776,6 +1786,50 @@ def mark_projected_messages_read(db_path: str | Path, message_ids: Sequence[str]
                         index_message_for_ops_focus(conn, refreshed)
                 count += int(cur.rowcount or 0)
             return count
+    finally:
+        conn.close()
+
+
+def set_projected_message_attention(
+    db_path: str | Path,
+    message_id: str,
+    enabled: bool,
+) -> bool:
+    """Persist the operator Flag state for one projected Inbox row.
+
+    The projection stores attention as a boolean.  Source-specific rows may
+    retain richer flag state in their native store, but the unified Inbox only
+    needs a durable outlined/filled Flag contract.  This targeted update also
+    advances the projection generation so an in-flight query cannot repaint a
+    stale action state over the operator's choice.
+    """
+
+    clean_id = str(message_id or "").strip()
+    if not clean_id:
+        return False
+    conn = connect_sqlite(db_path, row_factory=sqlite3.Row)
+    try:
+        ensure_message_projection_schema(conn)
+        stamp = utc_now_iso()
+        with conn:
+            cur = conn.execute(
+                """
+                UPDATE message_projection
+                   SET operator_attention=?, projected_utc=?
+                 WHERE message_id=? AND deleted=0
+                """,
+                (1 if enabled else 0, stamp, clean_id),
+            )
+            if cur.rowcount:
+                conn.execute(
+                    """
+                    UPDATE message_projection_generation
+                       SET generation=generation+1, updated_utc=?
+                     WHERE singleton=1
+                    """,
+                    (stamp,),
+                )
+            return bool(cur.rowcount)
     finally:
         conn.close()
 

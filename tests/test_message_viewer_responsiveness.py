@@ -90,7 +90,7 @@ def test_local_message_filter_change_reuses_loaded_projection_scope() -> None:
     tab.received_filter = SimpleNamespace(currentData=lambda: 86400)
     tab._projected_source_families_for_current_scope = lambda: ("flmsg", "flamp")
     tab._inbox_focus = "all"
-    tab._projected_scope_load_key = ("all", ("flmsg", "flamp"), 86400, "", "", (), "", "", "")
+    tab._projected_scope_load_key = ("all", ("flmsg", "flamp"), (0, 86400), "", "", (), "", "", "")
     called = {"loads": 0}
     tab._unfreeze_table = lambda: None
     tab._load_projected_messages_into_table = lambda **_kwargs: called.__setitem__("loads", called["loads"] + 1) or True
@@ -107,7 +107,7 @@ def test_age_or_source_change_reloads_projection_scope_once() -> None:
     tab.received_filter = SimpleNamespace(currentData=lambda: 21600)
     tab._projected_source_families_for_current_scope = lambda: ("flmsg",)
     tab._inbox_focus = "all"
-    tab._projected_scope_load_key = ("all", ("flmsg", "flamp"), 86400, "", "", (), "", "", "")
+    tab._projected_scope_load_key = ("all", ("flmsg", "flamp"), (0, 86400), "", "", (), "", "", "")
     called = {"loads": 0}
     tab._unfreeze_table = lambda: None
     tab._load_projected_messages_into_table = lambda **_kwargs: called.__setitem__("loads", called["loads"] + 1) or True

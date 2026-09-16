@@ -15,6 +15,7 @@ from freqinout.core.message_projection_store import (
     load_projected_message_detail,
     query_projected_inbox_focus_counts,
     query_projected_message_page,
+    set_projected_message_attention,
 )
 
 
@@ -113,6 +114,22 @@ def test_mip4_page_reads_rows_count_and_generation_in_one_readonly_snapshot(monk
     assert "BEGIN" in normalized
     assert "COUNT(*) AS COUNT FROM MESSAGE_PROJECTION" in normalized
     assert "FROM MESSAGE_PROJECTION_GENERATION" in normalized
+
+
+def test_projected_attention_toggle_is_durable_and_generation_fenced(tmp_path) -> None:
+    db_path = tmp_path / "projection.db"
+    _seed_projection_rows(db_path, count=1)
+
+    assert set_projected_message_attention(db_path, "message-0000", True) is True
+    page = query_projected_message_page(db_path)
+    assert int(page.rows[0]["operator_attention"]) == 1
+    assert page.generation == 1
+
+    assert set_projected_message_attention(db_path, "message-0000", False) is True
+    page = query_projected_message_page(db_path)
+    assert int(page.rows[0]["operator_attention"]) == 0
+    assert page.generation == 2
+    assert set_projected_message_attention(db_path, "missing", True) is False
 
 
 def test_mip4_filter_count_uses_migration_indexes_and_returns_matching_page(tmp_path) -> None:
@@ -255,6 +272,43 @@ def test_mip4_page_applies_multi_group_identity_type_and_age_filters_before_limi
     assert len(page.rows) == 16
     assert all(10.0 <= float(row["received_ts"]) <= 30.0 for row in page.rows)
     assert all(row["status"] == "NEW" for row in page.rows)
+
+
+def test_mip4_spotter_group_query_admits_secondary_group_evidence_before_limit(tmp_path) -> None:
+    db_path = tmp_path / "projection.db"
+    _seed_projection_rows(db_path, count=0)
+    conn = sqlite3.connect(db_path)
+    try:
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO message_projection (
+                    message_id, canonical_key, content_hash, primary_source_id,
+                    source_family, group_name, status, deleted, archived,
+                    inbox_visible, event_ts, received_ts, search_text, projected_utc
+                ) VALUES ('spotter-secondary', 'spotter:secondary', 'hash',
+                          'spotter:source', 'sitrep', 'AMRRON', 'NEW', 0, 0,
+                          1, 100, 100, 'F!701 TO @MAGNET FIELD REPORT', '2026-09-16T00:00:00Z')
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO message_projection (
+                    message_id, canonical_key, content_hash, primary_source_id,
+                    source_family, group_name, status, deleted, archived,
+                    inbox_visible, event_ts, received_ts, search_text, projected_utc
+                ) VALUES ('commstat-mention', 'commstat:mention', 'hash2',
+                          'commstat:source', 'commstat', 'AMRRON', 'NEW', 0, 0,
+                          1, 101, 101, 'MAGNETIC FIELD REPORT', '2026-09-16T00:00:00Z')
+                """
+            )
+    finally:
+        conn.close()
+
+    page = query_projected_message_page(db_path, group_names=("MAGNET",), include_total=True)
+
+    assert page.total_count == 1
+    assert [row["message_id"] for row in page.rows] == ["spotter-secondary"]
 
 
 def test_inbox_focus_counts_are_one_scoped_snapshot_independent_of_active_focus(tmp_path) -> None:

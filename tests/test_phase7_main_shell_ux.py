@@ -2481,7 +2481,9 @@ def test_phase7_messages_workspace_filters_are_below_title_without_context_sente
     assert source.index("funnel_layout.addWidget(self.message_age_filter_label)") < source.index(
         "funnel_layout.addWidget(self.operating_group_filter, 2)"
     )
-    assert "self.received_filter.setFixedWidth(150)" in source
+    assert "self.received_filter.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)" in source
+    assert "self.received_filter.setMaximumWidth(360)" in source
+    assert "self.received_filter.setFixedWidth(150)" not in source
     assert "self.advanced_filters_btn.setFixedWidth(125)" in source
     assert "funnel_layout.addWidget(self.received_filter)" in source
     assert "funnel_layout.addWidget(self.advanced_filters_btn)" in source
@@ -2778,8 +2780,8 @@ def test_phase7_messages_filter_row_and_compose_splitter_reflow(monkeypatch, tmp
         assert 78 <= tab.messages_table.columnWidth(1) <= 300
         assert tab.messages_table.columnWidth(5) <= 520
         assert tab.messages_table.columnWidth(6) <= 90
-        action_floor = tab.messages_table.fontMetrics().horizontalAdvance("Actions…") + 20
-        assert action_floor <= tab.messages_table.columnWidth(7) <= action_floor + 48
+        action_width = tab._actions_delegate.required_width(tab.messages_table.fontMetrics())
+        assert tab.messages_table.columnWidth(7) == action_width
         assert tab.messages_table.minimumWidth() == 0
 
         tab.resize(900, 560)
@@ -2820,7 +2822,9 @@ def test_phase7_messages_filter_row_and_compose_splitter_reflow(monkeypatch, tmp
         tab._set_message_table_display_profile("form_message")
         assert header.sectionResizeMode(1) == QHeaderView.Stretch
         assert header.sectionResizeMode(6) == QHeaderView.Interactive
-        assert tab.messages_table.columnWidth(1) >= 420
+        # Direct action chips deliberately reserve their complete font-derived
+        # width; the narrative remains the elastic, readable column.
+        assert tab.messages_table.columnWidth(1) >= 320
         assert tab.messages_table.columnWidth(6) <= 90
         assert tab.messages_table.minimumWidth() == 0
         tab._set_message_table_display_profile("intel_report")

@@ -30,12 +30,22 @@ from PySide6.QtCore import (
     QModelIndex,
     QEvent,
     QRect,
+    QPoint,
     Signal,
     QObject,
     QThread,
     QFileSystemWatcher,
 )
-from PySide6.QtGui import QPainter, QColor, QPalette, QFont, QKeySequence, QShortcut
+from PySide6.QtGui import (
+    QPainter,
+    QColor,
+    QPalette,
+    QFont,
+    QKeySequence,
+    QShortcut,
+    QPen,
+    QPolygon,
+)
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -64,7 +74,6 @@ from PySide6.QtWidgets import (
     QAbstractScrollArea,
     QSplitter,
     QStyledItemDelegate,
-    QStyleOptionButton,
     QStyleOptionViewItem,
     QStyle,
     QMenu,
@@ -79,6 +88,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QTabWidget,
+    QToolTip,
 )
 
 from reportlab.lib.pagesizes import letter
@@ -130,6 +140,10 @@ class _ComposeSetupGroupBox(QGroupBox):
         finally:
             self._compose_derived_height_update = False
 
+    @property
+    def explicit_minimum_height(self) -> int:
+        return max(0, int(self._compose_explicit_minimum_height))
+
 
 class _FontBoundedLineEdit(QLineEdit):
     """Single-line editor whose compact width follows the active font."""
@@ -153,11 +167,6 @@ class _FontBoundedLineEdit(QLineEdit):
             self._refresh_font_width()
         return handled
 
-    @property
-    def explicit_minimum_height(self) -> int:
-        return max(0, int(self._compose_explicit_minimum_height))
-
-
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.gui.current_page_stack import CurrentPageStack
 from freqinout.core.multi_radio_store import MultiRadioStore
@@ -165,7 +174,7 @@ from freqinout.core.logger import log
 from freqinout.core.perf_metrics import emit_span, span as perf_span
 from freqinout.core.plan_context_service import PlanContextService
 from freqinout.core.regional_intelligence import STATE_TO_FEMA_REGION, US_STATE_ABBR_FROM_NAME
-from freqinout.core.sqlite_utils import connect_sqlite, fetch_all, table_exists
+from freqinout.core.sqlite_utils import connect_sqlite, connect_sqlite_readonly, fetch_all, table_exists
 from freqinout.core.sqlite_fingerprint import sqlite_identifier, sqlite_table_fingerprint
 from freqinout.core.support_reporting import build_support_summary, bullet_lines
 from freqinout.core.commstat_artifacts import (
@@ -257,11 +266,13 @@ from freqinout.core.message_row_presentation import (
 from freqinout.core.message_inbox_filters import (
     InboxFilterCriteria,
     active_inbox_scope_summary,
+    age_filter_bounds as _core_age_filter_bounds,
     is_message_group_candidate as _core_is_message_group_candidate,
     message_group_candidate_set as _core_message_group_candidate_set,
     message_group_option_sections as _core_message_group_option_sections,
     message_group_rebuild_selection as _core_message_group_rebuild_selection,
     message_group_source_map as _core_message_group_source_map,
+    message_group_values as _core_message_group_values,
     message_group_value as _core_message_group_value,
     message_source_options as _core_message_source_options,
     message_source_value as _core_message_source_value,
@@ -316,6 +327,7 @@ from freqinout.core.message_projection_store import (
     process_message_delete_queue,
     query_projected_inbox_focus_counts,
     query_projected_message_page,
+    set_projected_message_attention,
 )
 from freqinout.core.source_view_contracts import (
     contract_gate_failures,
@@ -525,6 +537,9 @@ from freqinout.core.nbems_compose import (
 )
 from freqinout.gui.help_registry import resolve_help_host
 from freqinout.gui.theme import (
+    action_chip_colors,
+    action_chip_metrics,
+    active_app_theme,
     apply_text_size_accessibility_guards,
     button_height_for_font,
     button_style,
@@ -583,6 +598,7 @@ JS8_BAD_PREVIEW_LIMIT = 1024
 BBS_AUTO_ARCHIVE_INTERVAL_SECONDS = 24 * 60 * 60  # once daily max
 BBS_AUTO_ARCHIVE_LAST_CHECK_KEY = "varac_bbs_auto_archive_last_check_ts"
 DEFAULT_RECEIVED_FILTER_SECONDS = 7 * 24 * 60 * 60
+_DAY_SECONDS = 24 * 60 * 60
 RECEIVED_FILTER_CHOICES = [
     ("Any time", 0),
     ("Last 15 min", 15 * 60),
@@ -592,10 +608,14 @@ RECEIVED_FILTER_CHOICES = [
     ("Last 12 hours", 12 * 60 * 60),
     ("Last 24 hours", 24 * 60 * 60),
     ("Last 7 days", 7 * 24 * 60 * 60),
-    ("Older than 2 weeks", -14 * 24 * 60 * 60),
-    ("Older than 1 month", -30 * 24 * 60 * 60),
-    ("Older than 2 months", -60 * 24 * 60 * 60),
-    ("Older than 6 months", -180 * 24 * 60 * 60),
+    ("8–14 days", (7 * _DAY_SECONDS, 14 * _DAY_SECONDS)),
+    ("15–30 days", (14 * _DAY_SECONDS, 30 * _DAY_SECONDS)),
+    ("31–60 days", (30 * _DAY_SECONDS, 60 * _DAY_SECONDS)),
+    ("61–180 days", (60 * _DAY_SECONDS, 180 * _DAY_SECONDS)),
+    ("181 days and older", -180 * _DAY_SECONDS),
+    ("Cleanup: 15 days and older", -14 * _DAY_SECONDS),
+    ("Cleanup: 31 days and older", -30 * _DAY_SECONDS),
+    ("Cleanup: 61 days and older", -60 * _DAY_SECONDS),
 ]
 def _safe_js8_text(value: object, *, limit: int = JS8_SAFE_TEXT_LIMIT, upper: bool = False) -> str:
     try:
@@ -2278,6 +2298,7 @@ class _ProjectedMessageQueryWorker(QObject):
         generation = 0
         focus_counts: dict[str, int] = {}
         focus_counts_generation = 0
+        bbs_published_counts: dict[str, int] = {}
         try:
             page = query_projected_message_page(
                 self._db_path,
@@ -2294,6 +2315,51 @@ class _ProjectedMessageQueryWorker(QObject):
                 message_id: [dict(ref) for ref in message_refs]
                 for message_id, message_refs in loaded_refs.items()
             }
+            external_paths = sorted(
+                {
+                    str(ref.get("external_path") or "").strip()
+                    for message_refs in refs.values()
+                    for ref in message_refs
+                    if str(ref.get("external_path") or "").strip()
+                }
+            )
+            if external_paths:
+                try:
+                    conn = connect_sqlite_readonly(self._db_path, timeout=1.0)
+                    try:
+                        has_artifacts = conn.execute(
+                            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='bbs_artifacts'"
+                        ).fetchone()
+                        has_memberships = conn.execute(
+                            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='bbs_location_artifacts'"
+                        ).fetchone()
+                        if has_artifacts and has_memberships:
+                            for start in range(0, len(external_paths), 200):
+                                chunk = external_paths[start : start + 200]
+                                placeholders = ",".join("?" for _ in chunk)
+                                published_rows = conn.execute(
+                                    f"""
+                                    SELECT a.source_path, COUNT(*)
+                                      FROM bbs_artifacts a
+                                      JOIN bbs_location_artifacts la ON la.artifact_id=a.artifact_id
+                                     WHERE la.publish_enabled=1
+                                       AND a.source_path IN ({placeholders})
+                                     GROUP BY a.source_path
+                                    """,
+                                    tuple(chunk),
+                                ).fetchall()
+                                for source_path, count in published_rows:
+                                    key = os.path.normcase(
+                                        os.path.normpath(os.path.abspath(str(source_path or "")))
+                                    )
+                                    if key:
+                                        bbs_published_counts[key] = max(0, int(count or 0))
+                    finally:
+                        conn.close()
+                except Exception:
+                    # Managed BBS is optional.  Its readiness snapshot must
+                    # never make the primary Inbox projection fail.
+                    bbs_published_counts = {}
             count_query = {
                 key: self._query[key]
                 for key in (
@@ -2325,6 +2391,7 @@ class _ProjectedMessageQueryWorker(QObject):
                 "generation": generation,
                 "focus_counts": focus_counts,
                 "focus_counts_generation": focus_counts_generation,
+                "bbs_published_counts": bbs_published_counts,
                 "elapsed_ms": (time.perf_counter() - started) * 1000.0,
                 "error": error,
             }
@@ -2778,7 +2845,10 @@ class MessageTableModel(QAbstractTableModel):
                 if col == 6:
                     return self._semantic_labels_for_row(row)[1]
             if col == 7:
-                return "Actions…"
+                # The action delegate owns every visible label in this cell.
+                # Returning fallback text lets native item painting draw a
+                # second copy behind the chips on some platform styles.
+                return ""
         if role == Qt.UserRole:
             return row
         if role == Qt.DecorationRole and col == 1:
@@ -2798,7 +2868,10 @@ class MessageTableModel(QAbstractTableModel):
                 exact = str(getattr(row, "rcv_display", "") or "").strip()
                 return f"Received: {exact}" if exact else None
         if role == Qt.ToolTipRole and col == 7:
-            return "Open actions for this message."
+            # The delegate provides the tooltip for the exact icon under the
+            # pointer.  A cell-wide tooltip competes with that guidance and can
+            # obscure neighboring actions in this dense column.
+            return None
         if role == Qt.ToolTipRole and col in (1, 6):
             details = [
                 str(row.title or "").strip() if col in (1, 6) else "",
@@ -3117,11 +3190,27 @@ class MessageTableModel(QAbstractTableModel):
         return _core_message_row_identity(row)
 
 
+@dataclass(frozen=True)
+class MessageRowAction:
+    """One cache-only direct action rendered in the Inbox action column."""
+
+    key: str
+    label: str
+    tooltip: str
+    icon: str
+    enabled: bool = True
+    active: bool = False
+    role: str = "secondary"
+
+
 class MessageActionDelegate(QStyledItemDelegate):
-    def __init__(self, parent, danger_color: QColor | None = None):
+    def __init__(self, parent):
         super().__init__(parent)
-        self._danger = danger_color or QColor(Qt.red)
-        self._open_menu: QMenu | None = None
+        self._hovered_action: tuple[int, str] | None = None
+        self._view = getattr(parent, "messages_table", None)
+        if isinstance(self._view, QTableView):
+            self._view.setMouseTracking(True)
+            self._view.viewport().installEventFilter(self)
 
     @staticmethod
     def _is_live_bbs_file_row(row: UnifiedMessage | None) -> bool:
@@ -3136,140 +3225,344 @@ class MessageActionDelegate(QStyledItemDelegate):
         )
 
     @staticmethod
-    def _supports_standard_management_actions(row: UnifiedMessage | None, *, projected_file_row: bool) -> bool:
+    def _supports_flag(row: UnifiedMessage | None, *, projected_file_row: bool) -> bool:
         return bool(
             projected_file_row
-            or isinstance(getattr(row, "payload", None), (JS8Message, FileRecord, VarACMessage, SpotterMessage))
+            or isinstance(
+                getattr(row, "payload", None),
+                (ProjectedMessagePayload, JS8Message, FileRecord, VarACMessage, SpotterMessage),
+            )
         )
+
+    @staticmethod
+    def _file_origin(row: UnifiedMessage | None, rec: FileRecord | None) -> str:
+        return str(
+            getattr(rec, "origin", "")
+            or getattr(row, "origin", "")
+            or ""
+        ).strip().lower()
+
+    def _action_items(self, row: UnifiedMessage) -> list[MessageRowAction]:
+        """Return source-aware actions without source, database, or filesystem I/O."""
+
+        parent_widget = self.parent()
+        items: list[MessageRowAction] = [
+            MessageRowAction("view", "", "View message", "view")
+        ]
+        rec = None
+        if hasattr(parent_widget, "_file_record_for_message_row"):
+            rec = parent_widget._file_record_for_message_row(row, allow_detail_lookup=False)
+        elif isinstance(getattr(row, "payload", None), FileRecord):
+            rec = row.payload
+        projected_file_row = isinstance(rec, FileRecord) and isinstance(
+            getattr(row, "payload", None), ProjectedMessagePayload
+        )
+        origin = self._file_origin(row, rec)
+        archived_bbs_row = origin == "bbs_archive" or self._is_archived_bbs_file_row(row)
+        live_bbs_row = origin == "bbs" and not archived_bbs_row
+
+        if live_bbs_row:
+            items.append(MessageRowAction("archive", "", "Archive BBS message", "archive"))
+        elif not archived_bbs_row and self._supports_flag(row, projected_file_row=projected_file_row):
+            flag_state = int(getattr(row.payload, "flag_state", 0) or 0)
+            items.append(
+                MessageRowAction(
+                    "flag",
+                    "",
+                    "Clear flag" if flag_state else "Flag for follow-up",
+                    "flag",
+                    active=flag_state > 0,
+                )
+            )
+
+        if not live_bbs_row and not archived_bbs_row and isinstance(rec, FileRecord):
+            if origin == "flamp" and str(rec.path.suffix or "").lower() in {".b2s", ".k2s"}:
+                relay_present = bool(
+                    hasattr(parent_widget, "_cached_row_in_flamp_relay")
+                    and parent_widget._cached_row_in_flamp_relay(row)
+                )
+                items.append(
+                    MessageRowAction(
+                        "relay_remove" if relay_present else "relay",
+                        "",
+                        "Remove FLAMP Relay copy" if relay_present else "Add to FLAMP Relay",
+                        "relay",
+                        active=relay_present,
+                    )
+                )
+            if origin in {"flmsg", "flamp", "varac"}:
+                bbs_present = bool(
+                    hasattr(parent_widget, "_cached_row_in_varac_bbs")
+                    and parent_widget._cached_row_in_varac_bbs(row)
+                )
+                items.append(
+                    MessageRowAction(
+                        "bbs_remove" if bbs_present else "bbs",
+                        "-BBS" if bbs_present else "+BBS",
+                        "Remove from all Managed BBS locations"
+                        if bbs_present
+                        else "Add to Managed BBS",
+                        "bbs",
+                        active=bbs_present,
+                    )
+                )
+
+        if isinstance(
+            row.payload,
+            (
+                FileRecord,
+                ProjectedMessagePayload,
+                JS8Message,
+                SpotterMessage,
+                VarACMessage,
+                SitrepMessage,
+                CommStatArtifact,
+            ),
+        ):
+            items.append(
+                MessageRowAction(
+                    "delete",
+                    "",
+                    "Delete message",
+                    "trash",
+                    role="danger",
+                )
+            )
+        return items
+
+    @classmethod
+    def required_width(cls, font_metrics) -> int:
+        """Font-derived width for the widest valid direct-action row."""
+
+        padding, gap, margin, _height, _radius = action_chip_metrics(font_metrics)
+        labels = ("", "", "", "+BBS", "")
+        return int(
+            (2 * margin)
+            + sum(
+                max(_height, font_metrics.horizontalAdvance(label) + padding)
+                for label in labels
+            )
+            + (len(labels) - 1) * gap
+        )
+
+    def _chip_rects(
+        self,
+        option: QStyleOptionViewItem,
+        items: Sequence[MessageRowAction],
+    ) -> list[tuple[MessageRowAction, QRect]]:
+        font_metrics = option.fontMetrics
+        padding, gap, margin, natural_height, _radius = action_chip_metrics(font_metrics)
+        height = min(natural_height, max(1, option.rect.height() - (2 * margin)))
+        top = option.rect.top() + max(0, (option.rect.height() - height) // 2)
+        left = option.rect.left() + margin
+        result: list[tuple[MessageRowAction, QRect]] = []
+        for item in items:
+            width = max(height, font_metrics.horizontalAdvance(item.label) + padding)
+            rect = QRect(left, top, width, height)
+            result.append((item, rect))
+            left = rect.right() + 1 + gap
+        return result
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
         if index.column() != 7:
             super().paint(painter, option, index)
             return
-        button = QStyleOptionButton()
-        if option.widget is not None:
-            button.initFrom(option.widget)
-        button.rect = option.rect.adjusted(4, 3, -4, -3)
-        button.text = "Actions…"
-        button.palette = option.palette
-        button.state = QStyle.State_Enabled
-        if option.state & QStyle.State_MouseOver:
-            button.state |= QStyle.State_MouseOver
-        if option.state & QStyle.State_HasFocus:
-            button.state |= QStyle.State_HasFocus
+        background = QStyleOptionViewItem(option)
+        self.initStyleOption(background, index)
+        background.text = ""
         style = option.widget.style() if option.widget is not None else QApplication.style()
-        style.drawControl(QStyle.CE_PushButton, button, painter, option.widget)
+        style.drawControl(QStyle.CE_ItemViewItem, background, painter, option.widget)
+        row = index.data(Qt.UserRole)
+        if row is None:
+            return
+        theme = active_app_theme()
+        _padding, _gap, _margin, _height, radius = action_chip_metrics(option.fontMetrics)
+        chip_font = QFont(option.font)
+        chip_font.setWeight(QFont.Weight.DemiBold)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setFont(chip_font)
+        for action, rect in self._chip_rects(option, self._action_items(row)):
+            hovered = self._hovered_action == (id(row), action.key)
+            background_color, text_color, border_color = action_chip_colors(
+                action.role,
+                theme,
+                enabled=action.enabled,
+                active=action.active,
+                hovered=hovered,
+            )
+            painter.setPen(QColor(border_color))
+            painter.setBrush(QColor(background_color))
+            painter.drawRoundedRect(rect, radius, radius)
+            painter.setPen(QColor(text_color))
+            if action.label:
+                painter.drawText(rect, int(Qt.AlignCenter | Qt.TextSingleLine), action.label)
+            else:
+                self._paint_action_icon(painter, action, rect, QColor(text_color))
+        painter.restore()
 
     @staticmethod
-    def _add_menu_action(menu: QMenu, text: str, callback: Callable[[], None], *, enabled: bool = True):
-        action = menu.addAction(text)
-        action.setEnabled(bool(enabled))
-        action.triggered.connect(callback)
-        return action
+    def _paint_action_icon(
+        painter: QPainter,
+        action: MessageRowAction,
+        rect: QRect,
+        color: QColor,
+    ) -> None:
+        """Paint compact theme-colored icons without platform button chrome."""
 
-    def _build_action_menu(self, row: UnifiedMessage) -> QMenu:
+        side = max(10, min(rect.width(), rect.height()) - max(8, rect.height() // 3))
+        icon = QRect(
+            rect.center().x() - side // 2,
+            rect.center().y() - side // 2,
+            side,
+            side,
+        )
+        stroke = max(1, side // 8)
+        pen = QPen(color, stroke)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        name = action.icon
+        if name == "view":
+            points = QPolygon(
+                [
+                    QPoint(icon.left(), icon.center().y()),
+                    QPoint(icon.center().x(), icon.top() + 1),
+                    QPoint(icon.right(), icon.center().y()),
+                    QPoint(icon.center().x(), icon.bottom() - 1),
+                ]
+            )
+            painter.drawPolygon(points)
+            pupil = max(2, side // 5)
+            painter.setBrush(color)
+            painter.drawEllipse(icon.center(), pupil, pupil)
+        elif name == "flag":
+            pole_x = icon.left() + max(1, side // 5)
+            painter.drawLine(pole_x, icon.top(), pole_x, icon.bottom())
+            flag = QPolygon(
+                [
+                    QPoint(pole_x, icon.top() + 1),
+                    QPoint(icon.right(), icon.top() + side // 4),
+                    QPoint(pole_x, icon.center().y()),
+                ]
+            )
+            if action.active:
+                painter.setBrush(color)
+            painter.drawPolygon(flag)
+        elif name == "archive":
+            body = icon.adjusted(1, side // 4, -1, -1)
+            painter.drawRect(body)
+            painter.drawLine(icon.left(), icon.top() + side // 4, icon.right(), icon.top() + side // 4)
+            painter.drawLine(icon.center().x() - side // 6, body.top() + side // 4, icon.center().x() + side // 6, body.top() + side // 4)
+        elif name == "relay":
+            y1 = icon.top() + side // 3
+            y2 = icon.bottom() - side // 3
+            painter.drawLine(icon.left() + 1, y1, icon.right() - 2, y1)
+            painter.drawLine(icon.right() - 2, y1, icon.right() - side // 4, y1 - side // 5)
+            painter.drawLine(icon.right() - 2, y1, icon.right() - side // 4, y1 + side // 5)
+            painter.drawLine(icon.right() - 1, y2, icon.left() + 2, y2)
+            painter.drawLine(icon.left() + 2, y2, icon.left() + side // 4, y2 - side // 5)
+            painter.drawLine(icon.left() + 2, y2, icon.left() + side // 4, y2 + side // 5)
+            sign_x = icon.right() - side // 6
+            sign_y = icon.bottom() - side // 6
+            painter.drawLine(sign_x - side // 7, sign_y, sign_x + side // 7, sign_y)
+            if not action.active:
+                painter.drawLine(sign_x, sign_y - side // 7, sign_x, sign_y + side // 7)
+        elif name == "trash":
+            body = icon.adjusted(side // 4, side // 3, -side // 4, -1)
+            painter.drawRoundedRect(body, max(1, stroke), max(1, stroke))
+            painter.drawLine(icon.left() + side // 5, icon.top() + side // 4, icon.right() - side // 5, icon.top() + side // 4)
+            painter.drawLine(icon.center().x() - side // 7, icon.top() + side // 8, icon.center().x() + side // 7, icon.top() + side // 8)
+            painter.drawLine(body.left() + side // 7, body.top() + side // 6, body.left() + side // 7, body.bottom() - side // 8)
+            painter.drawLine(body.right() - side // 7, body.top() + side // 6, body.right() - side // 7, body.bottom() - side // 8)
+
+    def eventFilter(self, watched, event):
+        view = self._view
+        if not isinstance(view, QTableView) or watched is not view.viewport():
+            return super().eventFilter(watched, event)
+        hovered: tuple[int, str] | None = None
+        if event.type() == QEvent.MouseMove:
+            position = event.position().toPoint() if hasattr(event, "position") else event.pos()
+            index = view.indexAt(position)
+            if index.isValid() and index.column() == 7:
+                row = index.data(Qt.UserRole)
+                if row is not None:
+                    option = QStyleOptionViewItem()
+                    option.initFrom(view.viewport())
+                    option.rect = view.visualRect(index)
+                    option.font = view.font()
+                    option.fontMetrics = view.fontMetrics()
+                    for action, rect in self._chip_rects(
+                        option,
+                        self._action_items(row),
+                    ):
+                        if action.enabled and rect.contains(position):
+                            hovered = (id(row), action.key)
+                            if hovered != self._hovered_action:
+                                QToolTip.showText(
+                                    view.viewport().mapToGlobal(position),
+                                    action.tooltip,
+                                    view.viewport(),
+                                    rect,
+                                )
+                            break
+        if hovered != self._hovered_action:
+            self._hovered_action = hovered
+            view.viewport().setCursor(Qt.PointingHandCursor if hovered else Qt.ArrowCursor)
+            if hovered is None:
+                QToolTip.hideText()
+            view.viewport().update()
+        return super().eventFilter(watched, event)
+
+    def _trigger_action(self, key: str, row: UnifiedMessage) -> bool:
         parent_widget = self.parent()
-        menu = QMenu(parent_widget)
-        self._add_menu_action(menu, "View", lambda: parent_widget._on_view_message(row))
-
-        projected_file_row = bool(
-            hasattr(parent_widget, "_projected_file_record")
-            and isinstance(getattr(row, "payload", None), ProjectedMessagePayload)
-            and parent_widget._projected_file_record(row.payload, allow_detail_lookup=False) is not None
-        )
-        live_bbs_row = bool(
-            (isinstance(row.payload, FileRecord) or projected_file_row)
-            and hasattr(parent_widget, "_is_bbs_manageable_file_row")
-            and parent_widget._is_bbs_manageable_file_row(row)
-        )
-        archived_bbs_row = self._is_archived_bbs_file_row(row)
-        relay_copy_row = bool(
-            not archived_bbs_row
-            and not live_bbs_row
-            and hasattr(parent_widget, "_can_copy_row_to_flamp_relay")
-            and parent_widget._can_copy_row_to_flamp_relay(row)
-        )
-        bbs_copy_row = bool(
-            not archived_bbs_row
-            and not live_bbs_row
-            and hasattr(parent_widget, "_can_copy_row_to_varac_bbs")
-            and parent_widget._can_copy_row_to_varac_bbs(row)
-        )
-
-        if live_bbs_row:
-            menu.addSeparator()
-            if projected_file_row:
-                archive = lambda: parent_widget._archive_projected_file_message(row)
+        entry = next((item for item in self._action_items(row) if item.key == key), None)
+        if entry is None or not entry.enabled:
+            return False
+        if key == "view":
+            parent_widget._on_view_message(row)
+        elif key == "flag":
+            parent_widget._cycle_row_flag_state(row)
+        elif key == "relay":
+            parent_widget._copy_row_to_flamp_relay(row)
+        elif key == "relay_remove":
+            parent_widget._remove_row_from_flamp_relay(row)
+        elif key == "bbs":
+            parent_widget._copy_row_to_varac_bbs(row)
+        elif key == "bbs_remove":
+            parent_widget._remove_row_from_varac_bbs(row)
+        elif key == "archive":
+            projected = isinstance(row.payload, ProjectedMessagePayload)
+            if projected:
+                parent_widget._archive_projected_file_message(row)
             else:
-                archive = lambda: parent_widget._archive_file_record(row.payload)
-            self._add_menu_action(menu, "Archive", archive)
-        elif (
-            not archived_bbs_row
-            and not projected_file_row
-            and self._supports_standard_management_actions(row, projected_file_row=False)
-        ):
-            flag_state = int(getattr(row.payload, "flag_state", 0) or 0)
-            flag_label = ("Mark for review", "Mark resolved", "Clear flag")[min(flag_state, 2)]
-            self._add_menu_action(menu, flag_label, lambda: parent_widget._cycle_flag_state(row.payload))
-
-        if relay_copy_row:
-            present = bool(
-                hasattr(parent_widget, "_is_row_already_in_flamp_relay")
-                and parent_widget._is_row_already_in_flamp_relay(row)
-            )
-            enabled = bool(
-                not present
-                and (
-                    not hasattr(parent_widget, "_is_row_relay_copy_action_enabled")
-                    or parent_widget._is_row_relay_copy_action_enabled(row)
-                )
-            )
-            self._add_menu_action(
-                menu,
-                "Already in FLAMP Relay" if present else "Add to FLAMP Relay",
-                lambda: parent_widget._copy_row_to_flamp_relay(row),
-                enabled=enabled,
-            )
-        if bbs_copy_row:
-            present = bool(
-                hasattr(parent_widget, "_is_row_already_in_varac_bbs")
-                and parent_widget._is_row_already_in_varac_bbs(row)
-            )
-            enabled = bool(
-                not present
-                and (
-                    not hasattr(parent_widget, "_is_row_bbs_copy_action_enabled")
-                    or parent_widget._is_row_bbs_copy_action_enabled(row)
-                )
-            )
-            self._add_menu_action(
-                menu,
-                "Already in BBS" if present else "Add to BBS",
-                lambda: parent_widget._copy_row_to_varac_bbs(row),
-                enabled=enabled,
-            )
-
-        delete_callback: Callable[[], None] | None = None
-        if isinstance(row.payload, FileRecord):
-            delete_callback = lambda: parent_widget._delete_file_record(row.payload)
-        elif isinstance(row.payload, ProjectedMessagePayload) and projected_file_row:
-            delete_callback = lambda: parent_widget._delete_projected_file_message(row)
-        elif isinstance(row.payload, JS8Message):
-            delete_callback = lambda: parent_widget._delete_js8_message(row.payload)
-        elif isinstance(row.payload, SpotterMessage):
-            delete_callback = lambda: parent_widget._delete_spotter_message(row.payload)
-        elif isinstance(row.payload, VarACMessage):
-            delete_callback = lambda: parent_widget._delete_varac_message(row.payload)
-        elif isinstance(row.payload, SitrepMessage):
-            delete_callback = lambda: parent_widget._delete_sitrep_message(row.payload)
-        elif isinstance(row.payload, CommStatArtifact):
-            delete_callback = lambda: parent_widget._delete_commstat_message(row.payload)
-        elif isinstance(row.payload, ProjectedMessagePayload):
-            delete_callback = lambda: parent_widget._delete_projected_message(row)
-        if delete_callback is not None:
-            menu.addSeparator()
-            self._add_menu_action(menu, "Delete…", delete_callback)
-        return menu
+                parent_widget._archive_file_record(row.payload)
+        elif key == "delete":
+            if isinstance(row.payload, FileRecord):
+                parent_widget._delete_file_record(row.payload)
+            elif isinstance(row.payload, ProjectedMessagePayload) and (
+                hasattr(parent_widget, "_file_record_for_message_row")
+                and parent_widget._file_record_for_message_row(row, allow_detail_lookup=False) is not None
+            ):
+                parent_widget._delete_projected_file_message(row)
+            elif isinstance(row.payload, JS8Message):
+                parent_widget._delete_js8_message(row.payload)
+            elif isinstance(row.payload, SpotterMessage):
+                parent_widget._delete_spotter_message(row.payload)
+            elif isinstance(row.payload, VarACMessage):
+                parent_widget._delete_varac_message(row.payload)
+            elif isinstance(row.payload, SitrepMessage):
+                parent_widget._delete_sitrep_message(row.payload)
+            elif isinstance(row.payload, CommStatArtifact):
+                parent_widget._delete_commstat_message(row.payload)
+            elif isinstance(row.payload, ProjectedMessagePayload):
+                parent_widget._delete_projected_message(row)
+            else:
+                return False
+        else:
+            return False
+        return True
 
     def editorEvent(self, event, model, option, index):
         if index.column() != 7:
@@ -3281,24 +3574,11 @@ class MessageActionDelegate(QStyledItemDelegate):
         row = index.data(Qt.UserRole)
         if row is None:
             return False
-        if self._open_menu is not None:
-            self._open_menu.close()
-            self._open_menu.deleteLater()
-        menu = self._build_action_menu(row)
-        self._open_menu = menu
-        menu.aboutToHide.connect(lambda: QTimer.singleShot(0, self._clear_open_menu))
-        if hasattr(event, "globalPosition"):
-            global_pos = event.globalPosition().toPoint()
-        else:
-            global_pos = option.widget.mapToGlobal(option.rect.bottomLeft())
-        menu.popup(global_pos)
-        return True
-
-    def _clear_open_menu(self) -> None:
-        menu = self._open_menu
-        self._open_menu = None
-        if menu is not None:
-            menu.deleteLater()
+        position = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        for action, rect in self._chip_rects(option, self._action_items(row)):
+            if action.enabled and rect.contains(position):
+                return self._trigger_action(action.key, row)
+        return False
 
 
 class MessageCheckboxDelegate(QStyledItemDelegate):
@@ -5274,11 +5554,19 @@ class MessageViewerTab(QWidget):
         self.received_filter = QComboBox()
         for label, seconds in RECEIVED_FILTER_CHOICES:
             self.received_filter.addItem(label, seconds)
+        # Separate recent review windows, non-overlapping historical bands,
+        # and deliberately cumulative cleanup scopes.  The labels also remain
+        # explicit for keyboard and screen-reader users.
+        self.received_filter.insertSeparator(8)
+        cleanup_idx = self.received_filter.findData(-14 * _DAY_SECONDS)
+        if cleanup_idx >= 0:
+            self.received_filter.insertSeparator(cleanup_idx)
         default_age_idx = self.received_filter.findData(DEFAULT_RECEIVED_FILTER_SECONDS)
         if default_age_idx >= 0:
             self.received_filter.setCurrentIndex(default_age_idx)
         self.received_filter.setToolTip(
-            "Filter by message age. Use recent windows for triage or older-than windows before cleanup/delete."
+            "Filter by message age. Day ranges do not overlap. Cleanup choices include the named age and "
+            "everything older, making them suitable for Select all and Delete."
         )
         self.received_filter.currentIndexChanged.connect(self._on_filter_changed)
         fit_combo_box_to_contents(self.received_filter)
@@ -5615,7 +5903,7 @@ class MessageViewerTab(QWidget):
         self.messages_table.setColumnWidth(5, 148)
         self.messages_table.setColumnWidth(
             7,
-            max(96, self.messages_table.fontMetrics().horizontalAdvance("Actions…") + 32),
+            MessageActionDelegate.required_width(self.messages_table.fontMetrics()),
         )
         # Publish the final empty-model profile before the first frame.  Later
         # row snapshots may request one coalesced atomic refit, but the native
@@ -5628,7 +5916,7 @@ class MessageViewerTab(QWidget):
         self.messages_table.activated.connect(self._on_message_table_activated)
 
         self._update_time_ui()
-        self._actions_delegate = MessageActionDelegate(self, QColor(resolve_theme(self.settings)["danger"]))
+        self._actions_delegate = MessageActionDelegate(self)
         self.messages_table.setItemDelegateForColumn(7, self._actions_delegate)
         self.messages_table.setItemDelegateForColumn(0, MessageCheckboxDelegate(self.messages_table))
         messages_layout.addWidget(self.messages_table)
@@ -5788,8 +6076,8 @@ class MessageViewerTab(QWidget):
         self.show_all_message_groups_chk.setMinimumWidth(96)
         self.source_filter.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
         self.source_filter.setMinimumWidth(160)
-        self.received_filter.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.received_filter.setFixedWidth(150)
+        self.received_filter.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        self.received_filter.setMaximumWidth(360)
         self.clear_filters_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.clear_filters_btn.setFixedWidth(120)
         self.advanced_filters_btn = QPushButton("Advanced Filters")
@@ -6140,10 +6428,7 @@ class MessageViewerTab(QWidget):
         return False
 
     def _refresh_inbox_focus_unread_counts(self, rows: Sequence[UnifiedMessage], *, now_ts: float) -> None:
-        try:
-            age_seconds = int(self.received_filter.currentData() or 0)
-        except Exception:
-            age_seconds = 0
+        age_filter = self.received_filter.currentData() if hasattr(self, "received_filter") else 0
         selected_groups = self._expanded_selected_message_groups()
         configured_groups = self._configured_message_group_names()
         focus_keys = [key for key, _label, _tip in self._inbox_focus_options()]
@@ -6156,7 +6441,7 @@ class MessageViewerTab(QWidget):
                 configured_groups=configured_groups,
             ):
                 continue
-            if not _core_row_matches_age_filter(row, age_seconds, now_ts=now_ts):
+            if not _core_row_matches_age_filter(row, age_filter, now_ts=now_ts):
                 continue
             if not self._row_is_unread_for_focus_count(row):
                 continue
@@ -6242,16 +6527,15 @@ class MessageViewerTab(QWidget):
         return self._load_projected_messages_into_table(force=False)
 
     def _projected_scope_key(self) -> tuple[object, ...]:
-        try:
-            age_seconds = int(self.received_filter.currentData() or 0)
-        except Exception:
-            age_seconds = 0
+        age_bounds = _core_age_filter_bounds(
+            self.received_filter.currentData() if hasattr(self, "received_filter") else 0
+        )
         status = self.status_filter.currentText() if hasattr(self, "status_filter") else ""
-        groups = self._selected_message_groups()
+        groups = self._expanded_selected_message_groups()
         return (
             str(getattr(self, "_inbox_focus", "all") or "all").strip().lower(),
             self._projected_source_families_for_current_scope(),
-            age_seconds,
+            age_bounds,
             (self.rcv_search.text() if hasattr(self, "rcv_search") else "").strip().lower(),
             status,
             tuple(sorted(groups or ())),
@@ -15444,6 +15728,37 @@ class MessageViewerTab(QWidget):
             self._set_file_flag(payload, next_state)
         self._populate_messages_table(force=True)
 
+    def _cycle_row_flag_state(self, row: UnifiedMessage | None) -> None:
+        """Toggle a row flag while preserving native and projection state."""
+
+        if row is None:
+            return
+        payload = getattr(row, "payload", None)
+        if not isinstance(payload, ProjectedMessagePayload):
+            self._cycle_flag_state(payload)
+            return
+        next_state = 0 if int(payload.flag_state or 0) else 1
+        db_path = self._db_path()
+        if db_path is None or not payload.message_id:
+            return
+        try:
+            if not set_projected_message_attention(db_path, payload.message_id, bool(next_state)):
+                return
+            payload.flag_state = next_state
+            row.actionable = bool(next_state)
+            rec = self._projected_file_record(payload, allow_detail_lookup=False)
+            if rec is not None:
+                self._set_file_flag(rec, next_state)
+        except Exception as exc:
+            log.debug("MessageViewer: failed to update projected row flag: %s", exc)
+            return
+        row_index = self._messages_model.index_for_row(row) if hasattr(self, "_messages_model") else -1
+        if row_index >= 0:
+            index = self._messages_model.index(row_index, 7)
+            self._messages_model.dataChanged.emit(index, index, [Qt.DisplayRole, Qt.ToolTipRole])
+        if hasattr(self, "messages_table"):
+            self.messages_table.viewport().update()
+
     def _set_js8_flag(self, msg_id: int, flag_state: int) -> None:
         db_path = self._local_js8_db()
         if not db_path or not Path(db_path).exists():
@@ -16044,7 +16359,7 @@ class MessageViewerTab(QWidget):
         self.messages_table.setStyleSheet(table_style)
         self.pending_table.setStyleSheet(f"QTableWidget {{ gridline-color: {grid}; }}")
         if self._actions_delegate:
-            self._actions_delegate._danger = QColor(theme["danger"])
+            self.messages_table.viewport().update()
         if self.loading_label:
             bg = theme.get("surface_alt", theme.get("surface", "#f2f2f2"))
             fg = theme.get("accent", theme.get("text", "#222"))
@@ -16895,14 +17210,14 @@ class MessageViewerTab(QWidget):
 
     def _projected_query_parameters(self) -> Dict[str, object]:
         source_families = self._projected_source_families_for_current_scope()
-        try:
-            age_seconds = int(self.received_filter.currentData() or 0)
-        except Exception:
-            age_seconds = 0
+        minimum_age, maximum_age = _core_age_filter_bounds(
+            self.received_filter.currentData() if hasattr(self, "received_filter") else 0
+        )
+        now_ts = time.time()
         params: Dict[str, object] = {
             "source_families": source_families,
-            "received_after_ts": time.time() - age_seconds if age_seconds > 0 else 0.0,
-            "received_before_ts": time.time() - abs(age_seconds) if age_seconds < 0 else 0.0,
+            "received_after_ts": now_ts - maximum_age if maximum_age > 0 else 0.0,
+            "received_before_ts": now_ts - minimum_age if minimum_age > 0 else 0.0,
             "search_text": (self.rcv_search.text() if hasattr(self, "rcv_search") else "").strip(),
         }
         focus = str(getattr(self, "_inbox_focus", "all") or "all").strip().lower()
@@ -16914,7 +17229,10 @@ class MessageViewerTab(QWidget):
                 params["statuses"] = (status,) if status.upper() in {"NEW", "UNREAD"} else ("__NONE__",)
             else:
                 params["status"] = status
-        groups = self._selected_message_groups()
+        # Parent/family selection must be expanded before the bounded indexed
+        # query.  Expanding only in the later in-memory predicate loses child
+        # group rows before they can be evaluated.
+        groups = self._expanded_selected_message_groups()
         if groups:
             params["group_names"] = tuple(sorted(groups))
         from_call = self.from_filter.currentText() if hasattr(self, "from_filter") else ""
@@ -17024,6 +17342,10 @@ class MessageViewerTab(QWidget):
             db_rows if isinstance(db_rows, list) else [],
             refs if isinstance(refs, dict) else {},
         )
+        self._install_projected_action_state(
+            rows,
+            data.get("bbs_published_counts", {}),
+        )
         focus_counts = data.get("focus_counts", data.get("focus_unread_counts"))
         focus_counts_generation = int(data.get("focus_counts_generation", generation) or 0)
         if (
@@ -17081,6 +17403,23 @@ class MessageViewerTab(QWidget):
             generation,
             self._active_message_scope_summary(),
         )
+
+    def _install_projected_action_state(
+        self,
+        rows: Sequence[UnifiedMessage],
+        bbs_published_counts: object,
+    ) -> None:
+        """Install worker-produced action state without querying during paint."""
+
+        counts = bbs_published_counts if isinstance(bbs_published_counts, Mapping) else {}
+        known = getattr(self, "_reader_bbs_known_counts", {})
+        for row in list(rows)[:200]:
+            rec = self._file_record_for_message_row(row, allow_detail_lookup=False)
+            key = self._bbs_copy_session_key_for_record(rec)
+            if key is None:
+                continue
+            known[key] = max(0, int(counts.get(key[0], 0) or 0))
+        self._reader_bbs_known_counts = known
 
     def _on_projected_message_query_thread_finished(self) -> None:
         self._retain_finished_worker_refs(self._projected_query_thread, self._projected_query_worker)
@@ -18318,6 +18657,13 @@ class MessageViewerTab(QWidget):
         if table is None or model is None:
             return
         font_metrics = table.fontMetrics()
+        _chip_padding, _chip_gap, chip_margin, chip_height, _chip_radius = action_chip_metrics(font_metrics)
+        action_row_height = chip_height + (2 * chip_margin)
+        vertical_header = table.verticalHeader()
+        vertical_header.setMinimumSectionSize(
+            max(vertical_header.minimumSectionSize(), action_row_height)
+        )
+        vertical_header.setDefaultSectionSize(action_row_height)
         padding = max(24, int(font_metrics.horizontalAdvance("MM")))
         header = table.horizontalHeader()
         indicator_width = (
@@ -18332,7 +18678,7 @@ class MessageViewerTab(QWidget):
             if column == 0:
                 minimum, cap = indicator_width, indicator_width
             elif column == model.columnCount() - 1:
-                action_width = font_metrics.horizontalAdvance("Actions…") + padding
+                action_width = MessageActionDelegate.required_width(font_metrics)
                 minimum, cap = action_width, action_width
             elif semantic == "source":
                 minimum, cap = 78, 180
@@ -18490,8 +18836,11 @@ class MessageViewerTab(QWidget):
         pairs: list[tuple[str, str]] = []
         configured_groups = self._configured_message_group_names()
         for row in rows:
-            group = _core_message_group_value(row, configured_groups=configured_groups)
-            if group:
+            for group in _core_message_group_values(
+                row,
+                configured_groups=configured_groups,
+                candidate_groups=configured_groups,
+            ):
                 pairs.append((group, self._message_source_value(row)))
         group_sources = _core_message_group_source_map(pairs, family_map=self._operator_group_family_map())
         self._add_commstat_group_options_for_current_scope(group_sources)
@@ -18773,7 +19122,11 @@ class MessageViewerTab(QWidget):
             return True
         if (self.rcv_search.text() if hasattr(self, "rcv_search") else "").strip():
             return True
-        if hasattr(self, "received_filter") and int(self.received_filter.currentData() or 0) != DEFAULT_RECEIVED_FILTER_SECONDS:
+        if (
+            hasattr(self, "received_filter")
+            and _core_age_filter_bounds(self.received_filter.currentData())
+            != _core_age_filter_bounds(DEFAULT_RECEIVED_FILTER_SECONDS)
+        ):
             return True
         if getattr(self, "_map_context_filter", {}) or {}:
             return True
@@ -18878,7 +19231,8 @@ class MessageViewerTab(QWidget):
             and not getattr(self, "_intel_topic_filter", "")
             and not getattr(self, "_traffic_action_filter", "")
             and not (getattr(self, "_map_context_filter", {}) or {})
-            and int(self.received_filter.currentData() or 0) == DEFAULT_RECEIVED_FILTER_SECONDS
+            and _core_age_filter_bounds(self.received_filter.currentData())
+            == _core_age_filter_bounds(DEFAULT_RECEIVED_FILTER_SECONDS)
             and not self.rcv_search.text().strip()
         ):
             return
@@ -19168,10 +19522,9 @@ class MessageViewerTab(QWidget):
     def _current_age_filter_label(self) -> str:
         if not hasattr(self, "received_filter"):
             return ""
-        try:
-            if int(self.received_filter.currentData() or 0) == DEFAULT_RECEIVED_FILTER_SECONDS:
-                return ""
-        except Exception:
+        if _core_age_filter_bounds(self.received_filter.currentData()) == _core_age_filter_bounds(
+            DEFAULT_RECEIVED_FILTER_SECONDS
+        ):
             return ""
         return str(self.received_filter.currentText() or "").strip()
 
@@ -20177,7 +20530,7 @@ class MessageViewerTab(QWidget):
                     else 96
                 )
             elif idx == 7:
-                min_width = 132
+                min_width = MessageActionDelegate.required_width(widget.fontMetrics())
             elif idx in (3, 4):
                 min_width = 96
             else:
@@ -20195,7 +20548,8 @@ class MessageViewerTab(QWidget):
             or bool(getattr(self, "_intel_status_filter", ""))
             or bool(getattr(self, "_intel_topic_filter", ""))
             or bool(getattr(self, "_traffic_action_filter", ""))
-            or int(self.received_filter.currentData() or 0) != DEFAULT_RECEIVED_FILTER_SECONDS
+            or _core_age_filter_bounds(self.received_filter.currentData())
+            != _core_age_filter_bounds(DEFAULT_RECEIVED_FILTER_SECONDS)
             or bool(getattr(self, "_map_context_filter", {}) or {})
             or bool(self.rcv_search.text().strip())
         )
@@ -22070,10 +22424,9 @@ class MessageViewerTab(QWidget):
     def _bbs_copy_session_key_for_record(rec: FileRecord | None) -> tuple[str, float, int] | None:
         if not isinstance(rec, FileRecord):
             return None
-        try:
-            path_txt = str(rec.path.resolve())
-        except Exception:
-            path_txt = str(rec.path)
+        # This key is also used by the paint-time action snapshot.  Keep it
+        # lexical: Path.resolve() may touch the filesystem on some platforms.
+        path_txt = os.path.abspath(os.fspath(rec.path))
         path_key = os.path.normcase(os.path.normpath(path_txt))
         try:
             mtime_key = round(float(rec.mtime or 0.0), 6)
@@ -22084,6 +22437,20 @@ class MessageViewerTab(QWidget):
         except Exception:
             size_key = 0
         return (path_key, mtime_key, size_key)
+
+    def _cached_row_in_varac_bbs(self, row: UnifiedMessage | None) -> bool:
+        """Return only already-loaded BBS publication state for row painting."""
+
+        key = self._bbs_copy_session_key_for_row(row)
+        if key is None:
+            return False
+        known = getattr(self, "_reader_bbs_known_counts", {})
+        if key in known:
+            return int(known.get(key, 0) or 0) > 0
+        if any(tuple(marker[:3]) == key for marker in self._bbs_copied_session_keys):
+            return True
+        published = getattr(self, "_bbs_published_index_cache", {})
+        return bool(set(published.get(key[0], set()))) if isinstance(published, dict) else False
 
     def _bbs_copy_session_key_for_row(self, row: UnifiedMessage | None) -> tuple[str, float, int] | None:
         return MessageViewerTab._bbs_copy_session_key_for_record(
@@ -22403,14 +22770,14 @@ class MessageViewerTab(QWidget):
         existing: List[Dict[str, object]] = []
         managed_published_ids = self._managed_bbs_published_target_ids_for_record(rec)
         for target in self._varac_bbs_copy_targets():
-            if not bool(target.get("valid", False)):
-                continue
             target_id = str(target.get("id", "") or "")
             if str(target.get("kind", "") or "") == "location" and target_id in managed_published_ids:
                 candidate = dict(target)
                 candidate["copied_path"] = Path(str(target.get("path", "") or ""))
                 candidate["managed_membership"] = True
                 existing.append(candidate)
+                continue
+            if not bool(target.get("valid", False)):
                 continue
             dst = self._varac_bbs_destination_for_row(row, target=target)
             if dst is None:
@@ -22435,7 +22802,18 @@ class MessageViewerTab(QWidget):
         if not existing:
             return
         if confirm:
-            file_list = "\n".join(str(target.get("copied_path", "") or "") for target in existing[:5])
+            removal_lines: List[str] = []
+            for target in existing[:5]:
+                if bool(target.get("managed_membership", False)):
+                    label = str(
+                        target.get("location_name", "")
+                        or target.get("label", "")
+                        or "Managed BBS"
+                    )
+                    removal_lines.append(f"Managed BBS: {label}")
+                else:
+                    removal_lines.append(str(target.get("copied_path", "") or ""))
+            file_list = "\n".join(removal_lines)
             more = f"\n...and {len(existing) - 5} more" if len(existing) > 5 else ""
             resp = QMessageBox.question(
                 self,
@@ -22485,6 +22863,9 @@ class MessageViewerTab(QWidget):
                 "Remove From BBS",
                 f"Removed {removed} copied BBS artifact(s). The original message/file was left in place.",
             )
+        key = self._bbs_copy_session_key_for_row(row)
+        if key is not None:
+            self._reader_bbs_known_counts[key] = 0
         self._invalidate_bbs_action_cache()
         self._unfreeze_table()
         self._populate_messages_table(force=True)
@@ -22556,6 +22937,9 @@ class MessageViewerTab(QWidget):
                 "Managed BBS Updated",
                 message,
             )
+        key = self._bbs_copy_session_key_for_row(row)
+        if key is not None:
+            self._reader_bbs_known_counts[key] = len(selected_location_ids)
         self._invalidate_bbs_action_cache()
         self._unfreeze_table()
         self._populate_messages_table(force=True)
@@ -22727,8 +23111,9 @@ class MessageViewerTab(QWidget):
 
     def _flamp_relay_source_file_for_row(self, row: UnifiedMessage | None) -> FileRecord | None:
         payload = getattr(row, "payload", None) if row is not None else None
-        if isinstance(payload, FileRecord) and self._is_flamp_relay_payload_name(payload.path.name):
-            return payload
+        cached_record = self._file_record_for_message_row(row, allow_detail_lookup=False)
+        if isinstance(cached_record, FileRecord) and self._is_flamp_relay_payload_name(cached_record.path.name):
+            return cached_record
         if isinstance(payload, VarACMessage):
             matched, _terms, reason = self._find_varac_received_file_for_message(payload)
             if matched is not None and self._is_flamp_relay_payload_name(matched.path.name):
@@ -22801,6 +23186,15 @@ class MessageViewerTab(QWidget):
             return False
         dst, _mode, _queue_id = self._flamp_relay_destination_for_record(rec)
         return dst is not None
+
+    def _cached_row_in_flamp_relay(self, row: UnifiedMessage | None) -> bool:
+        """Return session-known Relay state without parsing or path probing."""
+
+        rec = self._file_record_for_message_row(row, allow_detail_lookup=False)
+        if not isinstance(rec, FileRecord) or not self._is_flamp_relay_payload_name(rec.path.name):
+            return False
+        key = MessageViewerTab._bbs_copy_session_key_for_record(rec)
+        return key is not None and key in self._relay_copied_session_keys
 
     def _relay_copy_session_key_for_row(self, row: UnifiedMessage | None) -> tuple[str, float, int] | None:
         rec = self._flamp_relay_source_file_for_row(row)
@@ -22904,6 +23298,44 @@ class MessageViewerTab(QWidget):
             "Copy to FLAMP Relay",
             f"Copied file to FLAMP Relay:\n{dst}\n\n{note}",
         )
+        self._unfreeze_table()
+        self._populate_messages_table(force=True)
+
+    def _remove_row_from_flamp_relay(self, row: UnifiedMessage | None) -> None:
+        """Remove only FIO's Relay copy; never remove the received source."""
+
+        rec = self._file_record_for_message_row(row, allow_detail_lookup=False)
+        if not isinstance(rec, FileRecord):
+            return
+        dst, _mode, _queue_id = self._flamp_relay_destination_for_record(rec)
+        if dst is None:
+            return
+        try:
+            same_source = rec.path.resolve() == dst.resolve()
+        except Exception:
+            same_source = False
+        if same_source:
+            return
+        response = QMessageBox.question(
+            self,
+            "Remove From FLAMP Relay",
+            "Remove the FLAMP Relay copy for this message?\n\n"
+            "The original received file will not be deleted.\n\n"
+            f"{dst}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if response != QMessageBox.Yes:
+            return
+        try:
+            if dst.exists() and dst.is_file():
+                dst.unlink()
+        except Exception as exc:
+            QMessageBox.warning(self, "Remove From FLAMP Relay", f"Relay copy could not be removed:\n{exc}")
+            return
+        key = MessageViewerTab._bbs_copy_session_key_for_record(rec)
+        if key is not None:
+            self._relay_copied_session_keys.discard(key)
         self._unfreeze_table()
         self._populate_messages_table(force=True)
 

@@ -17,12 +17,22 @@ legacy Spotter alias. A focused regression proves Spotter + MAGNET preserves
 the historical row while projected CommStat remains separated.
 
 The crowded View/flag/Relay/BBS/Delete text cluster is now one themed
-`Actions…` disclosure whose menu is built only on activation. The selection
+row of compact, always-visible action chips with a font-derived fixed column;
+no menu click or overlapping text links are required. The selection
 header is a real visible `Select all`/`Clear all` button with font-derived
 geometry, shared theme inheritance, accessible naming, and bounded-visible-page
 semantics even when no extra filter is active. Optional Spotter comments now
 match SuperSpotter's compact 34-column presentation and enforce a documented
 50-character authored limit without truncating received legacy evidence.
+
+A field retest exposed a second group-filter boundary: the visible predicate
+expanded an operator parent family, but the earlier indexed projection query
+used only the literal parent. The query and its cache key now use the same
+expanded family, so removing an unrelated configured group cannot discard
+Spotter child-group rows before evaluation. Age filtering now covers every
+historical day with non-overlapping review bands and separately labeled
+cumulative cleanup scopes. Both bounds execute in the indexed projection query
+and retain the 200-row UI limit.
 
 Work packages and model: the primary GPT-5 model at high reasoning owned the
 filter semantics, UI redesign, comment compatibility review, specification,
@@ -38,11 +48,13 @@ profile/choice caches, with a source-level no-database regression. Other samples
 captured bounded background Spotter form discovery, Mesh adapter work, and a
 station-shell reflow; none implicated the Inbox predicate or action renderer.
 
-Acceptance evidence: 446 Inbox, Spotter, Compose, reader, BBS/Relay, projection,
-main-shell, responsive-layout, codec, and cache-contract tests passed. Changed
-Python files compile and the diff whitespace gate passes. Native visual
-qualification remains open. Existing unrelated documentation changes and
-rendered artifacts were preserved.
+Acceptance evidence: the follow-up partition passed 510 Inbox, Spotter,
+projection-store/projector, asynchronous reader, action, age, main-shell, and
+responsive-layout tests. The prior broader partition passed 446 Compose,
+BBS/Relay, codec, and cache-contract tests. Changed Python files compile and
+the diff whitespace gate passes. Native visual qualification remains open.
+Existing unrelated documentation changes and rendered artifacts were
+preserved.
 
 ## 2026-09-15 — Settings Use Radio native-window stability
 
@@ -6494,3 +6506,68 @@ theme/geometry, and embedded/pop-out Compose qualification passes **82 tests**.
 Changed Python modules compile and `git diff --check` passes. No application
 restart, runtime-state mutation, endpoint command, commit, or remote push was
 performed.
+
+## 2026-09-16 — Inbox row-action paint and shared-theme correction
+
+Status: implementation complete; automated and offscreen visual gates passed;
+native operator confirmation remains pending.
+
+The operator screenshot showed native rectangular View/Delete buttons painted
+over duplicated fallback action text. The model supplied a visible
+`View · Flag · Delete` string, the delegate cleared a copied style option, and
+then the base delegate reinitialized that option from the model before painting.
+Native push buttons were subsequently drawn on top, producing overlapping text
+and platform-inconsistent chrome.
+
+The action model now returns no display fallback for the delegate-owned column.
+The delegate paints the item background exactly once and draws direct View,
+Flag, Relay, BBS, Archive, and Delete actions with centralized shared-theme chip
+colors and font-derived metrics from `theme.py`. The action column and row floor
+use the same metrics as the painted rectangles, so hit targets and visuals stay
+aligned at Normal and Large Text. Hover detection is bounded to the retained
+row snapshot and performs no source, database, filesystem, endpoint, or network
+work.
+
+Primary Codex GPT-5 with high reasoning owned the renderer/model correction,
+shared component addition, integration review, tests, and documentation. The
+active execution policy prohibited spawning a subagent without an explicit
+delegation request, so no delegated diff was produced. Focused Inbox action,
+shared-theme/font geometry, and responsive-shell qualification passes **142
+tests**. The complete process-isolated Inbox/projection/Spotter/performance
+partition passes **496 tests**. A combined macOS offscreen process reproduced
+the repository's native Qt/worker lifecycle segfault during reader paint
+settlement; all 19 reader tests pass individually in clean processes. Offscreen
+Light/Normal and Dark/Large renders show one clean label per chip with no overlap
+or native button chrome. Changed modules compile and `git diff --check` passes.
+No runtime state, endpoint, commit, or remote repository was changed.
+
+## 2026-09-16 — Source-aware Inbox icon actions
+
+Status: implementation complete; automated qualification passed; native
+operator confirmation remains pending.
+
+The compact action renderer now uses theme-colored eye, flag, Relay, Archive,
+and trash iconology with explicit `+BBS`/`-BBS` text where a generic symbol
+would be ambiguous. Delete is neutral at rest and exposes its danger role on
+hover before the existing confirmation. Tooltips name every icon action.
+
+Eligibility is now derived from the bounded row and cached external references,
+not from readiness probes in paint. Projected FLMsg/FLAMP rows therefore retain
+Flag and expose Managed BBS plus applicable Relay actions. BBS and Relay state
+can be reversed without deleting the received source; BBS removal keeps its
+explicit confirmation. Projection-backed flags persist through the unified
+projection store, while source-native rows retain their existing flag stores.
+
+The delegate no longer calls BBS database discovery, Relay parsing, source
+lookup, or filesystem existence checks while painting, resizing, or hovering.
+Focused action/theme/projection qualification passes **32 tests**. The broader
+Inbox, projection, source, theme, layout, and shell partition qualified **613
+tests** after correcting the compose explicit-floor property exposed by that
+gate. All **20** reader tests pass in fresh processes; the known macOS Qt
+worker/widget teardown fault can still crash a combined offscreen process.
+Light/Normal and Dark/Large Text offscreen renders show non-overlapping icons,
+legible `+BBS`/`-BBS`, active state, and neutral-at-rest trash treatment.
+The Actions cell has no section-wide tooltip; guidance appears only for the
+specific icon under the pointer.
+Changed Python modules compile and `git diff --check` passes. No runtime state,
+endpoint, commit, or remote repository was changed.

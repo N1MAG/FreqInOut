@@ -62,6 +62,7 @@ from freqinout.core.observation_projection import Observation
 from freqinout.core.message_inbox_filters import (
     InboxFilterCriteria,
     active_inbox_scope_summary,
+    age_filter_bounds,
     is_message_group_candidate,
     message_group_candidate_set,
     message_group_option_sections,
@@ -1874,7 +1875,7 @@ def test_active_inbox_scope_summary_is_core_operator_text() -> None:
         focus_labels={"spotter": "Spotter"},
         groups={"MR08", "MAGNET", "MR09", "MR10"},
         sources={"spotter", "varac", "js8", "commstat"},
-        age_label="Older than 2 weeks",
+        age_label="Cleanup: 15 days and older",
         search_query="wildfire",
         type_sel="MSG Type...",
         status_sel="Action Needed",
@@ -1885,7 +1886,7 @@ def test_active_inbox_scope_summary_is_core_operator_text() -> None:
     assert "Focus Spotter" in summary
     assert "Groups MAGNET, MR08, MR09 +1" in summary
     assert "Sources CommStat, JS8Call, Spotter +1" in summary
-    assert "Older than 2 weeks" in summary
+    assert "Cleanup: 15 days and older" in summary
     assert 'Search "wildfire"' in summary
     assert "Status Action Needed" in summary
     assert "From K7ETC" in summary
@@ -2648,6 +2649,47 @@ def test_received_age_filter_supports_recent_and_cleanup_windows() -> None:
     assert row_matches_age_filter(old, 24 * 60 * 60, now_ts=now_ts) is False
     assert row_matches_age_filter(old, -14 * 24 * 60 * 60, now_ts=now_ts) is True
     assert row_matches_age_filter(recent, -14 * 24 * 60 * 60, now_ts=now_ts) is False
+
+
+def test_received_age_filter_supports_non_overlapping_review_bands() -> None:
+    day = 24 * 60 * 60
+    now_ts = 1_800_000_000.0
+    day_10 = UnifiedMessage("FLMSG", "READ", "K7ETC", "MR08", now_ts - 10 * day, "", "Ten", "flmsg", object())
+    day_20 = UnifiedMessage("FLMSG", "READ", "K7ETC", "MR08", now_ts - 20 * day, "", "Twenty", "flmsg", object())
+
+    assert age_filter_bounds((7 * day, 14 * day)) == (7 * day, 14 * day)
+    assert row_matches_age_filter(day_10, (7 * day, 14 * day), now_ts=now_ts) is True
+    assert row_matches_age_filter(day_20, (7 * day, 14 * day), now_ts=now_ts) is False
+    assert row_matches_age_filter(day_20, (14 * day, 30 * day), now_ts=now_ts) is True
+
+
+def test_spotter_group_filter_matches_exact_secondary_group_evidence() -> None:
+    payload = SimpleNamespace(group="AMRRON", decoded_text="F!701 TO[@MAGNET] ST[CO]")
+    row = UnifiedMessage(
+        "F!701",
+        "NEW",
+        "K7ETC",
+        "AMRRON",
+        1.0,
+        "",
+        "Field report",
+        "spotter",
+        payload,
+        search_text="f!701 to @magnet field report",
+    )
+
+    assert row_matches_workspace_scope(
+        row,
+        selected_groups={"MAGNET"},
+        configured_groups={"AMRRON", "MAGNET"},
+    ) is True
+    row.search_text = "magnetic declination report"
+    payload.decoded_text = ""
+    assert row_matches_workspace_scope(
+        row,
+        selected_groups={"MAGNET"},
+        configured_groups={"AMRRON", "MAGNET"},
+    ) is False
 
 
 def test_inbox_status_and_search_filters_are_core_row_logic() -> None:
@@ -3830,7 +3872,7 @@ def test_select_visible_reports_active_scope_to_operator() -> None:
     tab._message_group_filter_active = lambda: True
     tab._selected_message_groups = lambda: {"MR08"}
     tab._selected_message_sources = lambda: {"spotter"}
-    tab.received_filter = Combo("Older than 2 weeks", -14 * 24 * 60 * 60)
+    tab.received_filter = Combo("Cleanup: 15 days and older", -14 * 24 * 60 * 60)
     tab.rcv_search = Combo("wildfire", 0)
     tab.type_filter = Combo("MSG Type...", 0)
     tab.status_filter = Combo("Status...", 0)
@@ -3844,7 +3886,7 @@ def test_select_visible_reports_active_scope_to_operator() -> None:
     assert "Selected 1 visible message" in tab.message_check_status_label.text
     assert "Focus Spotter" in tab.message_check_status_label.text
     assert "Groups MR08" in tab.message_check_status_label.text
-    assert "Older than 2 weeks" in tab.message_check_status_label.text
+    assert "Cleanup: 15 days and older" in tab.message_check_status_label.text
     assert 'Search "wildfire"' in tab.message_check_status_label.text
 
 
