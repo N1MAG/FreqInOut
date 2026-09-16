@@ -257,8 +257,8 @@ The receive-only setup is a guided-workflow redesign governed by
   manual-tuning state or matching reversible tune/readback/restore evidence and
   the operator's FIO-tuning opt-in.
 - **Normal sequence:** `Radio -> Operating Model -> Software -> Connection ->
-  Test control -> Enable FIO tuning -> Review -> Save Radio`. The immutable
-  receive-only model is confirmed before software is selected. The Software
+  Test control -> Enable FIO tuning -> Review -> Save Radio`. A compatible
+  enabled receive-only model is selected before software is selected. The Software
   page uses the same radio-owned application concept as a transceiver while
   allowing only integrations that have a reviewed receive-only contract.
   SDR++ remains the receiver application; an optional distinct JS8Call instance
@@ -306,7 +306,9 @@ verification card rather than an empty app-connections page.
 ### Receive-only operating model and JS8Call ownership
 
 Every installation contains exactly one protected built-in **Receive-only SDR**
-Operating Model before Guided Add Radio needs it. It enables Messages, Map,
+Operating Model before Guided Add Radio needs it. A fresh blank station ensures
+that model and the protected transceiver default without creating a radio,
+assignment, or runtime-primary projection. It enables Messages, Map,
 background ingest, and Launch Control while disabling scheduler ownership, Net
 Control, profile swaps, QSY, PTT, Compose sending, Expect replies, and every
 other transmit path. Observer restore/default-assignment logic resolves to this
@@ -320,8 +322,8 @@ for a new assignment. It must never reuse or silently replace another radio's
 instance. SDR++ application launch and JS8Call instance launch are separate
 reviewed selections in one guided setup.
 
-The guided workflow creates the observer as non-primary, assigns the selected
-receive-only model, atomically creates/adopts the optional JS8Call instance, and
+The guided workflow saves the observer inactive and non-primary, assigns the
+selected receive-only model, creates/adopts the optional JS8Call instance, and
 only then may activate the receiver. A first/only observer never becomes the
 legacy compatibility primary. Cancel writes no radio, assignment, software
 instance, manifest, or launch recipe. A recoverable post-radio failure leaves

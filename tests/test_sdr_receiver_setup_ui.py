@@ -127,7 +127,7 @@ def test_observer_guided_flow_orders_model_first_and_stages_distinct_js8(monkeyp
     assert result is None
 
 
-def test_transceiver_guided_flow_keeps_stable_numbering_and_skips_model(monkeypatch, tmp_path) -> None:
+def test_transceiver_guided_flow_keeps_stable_numbering_and_selectable_model(monkeypatch, tmp_path) -> None:
     def inspect(dialog) -> None:
         from PySide6.QtWidgets import QApplication, QComboBox, QPushButton
 
@@ -144,12 +144,175 @@ def test_transceiver_guided_flow_keeps_stable_numbering_and_skips_model(monkeypa
         assert all(step is not None and not step.isHidden() for step in steps)
         model_step = steps[1]
         assert model_step is not None
-        assert model_step.text() == "2. Operating Model · N/A"
-        assert not model_step.isEnabled()
-        assert model_step.property("guidedStepApplicable") is False
+        assert model_step.text() == "2. Operating Model"
+        assert model_step.isEnabled()
+        assert model_step.property("guidedStepApplicable") is True
+        model_step.click()
+        QApplication.processEvents()
+        model_combo = dialog.findChild(QComboBox, "guidedOperatingModel")
+        assert model_combo is not None
+        assert model_combo.isEnabled()
+        assert model_combo.count() >= 1
+        assert int(model_combo.currentData() or 0) > 0
         assert next_button.text() == "Next: Software"
 
     _open_receiver_dialog(monkeypatch, tmp_path, None, inspect)
+
+
+def test_existing_observer_custom_receive_only_model_is_preselected_on_edit(monkeypatch, tmp_path) -> None:
+    selected_model = {"id": 91, "name": "Field SDR Watch", "enabled": 1, "receive_only": 1}
+
+    def configure(tab) -> None:
+        tab.operating_profiles = [selected_model]
+        tab.device_assignments = [{"device_profile_id": 71, "operating_profile_id": 91}]
+
+    def inspect(dialog) -> None:
+        from PySide6.QtWidgets import QComboBox
+
+        combo = dialog.findChild(QComboBox, "guidedOperatingModel")
+        assert combo is not None
+        assert combo.currentData() == 91
+        assert combo.currentText() == "Field SDR Watch (receive-only)"
+
+    _open_receiver_dialog(
+        monkeypatch,
+        tmp_path,
+        {"id": 71, "name": "Existing SDR", "device_class": "observer"},
+        inspect,
+        configure_tab=configure,
+    )
+
+
+def test_existing_transceiver_operating_model_is_preselected_on_edit(monkeypatch, tmp_path) -> None:
+    selected_model = {"id": 92, "name": "Portable Field Model", "enabled": 1, "receive_only": 0}
+
+    def configure(tab) -> None:
+        tab.operating_profiles = [selected_model]
+        tab.device_assignments = [{"device_profile_id": 72, "operating_profile_id": 92}]
+
+    def inspect(dialog) -> None:
+        from PySide6.QtWidgets import QComboBox
+
+        combo = dialog.findChild(QComboBox, "guidedOperatingModel")
+        assert combo is not None
+        assert combo.isEnabled()
+        assert combo.currentData() == 92
+        assert combo.currentText() == "Portable Field Model"
+
+    _open_receiver_dialog(
+        monkeypatch,
+        tmp_path,
+        {"id": 72, "name": "Existing Rig", "device_class": "tx_rx"},
+        inspect,
+        configure_tab=configure,
+    )
+
+
+def test_add_radio_save_persists_selected_model_for_nonfirst_transceiver(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from freqinout.gui.settings_tab import SettingsTab
+
+    assigned: list[tuple[int, int, dict[str, object]]] = []
+    persisted: list[dict[str, object]] = []
+    tab = SettingsTab.__new__(SettingsTab)
+    tab.multi_radio_store = SimpleNamespace(
+        list_device_profiles=lambda: [{"id": 1, "name": "Primary"}],
+        set_device_operating_profile=lambda radio_id, model_id, **kwargs: assigned.append((radio_id, model_id, kwargs)),
+    )
+    tab._open_device_profile_dialog = lambda existing=None: {
+        "id": None,
+        "name": "Second Rig",
+        "device_class": "tx_rx",
+        "guided_operating_profile_id": 42,
+    }
+    def persist(payload, **kwargs):
+        persisted.append(dict(kwargs))
+        tab._last_persisted_device_profile = {**payload, "id": 2}
+        return True
+
+    tab._persist_device_profile = persist
+
+    tab._add_device_profile()
+
+    assert persisted == [{"defer_activation_until_assignment": True}]
+    assert assigned == [(2, 42, {
+        "assignment_state": "active",
+        "reason": "Operating Model selected during guided radio setup.",
+        "created_by": "guided_radio_setup",
+    })]
+
+
+def test_first_transceiver_is_activated_only_after_selected_model_assignment() -> None:
+    from types import SimpleNamespace
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    events: list[tuple[str, int, int | None]] = []
+    saved_radio = {
+        "id": 1,
+        "name": "First Rig",
+        "device_class": "tx_rx",
+        "runtime_active": 0,
+        "runtime_primary": 0,
+    }
+
+    def assign(radio_id, model_id, **_kwargs):
+        events.append(("assign", radio_id, model_id))
+
+    def activate(radio_id):
+        assert events == [("assign", 1, 42)]
+        events.append(("activate", radio_id, None))
+        return {**saved_radio, "runtime_active": 1, "runtime_primary": 1}
+
+    tab = SettingsTab.__new__(SettingsTab)
+    tab.multi_radio_store = SimpleNamespace(
+        list_device_profiles=lambda: [],
+        set_device_operating_profile=assign,
+        set_runtime_primary_device_profile=activate,
+    )
+    tab._open_device_profile_dialog = lambda existing=None: {
+        "id": None,
+        "name": "First Rig",
+        "device_class": "tx_rx",
+        "guided_operating_profile_id": 42,
+    }
+
+    def persist(payload, **kwargs):
+        assert kwargs == {"defer_activation_until_assignment": True}
+        tab._last_persisted_device_profile = dict(saved_radio)
+        return True
+
+    tab._persist_device_profile = persist
+    tab._refresh_runtime_projection_ui = lambda **_kwargs: None
+    tab._refresh_multi_radio_tables = lambda: None
+
+    tab._add_device_profile()
+
+    assert events == [("assign", 1, 42), ("activate", 1, None)]
+
+
+def test_failed_new_observer_model_assignment_remains_inactive_and_nonprimary(monkeypatch) -> None:
+    from freqinout.gui import settings_tab
+    from freqinout.gui.settings_tab import SettingsTab
+
+    monkeypatch.setattr(settings_tab.QMessageBox, "warning", lambda *args, **kwargs: None)
+    radio = {"id": 2, "device_class": "observer", "runtime_active": 0, "runtime_primary": 0}
+
+    class _Store:
+        def ensure_receive_only_operating_profile(self):
+            return {"id": 73}
+
+        def set_device_operating_profile(self, _radio_id, _model_id, **_kwargs):
+            raise ValueError("assignment unavailable")
+
+    tab = SettingsTab.__new__(SettingsTab)
+    tab.multi_radio_store = _Store()
+    tab._refresh_multi_radio_tables = lambda: None
+    tab._emit_device_profiles_changed = lambda: None
+
+    assert tab._finalize_guided_observer_profile(radio) is False
+    assert radio["runtime_active"] == 0
+    assert radio["runtime_primary"] == 0
 
 
 def test_unsaved_receiver_can_test_and_keep_verified_evidence_in_one_session(monkeypatch, tmp_path) -> None:

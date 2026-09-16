@@ -119,8 +119,8 @@ def test_guided_observer_finalization_assigns_model_then_adopts_js8_then_activat
             self.calls.append(("ensure_model", None))
             return {"id": 9}
 
-        def set_device_operating_profile(self, radio_id, model_id):
-            self.calls.append(("assign_model", (radio_id, model_id)))
+        def set_device_operating_profile(self, radio_id, model_id, **kwargs):
+            self.calls.append(("assign_model", (radio_id, model_id, kwargs)))
             return {"device_profile_id": radio_id, "operating_profile_id": model_id}
 
         def adopt_observer_js8_instance(self, **kwargs):
@@ -166,6 +166,12 @@ def test_guided_observer_finalization_assigns_model_then_adopts_js8_then_activat
         "adopt_js8",
         "activate",
     ]
+    assert store.calls[1][1][0:2] == (4, 9)
+    assert store.calls[1][1][2] == {
+        "assignment_state": "active",
+        "reason": "Operating Model selected during guided radio setup.",
+        "created_by": "guided_radio_setup",
+    }
     adoption = dict(store.calls[2][1])
     assert adoption["replace_existing"] is False
     assert adoption["expected_current_instance_id"] is None

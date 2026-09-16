@@ -375,8 +375,15 @@ def test_settings_add_radio_dialog_keeps_guided_steps_available(
             for button in dialog.findChildren(QPushButton)
             if button.objectName().startswith("guidedWizardStep_")
         }
+        step_buttons["guidedWizardStep_model"].click()
+        app.processEvents()
+        operating_model_combo = dialog.findChild(QComboBox, "guidedOperatingModel")
+        assert operating_model_combo is not None
         seen["step_buttons"] = step_buttons
         seen["step_text"] = dialog.findChild(QPushButton, "guidedWizardStep_radio").text()
+        seen["operating_model_visible"] = operating_model_combo.isVisible()
+        seen["operating_model_enabled"] = operating_model_combo.isEnabled()
+        seen["operating_model_id"] = int(operating_model_combo.currentData() or 0)
         return QDialog.Rejected
 
     monkeypatch.setattr(QDialog, "exec", _inspect_dialog)
@@ -395,12 +402,13 @@ def test_settings_add_radio_dialog_keeps_guided_steps_available(
         assert seen["step_text"]
         assert step_buttons["guidedWizardStep_model"].isVisible()
         assert step_buttons["guidedWizardStep_connection"].isVisible()
+        assert step_buttons["guidedWizardStep_model"].isEnabled() is True
+        assert seen["operating_model_visible"] is True
+        assert seen["operating_model_enabled"] is True
+        assert int(seen["operating_model_id"]) > 0
         # Non-applicable controls remain discoverable in the same seven-step
         # navigator and communicate their inactive state rather than vanishing.
-        inactive_ids = (
-            ("guidedWizardStep_model",) if device_class == "tx_rx" else
-            ("guidedWizardStep_guard", "guidedWizardStep_schedule")
-        )
+        inactive_ids = ("guidedWizardStep_guard", "guidedWizardStep_schedule") if device_class == "observer" else ()
         for step_id in inactive_ids:
             button = step_buttons[step_id]
             assert button.isEnabled() is False or any(
@@ -411,6 +419,8 @@ def test_settings_add_radio_dialog_keeps_guided_steps_available(
             assert "N/A" not in step_buttons["guidedWizardStep_connection"].text()
             assert "N/A" in step_buttons["guidedWizardStep_guard"].text()
             assert "N/A" in step_buttons["guidedWizardStep_schedule"].text()
+        else:
+            assert "N/A" not in step_buttons["guidedWizardStep_model"].text()
         navigator = step_buttons["guidedWizardStep_radio"].parentWidget()
         assert navigator is not None
         assert all(button.geometry().right() <= navigator.rect().right() for button in step_buttons.values())
@@ -420,6 +430,36 @@ def test_settings_add_radio_dialog_keeps_guided_steps_available(
     finally:
         tab.deleteLater()
         app.processEvents()
+
+
+def test_saved_observer_radio_receives_selected_operating_model() -> None:
+    """The Save Radio completion seam persists the reviewed RX model assignment."""
+    from freqinout.gui.settings_tab import SettingsTab
+
+    class _Store:
+        def __init__(self) -> None:
+            self.assigned: tuple[int, int] | None = None
+
+        def ensure_receive_only_operating_profile(self) -> dict[str, int]:
+            return {"id": 73}
+
+        def set_device_operating_profile(self, radio_id: int, model_id: int, **_kwargs: object) -> dict[str, int]:
+            self.assigned = (radio_id, model_id)
+            return {"device_profile_id": radio_id, "operating_profile_id": model_id}
+
+    store = _Store()
+    tab = SettingsTab.__new__(SettingsTab)
+    tab.multi_radio_store = store
+    tab._refresh_multi_radio_tables = lambda: None
+    tab._emit_device_profiles_changed = lambda: None
+    tab._set_save_button_state = lambda *_args, **_kwargs: None
+    tab._last_persisted_device_profile = None
+
+    assert tab._finalize_guided_observer_profile(
+        {"id": 19, "device_class": "observer"},
+        operating_profile_id=0,
+    ) is True
+    assert store.assigned == (19, 73)
 
 
 def test_workspace_radio_chip_names_ownership_and_occupied_action_is_replace() -> None:

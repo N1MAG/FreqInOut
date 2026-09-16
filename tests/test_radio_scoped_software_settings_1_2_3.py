@@ -164,22 +164,22 @@ def test_device_profile_persists_radio_owned_software_fields(monkeypatch, tmp_pa
     assert int(saved["varac_bbs_auto_archive_days"]) == 30
 
 
-def test_settings_add_radio_marks_first_radio_active_before_projection() -> None:
+def test_settings_guided_add_radio_defers_activation_until_model_assignment() -> None:
     source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
-    persist_block = source[
-        source.index("    def _persist_device_profile")
-        : source.index("    def _add_device_profile")
-    ]
+    persist_start = source.index("    def _persist_device_profile")
+    add_start = source.index("    def _add_device_profile")
+    persist_block = source[persist_start:add_start]
+    add_block = source[add_start:source.index("    def _edit_device_profile", add_start)]
 
-    assert "first_radio = not bool(self.multi_radio_store.list_device_profiles())" in persist_block
-    assert 'payload["runtime_active"] = 1' in persist_block
-    assert 'payload["runtime_primary"] = 1' in persist_block
-    assert 'if first_radio and not observer_profile:' in persist_block
-    assert 'elif observer_profile:' in persist_block
+    # Profile persistence itself must leave a guided radio inactive until the
+    # selected Operating Model has been assigned successfully.
+    assert "defer_activation_until_assignment" in persist_block
+    assert "if first_radio and not observer_profile and not defer_activation_until_assignment" in persist_block
     assert 'payload["runtime_active"] = 0' in persist_block
     assert 'payload["runtime_primary"] = 0' in persist_block
-    assert '(first_radio and not observer_profile)' in persist_block
-    assert "sync_runtime_active_device_to_legacy_settings" in persist_block
+    assert "defer_activation_until_assignment=True" in add_block
+    assert "_assign_guided_operating_profile_after_save" in add_block
+    assert "set_runtime_primary_device_profile" in add_block
 
 
 def test_settings_add_radio_button_opens_guided_dialog(monkeypatch) -> None:

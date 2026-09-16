@@ -4,6 +4,59 @@ All new entries must follow the authoritative multi-model delivery contract in
 `docs/internal/project_delivery_rules.md` and record the required package/model,
 primary-review, acceptance, and exit-gate evidence.
 
+## 2026-09-16 — Add Radio Step 2 Operating Model assignment
+
+Status: implementation and code-level automated acceptance complete. Native
+operator confirmation remains external qualification; this correction was
+reviewed and validated from the named `Settings > Radios > Add Radio` code path
+without relying on screenshots or an application launch.
+
+The reported defect was present in code. Step 2 was explicitly applicable only
+to an observer/SDR, its selector was disabled, and a conventional transceiver's
+guided-save path discarded any staged Operating Model. Only the first
+transceiver sometimes received an implicit default later during primary-radio
+activation; subsequent transceivers could remain unassigned. Editing an
+observer also defaulted its disabled selector instead of reliably preserving a
+custom receive-only assignment.
+
+Step 2 is now applicable and selectable for both transceivers and observers.
+Transceivers see all enabled models; observers see only enabled receive-only
+models. The current assignment is preselected during edit, the Review card names
+the selected model, and Save requires a real persisted model ID. A fresh blank
+station idempotently creates only the protected default and receive-only model
+rows before presenting Step 2; this does not create a radio, assignment, or
+runtime-primary projection.
+
+Guided creation now uses a safety-ordered two-phase sequence supported by the
+existing persistence APIs: save the radio inactive, assign the reviewed model,
+then activate a first transceiver or first/only observer. Assignment failure
+leaves the saved radio inactive and recoverable. Changing the draft between
+observer and transceiver roles selects that role's preferred model instead of
+carrying an observer receive-only choice silently into a transmit-capable draft.
+
+Work packages and models: `gpt-5` primary/high reasoning owned interpretation,
+architecture, persistence ordering, core helper, delegated-diff review,
+integration corrections, specifications, and the final exit gate.
+`gpt-5.6-terra` high performed the read-only persistence and compatibility
+audit. `gpt-5.6-luna` medium implemented the bounded Step 2 presentation and
+selection work. `gpt-5.6-terra` medium implemented and repaired focused test
+coverage. Primary review removed synthetic unpersisted model choices, added the
+blank-station built-in-model persistence seam, reset the preferred model across
+role changes, added first-radio assignment-before-activation coverage, and
+updated stale delegated/test-suite API expectations.
+
+Acceptance evidence:
+
+- `QT_QPA_PLATFORM=offscreen ./.venv/bin/python -m pytest -q tests/test_software_admin_radio_first_ui.py -k settings_add_radio_dialog_keeps_guided_steps_available` — 4 passed, 18 deselected; the exact Settings Add Radio action exposes an enabled, visible selector with a persisted model ID for both roles at desktop and constrained sizes.
+- `QT_QPA_PLATFORM=offscreen ./.venv/bin/python -m pytest -q tests/test_sdr_operating_model_core.py tests/test_sdr_receiver_setup_ui.py tests/test_software_admin_radio_first_ui.py` — 46 passed.
+- Delegated stale-contract repair: `./.venv/bin/python -m pytest -q tests/test_sdr_operating_model_assignment_ui.py tests/test_radio_scoped_software_settings_1_2_3.py` — 161 passed.
+- Full guided-radio regression gate: `QT_QPA_PLATFORM=offscreen ./.venv/bin/python -m pytest -q tests/test_sdr_operating_model_core.py tests/test_sdr_operating_model_assignment_ui.py tests/test_compose_observer_safety.py tests/test_sdr_receiver_setup_ui.py tests/test_guided_setup.py tests/test_radio_scoped_software_settings_1_2_3.py tests/test_software_admin_radio_first_ui.py tests/test_settings_software_instance_adapter.py tests/test_js8_expect_runtime.py tests/test_receiver_software_launch.py tests/test_multi_rig_wave1_slice_a.py` — 363 passed.
+
+The implementation exit gate is closed. Native macOS and Linux confirmation of
+the selector and saved assignment remains operator-assisted release evidence;
+no schema migration, hardware operation, or runtime configuration mutation was
+performed by this work session.
+
 ## 2026-09-16 — Guided Add Radio stable seven-step navigator
 
 Status: implementation and focused automated acceptance complete. Exact-script

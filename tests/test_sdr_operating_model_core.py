@@ -9,6 +9,7 @@ import pytest
 from freqinout.core.launch_bundle_store import LaunchBundleStore
 from freqinout.core.multi_radio_store import (
     CURRENT_MULTI_RIG_MIGRATION_VERSION,
+    DEFAULT_OPERATING_SYSTEM_KEY,
     DEFAULT_RECEIVE_ONLY_OPERATING_SYSTEM_KEY,
     MULTI_RIG_MIGRATION_VERSION_KEY,
     MultiRadioStore,
@@ -71,6 +72,20 @@ def test_observer_creation_seeds_assignable_safe_operating_model(monkeypatch, tm
 
     assignment = store.set_device_operating_profile(int(observer["id"]), int(model["id"]))
     assert int(assignment["operating_profile_id"]) == int(model["id"])
+
+
+def test_blank_station_can_prepare_builtin_models_without_creating_a_radio(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+
+    models = store.ensure_builtin_operating_profiles()
+
+    assert {row["system_key"] for row in models} == {
+        DEFAULT_OPERATING_SYSTEM_KEY,
+        DEFAULT_RECEIVE_ONLY_OPERATING_SYSTEM_KEY,
+    }
+    assert store.list_device_profiles() == []
 
 
 def test_first_only_observer_can_activate_after_assignment_but_never_becomes_primary(monkeypatch, tmp_path) -> None:

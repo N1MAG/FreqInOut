@@ -24603,48 +24603,170 @@ class SettingsTab(QWidget):
 
         operating_model_group, operating_model_form = _make_section(
             "Operating Model",
-            "Observer / SDR radios use a receive-only model. It never enables transmit, QSY, or scheduling controls.",
+            "Choose the shared Operating Model this radio should use after it is saved.",
         )
-        observer_operating_model_combo = QComboBox()
-        observer_operating_model_combo.setObjectName("guidedObserverOperatingModel")
-        receive_only_models = [
+        operating_model_combo = QComboBox()
+        operating_model_combo.setObjectName("guidedOperatingModel")
+        operating_model_combo.setAccessibleName("Operating Model for this radio")
+        operating_model_inventory = [
             dict(row)
             for row in (getattr(self, "operating_profiles", ()) or ())
             if isinstance(row, Mapping)
-            and int(row.get("enabled", 1) or 0) == 1
-            and int(row.get("receive_only", 0) or 0) == 1
         ]
-        for row in receive_only_models:
-            observer_operating_model_combo.addItem(
-                str(row.get("name", "Receive-only SDR") or "Receive-only SDR"),
-                int(row.get("id", 0) or 0),
+        if not operating_model_inventory:
+            try:
+                ensure_models = getattr(self.multi_radio_store, "ensure_builtin_operating_profiles", None)
+                if callable(ensure_models):
+                    ensure_models()
+                operating_model_inventory = [
+                    dict(row)
+                    for row in self.multi_radio_store.list_operating_profiles()
+                    if isinstance(row, Mapping)
+                ]
+            except Exception:
+                log.exception("Failed loading Operating Models for Guided Add Radio.")
+                operating_model_inventory = []
+        existing_operating_profile_id = 0
+        existing_radio_id = int((existing or {}).get("id", 0) or 0)
+        if existing_radio_id > 0:
+            existing_assignment = next(
+                (
+                    row
+                    for row in (getattr(self, "device_assignments", ()) or ())
+                    if isinstance(row, Mapping)
+                    and int(row.get("device_profile_id", 0) or 0) == existing_radio_id
+                ),
+                None,
             )
-        preferred_model_idx = next(
-            (
-                idx
-                for idx, row in enumerate(receive_only_models)
-                if str(row.get("system_key", "") or "").strip().lower() == "receive_only_sdr"
-            ),
-            0,
-        )
-        if observer_operating_model_combo.count() > 0:
-            observer_operating_model_combo.setCurrentIndex(preferred_model_idx)
-        observer_operating_model_combo.setEnabled(False)
-        observer_operating_model_combo.setToolTip(
-            "The built-in receive-only model is selected automatically for an SDR and cannot be changed to a transmit model."
+            if isinstance(existing_assignment, Mapping):
+                existing_operating_profile_id = int(existing_assignment.get("operating_profile_id", 0) or 0)
+            if existing_operating_profile_id <= 0:
+                try:
+                    existing_assignment = self.multi_radio_store.get_effective_assignment_for_device(
+                        existing_radio_id
+                    )
+                except Exception:
+                    log.exception("Failed loading the radio's existing Operating Model assignment.")
+                    existing_assignment = None
+                if isinstance(existing_assignment, Mapping):
+                    existing_operating_profile_id = int(
+                        existing_assignment.get("operating_profile_id", 0) or 0
+                    )
+        operating_model_combo.setToolTip(
+            "Choose from the same enabled Operating Models used by Settings > Radios > Operating Model Assignment."
         )
         _add_form_row(
             operating_model_form,
             "Assigned Model:",
-            observer_operating_model_combo,
-            "FIO assigns this model before the receiver can be activated.",
+            operating_model_combo,
+            "FIO assigns this shared model after the radio profile is saved.",
         )
-        observer_model_capabilities = QLabel(
-            "Receive and import only · no Compose or Expect sending · no QSY/PTT · no scheduler control"
-        )
-        observer_model_capabilities.setObjectName("guidedObserverOperatingModelCapabilities")
-        observer_model_capabilities.setWordWrap(True)
-        _add_full_width_row(operating_model_form, observer_model_capabilities)
+        operating_model_capabilities = QLabel()
+        operating_model_capabilities.setObjectName("guidedOperatingModelCapabilities")
+        operating_model_capabilities.setWordWrap(True)
+        _add_full_width_row(operating_model_form, operating_model_capabilities)
+
+        def _guided_operating_model_rows() -> List[Dict[str, Any]]:
+            device_stub = {
+                "device_class": str(device_class_combo.currentData() or "tx_rx").strip().lower() or "tx_rx"
+            }
+            return self._assignment_profiles_for_devices(operating_model_inventory, [device_stub])
+
+        def _selected_guided_operating_model() -> Optional[Dict[str, Any]]:
+            try:
+                selected_id = int(operating_model_combo.currentData() or 0)
+            except (TypeError, ValueError):
+                selected_id = 0
+            selected_system_key = str(
+                operating_model_combo.currentData(Qt.UserRole + 1) or ""
+            ).strip()
+            return next(
+                (
+                    dict(row)
+                    for row in operating_model_inventory
+                    if (
+                        selected_id > 0
+                        and int(row.get("id", 0) or 0) == selected_id
+                    )
+                    or (
+                        selected_id <= 0
+                        and selected_system_key
+                        and str(row.get("system_key", "") or "").strip() == selected_system_key
+                    )
+                ),
+                None,
+            )
+
+        def _selected_guided_operating_model_id() -> int:
+            selected = _selected_guided_operating_model()
+            return int(selected.get("id", 0) or 0) if selected else 0
+
+        def _refresh_guided_operating_model_summary() -> None:
+            selected = _selected_guided_operating_model()
+            observer_mode = str(device_class_combo.currentData() or "").strip().lower() == "observer"
+            if selected is None:
+                operating_model_capabilities.setText(
+                    "No compatible enabled Operating Model is available. Restore or create one in Settings > Main."
+                )
+                return
+            description = str(selected.get("description", "") or "").strip()
+            if observer_mode:
+                safety = "Receive and import only · no Compose or Expect sending · no QSY/PTT · no scheduler control"
+                operating_model_capabilities.setText(f"{description}\n{safety}" if description else safety)
+            else:
+                operating_model_capabilities.setText(
+                    description or "This shared Operating Model becomes active for the radio after Save Radio."
+                )
+
+        def _refresh_guided_operating_model_choices(
+            *,
+            preserve_current: bool = True,
+            preserve_existing: bool = True,
+        ) -> None:
+            current_id = _selected_guided_operating_model_id() if preserve_current else 0
+            observer_mode = str(device_class_combo.currentData() or "").strip().lower() == "observer"
+            candidates = _guided_operating_model_rows()
+            preferred_system_key = "receive_only_sdr" if observer_mode else "default_operating"
+            preferred_id = current_id or (existing_operating_profile_id if preserve_existing else 0)
+            if not any(int(row.get("id", 0) or 0) == preferred_id for row in candidates):
+                preferred_id = int(
+                    next(
+                        (
+                            row.get("id", 0)
+                            for row in candidates
+                            if str(row.get("system_key", "") or "").strip().lower() == preferred_system_key
+                        ),
+                        0,
+                    )
+                    or 0
+                )
+            operating_model_combo.blockSignals(True)
+            operating_model_combo.clear()
+            for row in candidates:
+                label = str(row.get("name", "") or "Operating Model").strip() or "Operating Model"
+                if int(row.get("receive_only", 0) or 0) == 1:
+                    label = f"{label} (receive-only)"
+                operating_model_combo.addItem(label, int(row.get("id", 0) or 0))
+                operating_model_combo.setItemData(
+                    operating_model_combo.count() - 1,
+                    str(row.get("system_key", "") or "").strip(),
+                    Qt.UserRole + 1,
+                )
+            selected_index = operating_model_combo.findData(preferred_id)
+            if selected_index < 0 and operating_model_combo.count() > 0:
+                selected_index = 0
+            if selected_index >= 0:
+                operating_model_combo.setCurrentIndex(selected_index)
+            operating_model_combo.blockSignals(False)
+            operating_model_combo.setEnabled(operating_model_combo.count() > 0)
+            operating_model_combo.setAccessibleName(
+                "Receive-only Operating Model for this SDR"
+                if observer_mode
+                else "Operating Model for this radio"
+            )
+            _refresh_guided_operating_model_summary()
+
+        _refresh_guided_operating_model_choices(preserve_current=False)
 
         js8spotter_launch_edit = QLineEdit(str((existing or {}).get("spotter_launch_path", "") or ""))
         js8spotter_launch_wrap = _make_browse_row(js8spotter_launch_edit, title="Select external JS8Spotter app", mode="folder")
@@ -26657,7 +26779,7 @@ class SettingsTab(QWidget):
             observer_mode = str(device_class_combo.currentData() or "").strip().lower() == "observer"
             return {
                 "radio": True,
-                "model": observer_mode,
+                "model": True,
                 "software": True,
                 "connection": _guided_connection_step_visible(),
                 "guard": not observer_mode,
@@ -26732,6 +26854,8 @@ class SettingsTab(QWidget):
             if guided_wizard_max_index_seen < _guided_wizard_index("review"):
                 return False
             if not str(setup_type_combo.currentData() or "").strip():
+                return False
+            if _selected_guided_operating_model_id() <= 0:
                 return False
             if _detected_app_choice_needs_operator_selection():
                 return False
@@ -27056,6 +27180,10 @@ class SettingsTab(QWidget):
             if conflict_lines:
                 guard_lines.extend(conflict_lines)
             guard_tone = "warning" if conflict_lines or guard_detail else "success"
+            selected_operating_model = _selected_guided_operating_model()
+            selected_operating_model_name = str(
+                (selected_operating_model or {}).get("name", "") or "Not selected"
+            ).strip() or "Not selected"
             review_html = [
                 _review_card_html(
                     "Radio Profile",
@@ -27071,9 +27199,9 @@ class SettingsTab(QWidget):
                     [
                         "Software: " + (", ".join(app_labels) if app_labels else "Monitor only"),
                         f"Frequency Control: {frequency_line}",
+                        f"Operating Model: {selected_operating_model_name}",
                         *(
                             [
-                                "Operating Model: Receive-only SDR (assigned before activation)",
                                 "Safety: no Compose/Expect sending, QSY, PTT, or scheduler authority",
                             ]
                             if str(device_class_combo.currentData() or "").strip().lower() == "observer"
@@ -27179,7 +27307,7 @@ class SettingsTab(QWidget):
             identity_group.setVisible(guided_wizard_step_id == "radio")
             software_group.setVisible(guided_wizard_step_id == "software")
             connection_group.setVisible(guided_wizard_step_id == "connection")
-            operating_model_group.setVisible(observer_mode and guided_wizard_step_id == "model")
+            operating_model_group.setVisible(guided_wizard_step_id == "model")
             rf_guard_tone, _rf_guard_title, _rf_guard_detail = _guided_schedule_assignment_warning_summary()
             rf_guard_needs_review = bool(rf_guard_tone)
             rf_guard_visible = (not observer_mode) and (
@@ -27202,7 +27330,11 @@ class SettingsTab(QWidget):
                 _update_dialog_readiness()
 
             guided_wizard_detail_label.setText(
-                "Confirm the immutable receive-only model and its safety boundaries."
+                (
+                    "Choose the receive-only Operating Model and confirm its safety boundaries."
+                    if observer_mode
+                    else "Choose the shared Operating Model this radio should use after it is saved."
+                )
                 if guided_wizard_step_id == "model"
                 else wizard_view.detail
             )
@@ -27624,13 +27756,29 @@ class SettingsTab(QWidget):
                 )
             _mark_custom_mix_from_software_edit()
 
+        def _on_guided_device_class_changed(_index: int) -> None:
+            # A role change is a compatibility boundary. Re-select that role's
+            # preferred model instead of carrying an observer's receive-only
+            # choice into a newly transmit-capable draft (or vice versa).
+            _refresh_guided_operating_model_choices(
+                preserve_current=False,
+                preserve_existing=False,
+            )
+            _update_dialog_visibility()
+
+        def _on_guided_operating_model_changed(_index: int) -> None:
+            _refresh_guided_operating_model_summary()
+            _update_guided_save_review()
+            _update_dialog_readiness()
+
         setup_type_combo.currentIndexChanged.connect(lambda _index: _apply_setup_type_choice())
         for step_id, btn in guided_wizard_buttons.items():
             btn.clicked.connect(lambda _checked=False, sid=step_id: _set_guided_wizard_step(sid))
         guided_wizard_back_btn.clicked.connect(lambda _checked=False: _move_guided_wizard(-1))
         guided_wizard_next_btn.clicked.connect(lambda _checked=False: _move_guided_wizard(1))
         backend_combo.currentIndexChanged.connect(_update_dialog_visibility)
-        device_class_combo.currentIndexChanged.connect(_update_dialog_visibility)
+        device_class_combo.currentIndexChanged.connect(_on_guided_device_class_changed)
+        operating_model_combo.currentIndexChanged.connect(_on_guided_operating_model_changed)
         use_flrig_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
         use_fldigi_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
         use_flmsg_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
@@ -27845,7 +27993,6 @@ class SettingsTab(QWidget):
         use_commstat_chk.stateChanged.connect(lambda _state: _update_dialog_readiness())
         use_varac_chk.stateChanged.connect(lambda _state: _update_dialog_readiness())
         backend_combo.currentIndexChanged.connect(lambda _idx: _update_dialog_readiness())
-        device_class_combo.currentIndexChanged.connect(lambda _idx: _update_dialog_readiness())
         deploy_combo.currentIndexChanged.connect(lambda _idx: _update_dialog_readiness())
 
         body_layout.addStretch(1)
@@ -27868,6 +28015,11 @@ class SettingsTab(QWidget):
                     guided_wizard_detail_label.setText(
                         "Choose the highlighted detected app or profile, then continue to Review before saving."
                     )
+                elif _selected_guided_operating_model_id() <= 0:
+                    _set_guided_wizard_step("model")
+                    guided_wizard_detail_label.setText(
+                        "Choose a compatible enabled Operating Model before saving this radio."
+                    )
                 else:
                     _set_guided_wizard_step("review")
                     guided_wizard_detail_label.setText("Review the guided setup before saving this radio.")
@@ -27885,14 +28037,10 @@ class SettingsTab(QWidget):
             payload["id"] = (existing or {}).get("id")
             payload["name"] = name
             out.update(normalize_guided_radio_profile_payload(payload))
+            operating_profile_id = _selected_guided_operating_model_id()
+            if operating_profile_id > 0:
+                out["guided_operating_profile_id"] = operating_profile_id
             if str(device_class_combo.currentData() or "").strip().lower() == "observer":
-                try:
-                    operating_profile_id = int(observer_operating_model_combo.currentData() or 0)
-                except (TypeError, ValueError):
-                    operating_profile_id = 0
-                if operating_profile_id > 0:
-                    out["guided_operating_profile_id"] = operating_profile_id
-
                 existing_js8_id = int((existing or {}).get("js8_instance_id", 0) or 0)
                 if use_js8call_chk.isChecked() and existing_js8_id <= 0:
                     js8_host = js8_host_edit.text().strip() or "127.0.0.1"
@@ -28015,7 +28163,13 @@ class SettingsTab(QWidget):
         self._refresh_contextual_autofill_buttons()
         self._refresh_running_status_compat(force=True)
 
-    def _persist_device_profile(self, values: Dict[str, Any], *, existing: Optional[Dict[str, Any]] = None) -> bool:
+    def _persist_device_profile(
+        self,
+        values: Dict[str, Any],
+        *,
+        existing: Optional[Dict[str, Any]] = None,
+        defer_activation_until_assignment: bool = False,
+    ) -> bool:
         self._last_persisted_device_profile = None
         is_active_edit = bool(existing and int(existing.get("runtime_active", 0) or 0) == 1)
         is_primary_edit = bool(existing and int(existing.get("runtime_primary", 0) or 0) == 1)
@@ -28142,13 +28296,14 @@ class SettingsTab(QWidget):
 
             first_radio = not bool(self.multi_radio_store.list_device_profiles())
             observer_profile = str(payload.get("device_class", "") or "").strip().lower() == "observer"
-            if first_radio and not observer_profile:
+            if first_radio and not observer_profile and not defer_activation_until_assignment:
                 payload["runtime_active"] = 1
                 payload["runtime_primary"] = 1
-            elif observer_profile:
-                # A receive-only radio must acquire its safe model before it
-                # can become active and can never be the compatibility
-                # primary, including on an otherwise blank installation.
+            elif observer_profile or (first_radio and defer_activation_until_assignment):
+                # Guided creation assigns the reviewed Operating Model before
+                # activating a new radio.  Observers can never be the
+                # compatibility primary; a first transceiver becomes primary
+                # only after its selected model has been assigned.
                 payload["runtime_active"] = 0
                 payload["runtime_primary"] = 0
             saved = self.multi_radio_store.save_device_profile(payload)
@@ -28185,7 +28340,11 @@ class SettingsTab(QWidget):
                 )
                 return False
 
-        if (first_radio and not observer_profile) or is_primary_edit or int(saved.get("runtime_primary", 0) or 0) == 1:
+        if (
+            (first_radio and not observer_profile and not defer_activation_until_assignment)
+            or is_primary_edit
+            or int(saved.get("runtime_primary", 0) or 0) == 1
+        ):
             try:
                 self.multi_radio_store.sync_runtime_active_device_to_legacy_settings_if_single_active(
                     int(saved.get("id", 0) or 0)
@@ -28297,6 +28456,52 @@ class SettingsTab(QWidget):
             log.debug("Failed opening Plan Builder after guided radio setup.", exc_info=True)
         return False
 
+    def _assign_guided_operating_profile_after_save(
+        self,
+        device_profile: Mapping[str, Any],
+        operating_profile_id: int,
+    ) -> bool:
+        """Assign the model reviewed in Add/Edit Radio before activation."""
+
+        radio_id = int(device_profile.get("id", 0) or 0)
+        if radio_id <= 0:
+            return False
+        observer_mode = str(device_profile.get("device_class", "") or "").strip().lower() == "observer"
+        try:
+            model_id = int(operating_profile_id or 0)
+            if model_id <= 0 and observer_mode:
+                model = self.multi_radio_store.ensure_receive_only_operating_profile()
+                model_id = int(model.get("id", 0) or 0)
+            if model_id <= 0:
+                raise ValueError("Select an enabled Operating Model before saving this radio.")
+            self.multi_radio_store.set_device_operating_profile(
+                radio_id,
+                model_id,
+                assignment_state="active",
+                reason="Operating Model selected during guided radio setup.",
+                created_by="guided_radio_setup",
+            )
+        except (ValueError, KeyError) as exc:
+            QMessageBox.warning(
+                self,
+                "Operating Model Assignment",
+                "The radio profile was saved, but its selected Operating Model could not be assigned. "
+                f"Its runtime state was not changed. Open Operating Model Assignment to retry. {exc}",
+            )
+            self._refresh_multi_radio_tables()
+            return False
+        except Exception:
+            log.exception("Failed assigning the guided Operating Model.")
+            QMessageBox.warning(
+                self,
+                "Operating Model Assignment",
+                "The radio profile was saved, but its selected Operating Model could not be assigned. "
+                "Its runtime state was not changed; open Operating Model Assignment to retry.",
+            )
+            self._refresh_multi_radio_tables()
+            return False
+        return True
+
     def _finalize_guided_observer_profile(
         self,
         device_profile: Mapping[str, Any],
@@ -28305,35 +28510,15 @@ class SettingsTab(QWidget):
         js8_draft: Optional[Mapping[str, Any]] = None,
         activate_after_assignment: bool = False,
     ) -> bool:
-        """Assign the RX model, then adopt an optional distinct JS8 instance."""
+        """Assign the reviewed RX model, then adopt an optional distinct JS8 instance."""
 
         radio_id = int(device_profile.get("id", 0) or 0)
         if radio_id <= 0:
             return False
-        try:
-            model_id = int(operating_profile_id or 0)
-            if model_id <= 0:
-                model = self.multi_radio_store.ensure_receive_only_operating_profile()
-                model_id = int(model.get("id", 0) or 0)
-            self.multi_radio_store.set_device_operating_profile(radio_id, model_id)
-        except (ValueError, KeyError) as exc:
-            QMessageBox.warning(
-                self,
-                "Receiver Operating Model",
-                "The receiver profile was saved, but its receive-only operating model could not be assigned. "
-                f"It remains inactive. {exc}",
-            )
-            self._refresh_multi_radio_tables()
-            return False
-        except Exception:
-            log.exception("Failed assigning the guided receive-only operating model.")
-            QMessageBox.warning(
-                self,
-                "Receiver Operating Model",
-                "The receiver profile was saved, but its receive-only operating model could not be assigned. "
-                "It remains inactive; open Operating Model Assignment to retry.",
-            )
-            self._refresh_multi_radio_tables()
+        if not self._assign_guided_operating_profile_after_save(
+            device_profile,
+            operating_profile_id,
+        ):
             return False
 
         if js8_draft:
@@ -28451,7 +28636,10 @@ class SettingsTab(QWidget):
         open_plan_manager = bool(created.pop("guided_open_plan_manager_after_save", False))
         schedule_choice = str(created.pop("guided_schedule_choice", "") or "").strip()
         blank_before_save = not bool(self.multi_radio_store.list_device_profiles())
-        if not self._persist_device_profile(created):
+        if not self._persist_device_profile(
+            created,
+            defer_activation_until_assignment=True,
+        ):
             return
         saved = getattr(self, "_last_persisted_device_profile", None) or {}
         if str(saved.get("device_class", "") or "").strip().lower() == "observer":
@@ -28466,6 +28654,29 @@ class SettingsTab(QWidget):
                 activate_after_assignment=blank_before_save,
             )
             return
+        if not self._assign_guided_operating_profile_after_save(
+            saved,
+            guided_operating_profile_id,
+        ):
+            return
+        if blank_before_save:
+            try:
+                active = self.multi_radio_store.set_runtime_primary_device_profile(
+                    int(saved.get("id", 0) or 0)
+                )
+                self._last_persisted_device_profile = dict(active)
+                saved = dict(active)
+                self._refresh_runtime_projection_ui(refresh_multi_radio=True)
+            except Exception:
+                log.exception("Failed activating the first guided transceiver after model assignment.")
+                QMessageBox.warning(
+                    self,
+                    "Radio Activation",
+                    "The radio and its selected Operating Model were saved, but FIO could not make it the active default radio. "
+                    "Use Radio Settings > Use Radio to retry.",
+                )
+                self._refresh_multi_radio_tables()
+                return
         if guided_plan_id > 0:
             self._assign_guided_frequency_plan_after_profile_save(int(saved.get("id", 0) or 0), guided_plan_id)
         elif open_plan_manager:
@@ -28508,6 +28719,11 @@ class SettingsTab(QWidget):
                     else None
                 ),
             )
+            return
+        if not self._assign_guided_operating_profile_after_save(
+            saved,
+            guided_operating_profile_id,
+        ):
             return
         if guided_plan_id > 0:
             self._assign_guided_frequency_plan_after_profile_save(int(saved.get("id", 0) or 0), guided_plan_id)

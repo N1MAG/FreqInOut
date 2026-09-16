@@ -6299,6 +6299,26 @@ class MultiRadioStore:
             rows = conn.execute("SELECT * FROM operating_profiles ORDER BY id ASC").fetchall()
             return [dict(row) for row in rows]
 
+    def ensure_builtin_operating_profiles(self) -> List[Dict[str, Any]]:
+        """Ensure Add Radio can select persisted default and receive-only models.
+
+        A fresh multi-rig blank slate intentionally has no radio, but its guided
+        setup still needs real Operating Model rows before the first radio is
+        reviewed. This helper creates only the protected built-in models; it
+        does not create a radio, assignment, or runtime-primary projection.
+        """
+
+        with self._connect() as conn:
+            operating = _record_by_system_key(conn, "operating_profiles", DEFAULT_OPERATING_SYSTEM_KEY)
+            if not operating:
+                operating = _save_operating_profile_conn(
+                    conn,
+                    _seed_operating_defaults(_load_kv_settings(conn)),
+                )
+            receiver = _ensure_receive_only_operating_profile_conn(conn, commit=False)
+            conn.commit()
+            return [dict(operating), dict(receiver)]
+
     def get_operating_profile(self, operating_profile_id: int) -> Optional[Dict[str, Any]]:
         with self._connect() as conn:
             return _record_by_id(conn, "operating_profiles", int(operating_profile_id))

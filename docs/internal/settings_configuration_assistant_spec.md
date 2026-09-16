@@ -280,11 +280,16 @@ disabled, and explicitly identified by its tooltip/accessibility description as
 not required for the current setup. Back, Next, direct-step eligibility, and
 save gating traverse only applicable steps. In particular, a receive-only SDR
 uses Operating Model and Connection while RF Guard and Schedule remain visible
-as not applicable; a conventional radio keeps Operating Model visible as a
-separate post-save assignment and keeps Connection visible even before a
-software/control choice makes endpoint fields necessary. Every step control
-uses a font-derived height and the complete strip wraps without clipping at the
-supported compact size.
+as not applicable; a conventional radio also uses Operating Model and keeps
+Connection visible even before a software/control choice makes endpoint fields
+necessary. Step 2 presents enabled shared models for a conventional radio and
+only enabled receive-only models for an observer/SDR. Editing a radio preselects
+its current assignment. Saving requires a real persisted selection, saves a new
+radio inactive, assigns that selected model, and only then activates a first
+transceiver or first/only observer. An assignment failure leaves the new radio
+inactive and recoverable rather than silently applying a default. Every step
+control uses a font-derived height and the complete strip wraps without clipping
+at the supported compact size.
 
 The embedded instance assistant must visibly present its complete guided path:
 `Purpose -> Find or create -> Identity -> Connections -> Files -> Launch ->
