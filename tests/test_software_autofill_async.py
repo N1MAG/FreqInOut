@@ -13,6 +13,9 @@ import pytest
 pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QApplication, QLineEdit
 
+from freqinout.core.guided_radio_software_model import RadioRole, SoftwareFamily
+from freqinout.core.guided_software_discovery import DiscoveryRequest
+from freqinout.core.guided_software_proposals import DiscoveryEvidence, DiscoverySnapshot
 from freqinout.core.software_path_detector import PathDetectionResult
 from freqinout.gui import settings_tab as settings_module
 from freqinout.gui.settings_tab import SettingsTab, _SoftwareAutofillWorker
@@ -33,23 +36,52 @@ def _result(key: str, path: str = "/tmp/example") -> PathDetectionResult:
     )
 
 
-def test_worker_uses_captured_mapping_and_never_settings_manager(monkeypatch) -> None:
+def test_worker_uses_immutable_coordinator_request_and_never_settings_manager() -> None:
     captured = []
 
-    class Detector:
-        def __init__(self, values):
-            captured.append(values)
+    class Coordinator:
+        def discover(self, request, *, cancel_probe):
+            captured.append((request, cancel_probe()))
+            return DiscoverySnapshot(
+                "settings-fast-light",
+                request.generation,
+                evidence=(
+                    DiscoveryEvidence(
+                        "path-flrig",
+                        "fast_light-scan",
+                        "FLRig path",
+                        {
+                            "record_type": "path_detection",
+                            "result_key": "path_flrig",
+                            "label": "path_flrig",
+                            "path": "/tmp/example",
+                            "confidence": "high",
+                            "reason": "test",
+                            "exists": "true",
+                            "target_type": "file",
+                        },
+                    ),
+                ),
+            )
 
-        def detect_fast_light(self):
-            return {"path_flrig": _result("path_flrig")}
+        def cancel(self, _session_key, _generation):
+            return None
 
-    monkeypatch.setattr(settings_module, "SoftwarePathDetector", Detector)
-    worker = _SoftwareAutofillWorker(4, "fast_light", {"radio_apps_base_folder": "/apps"})
+    request = DiscoveryRequest(
+        "settings-test",
+        "settings-fast-light",
+        4,
+        4,
+        RadioRole.TRANSCEIVER,
+        (SoftwareFamily.FAST_LIGHT,),
+        {"radio_apps_base_folder": "/apps"},
+    )
+    worker = _SoftwareAutofillWorker(Coordinator(), request, "fast_light")
     emitted = []
     worker.finished.connect(lambda generation, section, results: emitted.append((generation, section, results)))
     worker.run()
 
-    assert captured == [{"radio_apps_base_folder": "/apps"}]
+    assert captured == [(request, False)]
     assert emitted[0][0:2] == (4, "fast_light")
     assert emitted[0][2]["path_flrig"].path == "/tmp/example"
 
@@ -161,6 +193,12 @@ def test_repeated_request_coalesces_to_latest_and_cancels_active(monkeypatch) ->
     host._software_autofill_thread = Thread()
     host._software_autofill_worker = Worker()
     host._software_autofill_pending_request = None
+    host.device_profiles = []
+    host._software_autofill_session_key = "settings-test"
+
+    class Coordinator:
+        def register_request(self, _request): return True
+    host._guided_software_discovery = Coordinator()
 
     host._request_software_autofill(
         "js8", ("path_js8call",), target="software",

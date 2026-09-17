@@ -10,6 +10,9 @@ authority for Settings software workflows. It refines Phases 2 and 3 without
 moving operational FIO Spotter or BBS administration back under radio Settings.
 The guided multi-instance lifecycle, manifest, collision, launch, and Cluster
 VarAC contract is defined in `multi_instance_software_administration_spec.md`.
+The unified radio-first workflow, including observer Fast Light, Receiver Guard,
+Receive Schedule, native-writer qualification, and Add Radio handoff into this
+workspace, is defined by `guided_radio_software_configuration_spec.md`.
 
 ## Goal
 

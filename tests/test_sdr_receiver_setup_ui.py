@@ -79,11 +79,12 @@ def test_observer_guided_flow_orders_model_first_and_stages_distinct_js8(monkeyp
         guard_step = dialog.findChild(QPushButton, "guidedWizardStep_guard")
         schedule_step = dialog.findChild(QPushButton, "guidedWizardStep_schedule")
         assert guard_step is not None and schedule_step is not None
-        assert guard_step.text() == "5. RF Guard · N/A"
-        assert schedule_step.text() == "6. Schedule · N/A"
-        assert not guard_step.isEnabled() and not schedule_step.isEnabled()
-        assert guard_step.property("guidedStepApplicable") is False
-        assert "receive-only observer" in guard_step.toolTip()
+        assert guard_step.text() == "5. Safety"
+        assert schedule_step.text() == "6. Schedule"
+        assert guard_step.property("guidedStepApplicable") is True
+        assert schedule_step.property("guidedStepApplicable") is True
+        assert "receiver guard" in guard_step.toolTip().lower()
+        assert "receive schedule" in schedule_step.toolTip().lower()
 
         js8_choice = next(
             checkbox
@@ -113,10 +114,13 @@ def test_observer_guided_flow_orders_model_first_and_stages_distinct_js8(monkeyp
         assert launch is not None and not launch.isHidden()
         launch.setChecked(True)
 
-        review = dialog.findChild(QPushButton, "guidedWizardStep_review")
-        assert review is not None
-        review.click()
-        QApplication.processEvents()
+        # Receiver Guard and Receive Schedule are real, stable steps for an
+        # observer; walk them before Review & Save instead of skipping them.
+        for step_id in ("guard", "schedule", "review"):
+            step = dialog.findChild(QPushButton, f"guidedWizardStep_{step_id}")
+            assert step is not None and step.isEnabled()
+            step.click()
+            QApplication.processEvents()
         review_label = dialog.findChild(QLabel, "guidedSaveReview")
         assert review_label is not None
         assert "Operating Model: Receive-only SDR" in review_label.text()

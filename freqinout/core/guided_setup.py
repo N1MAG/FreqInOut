@@ -6,7 +6,11 @@ from pathlib import Path
 from typing import Mapping, Sequence, Tuple
 
 from freqinout.core.config_autodiscovery import APP_DISPLAY_NAMES, RadioInstanceProposal
-from freqinout.core.guided_app_config_plan import GuidedAppConfigPlan, build_guided_external_app_config_plan
+from freqinout.core.guided_app_config_plan import (
+    GuidedAppConfigPlan,
+    build_guided_external_app_config_plan,
+    qualified_native_writer_for_action,
+)
 
 GUIDED_SETUP_APP_IDS: Tuple[str, ...] = (
     "flrig",
@@ -528,11 +532,12 @@ def guided_setup_field_visibility(
 
 ADD_RADIO_WIZARD_STEPS: Tuple[Tuple[str, str], ...] = (
     ("radio", "Radio"),
+    ("model", "Operating Model"),
     ("software", "Software"),
-    ("connection", "Connection"),
-    ("guard", "RF Guard"),
+    ("connection", "Connections"),
+    ("guard", "Safety"),
     ("schedule", "Schedule"),
-    ("review", "Review"),
+    ("review", "Review & Save"),
 )
 
 
@@ -541,38 +546,55 @@ def guided_setup_wizard_view(
     *,
     connection_visible: bool = True,
     software_visible: bool = True,
+    radio_role: str = "transceiver",
 ) -> GuidedSetupWizardView:
-    """Return UI-ready state for the Add Radio guided setup wizard."""
+    """Return stable UI-ready state for the Add Radio guided setup wizard.
+
+    ``connection_visible`` and ``software_visible`` remain accepted for older
+    callers, but no longer remove or renumber a step.  A step with no active
+    family content explains that it is not used for the current draft.
+    """
 
     requested = str(current_step_id or "").strip().lower()
-    visible_steps = tuple(
-        item
-        for item in ADD_RADIO_WIZARD_STEPS
-        if (bool(connection_visible) or item[0] != "connection")
-        and (bool(software_visible) or item[0] != "software")
-    )
+    visible_steps = ADD_RADIO_WIZARD_STEPS
     step_ids = [step_id for step_id, _label in visible_steps]
     if requested not in step_ids:
-        if requested in {"software", "connection"}:
-            requested = "connection" if "connection" in step_ids else "guard"
-        if requested not in step_ids:
-            requested = "radio"
+        requested = "radio"
     current_index = step_ids.index(requested)
     previous_label = visible_steps[current_index - 1][1] if current_index > 0 else ""
     next_label = visible_steps[current_index + 1][1] if current_index < len(visible_steps) - 1 else ""
+    role_key = str(radio_role or "").strip().casefold()
+    observer_mode = role_key in {"observer", "receive_only", "receive-only", "sdr"}
+    software_detail = (
+        "Choose the receive-only software set and configure each selected instance responsibility."
+        if observer_mode
+        else "Choose the software set and configure each selected instance responsibility."
+    )
+    connection_detail = (
+        "Review receiver control and receive/decode companion connections separately."
+        if observer_mode
+        else "Review the connections owned by each selected software component."
+    )
+    guard_detail = (
+        "Configure Receiver Guard resources without granting PTT or transmit authority."
+        if observer_mode
+        else "Confirm RF Guard supported bands and shared resources before assigning a Radio Schedule."
+    )
+    schedule_detail = (
+        "Choose a Receive Schedule for verified retuning or reminder-only operation."
+        if observer_mode
+        else "Choose the Radio Schedule after RF Guard details are known."
+    )
     detail_by_step = {
         "radio": "Choose the radio model, name, role, and setup type.",
-        "software": "Choose the software stack and let FIO fill blank paths and ports where it can.",
-        "connection": "Review only the connection fields that apply to this radio.",
-        "guard": "Confirm supported bands and shared RF paths before assigning a Frequency Plan.",
-        "schedule": "Choose the Frequency Plan after antenna and RF Guard details are known.",
-        "review": "Review the radio profile and app configuration actions before saving.",
+        "model": "Choose or create a compatible Operating Model for this radio role.",
+        "software": software_detail,
+        "connection": connection_detail,
+        "guard": guard_detail,
+        "schedule": schedule_detail,
+        "review": "Review the complete radio, software, launch, safety, and schedule plan before saving.",
     }
     visible_sections = (requested,)
-    if requested == "review":
-        visible_sections = ("review",)
-    elif requested == "connection" and not bool(connection_visible):
-        visible_sections = tuple()
     return GuidedSetupWizardView(
         current_step_id=requested,
         current_index=current_index,
@@ -712,6 +734,14 @@ def guided_app_config_review_lines(plan: GuidedAppConfigPlan) -> Tuple[str, ...]
     remember_actions = [action for action in plan.actions if not action.writes_external_config]
     lines: list[str] = []
     if write_actions:
+        qualified_actions = [
+            action for action in write_actions
+            if qualified_native_writer_for_action(action) is not None
+        ]
+        operator_actions = [
+            action for action in write_actions
+            if qualified_native_writer_for_action(action) is None
+        ]
         apps = []
         seen: set[str] = set()
         for action in write_actions:
@@ -722,10 +752,16 @@ def guided_app_config_review_lines(plan: GuidedAppConfigPlan) -> Tuple[str, ...]
         app_text = ", ".join(apps[:4]) if apps else "external apps"
         if len(apps) > 4:
             app_text = f"{app_text}, +{len(apps) - 4} more"
-        lines.append(
-            f"App Configuration: save will remember this radio; managed setup can prepare "
-            f"{len(write_actions)} profile change(s) for {app_text} after backup."
-        )
+        if qualified_actions:
+            lines.append(
+                f"App Configuration: Final Save can apply {len(qualified_actions)} exact qualified profile "
+                f"change(s) after backup and readback; {len(operator_actions)} action(s) remain operator-managed."
+            )
+        else:
+            lines.append(
+                f"App Configuration: Final Save will remember {app_text}; all {len(operator_actions)} native "
+                "profile action(s) require the operator because no exact writer is qualified."
+            )
     elif remember_actions:
         apps = []
         seen = set()

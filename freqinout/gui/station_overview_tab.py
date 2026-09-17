@@ -258,6 +258,9 @@ class StationOverviewTab(QWidget):
                 continue
             label = str(summary.get("label") or "").strip()
             detail = str(summary.get("detail") or "").strip()
+            recovery_action = str(summary.get("recovery_action") or "").strip()
+            if recovery_action and recovery_action not in detail:
+                detail = f"{detail}\nRecovery: {recovery_action}" if detail else f"Recovery: {recovery_action}"
             state_code = str(summary.get("state") or "").strip().lower()
             if label:
                 snapshot.status_summary = label

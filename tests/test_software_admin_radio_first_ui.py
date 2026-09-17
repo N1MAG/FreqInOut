@@ -406,19 +406,13 @@ def test_settings_add_radio_dialog_keeps_guided_steps_available(
         assert seen["operating_model_visible"] is True
         assert seen["operating_model_enabled"] is True
         assert int(seen["operating_model_id"]) > 0
-        # Non-applicable controls remain discoverable in the same seven-step
-        # navigator and communicate their inactive state rather than vanishing.
-        inactive_ids = ("guidedWizardStep_guard", "guidedWizardStep_schedule") if device_class == "observer" else ()
-        for step_id in inactive_ids:
-            button = step_buttons[step_id]
-            assert button.isEnabled() is False or any(
-                marker in button.text().lower() for marker in ("n/a", "not applicable", "not used")
-            )
         if device_class == "observer":
             assert "N/A" not in step_buttons["guidedWizardStep_model"].text()
             assert "N/A" not in step_buttons["guidedWizardStep_connection"].text()
-            assert "N/A" in step_buttons["guidedWizardStep_guard"].text()
-            assert "N/A" in step_buttons["guidedWizardStep_schedule"].text()
+            assert step_buttons["guidedWizardStep_guard"].text() == "5. Safety"
+            assert step_buttons["guidedWizardStep_schedule"].text() == "6. Schedule"
+            assert step_buttons["guidedWizardStep_guard"].property("guidedStepApplicable") is True
+            assert step_buttons["guidedWizardStep_schedule"].property("guidedStepApplicable") is True
         else:
             assert "N/A" not in step_buttons["guidedWizardStep_model"].text()
         navigator = step_buttons["guidedWizardStep_radio"].parentWidget()

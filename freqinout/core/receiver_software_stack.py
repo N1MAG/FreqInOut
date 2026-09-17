@@ -34,7 +34,32 @@ RECEIVER_STACK_APPLICATIONS: Mapping[str, Mapping[str, Any]] = {
 # reviewed software-instance adoption flow, which owns its endpoint, profile,
 # storage, and launch identity. The planner still recognizes that resulting
 # launch row when it is explicitly receive-only scoped.
-OBSERVER_LAUNCH_APPLICATIONS = frozenset({*RECEIVER_STACK_APPLICATIONS, "JS8Call"})
+OBSERVER_LAUNCH_APPLICATIONS = frozenset(
+    {
+        *RECEIVER_STACK_APPLICATIONS,
+        "JS8Call",
+        "FLDigi",
+        "FLMsg",
+        "FLAmp",
+    }
+)
+
+_OBSERVER_APPLICATION_EXECUTABLES: Mapping[str, frozenset[str]] = {
+    "SDR++": frozenset({"sdrpp", "sdrpp.exe", "sdr++", "sdr++.exe", "sdr++.app"}),
+    "JS8Call": frozenset(
+        {
+            "js8call",
+            "js8call.exe",
+            "js8call-improved",
+            "js8call-improved.exe",
+            "js8call-subspace",
+            "js8call-subspace.exe",
+        }
+    ),
+    "FLDigi": frozenset({"fldigi", "fldigi.exe", "fldigi.app"}),
+    "FLMsg": frozenset({"flmsg", "flmsg.exe", "flmsg.app"}),
+    "FLAmp": frozenset({"flamp", "flamp.exe", "flamp.app"}),
+}
 
 
 def is_observer_profile(profile: Mapping[str, Any]) -> bool:
@@ -72,8 +97,10 @@ def _validate_receiver_launch_target(name: str, launch_path: str, launch_command
     target = launch_command or launch_path
     if not target:
         return
-    allowed = {"sdrpp", "sdrpp.exe", "sdr++", "sdr++.exe", "sdr++.app"}
-    if name == "SDR++" and not launch_command and _command_basename(launch_path) in allowed:
+    allowed = _OBSERVER_APPLICATION_EXECUTABLES.get(name, frozenset())
+    if not allowed:
+        raise ValueError(f"{name} is not approved for a receive-only SDR launch stack.")
+    if not launch_command and _command_basename(launch_path) in allowed:
         return
     try:
         parts = shlex.split(target, posix=True)
@@ -82,11 +109,11 @@ def _validate_receiver_launch_target(name: str, launch_path: str, launch_command
     if not parts:
         raise ValueError(f"{name} launch target is blank.")
     first = _command_basename(parts[0])
-    if name == "SDR++" and first in allowed:
+    if first in allowed:
         return
-    if name == "SDR++" and first == "open":
+    if first == "open":
         for index, token in enumerate(parts[:-1]):
-            if token == "-a" and _command_basename(parts[index + 1]) in {"sdr++", "sdrpp"}:
+            if token == "-a" and _command_basename(parts[index + 1]) in allowed:
                 return
     raise ValueError(
         f"{name} launch target must start the reviewed {name} application, not another executable."
@@ -182,6 +209,11 @@ def validate_observer_launch_items(items: Iterable[Mapping[str, Any]]) -> None:
                 f"{name} is not approved for a receive-only SDR launch stack. "
                 "Observer profiles cannot launch unreviewed or standard-scoped radio software."
             )
+        _validate_receiver_launch_target(
+            _clean(raw.get("name")),
+            _clean(raw.get("launch_path_override")),
+            _clean(raw.get("launch_command_override")),
+        )
 
 
 __all__ = [

@@ -877,10 +877,8 @@ def test_guided_app_config_review_summarizes_managed_external_writes(tmp_path) -
 
     lines = guided_app_config_review_lines(plan)
 
-    assert lines[0].startswith("App Configuration: save will remember this radio; managed setup can prepare")
-    assert "FLRig" in lines[0]
-    assert "FLDigi" in lines[0]
-    assert "JS8Call" in lines[0]
+    assert lines[0].startswith("App Configuration: Final Save will remember")
+    assert "no exact writer is qualified" in lines[0]
     assert any("VarAC: read/import only" in line for line in lines)
 
 
@@ -1361,19 +1359,19 @@ def test_guided_setup_wizard_view_returns_ui_ready_navigation_state() -> None:
     radio = guided_setup_wizard_view("radio")
     assert radio.current_index == 0
     assert radio.previous_label == ""
-    assert radio.next_label == "Software"
+    assert radio.next_label == "Operating Model"
     assert radio.can_go_back is False
     assert radio.can_go_next is True
     assert radio.visible_sections == ("radio",)
 
     schedule = guided_setup_wizard_view("schedule")
-    assert schedule.previous_label == "RF Guard"
-    assert schedule.next_label == "Review"
+    assert schedule.previous_label == "Safety"
+    assert schedule.next_label == "Review & Save"
     assert schedule.visible_sections == ("schedule",)
     assert "RF Guard" in schedule.detail
 
     guard = guided_setup_wizard_view("guard")
-    assert guard.previous_label == "Connection"
+    assert guard.previous_label == "Connections"
     assert guard.next_label == "Schedule"
     assert guard.visible_sections == ("guard",)
     assert "supported bands" in guard.detail.lower()
@@ -1383,28 +1381,32 @@ def test_guided_setup_wizard_view_returns_ui_ready_navigation_state() -> None:
     assert review.visible_sections == ("review",)
 
 
-def test_guided_setup_wizard_view_handles_hidden_connection_step() -> None:
+def test_guided_setup_wizard_view_keeps_connection_step_stable_when_unused() -> None:
     from freqinout.core.guided_setup import guided_setup_wizard_view
 
     view = guided_setup_wizard_view("connection", connection_visible=False)
 
-    assert view.current_step_id == "guard"
-    assert view.visible_sections == ("guard",)
+    assert view.current_step_id == "connection"
+    assert view.visible_sections == ("connection",)
     assert view.previous_label == "Software"
-    assert view.next_label == "Schedule"
+    assert view.next_label == "Safety"
 
     software = guided_setup_wizard_view("software", connection_visible=False)
-    assert software.next_label == "RF Guard"
-    assert [step_id for step_id, _label in software.steps] == ["radio", "software", "guard", "schedule", "review"]
+    assert software.next_label == "Connections"
+    assert [step_id for step_id, _label in software.steps] == [
+        "radio", "model", "software", "connection", "guard", "schedule", "review"
+    ]
 
 
-def test_guided_setup_wizard_view_skips_empty_software_step_for_receiver() -> None:
+def test_guided_setup_wizard_view_keeps_empty_software_step_for_receiver() -> None:
     from freqinout.core.guided_setup import guided_setup_wizard_view
 
     radio = guided_setup_wizard_view("radio", software_visible=False)
-    assert radio.next_label == "Connection"
+    assert radio.next_label == "Operating Model"
     assert [step_id for step_id, _label in radio.steps] == [
         "radio",
+        "model",
+        "software",
         "connection",
         "guard",
         "schedule",
@@ -1412,8 +1414,21 @@ def test_guided_setup_wizard_view_skips_empty_software_step_for_receiver() -> No
     ]
 
     redirected = guided_setup_wizard_view("software", software_visible=False)
-    assert redirected.current_step_id == "connection"
-    assert redirected.visible_sections == ("connection",)
+    assert redirected.current_step_id == "software"
+    assert redirected.visible_sections == ("software",)
+
+
+def test_guided_setup_wizard_view_uses_receiver_guard_and_schedule_guidance() -> None:
+    from freqinout.core.guided_setup import guided_setup_wizard_view
+
+    guard = guided_setup_wizard_view("guard", radio_role="observer")
+    schedule = guided_setup_wizard_view("schedule", radio_role="observer")
+
+    assert guard.steps == schedule.steps
+    assert "Receiver Guard" in guard.detail
+    assert "PTT" in guard.detail
+    assert "Receive Schedule" in schedule.detail
+    assert "reminder-only" in schedule.detail
 
 
 def test_guided_setup_schedule_decision_is_single_source_for_wizard_copy() -> None:
@@ -1590,7 +1605,7 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert 'schedule_group, schedule_form = _make_section(' in dialog_block
     assert 'connection_status_label.setObjectName("guidedConnectionStatus")' in dialog_block
     assert "No FIO frequency-control endpoint is required for this setup type." in dialog_block
-    assert '"Schedule Assignment"' in dialog_block
+    assert 'schedule_group.setTitle("Receive Schedule" if observer_mode else "Radio Schedule")' in dialog_block
     assert 'schedule_status_label.setObjectName("guidedScheduleAssignmentStatus")' in dialog_block
     assert 'schedule_path_combo.setObjectName("guidedSchedulePathCombo")' in dialog_block
     assert '"Schedule Path:"' in dialog_block
@@ -1608,7 +1623,7 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "self.multi_radio_store.list_frequency_plans()" in dialog_block
     assert "SOURCE_ONLY_FREQUENCY_PLAN_CATEGORIES" in dialog_block
     assert 'save_review_group, save_review_form = _make_section(' in dialog_block
-    assert '"Save Review"' in dialog_block
+    assert '"Review & Save"' in dialog_block
     assert 'save_review_label.setObjectName("guidedSaveReview")' in dialog_block
     assert "def _update_guided_save_review() -> None:" in dialog_block
     assert "VarAC monitor/import: FIO will not control VarAC frequency" in dialog_block
@@ -1633,7 +1648,7 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert 'rf_guard_step_active = guided_wizard_step_id == "guard"' in dialog_block
     assert "guard_fields_visible = bool(visibility.optional_fields or rf_guard_step_active)" in dialog_block
     assert "shared_guard_heading.setVisible(guard_fields_visible)" in dialog_block
-    assert "_set_row_visible(widget, guard_fields_visible)" in dialog_block
+    assert "_set_row_visible(widget, guard_fields_visible and not (observer_mode and transmit_only))" in dialog_block
     assert "optional_toggle.setVisible(False)" in dialog_block
     assert "optional_body.setVisible(rf_guard_visible)" in dialog_block
     assert '"Launch Control is managed after save from the selected radio\'s Settings view."' not in dialog_block
@@ -1648,7 +1663,7 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert '"Radio Profile"' in dialog_block
     assert '"Software and Control"' in dialog_block
     assert '"Endpoints"' in dialog_block
-    assert '"RF Guard and Schedule"' in dialog_block
+    assert '"Receiver Guard and Receive Schedule" if observer_mode else "RF Guard and Radio Schedule"' in dialog_block
     assert '"Files"' in dialog_block
     assert "files_review_lines = [" in dialog_block
     assert "Paths configured: {len(configured_file_lines)}" in dialog_block
@@ -1674,7 +1689,8 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert 'app_config_review_toggle_btn.setObjectName("guidedAppConfigReviewToggle")' in dialog_block
     assert 'app_config_apply_btn.setObjectName("guidedAppConfigApply")' in dialog_block
     assert "def _apply_guided_app_configuration() -> None:" in dialog_block
-    assert "apply_guided_external_app_config_plan(" in dialog_block
+    assert "apply_guided_external_app_config_plan(" not in dialog_block
+    assert "Preview only — no folders, profiles, or external application files were changed." in dialog_block
     assert "app_config_apply_btn.clicked.connect(_apply_guided_app_configuration)" in dialog_block
     assert "def _toggle_guided_app_config_review_details() -> None:" in dialog_block
     assert "def _set_app_config_review_card(" in dialog_block
@@ -1682,8 +1698,9 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "app_config_plan = _current_guided_app_config_plan()" in dialog_block
     assert "app_config_lines = guided_app_config_review_lines(app_config_plan)" in dialog_block
     assert "app_config_summary" in dialog_block
-    assert "Save Radio will not change external app files." in dialog_block
-    assert "Save Radio will only update the FIO radio profile." in dialog_block
+    assert "Final Save applies only exact qualified native writers off the UI thread" in dialog_block
+    assert "Unsupported application/version combinations remain an explicit operator action." in dialog_block
+    assert "Final Save updates the reviewed FIO radio and software identity" in dialog_block
     assert "Monitor/import only. FIO will not offer scheduler or QSY controls." in dialog_block
     assert "Manual/external control. FIO will not tune this radio until a control endpoint is selected." in dialog_block
     assert "controls scheduler and QSY actions." in dialog_block
@@ -1709,13 +1726,11 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "def _guided_wizard_step_applicability() -> Dict[str, bool]:" in dialog_block
     assert 'btn.setProperty("guidedStepApplicable", applicable)' in dialog_block
     assert "btn.setVisible(True)" in dialog_block
-    assert 'else f"{display_index}. {label} · N/A"' in dialog_block
+    assert 'btn.setText(f"{display_index}. {display_label}")' in dialog_block
     assert 'identity_group.setVisible(guided_wizard_step_id == "radio")' in dialog_block
     assert 'software_group.setVisible(guided_wizard_step_id == "software")' in dialog_block
     assert 'connection_group.setVisible(guided_wizard_step_id == "connection")' in dialog_block
-    assert 'schedule_group.setVisible(' in dialog_block
-    assert '(not observer_mode)' in dialog_block
-    assert 'and (guided_wizard_step_id == "schedule" or rf_guard_needs_review)' in dialog_block
+    assert 'schedule_group.setVisible(guided_wizard_step_id == "schedule")' in dialog_block
     assert 'save_review_group.setVisible(guided_wizard_step_id == "review")' in dialog_block
     assert "launch_group.setVisible(False)" not in dialog_block
     assert 'guided_next_action_label.setObjectName("guidedSetupNextAction")' in dialog_block
@@ -1875,11 +1890,10 @@ def test_guided_add_radio_assigns_selected_plan_after_profile_save() -> None:
     assert "optional_toggle.setVisible(False)" in source
     assert "optional_toggle.setArrowType(Qt.DownArrow if" in source
     assert "optional_body.setVisible(True)" in source
-    assert "rf_guard_needs_review = bool(rf_guard_tone)" in source
-    assert "rf_guard_visible = (not observer_mode) and (" in source
-    assert 'guided_wizard_step_id == "guard" or rf_guard_needs_review' in source
-    assert 'schedule_group.setVisible(' in source
-    assert 'and (guided_wizard_step_id == "schedule" or rf_guard_needs_review)' in source
+    assert 'rf_guard_visible = guided_wizard_step_id == "guard"' in source
+    assert 'optional_body.setVisible(rf_guard_visible)' in source
+    assert 'schedule_group.setTitle("Receive Schedule" if observer_mode else "Radio Schedule")' in source
+    assert 'schedule_group.setVisible(guided_wizard_step_id == "schedule")' in source
     assert "_apply_guided_schedule_assignment_warning_ui()" in source
     assert "def _refresh_guided_schedule_guard_review() -> None:" in source
     assert "schedule_plan_combo.currentIndexChanged.connect(lambda _index: _refresh_guided_schedule_guard_review())" in source

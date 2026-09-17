@@ -69,6 +69,10 @@ def test_guided_external_app_config_apply_writes_js8_only_with_explicit_backup(t
         app_paths={
             "js8call": "/Applications/JS8Call.app",
             "js8call_ini_path": str(js8_ini),
+            "js8_variant_family": "js8call_2_2",
+            "js8_variant_version": "2.2.0",
+            "js8_writer_platform": "macos",
+            "js8_writer_operation": "create",
         },
         callsign="n1mag",
         grid="dm79",

@@ -116,3 +116,27 @@ python tools/perf_benchmark.py summarize --name "^(main_window|messages|map|oper
   scrolling or clipped primary actions.
 - Run the 1,000-schedule Local Net outlook benchmark and require warm p95 below
   50 ms with a bounded dashboard result.
+
+## 10) Guided Radio / Software Qualification
+
+- Add and edit one transceiver and one receive-only SDR through all seven
+  guided steps. Confirm Back, Next, Cancel, role changes, Review, and final Save
+  remain responsive while software discovery or endpoint work is running.
+- For the observer, confirm only receive-only Operating Models and receive-only
+  Frequency Plans are assignable. Verify manual/unverified control produces
+  reminders only and matching SDR++ tune/readback/restore evidence permits
+  automatic receive retuning.
+- Give the SDR and an active peer the same Receiver Guard antenna or front-end
+  group. Confirm an automatic SDR retune is held with the exact peer/resource
+  reason and recovery action, while an unrelated radio continues normally.
+- Confirm Station Overview distinguishes manual tuning, applying, verified,
+  shared-resource hold, receiver unavailable, and endpoint backoff without
+  probing an endpoint from the UI thread.
+- Exercise exact launch or operator-start review for SDR++, stock JS8Call,
+  JS8Call Improved, Subspace, FLRig, FLDigi, FLMsg, FLAmp, and VarAC as
+  applicable. Verify an intentional manual-start choice is not reported as an
+  error or pending verification.
+- Record operator-assisted evidence separately for macOS, Linux, Windows, a
+  physical transceiver/backend, RTL-SDR with SDR++, live Fast Light, all three
+  JS8 variants, and a multi-node VarAC Cluster. Automated tests do not close
+  these live gates.

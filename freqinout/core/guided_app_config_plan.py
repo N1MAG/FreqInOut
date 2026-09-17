@@ -2,16 +2,62 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import sys
 from typing import Mapping, Sequence, Tuple
 
 from freqinout.core.config_autodiscovery import APP_DISPLAY_NAMES, RadioInstanceProposal, discover_varac_local_assets
-from freqinout.core.config_backup import ConfigBackupResult, create_config_backup
+from freqinout.core.config_backup import (
+    ConfigBackupResult,
+    ConfigRestoreResult,
+    create_config_backup,
+    restore_config_backup,
+)
 from freqinout.core.config_js8_managed import (
     JS8CallManagedProfilePlan,
     apply_js8call_multisettings_plan,
     build_js8call_managed_profile_plans,
+    verify_js8call_multisettings_plan,
 )
 from freqinout.core.config_managed_profiles import build_flrig_fldigi_managed_profile_plans
+from freqinout.core.guided_radio_software_model import (
+    NativeWriterCapability,
+    NativeWriterOperation,
+    NativeWriterRegistry,
+    SoftwareFamily,
+)
+
+
+def _native_platform() -> str:
+    if sys.platform.startswith("darwin"):
+        return "macos"
+    if sys.platform.startswith("win"):
+        return "windows"
+    return "linux"
+
+
+GUIDED_NATIVE_WRITER_REGISTRY = NativeWriterRegistry(
+    tuple(
+        NativeWriterCapability(
+            writer_key=f"js8-{variant}-{version}-{platform}-{operation.value}",
+            family=SoftwareFamily.JS8CALL,
+            variant=variant,
+            version=version,
+            platform=platform,
+            operation=operation,
+            preview_supported=True,
+            backup_supported=True,
+            readback_supported=True,
+            restore_supported=True,
+        )
+        for variant, version in (
+            ("js8call_2_2", "2.2.0"),
+            ("js8call_improved_3_0_3", "3.0.3"),
+            ("js8call_subspace_4_1", "4.1.0"),
+        )
+        for platform in ("linux", "macos", "windows")
+        for operation in (NativeWriterOperation.CREATE, NativeWriterOperation.UPDATE)
+    )
+)
 
 
 @dataclass(frozen=True)
@@ -62,14 +108,57 @@ class GuidedAppConfigApplyItem:
 class GuidedAppConfigApplyResult:
     items: Tuple[GuidedAppConfigApplyItem, ...]
     backup: ConfigBackupResult | None = None
+    restore: ConfigRestoreResult | None = None
 
     @property
     def ok(self) -> bool:
-        return not any(item.status == "failed" for item in self.items)
+        return not any(item.status in {"failed", "rolled_back"} for item in self.items)
 
     @property
     def external_writes_applied(self) -> bool:
         return any(item.status == "applied" and item.action_type != "create_directory" for item in self.items)
+
+
+def rollback_guided_external_app_config_apply(
+    result: GuidedAppConfigApplyResult,
+) -> GuidedAppConfigApplyResult:
+    """Restore the exact native-file backup retained by a reviewed apply.
+
+    This is also used when a later FIO persistence stage fails after native
+    readback succeeded. Directory preparation is intentionally not inferred or
+    removed; only the exact qualified native-writer targets are restored.
+    """
+
+    if result.backup is None:
+        return result
+    restore_result = restore_config_backup(result.backup)
+    restored = bool(restore_result.ok)
+    items = tuple(
+        GuidedAppConfigApplyItem(
+            action_id=item.action_id,
+            app_id=item.app_id,
+            action_type=item.action_type,
+            target=item.target,
+            status=("rolled_back" if item.status in {"applied", "failed"} and restored else item.status),
+            detail=(
+                f"{item.detail} Native configuration backup was restored."
+                if restored and item.status in {"applied", "failed"}
+                else item.detail
+            ),
+        )
+        for item in result.items
+    )
+    return GuidedAppConfigApplyResult(items=items, backup=result.backup, restore=restore_result)
+
+
+def qualified_native_writer_for_action(
+    action: GuidedAppConfigAction,
+    *,
+    writer_registry: NativeWriterRegistry = GUIDED_NATIVE_WRITER_REGISTRY,
+) -> NativeWriterCapability | None:
+    """Return the exact writer that may apply this reviewed action, if any."""
+
+    return _qualified_writer(action, writer_registry)
 
 
 def build_guided_external_app_config_plan(
@@ -200,6 +289,11 @@ def build_guided_external_app_config_plan(
                     "tcp_port": str(plan.tcp_port),
                     "udp_port": str(plan.udp_port),
                     "js8call_ini_path": str(paths.get("js8call_ini_path", "") or ""),
+                    "writer_family": "js8call",
+                    "writer_variant": str(paths.get("js8_variant_family", "") or ""),
+                    "writer_version": str(paths.get("js8_variant_version", "") or ""),
+                    "writer_platform": str(paths.get("js8_writer_platform", "") or _native_platform()),
+                    "writer_operation": str(paths.get("js8_writer_operation", "") or "create"),
                 },
                 notes=(
                     "JS8Call MultiSettings writes require backup of the existing JS8Call.ini before apply.",
@@ -220,6 +314,7 @@ def apply_guided_external_app_config_plan(
     allow_external_writes: bool = False,
     backup_root: Path | None = None,
     backup_reason: str = "guided-app-config",
+    writer_registry: NativeWriterRegistry = GUIDED_NATIVE_WRITER_REGISTRY,
 ) -> GuidedAppConfigApplyResult:
     """Apply the safe portions of a guided app configuration plan.
 
@@ -228,7 +323,11 @@ def apply_guided_external_app_config_plan(
     """
 
     items: list[GuidedAppConfigApplyItem] = []
-    write_targets = _guided_plan_external_write_targets(plan) if allow_external_writes else ()
+    write_targets = (
+        _guided_plan_external_write_targets(plan, writer_registry=writer_registry)
+        if allow_external_writes
+        else ()
+    )
     backup_result = (
         create_config_backup(write_targets, reason=backup_reason, backup_root=backup_root)
         if write_targets
@@ -238,6 +337,7 @@ def apply_guided_external_app_config_plan(
         backup_result is not None and any(item.status == "failed" for item in backup_result.items)
     )
     js8_plans_by_action = _js8_multisettings_plans_by_action(plan)
+    external_write_attempted = False
     for action in plan.actions:
         action_type = str(action.action_type or "").strip()
         target = str(action.target or "").strip()
@@ -290,6 +390,21 @@ def apply_guided_external_app_config_plan(
                 )
             )
             continue
+        if _qualified_writer(action, writer_registry) is None:
+            items.append(
+                GuidedAppConfigApplyItem(
+                    action_id=action.action_id,
+                    app_id=action.app_id,
+                    action_type=action_type,
+                    target=target,
+                    status="operator_action_required",
+                    detail=(
+                        "No exact supported native writer matches this application variant, version, platform, and operation. "
+                        "FIO configuration was not written; complete the native profile in the application and verify it in Health."
+                    ),
+                )
+            )
+            continue
         if backup_failed:
             items.append(
                 GuidedAppConfigApplyItem(
@@ -307,7 +422,10 @@ def apply_guided_external_app_config_plan(
             js8_plan = js8_plans_by_action.get(action.action_id)
             if ini_path and js8_plan is not None:
                 try:
+                    external_write_attempted = True
                     applied_path = apply_js8call_multisettings_plan(js8_plan, ini_path=Path(ini_path))
+                    if not verify_js8call_multisettings_plan(js8_plan, ini_path=Path(applied_path)):
+                        raise OSError("JS8Call MultiSettings readback did not match the reviewed write plan.")
                     items.append(
                         GuidedAppConfigApplyItem(
                             action_id=action.action_id,
@@ -340,19 +458,62 @@ def apply_guided_external_app_config_plan(
                 detail="No supported explicit external writer is available for this action yet.",
             )
         )
-    return GuidedAppConfigApplyResult(items=tuple(items), backup=backup_result)
+    restore_result: ConfigRestoreResult | None = None
+    if (
+        external_write_attempted
+        and backup_result is not None
+        and any(item.status == "failed" for item in items)
+    ):
+        rolled_back = rollback_guided_external_app_config_apply(
+            GuidedAppConfigApplyResult(items=tuple(items), backup=backup_result)
+        )
+        items = list(rolled_back.items)
+        restore_result = rolled_back.restore
+    return GuidedAppConfigApplyResult(items=tuple(items), backup=backup_result, restore=restore_result)
 
 
-def _guided_plan_external_write_targets(plan: GuidedAppConfigPlan) -> Tuple[Path, ...]:
+def _guided_plan_external_write_targets(
+    plan: GuidedAppConfigPlan,
+    *,
+    writer_registry: NativeWriterRegistry,
+) -> Tuple[Path, ...]:
     targets = []
     for action in plan.actions:
         if not action.writes_external_config:
+            continue
+        if _qualified_writer(action, writer_registry) is None:
             continue
         if str(action.action_type or "").strip() == "update_js8_multisettings":
             ini_path = str(action.details.get("js8call_ini_path", "") or "").strip()
             if ini_path:
                 targets.append(Path(ini_path).expanduser())
     return tuple(targets)
+
+
+def _qualified_writer(
+    action: GuidedAppConfigAction,
+    registry: NativeWriterRegistry,
+) -> NativeWriterCapability | None:
+    details = action.details
+    family = str(details.get("writer_family") or action.app_id or "").strip().lower()
+    variant = str(details.get("writer_variant") or "").strip().lower()
+    version = str(details.get("writer_version") or "").strip().lower()
+    platform = str(details.get("writer_platform") or "").strip().lower()
+    operation = str(details.get("writer_operation") or "").strip().lower()
+    capability = registry.lookup(
+        family=family,
+        variant=variant,
+        version=version,
+        platform=platform,
+        operation=operation,
+    )
+    if capability is None:
+        return None
+    if str(action.action_type or "").strip() == "update_js8_multisettings":
+        ini_path = str(details.get("js8call_ini_path") or "").strip()
+        if not ini_path or Path(ini_path).expanduser().suffix.casefold() != ".ini":
+            return None
+    return capability
 
 
 def _js8_multisettings_plans_by_action(plan: GuidedAppConfigPlan) -> Mapping[str, JS8CallManagedProfilePlan]:

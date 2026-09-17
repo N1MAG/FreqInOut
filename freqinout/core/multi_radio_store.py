@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.js8_defaults import coerce_js8_offset_hz
+from freqinout.core.guided_varac_configuration import normalize_varac_path
 from freqinout.core.js8_storage import (
     STORAGE_MODES,
     canonicalize_storage_path,
@@ -2617,6 +2618,7 @@ def _sync_rf_conflict_policies_conn(conn: sqlite3.Connection) -> List[Dict[str, 
         """,
     )
     devices: List[Dict[str, Any]] = []
+    transmit_devices: List[Dict[str, Any]] = []
     overlap_devices_by_id: Dict[int, Dict[str, Any]] = {}
     for row in rows:
         device = dict(row)
@@ -2637,8 +2639,9 @@ def _sync_rf_conflict_policies_conn(conn: sqlite3.Connection) -> List[Dict[str, 
             device["advanced_frequency_guard_group"] and device["advanced_frequency_guard_window_hz"] > 0
         ):
             overlap_devices_by_id[int(device.get("id", 0) or 0)] = device
+        devices.append(device)
         if _coerce_text(device.get("device_class", "tx_rx"), "tx_rx").lower() != "observer":
-            devices.append(device)
+            transmit_devices.append(device)
 
     groups_by_field: Dict[str, Dict[str, List[Dict[str, Any]]]] = {
         "antenna_group": {},
@@ -2647,12 +2650,21 @@ def _sync_rf_conflict_policies_conn(conn: sqlite3.Connection) -> List[Dict[str, 
         "band_overlap_guard_group": {},
         "advanced_frequency_guard_group": {},
     }
+    # Receiver Guard shares the same central coordination-policy boundary as
+    # RF Guard.  Observer antenna/front-end claims must therefore participate
+    # in the same pair graph; excluding observers here would persist a guard
+    # that the scheduler could never enforce.  Amplifiers remain a transmit-
+    # radio resource and are deliberately not inferred for observers.
     for device in devices:
-        for field_name in ("antenna_group", "frontend_group", "amplifier_group"):
+        for field_name in ("antenna_group", "frontend_group"):
             group_value = str(device.get(field_name, "") or "").strip()
             if not group_value:
                 continue
             groups_by_field[field_name].setdefault(group_value, []).append(device)
+    for device in transmit_devices:
+        group_value = str(device.get("amplifier_group", "") or "").strip()
+        if group_value:
+            groups_by_field["amplifier_group"].setdefault(group_value, []).append(device)
     for device in overlap_devices_by_id.values():
         group_value = str(device.get("band_overlap_guard_group", "") or "").strip()
         if group_value:
@@ -2700,8 +2712,12 @@ def _sync_rf_conflict_policies_conn(conn: sqlite3.Connection) -> List[Dict[str, 
                             "advanced_frequency_groups": set(),
                             "guard_modes": set(),
                             "advanced_frequency_windows_hz": {},
+                            "observer_ids": set(),
                         },
                     )
+                    for member in (left, right):
+                        if _is_observer_device_class(member):
+                            pair_entry["observer_ids"].add(int(member.get("id", 0) or 0))
                     pair_entry[str(trigger_key)].add(group_name)
                     if field_name == "band_overlap_guard_group":
                         pair_entry["guard_modes"].add(left.get("band_overlap_guard_mode", "warn"))
@@ -2730,11 +2746,21 @@ def _sync_rf_conflict_policies_conn(conn: sqlite3.Connection) -> List[Dict[str, 
                 if int(value or 0) > 0
             },
             "guard_modes": sorted(str(mode) for mode in info["guard_modes"]),
+            "receiver_guard": bool(
+                info.get("observer_ids")
+                and (info.get("antenna_groups") or info.get("frontend_groups"))
+            ),
         }
         if not any(value for key, value in trigger.items() if key not in {"guard_modes", "advanced_frequency_windows_hz"}):
             continue
         guard_modes = {normalize_rf_guard_mode(mode) for mode in trigger.get("guard_modes", [])}
-        if trigger.get("band_overlap_groups") or trigger.get("advanced_frequency_groups"):
+        if trigger.get("receiver_guard"):
+            # An automatic observer retune cannot stop for an interactive RF
+            # prompt.  A declared shared receive resource is therefore a hard
+            # hold until the peer evidence is clear; unrelated radios remain
+            # outside this pair-scoped policy.
+            safety_mode = "block"
+        elif trigger.get("band_overlap_groups") or trigger.get("advanced_frequency_groups"):
             safety_mode = "warn"
             for mode in guard_modes:
                 safety_mode = stricter_rf_guard_mode(safety_mode, mode)
@@ -3342,6 +3368,71 @@ def _validate_software_instance_radio_ownership_conn(
         raise ValueError(
             f"This {label} runtime instance is already assigned to {owner[0]}; "
             "each independently controlled radio needs its own instance identity."
+        )
+
+
+def _receive_only_manifest_evidence_conn(
+    conn: sqlite3.Connection,
+    *,
+    family_key: str,
+    application_id: int,
+) -> Dict[str, Any]:
+    """Return reviewed receive-only evidence for one saved application row."""
+
+    family = str(family_key or "").strip().lower()
+    try:
+        _link_column, table_name, _label = _SOFTWARE_INSTANCE_ASSIGNMENTS[family]
+    except KeyError:
+        return {}
+    application = _record_by_id(conn, table_name, int(application_id))
+    if application is None:
+        return {}
+    manifest_row = conn.execute(
+        """
+        SELECT evidence_json
+          FROM software_instance_manifests
+         WHERE family_key=? AND application_system_key=?
+      ORDER BY updated_utc DESC
+         LIMIT 1
+        """,
+        (family, str(application.get("system_key", "") or "")),
+    ).fetchone()
+    if manifest_row is None:
+        return {}
+    try:
+        evidence = json.loads(str(manifest_row[0] or "{}"))
+    except (TypeError, ValueError):
+        return {}
+    return dict(evidence) if isinstance(evidence, Mapping) else {}
+
+
+def _validate_observer_software_link_conn(
+    conn: sqlite3.Connection,
+    *,
+    family_key: str,
+    application_id: int,
+) -> None:
+    """Fail closed when a direct observer link lacks reviewed RX-only evidence."""
+
+    family = str(family_key or "").strip().lower()
+    if family == "varac":
+        raise ValueError("Observer / SDR device profiles cannot use VarAC or VarAC clusters.")
+    if family not in {"js8call", "fast_light"}:
+        return
+    evidence = _receive_only_manifest_evidence_conn(
+        conn,
+        family_key=family,
+        application_id=int(application_id),
+    )
+    if not (
+        bool(evidence.get("receive_only_ingest"))
+        and evidence.get("transmit_authority") is False
+        and str(evidence.get("execution_scope") or "receive_only").strip().lower() == "receive_only"
+    ):
+        label = "JS8Call" if family == "js8call" else "Fast Light"
+        raise ValueError(
+            f"Observer / SDR {label} assignments require reviewed receive-only evidence. "
+            "Use the guided Software instance workflow."
         )
 
 
@@ -5679,6 +5770,23 @@ class MultiRadioStore:
         if varac_node_id is not None and not _record_by_id(conn, "varac_nodes", int(varac_node_id)):
             raise KeyError(f"Unknown VarAC node id: {varac_node_id}")
 
+        if device_class == "observer":
+            if _coerce_bool_int(payload.get("use_varac", (existing or {}).get("use_varac", 0)), False):
+                raise ValueError("Observer / SDR device profiles cannot use VarAC or VarAC clusters.")
+            if _coerce_bool_int(payload.get("use_flrig", (existing or {}).get("use_flrig", 0)), False):
+                raise ValueError("Observer / SDR Fast Light workflows cannot enable FLRig, CAT, or PTT control.")
+            for family, application_id in (
+                ("js8call", js8_instance_id),
+                ("fast_light", fast_light_config_id),
+                ("varac", varac_node_id),
+            ):
+                if application_id is not None:
+                    _validate_observer_software_link_conn(
+                        conn,
+                        family_key=family,
+                        application_id=int(application_id),
+                    )
+
         requested_links = {
             "js8call": js8_instance_id,
             "fast_light": fast_light_config_id,
@@ -6892,6 +7000,7 @@ class MultiRadioStore:
         launch_at_startup: bool = False,
         varac_cluster_db_id: Optional[int] = None,
         varac_cluster_instance_number: Optional[int] = None,
+        varac_create_cluster_values: Optional[Mapping[str, Any]] = None,
         require_observer_receive_only: bool = False,
     ) -> Dict[str, Any]:
         """Persist one reviewed application instance and radio link atomically.
@@ -6911,12 +7020,59 @@ class MultiRadioStore:
                 profile = _record_by_id(conn, "device_profiles", radio_id)
                 if profile is None:
                     raise KeyError(f"Unknown radio profile id: {radio_id}")
+                observer_profile = _is_observer_device_class(profile)
                 if require_observer_receive_only and (
-                    family != "js8call" or not _is_observer_device_class(profile)
+                    family not in {"js8call", "fast_light"} or not observer_profile
                 ):
                     raise ValueError(
-                        "Receive-only JS8Call instances can only be assigned to observer / SDR profiles."
+                        "Receive-only software instances can only be assigned to observer / SDR profiles."
                     )
+                requested_manifest = dict(manifest_values or {})
+                requested_evidence = requested_manifest.get(
+                    "evidence",
+                    requested_manifest.get("evidence_json", {}),
+                )
+                if not isinstance(requested_evidence, Mapping):
+                    requested_evidence = {}
+                requested_evidence = dict(requested_evidence)
+                if observer_profile and family == "varac":
+                    raise ValueError("Observer / SDR device profiles cannot use VarAC or VarAC clusters.")
+                if observer_profile and family == "fast_light":
+                    if str(application_values.get("flrig_path", "") or "").strip():
+                        raise ValueError(
+                            "Observer / SDR Fast Light workflows cannot include FLRig, CAT, or PTT control."
+                        )
+                    if not (
+                        bool(requested_evidence.get("receive_only_ingest"))
+                        and requested_evidence.get("transmit_authority") is False
+                    ):
+                        raise ValueError(
+                            "Observer / SDR Fast Light requires reviewed receive-only evidence."
+                        )
+                    requested_evidence.update(
+                        {
+                            "receive_only_ingest": True,
+                            "transmit_authority": False,
+                            "execution_scope": RECEIVE_ONLY_EXECUTION_SCOPE,
+                        }
+                    )
+                if family == "fast_light" and bool(requested_evidence.get("advanced_tx_requested")):
+                    if observer_profile:
+                        raise ValueError("Advanced Fast Light TX is not available for an observer / SDR.")
+                    if not bool(requested_evidence.get("advanced_tx_acknowledged")):
+                        raise ValueError(
+                            "Advanced Fast Light TX requires explicit acknowledgement before saving."
+                        )
+                cluster_db_id_value = (
+                    int(varac_cluster_db_id)
+                    if varac_cluster_db_id is not None
+                    else None
+                )
+                create_cluster_values = dict(varac_create_cluster_values or {})
+                if create_cluster_values and family != "varac":
+                    raise ValueError("Only VarAC instances can create a VarAC cluster.")
+                if create_cluster_values and cluster_db_id_value is not None:
+                    raise ValueError("Choose either a new VarAC cluster or an existing cluster, not both.")
                 family_link_column = _SOFTWARE_INSTANCE_ASSIGNMENTS[family][0]
                 expected_current = (
                     _coerce_optional_int(expected_current_instance_id)
@@ -6946,10 +7102,21 @@ class MultiRadioStore:
                 elif family == "fast_light":
                     saved_app = _save_fast_light_config_conn(conn, app_values)
                     link_column = "fast_light_config_id"
+                    requested_resources = {
+                        str(item.get("kind", "") or "").strip(): str(item.get("value", "") or "").strip()
+                        for item in requested_manifest.get("resource_claims", ()) or ()
+                        if isinstance(item, Mapping)
+                    }
+                    flmsg_path = requested_resources.get("flmsg_application", "")
+                    flamp_path = requested_resources.get("flamp_application", "")
                     updates = {
                         "fast_light_config_id": int(saved_app["id"]),
-                        "use_flrig": 1,
+                        "use_flrig": 0 if observer_profile else 1,
                         "use_fldigi": 1,
+                        "use_flmsg": 1 if flmsg_path else 0,
+                        "use_flamp": 1 if flamp_path else 0,
+                        "flmsg_path": flmsg_path,
+                        "flamp_path": flamp_path,
                         "flrig_host": str(saved_app.get("flrig_host", "127.0.0.1") or "127.0.0.1"),
                         "flrig_port": int(saved_app.get("flrig_port", 12345) or 12345),
                         "fldigi_host": str(saved_app.get("fldigi_host", "127.0.0.1") or "127.0.0.1"),
@@ -6968,6 +7135,88 @@ class MultiRadioStore:
                         "varac_ini_path": str(saved_app.get("ini_path", "") or ""),
                         "varac_outbox_dir": str(app_values.get("outbox_path", "") or ""),
                     }
+                    if create_cluster_values:
+                        cluster_name = _coerce_text(
+                            create_cluster_values.get("name", create_cluster_values.get("cluster_id", "")),
+                            "VarAC Cluster",
+                        ) or "VarAC Cluster"
+                        public_cluster_id = _normalize_varac_cluster_id(
+                            create_cluster_values.get("cluster_id", cluster_name),
+                            _normalize_varac_cluster_id(cluster_name),
+                        )
+                        duplicate_cluster = conn.execute(
+                            "SELECT id FROM varac_clusters WHERE UPPER(cluster_id)=? LIMIT 1",
+                            (public_cluster_id,),
+                        ).fetchone()
+                        if duplicate_cluster is not None:
+                            raise ValueError(f"VarAC cluster ID {public_cluster_id} is already in use.")
+                        shared_db_path = _coerce_text(create_cluster_values.get("shared_db_path", ""), "")
+                        node_local_paths = {
+                            normalize_varac_path(
+                                _coerce_text(app_values.get(key, ""), ""),
+                                f"VarAC {key}",
+                            )
+                            for key in ("ini_path", "db_path", "incoming_path", "outbox_path")
+                            if _coerce_text(app_values.get(key, ""), "")
+                        }
+                        normalized_shared_db = (
+                            normalize_varac_path(shared_db_path, "VarAC shared database path")
+                            if shared_db_path
+                            else ""
+                        )
+                        if normalized_shared_db and normalized_shared_db in node_local_paths:
+                            raise ValueError(
+                                "A VarAC cluster shared database cannot replace a node-local INI, database, incoming, or outbox path."
+                            )
+                        if normalized_shared_db:
+                            existing_cluster_paths = {
+                                normalize_varac_path(str(row[0]), "VarAC shared database path")
+                                for row in conn.execute(
+                                    "SELECT shared_db_path FROM varac_clusters WHERE shared_db_path IS NOT NULL AND TRIM(shared_db_path)<>''"
+                                ).fetchall()
+                                if str(row[0] or "").strip()
+                            }
+                            if normalized_shared_db in existing_cluster_paths:
+                                raise ValueError(
+                                    "The VarAC cluster shared database is already owned by another cluster."
+                                )
+                            existing_node_paths = {
+                                normalize_varac_path(str(value), "VarAC node-local path")
+                                for row in conn.execute(
+                                    "SELECT ini_path, db_path, incoming_path FROM varac_nodes"
+                                ).fetchall()
+                                for value in row
+                                if str(value or "").strip()
+                            }
+                            existing_node_paths.update(
+                                normalize_varac_path(str(row[0]), "VarAC node outbox path")
+                                for row in conn.execute(
+                                    "SELECT varac_outbox_dir FROM device_profiles WHERE TRIM(COALESCE(varac_outbox_dir, ''))<>''"
+                                ).fetchall()
+                            )
+                            if normalized_shared_db in existing_node_paths:
+                                raise ValueError(
+                                    "The VarAC cluster shared database conflicts with an existing node-local path."
+                                )
+                        now_iso = _utc_now_iso()
+                        conn.execute(
+                            """
+                            INSERT INTO varac_clusters (
+                                name, cluster_id, shared_db_path, counters_refresh_sec,
+                                ptt_lock_enabled, gateway_handler_device_id, created_utc, updated_utc
+                            ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
+                            """,
+                            (
+                                cluster_name,
+                                public_cluster_id,
+                                shared_db_path or None,
+                                max(5, min(600, _coerce_int(create_cluster_values.get("counters_refresh_sec", 30), 30))),
+                                _coerce_bool_int(create_cluster_values.get("ptt_lock_enabled", 0), False),
+                                now_iso,
+                                now_iso,
+                            ),
+                        )
+                        cluster_db_id_value = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
                 current_link = _coerce_optional_int(profile.get(link_column))
                 if current_link is not None and current_link != int(saved_app["id"]) and not replace_existing:
                     raise ValueError(
@@ -6987,10 +7236,10 @@ class MultiRadioStore:
                     application_id=int(saved_app["id"]),
                 )
 
-                manifest_payload = dict(manifest_values or {})
+                manifest_payload = requested_manifest
                 manifest_payload["family_key"] = family
                 manifest_payload["application_system_key"] = str(saved_app.get("system_key", "") or "")
-                if family == "js8call" and _is_observer_device_class(profile):
+                if family == "js8call" and observer_profile:
                     evidence = manifest_payload.get("evidence", manifest_payload.get("evidence_json", {}))
                     if not isinstance(evidence, Mapping):
                         evidence = {}
@@ -6998,17 +7247,20 @@ class MultiRadioStore:
                         **dict(evidence),
                         "receive_only_ingest": True,
                         "transmit_authority": False,
+                        "execution_scope": RECEIVE_ONLY_EXECUTION_SCOPE,
                     }
+                elif family == "fast_light":
+                    manifest_payload["evidence"] = requested_evidence
                 manifest_payload.setdefault(
                     "instance_key",
                     f"{family}:{str(saved_app.get('system_key', '') or '')}",
                 )
                 saved_manifest = _save_software_instance_manifest_conn(conn, manifest_payload)
-                if family == "varac" and varac_cluster_db_id is not None:
-                    cluster = _varac_cluster_by_id(conn, int(varac_cluster_db_id))
+                if family == "varac" and cluster_db_id_value is not None:
+                    cluster = _varac_cluster_by_id(conn, int(cluster_db_id_value))
                     if cluster is None:
-                        raise KeyError(f"Unknown VarAC cluster id: {varac_cluster_db_id}")
-                    if _is_observer_device_class(profile):
+                        raise KeyError(f"Unknown VarAC cluster id: {cluster_db_id_value}")
+                    if observer_profile:
                         raise ValueError("Observer / SDR device profiles cannot participate in VarAC clusters.")
                     instance_number = _coerce_int(varac_cluster_instance_number, 0)
                     if instance_number <= 0:
@@ -7016,7 +7268,7 @@ class MultiRadioStore:
                     other = _varac_enabled_membership_for_device(
                         conn,
                         radio_id,
-                        exclude_cluster_id=int(varac_cluster_db_id),
+                        exclude_cluster_id=int(cluster_db_id_value),
                     )
                     if other is not None and not replacing:
                         raise ValueError("This radio is already an enabled member of another VarAC cluster.")
@@ -7026,7 +7278,7 @@ class MultiRadioStore:
                          WHERE cluster_id=? AND instance_number=? AND device_profile_id<>? AND enabled=1
                          LIMIT 1
                         """,
-                        (int(varac_cluster_db_id), instance_number, radio_id),
+                        (int(cluster_db_id_value), instance_number, radio_id),
                     ).fetchone()
                     if occupied is not None:
                         raise ValueError(f"VarAC cluster instance {instance_number} is already assigned.")
@@ -7048,8 +7300,8 @@ class MultiRadioStore:
                             conn,
                             radio_profile_id=radio_id,
                             preserve_cluster_id=(
-                                int(varac_cluster_db_id)
-                                if varac_cluster_db_id is not None
+                                int(cluster_db_id_value)
+                                if cluster_db_id_value is not None
                                 else None
                             ),
                         )
@@ -7073,7 +7325,7 @@ class MultiRadioStore:
                     manifest=saved_manifest,
                     launch_at_startup=bool(launch_at_startup),
                 )
-                if family == "varac" and varac_cluster_db_id is not None:
+                if family == "varac" and cluster_db_id_value is not None:
                     now_iso = _utc_now_iso()
                     conn.execute(
                         """
@@ -7085,8 +7337,13 @@ class MultiRadioStore:
                             enabled=1,
                             updated_utc=excluded.updated_utc
                         """,
-                        (int(varac_cluster_db_id), radio_id, instance_number, now_iso, now_iso),
+                        (int(cluster_db_id_value), radio_id, instance_number, now_iso, now_iso),
                     )
+                    if bool(create_cluster_values.get("gateway_for_new_cluster", False)):
+                        conn.execute(
+                            "UPDATE varac_clusters SET gateway_handler_device_id=?, updated_utc=? WHERE id=?",
+                            (radio_id, now_iso, int(cluster_db_id_value)),
+                        )
                     _sync_varac_cluster_member_enabled_flags_conn(conn)
                 conn.commit()
             except Exception:
@@ -7131,6 +7388,58 @@ class MultiRadioStore:
             radio_profile_id=radio_id,
             application_values=application_values,
             manifest_values=manifest_values,
+            replace_existing=replace_existing,
+            expected_current_instance_id=expected_current_instance_id,
+            launch_at_startup=launch_at_startup,
+            require_observer_receive_only=True,
+        )
+
+    def adopt_observer_fast_light_instance(
+        self,
+        *,
+        radio_profile_id: int,
+        application_values: Mapping[str, Any],
+        manifest_values: Mapping[str, Any],
+        replace_existing: bool = False,
+        expected_current_instance_id: Any = _SOFTWARE_INSTANCE_EXPECTATION_UNSET,
+        launch_at_startup: bool = False,
+    ) -> Dict[str, Any]:
+        """Assign a reviewed FLDigi-led Fast Light bundle to an observer.
+
+        The stored bundle may include receive/log/file helpers, but never FLRig,
+        CAT, PTT, automatic send, or transmit authority.
+        """
+
+        radio_id = int(radio_profile_id or 0)
+        with self._connect_readonly() as conn:
+            profile = _record_by_id(conn, "device_profiles", radio_id)
+        if profile is None:
+            raise KeyError(f"Unknown radio profile id: {radio_id}")
+        if not _is_observer_device_class(profile):
+            raise ValueError("Receive-only Fast Light instances can only be assigned to observer / SDR profiles.")
+        app_values = dict(application_values or {})
+        if str(app_values.get("flrig_path", "") or "").strip():
+            raise ValueError("Observer / SDR Fast Light workflows cannot include FLRig, CAT, or PTT control.")
+        app_values["flrig_path"] = ""
+        # The legacy Fast Light table retains a non-null FLRig port column.
+        # Keep an inert compatibility value while the observer radio has no
+        # FLRig launch item, capability flag, CAT/PTT authority, or dependency.
+        app_values["flrig_port"] = int(app_values.get("flrig_port") or 12345)
+        manifest_payload = dict(manifest_values or {})
+        evidence = manifest_payload.get("evidence", manifest_payload.get("evidence_json", {}))
+        if not isinstance(evidence, Mapping):
+            evidence = {}
+        manifest_payload["evidence"] = {
+            **dict(evidence),
+            "receive_only_ingest": True,
+            "transmit_authority": False,
+            "execution_scope": RECEIVE_ONLY_EXECUTION_SCOPE,
+        }
+        return self.adopt_software_instance(
+            family_key="fast_light",
+            radio_profile_id=radio_id,
+            application_values=app_values,
+            manifest_values=manifest_payload,
             replace_existing=replace_existing,
             expected_current_instance_id=expected_current_instance_id,
             launch_at_startup=launch_at_startup,
@@ -7238,7 +7547,9 @@ class MultiRadioStore:
 
         now_iso = _utc_now_iso()
         profile = _record_by_id(conn, "device_profiles", int(radio_profile_id)) or {}
-        observer_js8 = family_key == "js8call" and _is_observer_device_class(profile)
+        observer_profile = _is_observer_device_class(profile)
+        observer_js8 = family_key == "js8call" and observer_profile
+        observer_fast_light = family_key == "fast_light" and observer_profile
         conn.execute(
             """
             INSERT INTO radio_launch_bundles
@@ -7304,36 +7615,57 @@ class MultiRadioStore:
                         str(int(saved_app.get("fldigi_port", 7362) or 7362)),
                     ]
                 )
-            rows = (
-                (
-                    f"{manifest_key}:flrig",
-                    "FLRig",
-                    10,
-                    "",
-                    str(saved_app.get("flrig_path", "") or ""),
-                    [],
+            fldigi_readiness = {
+                "host": str(saved_app.get("fldigi_host", host) or host),
+                "port": int(saved_app.get("fldigi_port", 7362) or 7362),
+                "require_service": True,
+                "launch_arguments": fldigi_arguments,
+            }
+            if observer_fast_light:
+                fldigi_readiness.update(
                     {
-                        "host": host,
-                        "port": int(saved_app.get("flrig_port", 12345) or 12345),
-                        "require_service": True,
-                        "launch_arguments": flrig_arguments,
-                    },
-                ),
-                (
-                    f"{manifest_key}:fldigi",
-                    "FLDigi",
-                    20,
-                    command,
-                    str(saved_app.get("fldigi_path", "") or ""),
-                    ["FLRig"],
-                    {
-                        "host": str(saved_app.get("fldigi_host", host) or host),
-                        "port": int(saved_app.get("fldigi_port", 7362) or 7362),
-                        "require_service": True,
-                        "launch_arguments": fldigi_arguments,
-                    },
-                ),
-            )
+                        "execution_scope": RECEIVE_ONLY_EXECUTION_SCOPE,
+                        "receive_only_ingest": True,
+                        "transmit_authority": False,
+                    }
+                )
+                rows = (
+                    (
+                        f"{manifest_key}:fldigi",
+                        "FLDigi",
+                        20,
+                        command,
+                        str(saved_app.get("fldigi_path", "") or ""),
+                        [],
+                        fldigi_readiness,
+                    ),
+                )
+            else:
+                rows = (
+                    (
+                        f"{manifest_key}:flrig",
+                        "FLRig",
+                        10,
+                        "",
+                        str(saved_app.get("flrig_path", "") or ""),
+                        [],
+                        {
+                            "host": host,
+                            "port": int(saved_app.get("flrig_port", 12345) or 12345),
+                            "require_service": True,
+                            "launch_arguments": flrig_arguments,
+                        },
+                    ),
+                    (
+                        f"{manifest_key}:fldigi",
+                        "FLDigi",
+                        20,
+                        command,
+                        str(saved_app.get("fldigi_path", "") or ""),
+                        ["FLRig"],
+                        fldigi_readiness,
+                    ),
+                )
         else:
             rows = (
                 (
@@ -7343,7 +7675,7 @@ class MultiRadioStore:
                     command or str(saved_app.get("launch_cmd", "") or ""),
                     str(saved_app.get("install_path", "") or ""),
                     [],
-                    {},
+                    {"working_directory": resources.get("working_directory", "")},
                 ),
             )
         for instance_key, app_name, order, command_override, path_override, dependencies, readiness in rows:

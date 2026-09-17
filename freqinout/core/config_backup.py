@@ -28,6 +28,24 @@ class ConfigBackupResult:
     manifest_path: str
 
 
+@dataclass(frozen=True)
+class ConfigRestoreItem:
+    original_path: str
+    backup_path: str
+    status: str
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class ConfigRestoreResult:
+    backup_dir: str
+    items: Tuple[ConfigRestoreItem, ...]
+
+    @property
+    def ok(self) -> bool:
+        return not any(item.status == "failed" for item in self.items)
+
+
 def create_config_backup(
     paths: Iterable[Path],
     *,
@@ -101,6 +119,61 @@ def create_config_backup(
     )
     _write_manifest(result)
     return result
+
+
+def restore_config_backup(result: ConfigBackupResult) -> ConfigRestoreResult:
+    """Restore exactly the paths represented by one completed backup.
+
+    A ``missing`` backup item means the target did not exist before apply; a
+    rollback therefore removes only that exact target if the writer created it.
+    Existing files/directories are replaced from their retained backup copy.
+    The function never infers additional targets from a parent directory.
+    """
+
+    restored: list[ConfigRestoreItem] = []
+    for item in reversed(tuple(result.items or ())):
+        original = Path(item.original_path).expanduser()
+        backup = Path(item.backup_path).expanduser() if item.backup_path else None
+        if item.status not in {"backed_up", "missing"}:
+            restored.append(
+                ConfigRestoreItem(
+                    original_path=str(original),
+                    backup_path=str(backup or ""),
+                    status="failed",
+                    error="The original backup item was not completed.",
+                )
+            )
+            continue
+        try:
+            if original.is_symlink() or original.is_file():
+                original.unlink()
+            elif original.is_dir():
+                shutil.rmtree(original)
+            if item.status == "backed_up":
+                if backup is None or not backup.exists():
+                    raise OSError("Backup copy is unavailable.")
+                original.parent.mkdir(parents=True, exist_ok=True)
+                if item.kind == "directory":
+                    shutil.copytree(backup, original, symlinks=True)
+                else:
+                    shutil.copy2(backup, original, follow_symlinks=False)
+            restored.append(
+                ConfigRestoreItem(
+                    original_path=str(original),
+                    backup_path=str(backup or ""),
+                    status="restored",
+                )
+            )
+        except OSError as exc:
+            restored.append(
+                ConfigRestoreItem(
+                    original_path=str(original),
+                    backup_path=str(backup or ""),
+                    status="failed",
+                    error=str(exc),
+                )
+            )
+    return ConfigRestoreResult(backup_dir=result.backup_dir, items=tuple(restored))
 
 
 def _write_manifest(result: ConfigBackupResult) -> None:

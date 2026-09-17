@@ -52,17 +52,19 @@ _FAMILY_DETAILS = {
 }
 _FAMILY_FIELDS = {
     "js8call": frozenset(
-        {"instance_name", "ownership", "rig_name", "host", "port", "udp_port", "application_path", "configuration_path", "storage_path", "launch_command", "launch_at_startup", "notes"}
+        {"instance_name", "ownership", "variant", "version", "rig_name", "host", "port", "udp_port", "application_path", "configuration_path", "storage_path", "launch_command", "launch_at_startup", "notes"}
     ),
     "fast_light": frozenset(
-        {"instance_name", "ownership", "host", "port", "secondary_port", "application_path", "secondary_application_path", "configuration_path", "secondary_configuration_path", "storage_path", "secondary_storage_path", "launch_command", "launch_at_startup", "notes"}
+        {"instance_name", "ownership", "host", "port", "secondary_port", "application_path", "secondary_application_path", "flmsg_application_path", "flamp_application_path", "configuration_path", "secondary_configuration_path", "storage_path", "secondary_storage_path", "launch_command", "launch_at_startup", "advanced_tx_requested", "advanced_tx_acknowledged", "notes"}
     ),
     "varac": frozenset(
-        {"instance_name", "ownership", "application_path", "configuration_path", "storage_path", "secondary_storage_path", "outbox_path", "cluster_id", "cluster_instance_number", "launch_command", "launch_at_startup", "notes"}
+        {"instance_name", "ownership", "application_path", "configuration_path", "storage_path", "secondary_storage_path", "outbox_path", "working_directory", "cluster_path", "cluster_id", "cluster_name", "cluster_shared_database", "cluster_instance_number", "cluster_gateway", "cluster_ptt_lock", "launch_command", "launch_at_startup", "notes"}
     ),
 }
 _FAMILY_FIELD_LABELS = {
     "js8call": {
+        "variant": "JS8Call variant",
+        "version": "Verified application version",
         "rig_name": "JS8Call rig name",
         "host": "JS8Call API host",
         "port": "JS8Call TCP API port",
@@ -78,6 +80,8 @@ _FAMILY_FIELD_LABELS = {
         "secondary_port": "FLDigi XML-RPC port",
         "application_path": "FLRig application",
         "secondary_application_path": "FLDigi application",
+        "flmsg_application_path": "FLMsg application",
+        "flamp_application_path": "FLAmp application",
         "configuration_path": "FLRig profile folder",
         "secondary_configuration_path": "FLDigi profile folder",
         "storage_path": "FLDigi log folder",
@@ -90,7 +94,11 @@ _FAMILY_FIELD_LABELS = {
         "storage_path": "VarAC database",
         "secondary_storage_path": "VarAC incoming folder",
         "outbox_path": "VarAC outbox folder",
+        "working_directory": "VarAC working directory",
+        "cluster_path": "Cluster setup",
         "cluster_id": "VarAC cluster",
+        "cluster_name": "New cluster name",
+        "cluster_shared_database": "Cluster shared database",
         "cluster_instance_number": "Cluster instance number",
         "launch_command": "Instance-specific launch command",
     },
@@ -114,8 +122,15 @@ class SoftwareInstanceDraft:
     family_key: str = ""
     instance_name: str = ""
     radio_id: Optional[int] = None
+    owner_draft_key: str = ""
+    owner_label: str = ""
+    radio_role: str = "tx_rx"
     mode: str = "managed"
     ownership: str = "fio-managed"
+    variant: str = ""
+    version: str = ""
+    writer_platform: str = ""
+    writer_operation: str = "create"
     host: str = "127.0.0.1"
     port: int = 0
     udp_port: int = 0
@@ -123,6 +138,8 @@ class SoftwareInstanceDraft:
     rig_name: str = ""
     application_path: str = ""
     secondary_application_path: str = ""
+    flmsg_application_path: str = ""
+    flamp_application_path: str = ""
     configuration_path: str = ""
     secondary_configuration_path: str = ""
     storage_path: str = ""
@@ -130,8 +147,16 @@ class SoftwareInstanceDraft:
     outbox_path: str = ""
     launch_command: str = ""
     launch_at_startup: bool = False
+    working_directory: str = ""
+    advanced_tx_requested: bool = False
+    advanced_tx_acknowledged: bool = False
+    cluster_path: str = "standalone"
     cluster_id: str = ""
+    cluster_name: str = ""
+    cluster_shared_database: str = ""
     cluster_instance_number: int = 0
+    cluster_gateway: bool = False
+    cluster_ptt_lock: bool = False
     notes: str = ""
     imported_id: Optional[int] = None
     imported_system_key: str = ""
@@ -172,9 +197,17 @@ class SoftwareInstanceDraft:
                 ("fldigi_configuration", self.secondary_configuration_path),
                 ("fldigi_logs", self.storage_path),
                 ("fldigi_checkins", self.secondary_storage_path),
+                ("flmsg_application", self.flmsg_application_path),
+                ("flamp_application", self.flamp_application_path),
             ):
                 if value:
-                    resources.append({"kind": kind, "value": value, "exclusive": True})
+                    resources.append(
+                        {
+                            "kind": kind,
+                            "value": value,
+                            "exclusive": kind not in {"flmsg_application", "flamp_application"},
+                        }
+                    )
         else:
             for kind, value in (
                 ("varac_ini", self.configuration_path),
@@ -200,6 +233,13 @@ class SoftwareInstanceDraft:
             "ownership": self.ownership,
             "management_mode": management_mode,
             "provenance": provenance,
+            "variant": self.variant,
+            "version": self.version,
+            "writer_platform": self.writer_platform,
+            "writer_operation": self.writer_operation,
+            "owner_draft_key": self.owner_draft_key,
+            "owner_label": self.owner_label,
+            "radio_role": self.radio_role,
             "instance_key": (
                 f"{self.family_key}:{self.imported_system_key}"
                 if self.imported_system_key
@@ -214,6 +254,8 @@ class SoftwareInstanceDraft:
             "ports": ports,
             "application_path": self.application_path,
             "secondary_application_path": self.secondary_application_path,
+            "flmsg_application_path": self.flmsg_application_path,
+            "flamp_application_path": self.flamp_application_path,
             "executable_path": self.application_path,
             "configuration_path": self.configuration_path,
             "configuration_root": self.configuration_path,
@@ -224,8 +266,17 @@ class SoftwareInstanceDraft:
             "outbox_path": self.outbox_path,
             "launch_command": self.launch_command,
             "launch_at_startup": self.launch_at_startup,
+            "working_directory": self.working_directory,
+            "advanced_tx_requested": self.advanced_tx_requested,
+            "advanced_tx_acknowledged": self.advanced_tx_acknowledged,
+            "execution_scope": "receive_only" if self.radio_role == "observer" else "standard",
+            "cluster_path": self.cluster_path,
             "cluster_id": self.cluster_id,
+            "cluster_name": self.cluster_name,
+            "cluster_shared_database": self.cluster_shared_database,
             "cluster_instance_number": int(self.cluster_instance_number or 0),
+            "cluster_gateway": self.cluster_gateway,
+            "cluster_ptt_lock": self.cluster_ptt_lock,
             "resource_claims": resources,
             "notes": self.notes,
             "imported_id": self.imported_id,
@@ -237,6 +288,8 @@ class SoftwareInstanceDraft:
             payload.update(
                 {
                     "js8_rig_name": self.rig_name,
+                    "js8_variant_family": self.variant,
+                    "js8_variant_version": self.version,
                     "js8_tcp_port": int(self.port or 0),
                     "js8_udp_port": int(self.udp_port or 0),
                     "js8_application_path": self.application_path,
@@ -251,6 +304,8 @@ class SoftwareInstanceDraft:
                     "fldigi_port": int(self.secondary_port or 0),
                     "flrig_path": self.application_path,
                     "fldigi_path": self.secondary_application_path,
+                    "flmsg_path": self.flmsg_application_path,
+                    "flamp_path": self.flamp_application_path,
                     "flrig_config_path": self.configuration_path,
                     "fldigi_config_path": self.secondary_configuration_path,
                     "fldigi_log_path": self.storage_path,
@@ -267,6 +322,9 @@ class SoftwareInstanceDraft:
                     "varac_outbox_dir": self.outbox_path,
                     "varac_cluster_id": self.cluster_id,
                     "varac_cluster_instance_number": int(self.cluster_instance_number or 0),
+                    "varac_cluster_path": self.cluster_path,
+                    "varac_cluster_name": self.cluster_name,
+                    "varac_cluster_shared_database": self.cluster_shared_database,
                 }
             )
         return payload
@@ -316,8 +374,15 @@ def normalize_instance_draft(value: Mapping[str, Any] | SoftwareInstanceDraft) -
         family_key=family,
         instance_name=_text(row.get("instance_name") or row.get("name")),
         radio_id=_int(row.get("radio_id")),
+        owner_draft_key=_text(row.get("owner_draft_key")),
+        owner_label=_text(row.get("owner_label")),
+        radio_role=_text(row.get("radio_role") or row.get("device_class") or "tx_rx").lower(),
         mode=mode,
         ownership=ownership,
+        variant=_text(row.get("variant") or row.get("variant_family") or row.get("js8_variant_family")),
+        version=_text(row.get("version") or row.get("variant_version") or row.get("js8_variant_version")),
+        writer_platform=_text(row.get("writer_platform") or row.get("js8_writer_platform")),
+        writer_operation=_text(row.get("writer_operation") or row.get("js8_writer_operation") or "create").lower(),
         host=_text(row.get("host") or "127.0.0.1"),
         port=_int(row.get("port") or row.get("js8_tcp_port") or row.get("flrig_port")) or 0,
         udp_port=_int(row.get("udp_port") or row.get("js8_udp_port")) or 0,
@@ -325,6 +390,8 @@ def normalize_instance_draft(value: Mapping[str, Any] | SoftwareInstanceDraft) -
         rig_name=_text(row.get("rig_name") or row.get("js8_rig_name")),
         application_path=_text(row.get("application_path") or row.get("install_path") or row.get("path") or row.get("js8_application_path") or row.get("flrig_path") or row.get("varac_install_path")),
         secondary_application_path=_text(row.get("secondary_application_path") or row.get("fldigi_path")),
+        flmsg_application_path=_text(row.get("flmsg_application_path") or row.get("flmsg_path")),
+        flamp_application_path=_text(row.get("flamp_application_path") or row.get("flamp_path")),
         configuration_path=_text(row.get("configuration_path") or row.get("ini_path") or row.get("profile_path") or row.get("js8_profile_path") or row.get("flrig_config_path") or row.get("varac_ini_path")),
         secondary_configuration_path=_text(row.get("secondary_configuration_path") or row.get("fldigi_config_path")),
         storage_path=_text(row.get("storage_path") or family_storage),
@@ -332,8 +399,18 @@ def normalize_instance_draft(value: Mapping[str, Any] | SoftwareInstanceDraft) -
         outbox_path=_text(row.get("outbox_path") or row.get("outbox_dir") or row.get("varac_outbox_dir")),
         launch_command=_text(row.get("launch_command") or row.get("launch_cmd")),
         launch_at_startup=_bool(row.get("launch_at_startup", False)),
+        working_directory=_text(row.get("working_directory") or row.get("working_dir")),
+        advanced_tx_requested=_bool(row.get("advanced_tx_requested", False)),
+        advanced_tx_acknowledged=_bool(row.get("advanced_tx_acknowledged", False)),
+        cluster_path=_text(row.get("cluster_path") or row.get("varac_cluster_path") or "standalone").lower(),
         cluster_id=_text(row.get("cluster_id") or row.get("varac_cluster_id")),
+        cluster_name=_text(row.get("cluster_name") or row.get("varac_cluster_name")),
+        cluster_shared_database=_text(
+            row.get("cluster_shared_database") or row.get("varac_cluster_shared_database")
+        ),
         cluster_instance_number=_int(row.get("cluster_instance_number") or row.get("varac_cluster_instance_number")) or 0,
+        cluster_gateway=_bool(row.get("cluster_gateway", False)),
+        cluster_ptt_lock=_bool(row.get("cluster_ptt_lock", False)),
         notes=_text(row.get("notes")),
         imported_id=_int(row.get("imported_id") or row.get("id")),
         imported_system_key=_text(row.get("imported_system_key") or row.get("system_key")),
@@ -360,7 +437,7 @@ def instance_conflicts(
         conflicts.append(InstanceConflict("family_required", "error", "Choose software", "Select JS8Call, Fast Light, or VarAC."))
     if not current.instance_name:
         conflicts.append(InstanceConflict("name_required", "error", "Name this instance", "Use a short name that distinguishes this instance from the others."))
-    if current.radio_id is None:
+    if current.radio_id is None and not current.owner_draft_key:
         conflicts.append(InstanceConflict("radio_required", "error", "Choose a radio", "Every software instance must be assigned to a radio before it can be added."))
     if current.mode == "remote" and not current.host:
         conflicts.append(InstanceConflict("host_required", "error", "Remote host required", "Enter the host name or address for the remote application."))
@@ -379,6 +456,34 @@ def instance_conflicts(
     if current.launch_at_startup and not (current.application_path or current.launch_command):
         conflicts.append(InstanceConflict("launch_target_required", "error", "Launch target is not set", "Choose an application or an explicit launch command before enabling startup."))
     if current.family_key == "fast_light":
+        observer_mode = current.radio_role == "observer"
+        if observer_mode and current.application_path:
+            conflicts.append(
+                InstanceConflict(
+                    "observer_fast_light_flrig",
+                    "error",
+                    "FLRig is unavailable for a receive-only radio",
+                    "Use FLDigi and approved receive/file helpers only; CAT, PTT, and transmit controls remain disabled.",
+                )
+            )
+        if observer_mode and current.advanced_tx_requested:
+            conflicts.append(
+                InstanceConflict(
+                    "observer_fast_light_tx",
+                    "error",
+                    "Advanced TX is unavailable",
+                    "An observer / SDR can never receive Fast Light transmit authority.",
+                )
+            )
+        if current.advanced_tx_requested and not current.advanced_tx_acknowledged:
+            conflicts.append(
+                InstanceConflict(
+                    "fast_light_tx_acknowledgement",
+                    "error",
+                    "Advanced TX acknowledgement is required",
+                    "Acknowledge the operating-model, RF Guard, and final-preflight requirements or leave Fast Light receive-safe.",
+                )
+            )
         if current.host and current.port and current.port == current.secondary_port:
             conflicts.append(
                 InstanceConflict(
@@ -388,22 +493,48 @@ def instance_conflicts(
                     "Assign different local TCP ports to FLRig and FLDigi.",
                 )
             )
-        if current.launch_at_startup and (
-            not current.configuration_path or not current.secondary_configuration_path
-        ):
+        missing_launch_profile = (
+            not current.secondary_configuration_path
+            if observer_mode
+            else not current.configuration_path or not current.secondary_configuration_path
+        )
+        if current.launch_at_startup and missing_launch_profile:
             conflicts.append(
                 InstanceConflict(
                     "fast_light_profile_required",
                     "error",
                     "Fast Light profile folders are required",
-                    "Startup needs distinct FLRig and FLDigi configuration folders so a second instance cannot reuse the default profile.",
+                    (
+                        "Startup needs a distinct FLDigi configuration folder so the receive-only instance cannot reuse the default profile."
+                        if observer_mode
+                        else "Startup needs distinct FLRig and FLDigi configuration folders so a second instance cannot reuse the default profile."
+                    ),
                 )
             )
     if current.family_key == "varac":
-        if bool(current.cluster_id) != bool(current.cluster_instance_number):
-            conflicts.append(InstanceConflict("cluster_pair_required", "error", "Cluster selection is incomplete", "Choose both a VarAC cluster and a positive instance number, or leave both blank for a standalone node."))
-        if current.cluster_id and not current.launch_command:
+        if current.radio_role == "observer":
+            conflicts.append(
+                InstanceConflict(
+                    "observer_varac_forbidden",
+                    "error",
+                    "VarAC is unavailable for this radio",
+                    "Observer / SDR profiles cannot use standalone or Cluster VarAC.",
+                )
+            )
+        if current.cluster_path not in {"standalone", "create_cluster", "join_cluster"}:
+            conflicts.append(InstanceConflict("cluster_path_invalid", "error", "Choose a VarAC cluster path", "Use standalone, create a cluster, or join an existing cluster."))
+        if current.cluster_path == "join_cluster" and not current.cluster_id:
+            conflicts.append(InstanceConflict("cluster_required", "error", "Choose an existing cluster", "Select the cluster this VarAC node should join."))
+        if current.cluster_path == "create_cluster" and not (current.cluster_name or current.cluster_id):
+            conflicts.append(InstanceConflict("cluster_name_required", "error", "Name the new cluster", "Enter a distinct cluster name or ID."))
+        if current.cluster_path != "standalone" and not current.cluster_instance_number:
+            conflicts.append(InstanceConflict("cluster_instance_required", "error", "Cluster instance number is required", "Choose a positive instance number for this VarAC node."))
+        if current.cluster_path != "standalone" and not current.launch_command:
             conflicts.append(InstanceConflict("cluster_launch_required", "error", "Cluster launch command is required", "Use an instance-specific VarAC launch command so FIO cannot start the default node by mistake."))
+        if current.cluster_path == "standalone" and (current.cluster_id or current.cluster_instance_number):
+            conflicts.append(InstanceConflict("standalone_cluster_fields", "error", "Standalone VarAC has cluster fields", "Clear cluster identity and instance number or choose a cluster setup path."))
+        if current.launch_at_startup and not current.working_directory:
+            conflicts.append(InstanceConflict("varac_working_directory", "error", "Working directory is required", "VarAC launch identity includes its exact working directory."))
 
     wanted_name = current.instance_name.casefold()
     wanted_endpoint = (current.host.casefold(), current.port) if current.host and current.port else None
@@ -477,6 +608,10 @@ class SoftwareInstanceAssistant(QWidget):
         existing_instances: Iterable[Mapping[str, Any]] = (),
         varac_clusters: Iterable[Mapping[str, Any]] = (),
         selected_radio_id: Optional[int] = None,
+        unsaved_owner_key: str = "",
+        unsaved_radio_label: str = "",
+        radio_role: str = "tx_rx",
+        initial_draft: Mapping[str, Any] | SoftwareInstanceDraft | None = None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -487,12 +622,17 @@ class SoftwareInstanceAssistant(QWidget):
         self._radios = tuple(dict(row) for row in radios if isinstance(row, Mapping))
         self._varac_clusters = tuple(dict(row) for row in varac_clusters if isinstance(row, Mapping))
         self._selected_radio_id = _int(selected_radio_id)
+        self._unsaved_owner_key = _text(unsaved_owner_key)
+        self._unsaved_radio_label = _text(unsaved_radio_label) or "Unsaved radio draft"
+        self._radio_role = _text(radio_role).lower() or "tx_rx"
         self._radio_assignments: dict[int, Mapping[str, Any]] = {}
         self._replacement_instance: Optional[Mapping[str, Any]] = None
         self._replacement_confirmed = False
         self._imported_id: Optional[int] = None
         self._imported_system_key = ""
         self._discovery_selected = False
+        self._writer_platform = ""
+        self._writer_operation = "create"
         self._discovery_results: tuple[Mapping[str, Any], ...] = ()
         self._step = 0
         self._field_widgets: dict[str, QWidget] = {}
@@ -503,6 +643,21 @@ class SoftwareInstanceAssistant(QWidget):
             if selected_index >= 0:
                 self.radio_combo.setCurrentIndex(selected_index)
         self._load_family(self._family_key)
+        if initial_draft is not None:
+            seeded = normalize_instance_draft(
+                {
+                    **(
+                        initial_draft.payload()
+                        if isinstance(initial_draft, SoftwareInstanceDraft)
+                        else dict(initial_draft)
+                    ),
+                    "family_key": self._family_key,
+                    "owner_draft_key": self._unsaved_owner_key,
+                    "owner_label": self._unsaved_radio_label,
+                    "radio_role": self._radio_role,
+                }
+            )
+            self._set_draft(seeded)
         # A workspace-launched operation is intentionally scoped to exactly
         # one family; changing family would mix the supplied inventory and
         # radio link columns.  A standalone assistant (no family argument)
@@ -680,10 +835,17 @@ class SoftwareInstanceAssistant(QWidget):
     def _build_identity_page(self) -> None:
         self._new_form_page(
             "Identity: give this instance a distinct name and confirm who manages it.",
-            (("instance_name", "Instance name", "A distinct name for this application instance"),),
+            (
+                ("instance_name", "Instance name", "A distinct name for this application instance"),
+                ("variant", "JS8Call variant", "Choose the exact installed JS8Call family"),
+                ("version", "Verified application version", "Exact version, for example 2.2.0"),
+            ),
         )
         ownership = QComboBox()
-        ownership.addItem("FIO-managed launch (external settings unchanged)", "fio-managed")
+        ownership.addItem(
+            "FIO-managed identity and launch (native settings only when exactly qualified)",
+            "fio-managed",
+        )
         ownership.addItem("Operator-managed (observe/import only)", "operator-managed")
         ownership.addItem("Remote (observe endpoint only)", "remote")
         ownership.setAccessibleName("Software instance ownership")
@@ -711,15 +873,32 @@ class SoftwareInstanceAssistant(QWidget):
             (
                 ("application_path", "Application / FLRig path", "Path to the application or launcher"),
                 ("secondary_application_path", "FLDigi path", "Fast Light FLDigi application (optional)"),
+                ("flmsg_application_path", "FLMsg path", "Fast Light FLMsg application (optional shared tool)"),
+                ("flamp_application_path", "FLAmp path", "Fast Light FLAmp application (optional shared tool)"),
                 ("configuration_path", "Configuration / profile / INI", "Profile, configuration, or VarAC INI"),
                 ("secondary_configuration_path", "FLDigi configuration", "FLDigi profile/configuration"),
                 ("storage_path", "Data / database / log folder", "Instance-owned data, database, or FLDigi logs"),
                 ("secondary_storage_path", "Incoming / check-in folder", "VarAC incoming or FLDigi check-in folder"),
                 ("outbox_path", "VarAC outbox", "VarAC outbox folder"),
+                ("working_directory", "VarAC working directory", "Exact working directory for this VarAC node"),
+                ("cluster_path", "Cluster setup", "Standalone, create, or join"),
                 ("cluster_id", "VarAC cluster ID", "Optional cluster identifier"),
+                ("cluster_name", "New cluster name", "Name for a new VarAC cluster"),
+                ("cluster_shared_database", "Cluster shared database", "Optional cluster-owned shared database"),
                 ("cluster_instance_number", "VarAC cluster instance", "Optional positive instance number"),
             ),
         )
+        for key, text in (
+            ("cluster_gateway", "Use this node as the new cluster gateway"),
+            ("cluster_ptt_lock", "Enable cluster PTT lock"),
+        ):
+            checkbox = QCheckBox(text)
+            checkbox.setAccessibleName(text)
+            checkbox.toggled.connect(lambda _checked: self._refresh_review_if_needed())
+            self._field_widgets[key] = checkbox
+            label = QLabel("Cluster policy")
+            self._field_labels[key] = label
+            self._active_form.addRow(label, checkbox)
 
     def _build_launch_page(self) -> None:
         self._new_form_page(
@@ -732,14 +911,61 @@ class SoftwareInstanceAssistant(QWidget):
         launch_label = QLabel("Startup policy")
         self._field_labels["launch_at_startup"] = launch_label
         self._active_form.addRow(launch_label, launch)
+        advanced_tx = QCheckBox("Enable Advanced Fast Light TX")
+        advanced_tx.setAccessibleName("Enable Advanced Fast Light transmit mode")
+        advanced_tx.setToolTip(
+            "Receive-safe is the default. Advanced TX also requires a compatible Operating Model, RF Guard, and final preflight."
+        )
+        advanced_ack = QCheckBox(
+            "I understand Advanced TX remains subject to Operating Model, RF Guard, and final preflight"
+        )
+        advanced_ack.setAccessibleName("Acknowledge Advanced Fast Light transmit safeguards")
+        advanced_tx.toggled.connect(advanced_ack.setEnabled)
+        advanced_tx.toggled.connect(lambda _checked: self._refresh_review_if_needed())
+        advanced_ack.toggled.connect(lambda _checked: self._refresh_review_if_needed())
+        advanced_ack.setEnabled(False)
+        self._field_widgets["advanced_tx_requested"] = advanced_tx
+        self._field_widgets["advanced_tx_acknowledged"] = advanced_ack
+        advanced_label = QLabel("Fast Light mode")
+        acknowledgement_label = QLabel("Advanced TX acknowledgement")
+        self._field_labels["advanced_tx_requested"] = advanced_label
+        self._field_labels["advanced_tx_acknowledged"] = acknowledgement_label
+        self._active_form.addRow(advanced_label, advanced_tx)
+        self._active_form.addRow(acknowledgement_label, advanced_ack)
 
     def _add_line(self, key: str, label: str, placeholder: str) -> None:
+        if key == "variant":
+            combo = QComboBox()
+            combo.setAccessibleName(label)
+            combo.addItem("Choose the verified JS8Call variant", "")
+            combo.addItem("JS8Call 2.2", "js8call_2_2")
+            combo.addItem("JS8Call Improved 3.0.3", "js8call_improved_3_0_3")
+            combo.addItem("JS8Call Subspace 4.1", "js8call_subspace_4_1")
+            combo.currentIndexChanged.connect(lambda _index: self._refresh_review_if_needed())
+            self._field_widgets[key] = combo
+            label_widget = QLabel(label)
+            self._field_labels[key] = label_widget
+            self._active_form.addRow(label_widget, combo)
+            return
+        if key == "cluster_path":
+            combo = QComboBox()
+            combo.setAccessibleName(label)
+            combo.addItem("Standalone VarAC node", "standalone")
+            combo.addItem("Create a new cluster", "create_cluster")
+            combo.addItem("Join an existing cluster", "join_cluster")
+            combo.currentIndexChanged.connect(lambda _index: self._sync_family_fields())
+            combo.currentIndexChanged.connect(lambda _index: self._refresh_review_if_needed())
+            self._field_widgets[key] = combo
+            label_widget = QLabel(label)
+            self._field_labels[key] = label_widget
+            self._active_form.addRow(label_widget, combo)
+            return
         if key == "cluster_id":
             combo = QComboBox()
-            combo.setEditable(False)
+            combo.setEditable(True)
             combo.setAccessibleName(label)
             combo.setToolTip("Choose a configured cluster, or leave this blank for a standalone VarAC node.")
-            combo.addItem("No cluster (standalone)", "")
+            combo.addItem("Choose or enter a cluster", "")
             for cluster in self._varac_clusters:
                 public_id = _text(cluster.get("cluster_id"))
                 name = _text(cluster.get("name")) or public_id
@@ -817,6 +1043,15 @@ class SoftwareInstanceAssistant(QWidget):
         elif isinstance(port, QLineEdit) and normalized == "fast_light" and port.text() == str(_DEFAULT_PORTS[normalized]):
             port.setText(str(self._next_port(12345, "flrig_port", "port")))
         self._sync_family_fields()
+        if normalized == "fast_light" and self._radio_role == "observer":
+            self.guidance_label.setText(
+                "Configure one receive-only Fast Light identity for this SDR. FLDigi and approved file helpers are available; "
+                "FLRig, CAT, PTT, transmit, and automatic send remain disabled."
+            )
+        elif normalized == "varac" and self._radio_role == "observer":
+            self.guidance_label.setText(
+                "VarAC is unavailable for an observer / SDR. Return to Add Radio and choose a receive-only application."
+            )
         self._rebuild_radio_choices()
 
     def _next_port(self, base: int, *keys: str) -> int:
@@ -859,6 +1094,25 @@ class SoftwareInstanceAssistant(QWidget):
 
     def _rebuild_radio_choices(self) -> None:
         """Render every known radio with same-family ownership status."""
+
+        if self._unsaved_owner_key:
+            self.radio_combo.blockSignals(True)
+            self.radio_combo.clear()
+            self.radio_combo.addItem(
+                f"{self._unsaved_radio_label} — inactive setup draft",
+                None,
+            )
+            self.radio_combo.setToolTip(
+                "This software instance belongs to the current unsaved radio draft. "
+                "Nothing is persisted until Save Radio and Software."
+            )
+            self.radio_combo.setEnabled(False)
+            self.radio_combo.blockSignals(False)
+            self._selected_radio_id = None
+            self._radio_assignments = {}
+            self._replacement_instance = None
+            self._refresh_radio_context()
+            return
 
         assignments: dict[int, Mapping[str, Any]] = {}
         by_id = {
@@ -945,6 +1199,22 @@ class SoftwareInstanceAssistant(QWidget):
         self._refresh()
 
     def _refresh_radio_context(self) -> None:
+        if self._unsaved_owner_key:
+            self._selected_radio_id = None
+            self._replacement_instance = None
+            self._replacement_confirmed = False
+            self.create_radio_button.setVisible(False)
+            self.radio_combo.setEnabled(False)
+            self.replacement_checkbox.setVisible(False)
+            self.replacement_checkbox.setEnabled(False)
+            self.radio_guidance_label.setText(
+                f"Radio draft selected: {self._unsaved_radio_label}. "
+                "Apply returns the reviewed software bundle to Add Radio; it does not save it."
+            )
+            self.replacement_banner.setText(
+                "Inactive setup draft — Save Radio and Software remains required."
+            )
+            return
         radio_id = _int(self.radio_combo.currentData())
         self._selected_radio_id = radio_id
         replacement = self._radio_assignments.get(radio_id) if radio_id is not None else None
@@ -1003,14 +1273,39 @@ class SoftwareInstanceAssistant(QWidget):
     def _sync_family_fields(self) -> None:
         visible = _FAMILY_FIELDS.get(self._family_key, frozenset())
         labels = _FAMILY_FIELD_LABELS.get(self._family_key, {})
+        observer_mode = self._radio_role == "observer"
+        cluster_path_widget = self._field_widgets.get("cluster_path")
+        cluster_path = (
+            str(cluster_path_widget.currentData() or "standalone")
+            if isinstance(cluster_path_widget, QComboBox)
+            else "standalone"
+        )
         for key, widget in self._field_widgets.items():
             shown = key in visible
+            if self._family_key == "fast_light" and observer_mode and key in {
+                "port",
+                "application_path",
+                "configuration_path",
+                "advanced_tx_requested",
+                "advanced_tx_acknowledged",
+            }:
+                shown = False
+            if self._family_key == "varac":
+                if key in {"cluster_id", "cluster_name", "cluster_shared_database", "cluster_instance_number", "cluster_gateway", "cluster_ptt_lock"}:
+                    shown = cluster_path != "standalone"
+                if key in {"cluster_name", "cluster_shared_database", "cluster_gateway", "cluster_ptt_lock"}:
+                    shown = cluster_path == "create_cluster"
             widget.setVisible(shown)
             label = self._field_labels.get(key)
             if label is not None:
                 if key in labels and isinstance(label, QLabel):
                     label.setText(labels[key])
                 label.setVisible(shown)
+        if self._family_key == "fast_light" and observer_mode:
+            for key in ("advanced_tx_requested", "advanced_tx_acknowledged"):
+                widget = self._field_widgets.get(key)
+                if isinstance(widget, QCheckBox):
+                    widget.setChecked(False)
 
     def _refresh_source(self) -> None:
         discover = self.source_buttons["discover"].isChecked()
@@ -1073,8 +1368,14 @@ class SoftwareInstanceAssistant(QWidget):
 
     def _set_draft(self, draft: SoftwareInstanceDraft) -> None:
         values = draft.payload()
+        self._radio_role = draft.radio_role or self._radio_role
         self._imported_id = draft.imported_id
         self._imported_system_key = draft.imported_system_key
+        self._writer_platform = draft.writer_platform
+        self._writer_operation = draft.writer_operation or "create"
+        source_button = self.source_buttons.get(draft.mode)
+        if source_button is not None:
+            source_button.setChecked(True)
         for key, widget in self._field_widgets.items():
             value = values.get(key, "")
             if isinstance(widget, QLineEdit):
@@ -1097,6 +1398,7 @@ class SoftwareInstanceAssistant(QWidget):
             operator_index = self._field_widgets["ownership"].findData("operator-managed")
             if operator_index >= 0 and draft.ownership == "fio-managed":
                 self._field_widgets["ownership"].setCurrentIndex(operator_index)
+        self._sync_family_fields()
 
     def draft(self) -> SoftwareInstanceDraft:
         def value(key: str) -> str:
@@ -1104,7 +1406,14 @@ class SoftwareInstanceAssistant(QWidget):
             if isinstance(widget, QLineEdit):
                 return widget.text().strip()
             if isinstance(widget, QComboBox):
-                return str(widget.currentData() or "").strip()
+                data = widget.currentData()
+                if widget.isEditable() and not str(data or "").strip():
+                    # An editable combo may use a labeled blank first item.
+                    # Treat that item as blank, but preserve actual operator text.
+                    if widget.currentIndex() >= 0:
+                        return ""
+                    return widget.currentText().strip()
+                return str(data or "").strip()
             return ""
 
         def number(key: str) -> int:
@@ -1119,8 +1428,15 @@ class SoftwareInstanceAssistant(QWidget):
             family_key=self._family_key,
             instance_name=value("instance_name"),
             radio_id=radio_id,
+            owner_draft_key=self._unsaved_owner_key,
+            owner_label=self._unsaved_radio_label if self._unsaved_owner_key else "",
+            radio_role=self._radio_role,
             mode=next((key for key, button in self.source_buttons.items() if button.isChecked()), "managed"),
             ownership=str(self._field_widgets["ownership"].currentData() or "fio-managed"),
+            variant=value("variant"),
+            version=value("version"),
+            writer_platform=self._writer_platform,
+            writer_operation=self._writer_operation,
             host=value("host"),
             port=number("port"),
             udp_port=number("udp_port"),
@@ -1128,6 +1444,8 @@ class SoftwareInstanceAssistant(QWidget):
             rig_name=value("rig_name"),
             application_path=value("application_path"),
             secondary_application_path=value("secondary_application_path"),
+            flmsg_application_path=value("flmsg_application_path"),
+            flamp_application_path=value("flamp_application_path"),
             configuration_path=value("configuration_path"),
             secondary_configuration_path=value("secondary_configuration_path"),
             storage_path=value("storage_path"),
@@ -1135,8 +1453,16 @@ class SoftwareInstanceAssistant(QWidget):
             outbox_path=value("outbox_path"),
             launch_command=value("launch_command"),
             launch_at_startup=checked("launch_at_startup"),
+            working_directory=value("working_directory"),
+            advanced_tx_requested=checked("advanced_tx_requested"),
+            advanced_tx_acknowledged=checked("advanced_tx_acknowledged"),
+            cluster_path=value("cluster_path") or "standalone",
             cluster_id=value("cluster_id"),
+            cluster_name=value("cluster_name"),
+            cluster_shared_database=value("cluster_shared_database"),
             cluster_instance_number=number("cluster_instance_number"),
+            cluster_gateway=checked("cluster_gateway"),
+            cluster_ptt_lock=checked("cluster_ptt_lock"),
             notes=value("notes"),
             imported_id=self._imported_id,
             imported_system_key=self._imported_system_key,
@@ -1204,6 +1530,7 @@ class SoftwareInstanceAssistant(QWidget):
         if draft.family_key == "js8call":
             lines.extend(
                 (
+                    f"Variant/version: {draft.variant or 'Not verified'} · {draft.version or 'Not verified'}",
                     f"Rig name: {draft.rig_name or 'Not set'}",
                     f"TCP API: {endpoint}",
                     f"UDP: {draft.host}:{draft.udp_port}" if draft.udp_port else "UDP: Not configured",
@@ -1213,15 +1540,30 @@ class SoftwareInstanceAssistant(QWidget):
                 )
             )
         elif draft.family_key == "fast_light":
-            lines.extend(
-                (
-                    f"FLRig endpoint: {endpoint}",
-                    f"FLDigi endpoint: {draft.host}:{draft.secondary_port}" if draft.secondary_port else "FLDigi endpoint: Not configured",
-                    f"FLRig application/config: {draft.application_path or 'Not set'} · {draft.configuration_path or 'Not set'}",
-                    f"FLDigi application/config: {draft.secondary_application_path or 'Not set'} · {draft.secondary_configuration_path or 'Not set'}",
-                    f"FLDigi logs/check-ins: {draft.storage_path or 'Not set'} · {draft.secondary_storage_path or 'Not set'}",
+            if draft.radio_role == "observer":
+                lines.extend(
+                    (
+                        "Scope: Receive-only; FLRig, CAT, PTT, TX, and automatic send unavailable",
+                        f"FLDigi endpoint: {draft.host}:{draft.secondary_port}" if draft.secondary_port else "FLDigi endpoint: Not configured",
+                        f"FLDigi application/config: {draft.secondary_application_path or 'Not set'} · {draft.secondary_configuration_path or 'Not set'}",
+                        f"FLMsg/FLAmp: {draft.flmsg_application_path or 'Operator start / not selected'} · {draft.flamp_application_path or 'Operator start / not selected'}",
+                        f"FLDigi logs/check-ins: {draft.storage_path or 'Not set'} · {draft.secondary_storage_path or 'Not set'}",
+                    )
                 )
-            )
+            else:
+                lines.extend(
+                    (
+                        f"FLRig endpoint: {endpoint}",
+                        f"FLDigi endpoint: {draft.host}:{draft.secondary_port}" if draft.secondary_port else "FLDigi endpoint: Not configured",
+                        f"FLRig application/config: {draft.application_path or 'Not set'} · {draft.configuration_path or 'Not set'}",
+                        f"FLDigi application/config: {draft.secondary_application_path or 'Not set'} · {draft.secondary_configuration_path or 'Not set'}",
+                        f"FLMsg/FLAmp: {draft.flmsg_application_path or 'Operator start / not selected'} · {draft.flamp_application_path or 'Operator start / not selected'}",
+                        f"FLDigi logs/check-ins: {draft.storage_path or 'Not set'} · {draft.secondary_storage_path or 'Not set'}",
+                        "Fast Light mode: Advanced TX requested"
+                        if draft.advanced_tx_requested
+                        else "Fast Light mode: Receive-safe",
+                    )
+                )
         else:
             lines.extend(
                 (
@@ -1229,7 +1571,9 @@ class SoftwareInstanceAssistant(QWidget):
                     f"INI: {draft.configuration_path or 'Not set'}",
                     f"Database: {draft.storage_path or 'Not set'}",
                     f"Incoming/outbox: {draft.secondary_storage_path or 'Not set'} · {draft.outbox_path or 'Not set'}",
-                    f"Cluster: {draft.cluster_id or 'Not assigned'}"
+                    f"Working directory: {draft.working_directory or 'Not set'}",
+                    f"Cluster path: {draft.cluster_path.replace('_', ' ').title()}",
+                    f"Cluster: {draft.cluster_id or draft.cluster_name or 'Not assigned'}"
                     + (f" · instance {draft.cluster_instance_number}" if draft.cluster_instance_number else ""),
                 )
             )
@@ -1237,7 +1581,11 @@ class SoftwareInstanceAssistant(QWidget):
             (
                 f"Launch command: {draft.launch_command or 'Use configured application path'}",
                 f"Launch at FIO startup: {'Yes' if draft.launch_at_startup else 'No'}",
-                "External configuration write: None from this review",
+                (
+                    "External configuration: eligible for reviewed native apply"
+                    if draft.family_key == "js8call" and draft.variant and draft.version and draft.configuration_path
+                    else "External configuration: operator action required unless an exact supported writer is qualified"
+                ),
             )
         )
         self.review_label.setText("\n".join(lines))
@@ -1252,8 +1600,9 @@ class SoftwareInstanceAssistant(QWidget):
         self.step_label.setText(f"Step {self._step + 1} of {len(self.STEP_TITLES)} · {self.STEP_TITLES[self._step]}")
         self.back_button.setEnabled(self._step > 0)
         last_step = len(self.STEP_TITLES) - 1
-        self.next_button.setText("Add instance" if self._step == last_step else "Next")
-        blocked_for_radio = not self._selected_radio_id
+        final_action = "Apply to radio draft" if self._unsaved_owner_key else "Add instance"
+        self.next_button.setText(final_action if self._step == last_step else "Next")
+        blocked_for_radio = not self._selected_radio_id and not self._unsaved_owner_key
         blocked_for_replacement = self._replacement_instance is not None and not self._replacement_confirmed
         self.next_button.setEnabled(
             not blocked_for_radio

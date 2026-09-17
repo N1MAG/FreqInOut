@@ -7,6 +7,21 @@ still required; later adapters remain sequential gates
 
 Date: 2026-09-10
 
+Guided configuration authority update (2026-09-16):
+`guided_radio_software_configuration_spec.md` supersedes this document's older
+observer software-selection, RF Guard/Schedule applicability, launch-composition,
+and guided-save rules. The receiver adapter, reversible qualification,
+receive-only enforcement, and evidence contracts below remain authoritative.
+Implementation notes that describe SDR++ plus JS8Call as the only current
+observer stack are current-state evidence, not the target product boundary.
+
+GRS-5 integration update (2026-09-17): observer antenna/front-end Receiver
+Guard claims now enter the central pair-scoped scheduler arbitration graph.
+Verified automatic receiver retunes are held when a matching active peer owns a
+declared shared resource; manual/unverified receivers remain reminder-only.
+This automated implementation evidence does not close the live SDR-2 hardware
+gate.
+
 ## Purpose
 
 This specification defines how FIO identifies, explains, and optionally tunes a
@@ -36,7 +51,9 @@ direct SDR hardware driver, and no hardware/OS combination is labeled verified
 until the live SDR-2 acceptance matrix passes.
 
 - Observer SDR profiles store receive-only identity and endpoint information.
-- The current `SDR Follow` policy is advisory.
+- `SDR Follow` remains advisory. Receiver Guard is separate and enforceable:
+  declared shared observer antenna/front-end resources produce a blocking
+  scheduler hold for automatic receiver retunes while an active peer conflicts.
 - FIO has a RigCtlD protocol client capable of setting and reading frequency, but
   the observer policy deliberately prevents observer devices from entering the
   transceiver control path.
@@ -256,14 +273,15 @@ The receive-only setup is a guided-workflow redesign governed by
 - **Completion outcome:** One saved observer profile retains either explicit
   manual-tuning state or matching reversible tune/readback/restore evidence and
   the operator's FIO-tuning opt-in.
-- **Normal sequence:** `Radio -> Operating Model -> Software -> Connection ->
-  Test control -> Enable FIO tuning -> Review -> Save Radio`. A compatible
+- **Normal sequence:** `Radio -> Operating Model -> Software -> Connections ->
+  Safety -> Schedule -> Review & Save`. A compatible
   enabled receive-only model is selected before software is selected. The Software
   page uses the same radio-owned application concept as a transceiver while
   allowing only integrations that have a reviewed receive-only contract.
-  SDR++ remains the receiver application; an optional distinct JS8Call instance
-  may be configured for receive/import use. Transmit-only software choices,
-  RF Guard, and transmit schedule steps are unavailable for an observer.
+  SDR++ remains the receiver application; optional distinct JS8Call and
+  receive-only Fast Light instances may be configured through the unified
+  instance lifecycle. Receiver Guard and Receive Schedule remain available,
+  but transmit-only software, PTT, and transmit scheduling remain unavailable.
 - **Primary actions:** `Test control` is primary while the endpoint is ready for
   qualification. `Save Radio` becomes primary on Review. A passed test visibly
   directs the operator to enable FIO tuning and continue; a failed test leaves
@@ -309,9 +327,10 @@ Every installation contains exactly one protected built-in **Receive-only SDR**
 Operating Model before Guided Add Radio needs it. A fresh blank station ensures
 that model and the protected transceiver default without creating a radio,
 assignment, or runtime-primary projection. It enables Messages, Map,
-background ingest, and Launch Control while disabling scheduler ownership, Net
-Control, profile swaps, QSY, PTT, Compose sending, Expect replies, and every
-other transmit path. Observer restore/default-assignment logic resolves to this
+background ingest, Launch Control, and verified receive-schedule ownership while
+disabling the transmit scheduler, Net Control, profile swaps, transmit QSY, PTT,
+Compose sending, Expect replies, and every other transmit path. Observer
+restore/default-assignment logic resolves to this
 model; it never falls back to the transceiver default.
 
 An SDR may own a distinct JS8Call instance for receive traffic. The instance has
@@ -367,10 +386,10 @@ launch while retaining manual startup.
 - Every observer launch item carries `execution_scope=receive_only`. The launch
   planner rejects ordinary or transmit-capable entries for observer profiles,
   including entries injected outside guided setup. SDR++ is the approved
-  receiver application; JS8Call is separately approved only as a receive/import
-  companion instance.
-- A receiver launch item has no PTT, transmit, scheduler, radio-control, or
-  FLRig/JS8 dependency. Selecting it does not enable FIO tuning; reversible
+  receiver application; JS8Call and Fast Light require their separately
+  reviewed receive-only companion contracts.
+- A receiver launch item has no PTT, transmit, transmit-scheduler, or transceiver
+  radio-control authority. Selecting it does not enable FIO tuning; reversible
   tune/readback/restore qualification remains a separate explicit action.
 - Test control does not launch SDR++ and does not require FIO launch ownership.
   It can test an application the operator started independently. At runtime,

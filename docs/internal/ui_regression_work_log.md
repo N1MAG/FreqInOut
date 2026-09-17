@@ -6949,3 +6949,340 @@ software settings, launch persistence, and guided setup partition passes **242
 tests**. Changed Python modules compile and `git diff --check` passes. No runtime
 database, receiver endpoint, commit, or remote repository was changed by the
 automated gate.
+
+## 2026-09-16 — Unified guided radio and software configuration specification
+
+Status: specification exit gate passed; implementation has not started.
+
+`guided_radio_software_configuration_spec.md` now defines one radio-first setup
+contract for transceivers and receive-only SDRs. It makes application identity
+an atomic bundle, brings JS8Call and Fast Light under the same
+create/import/manual lifecycle, permits enforced receive-only Fast Light for an
+SDR, and requires all selected transceiver software—including standalone and
+Cluster VarAC—to use the shared guided software-instance workflow. Every
+configured external application must finish with an exact launch recipe or an
+explicit operator-start state.
+
+The specification replaces the old observer `RF Guard / Schedule N/A` policy
+with Receiver Guard and Receive Schedule while preserving the no-PTT/no-transmit
+boundary. It defines separate SDR++ receiver-control and companion-application
+cards, conditional native writers with preview/backup/readback/restore,
+resumable fallback when a writer is unavailable, atomic save/recovery,
+single-snapshot discovery, structured performance telemetry, measurable GUI
+responsiveness, and sequential GRS-0 through GRS-5 implementation gates.
+
+Work packages and model ownership:
+
+- Primary high-reasoning model: authority reconciliation, workflow and durable
+  identity architecture, concurrency/performance contract, persistence and
+  recovery boundaries, delivery slices, and final integration review.
+- `gpt-5.6-terra`, high reasoning: Fast Light current-state and receive-only
+  capability audit.
+- `gpt-5.6-terra`, high reasoning: VarAC node/cluster ownership, launch, safety,
+  persistence, and history audit.
+- `gpt-5.6-luna`, medium reasoning: guided-workflow wording, responsive UX,
+  error/recovery, and acceptance-test review. The primary review rejected its
+  recommendation to skip observer Guard/Schedule because the approved product
+  decision and existing receiver scheduler architecture require those steps.
+
+Evidence: the new specification and related authority links were reviewed for
+conflicts; Markdown whitespace and repository diff checks pass. No Python,
+database schema, runtime configuration, native application profile, endpoint,
+commit, or remote repository was changed in this specification-only slice.
+
+## 2026-09-17 — Guided radio/software configuration GRS-0 authority model
+
+Status: GRS-0 implementation exit gate passed; GRS-1 discovery/proposal work
+has not started.
+
+Added the Qt-free `guided_radio_software_model.py` authority layer. It defines
+the reviewed observer/transceiver capability matrix, canonical software-family
+and persisted-role adapters, immutable guided selections, complete atomic
+instance bundles, exact launch identity plus separate startup/health/readiness
+policy, source versus management ownership, collision-safe endpoints and
+resources, imported-bundle identity locking, and a fail-closed native-writer
+capability registry. FIO Spotter is modeled as built-in rather than an external
+launch item. Observer policy grants no transmit/PTT/transmit-schedule authority,
+rejects VarAC/Cluster/FLRig, and requires a reviewed external-TX-disabled claim
+for receive-only JS8, Fast Light, and CommStat bundles where applicable.
+
+The module imports only Python standard-library modules and performs no UI,
+filesystem, process, socket, database, endpoint, radio, discovery, planner, or
+writer action. No schema, migration, persistence adapter, runtime setting,
+external profile, or launch behavior changed in this slice. Existing durable
+manifests and launch/store records remain authoritative until their later
+sequential adapters pass the applicable exit gates.
+
+Work packages and model ownership:
+
+- Primary high-reasoning model: architecture, capability and atomicity
+  reconciliation, management/source and identity-policy separation, delegated
+  diff review, specification/work-log update, and final integration gate.
+- `gpt-5.6-terra`, high reasoning: bounded pure-model implementation.
+- `gpt-5.6-luna`, medium reasoning: focused capability, atomic-bundle,
+  immutability, writer-registry, and boundary tests.
+- `gpt-5.6-terra`, medium reasoning: read-only compatibility audit across the
+  current stores, manifests, launch planner, guided setup, receiver paths, and
+  VarAC boundaries.
+
+Acceptance evidence: the focused GRS-0 contract suite passes **20 tests**. The
+adjacent manifest/persistence, launch, guided setup, managed JS8, receiver
+control, SDR core, and VarAC partitions pass **169 tests**, for **189 passing
+tests** in the slice gate. The new module and tests compile, and repository diff
+checks pass. No runtime database, radio, application, endpoint, commit, or
+remote repository was changed by the automated gate.
+
+## 2026-09-17 — Guided radio/software configuration GRS-1 discovery and proposals
+
+Status: GRS-1 implementation exit gate passed; GRS-2 unified guided UX has not
+started.
+
+Added one Qt-free guided discovery coordinator with immutable request and
+result snapshots, bounded concurrent phases, coalescing, cache reuse,
+generation/draft stale-result rejection, cancellation, and structured timing
+telemetry. Read-only source adapters now scan JS8 profiles once per request,
+reuse those profiles for path projection, avoid repeated Fast Light application
+searches, and treat saved receiver settings as evidence without contacting an
+endpoint. Settings Add Radio and explicit Software Auto-Fill use the same
+coordinator from worker threads. The legacy Multi-Rig preview scan also moved
+off the GUI thread.
+
+The pure proposal layer defines complete imported identity bundles,
+deterministic collision/resource planning, and new-instance plans for JS8,
+Fast Light, receiver, and VarAC workflows. Existing JS8 API port `2442`
+therefore proposes `2443` only as part of a distinct profile/data/message/form
+and launch identity; an imported profile remains unchanged as one locked
+bundle. Discovery remains evidence only and performs no save, ownership,
+launch, socket, radio, process-control, or native-configuration write.
+
+Work packages and model ownership:
+
+- Primary high-reasoning model: concurrency architecture, coordinator and
+  scanner-source integration, performance/safety review, Settings integration
+  review, legacy-test migration, specification/work-log reconciliation, and
+  final exit gate.
+- `gpt-5.6-terra`, high reasoning: bounded pure proposal and resource-planning
+  model.
+- `gpt-5.6-terra`, medium reasoning: Settings worker integration and a separate
+  discovery/compatibility audit.
+- `gpt-5.6-luna`, medium reasoning: focused coordinator, source-adapter,
+  cancellation, stale-result, and projection tests.
+
+Acceptance evidence: the focused discovery/proposal/authority/performance
+partition passes **43 tests**. The adjacent Settings Auto-Fill, guided-radio,
+radio-scoped software, config discovery, Software Administration, receiver
+launch, and VarAC partitions pass **264 tests**, for **307 passing tests** in
+the slice gate. Changed Python and test modules compile and `git diff --check`
+passes. No runtime database, native profile, receiver endpoint, radio, commit,
+or remote repository was changed by the automated gate.
+
+## 2026-09-17 — Guided radio/software configuration GRS-2 unified UX
+
+Status: GRS-2 implementation exit gate passed; GRS-3 family completion has not
+started.
+
+Add Radio now keeps the approved seven step positions visible for every role:
+Radio, Operating Model, Software, Connections, Safety, Schedule, and Review &
+Save. Observer content is expressed as Receiver Guard and Receive Schedule;
+transceiver content remains RF Guard and Radio Schedule. The workflow retains
+operator edits while moving among steps, uses one responsive vertical scroll
+owner, exposes keyboard and accessibility names, and presents role-aware
+responsibility, permission, endpoint, launch, file, Guard, and Schedule review
+cards. Existing transceiver operating-model selection is preserved.
+
+Selected JS8Call, Fast Light, and VarAC families open the authoritative
+Software Instance Assistant against an opaque unsaved-radio owner key. The
+assistant therefore provides the same source, atomic identity, connection,
+file, launch, conflict, and review language used by Software Administration
+without inventing a negative or otherwise fake persisted radio ID. Its result
+returns to the Add Radio draft only. App configuration is preview-only inside
+the dialog, Cancel performs no save or external write, and final persistence
+remains reserved for the reviewed transaction slices.
+
+The dialog takes one Frequency Plan snapshot and reuses it while the operator
+navigates. Identical draft/plan validation is memoized, removing repeated plan
+queries and projections from ordinary step changes. Discovery remains on the
+shared GRS-1 worker coordinator. Shutdown waits added for these workers are
+bounded, cancel-aware, and explicitly tracked by the responsiveness contract.
+
+Work packages and model ownership:
+
+- Primary high-reasoning model: stable wizard and role-content architecture,
+  unsaved-owner Software Instance Assistant contract, transceiver regression
+  repair, plan-snapshot performance integration, delegated-diff review,
+  specification/work-log reconciliation, and final exit gate.
+- `gpt-5.6-terra`, medium reasoning: bounded guided UI implementation for the
+  seven steps, responsibility cards, role-aware Guard/Schedule pages, complete
+  Review, and the preview-only Software Administration handoff.
+- `gpt-5.6-luna`, medium reasoning: focused operator-visible, responsive,
+  accessibility, Cancel, observer, transceiver, and shared-assistant tests.
+- `gpt-5.6-terra`, medium reasoning: independent read-only architecture,
+  persistence, scheduler, and performance audit; its duplicate-editor finding
+  was closed by integrating the authoritative assistant before the gate.
+
+Acceptance evidence: the guided workflow, Software Instance Assistant,
+observer/transceiver, radio-scoped settings, receiver launch, Auto-Fill, and
+legacy-compatibility partition passes **326 tests**. The adjacent Software
+Administration layout, theme/font geometry, runtime theme propagation, first
+render, responsiveness, and performance contracts pass **79 tests**, for
+**405 passing tests** in the slice gate. Changed Python modules compile and
+`git diff --check` passes. No runtime database, native profile, external
+application, radio, endpoint, commit, or remote repository was changed by the
+automated gate.
+
+## 2026-09-17 — Guided radio/software configuration GRS-3 family completion
+
+Status: GRS-3 implementation exit gate passed; GRS-4 native writers and launch
+integration has not started.
+
+Completed the family-specific behavior behind the shared guided workflow.
+JS8Call create/import/manual plans preserve one atomic app/profile/API/message
+identity, and imported rows remain source-locked. Fast Light defaults to
+receive-safe; observer profiles can persist only a reviewed FLDigi-led
+receive-only bundle and receive no FLRig launch item, CAT/PTT capability, or
+transmit authority. Transceiver Advanced TX requires an explicit reviewed
+acknowledgement in durable manifest evidence. Direct store writes enforce the
+same observer restrictions.
+
+VarAC now has pure standalone, create-cluster, and join-cluster plans plus an
+atomic persistence path for node, manifest, radio link, launch identity,
+cluster, membership, and optional gateway. Case-insensitive cluster IDs,
+duplicate active member numbers, stale replacement ownership, shared/local
+database aliasing, and launch/resource collisions fail before commit or roll
+back the complete change. Settings -> Software now passes the selected radio
+role to the authoritative assistant and uses the same observer and cluster
+safety boundaries as Add Radio. Add Radio cannot complete a newly selected
+JS8Call, Fast Light, or VarAC family until its reviewed instance draft exists.
+
+Work packages and model ownership:
+
+- Primary high-reasoning model: store transaction and direct-persistence
+  architecture, Add Radio and Software Administration integration, delegated
+  diff review/corrections, normalized VarAC resource enforcement,
+  specification/work-log reconciliation, and final exit gate.
+- `gpt-5.6-terra`, high reasoning: Qt-free JS8Call/Fast Light completion policy,
+  observer receive-only validation, and Advanced TX acknowledgement model.
+- `gpt-5.6-terra`, high reasoning: pure VarAC standalone/create/join planner,
+  ownership, launch identity, membership, replacement, and collision policy.
+- `gpt-5.6-luna`, medium reasoning: independent GRS-3 family acceptance suite.
+
+Primary review corrected the observer Fast Light legacy-port compatibility
+adapter, role propagation from Software Administration, editable VarAC cluster
+placeholder handling, observer startup-profile validation, exact VarAC working
+directory persistence, create-cluster transaction wiring, and normalized
+shared-database collision enforcement.
+
+Acceptance evidence: the combined GRS-0 through GRS-3 authority, discovery,
+proposal, guided UI, Software Administration, family, store, manifest, launch,
+observer/transceiver, responsiveness, and adjacent regression partition passes
+**438 tests**. Changed Python modules compile and `git diff --check` passes. No
+runtime database, native application profile, receiver/radio endpoint, commit,
+or remote repository was changed by the automated gate.
+
+## 2026-09-17 — Guided radio/software configuration GRS-4 native writers and launch integration
+
+Status: GRS-4 implementation exit gate passed; GRS-5 scheduler, Guard,
+integration, and live qualification has not started.
+
+Added an exact native-writer registry for supported JS8Call 2.2.0, Improved
+3.0.3, and Subspace 4.1.0 create/update operations on Linux, macOS, and
+Windows. A writer qualifies only when family, variant, version, platform,
+operation, and explicit `.ini` target match. Final Add Radio and Software
+Administration saves run backup, apply, exact readback, and restore on a Qt
+worker rather than the GUI thread. Unsupported or incomplete writer evidence
+leaves the native file unchanged, saves an operator-action recovery state, and
+does not claim FIO changed third-party configuration. Post-write failures and
+later FIO persistence failures restore the exact backup target, including
+removing a file that did not exist before the apply.
+
+Launch planning now retains executable, command, arguments, working directory,
+safe environment/profile selector, configuration paths, dependencies,
+readiness, monitor policy, execution scope, known-recipe state, startup
+inclusion, bundle enablement, and explicit operator-start state. Manual and
+startup launch use the same StationLaunchPlanner with only radio scope changed.
+Shared applications deduplicate only when their durable launch identity and
+effective endpoint identity match. VarAC executes in its reviewed per-node
+working directory. Primary integration review also found and corrected a gap
+where guided Fast Light adoption could lose selected FLMsg/FLAmp identities;
+those selections now persist and appear in launch review as explicit
+operator-start components when no exact recipe is assigned.
+
+Work packages and model ownership:
+
+- Primary high-reasoning model: native-writer registry and transaction
+  architecture; exact backup/readback/restore; background Settings apply and
+  recovery integration; durable writer evidence; JS8 variant/version UX;
+  Fast Light component persistence correction; delegated-diff review;
+  specification/work-log reconciliation; and final exit gate.
+- `gpt-5.6-terra`, medium reasoning: bounded launch-planner/orchestrator
+  implementation covering exact launch identity, review states, dependency
+  planning, manual/startup unification, environment/cwd execution, and focused
+  launch tests.
+- `gpt-5.6-luna`, medium reasoning: independent native-writer and launch
+  acceptance coverage, including fault injection, platform command handling,
+  startup/operator policy, and dependency cases.
+
+Primary review corrected the delegated acceptance fixture so native-write tests
+use exact qualification metadata, implemented the rollback seam identified by
+its fault injection, tightened unsupported-writer no-mutation assertions,
+reviewed the launch diff line by line, and added the missing FLMsg/FLAmp
+adoption-to-review contract.
+
+Acceptance evidence: the combined GRS-0 through GRS-4 authority, discovery,
+proposal, guided UI, Software Administration, family/store/manifest, native
+writer fault-injection, exact restore, launch identity, observer safety,
+startup/manual planning, receiver, JS8 storage/launch, responsiveness, and
+adjacent regression partition passes **505 tests**. Changed Python and test
+modules compile and `git diff --check` passes. Automated tests changed no
+runtime database, real native application profile, receiver/radio endpoint,
+commit, or remote repository.
+
+## 2026-09-17 — Guided radio/software configuration GRS-5 scheduler, Guard, and integration
+
+Status: GRS-5 automated implementation exit gate passed. Operator-assisted
+external application, platform, and radio evidence remains explicitly pending;
+it is not inferred from automated tests.
+
+Receiver Guard now persists observer shared antenna and front-end claims into
+the same pair-scoped coordination graph used by the scheduler. The policy is a
+hard hold for an automatic observer retune, because an unattended receiver
+lane cannot stop for an interactive RF prompt. It affects only the radios in
+the declared pair; unrelated endpoint lanes continue independently. Amplifier
+claims remain transceiver-only and no observer PTT or transmit authority was
+introduced.
+
+Receive Schedule now lists only compatible receive-only plans for observers,
+returns the selected plan from final Save, and assigns it through the existing
+schedule store/coordinator. A verified exact receiver identity can retune;
+manual, failed, missing, or changed evidence remains reminder-only. Receiver
+Guard, Receive Schedule, Review, and post-save recovery use one cache-only
+five-state vocabulary. Endpoint operational summaries now carry exact
+receiver hold/failure reasons and recovery actions through Station Overview.
+
+Work packages and model ownership:
+
+- Primary high-reasoning model: scheduler/Guard architecture, observer policy
+  persistence, pair-scoped fail-closed arbitration, recovery telemetry,
+  delegated-diff review and corrections, adjacent regression integration,
+  release/specification reconciliation, and the final exit gate.
+- `gpt-5.6-terra`, medium reasoning: bounded guided Receiver Guard / Receive
+  Schedule UI, role-compatible plan filtering, accessible state cards, and
+  recovery presentation. Primary review corrected intentional-manual recovery
+  wording and missing-evidence classification.
+- `gpt-5.6-luna`, medium reasoning: focused receiver qualification, safety,
+  cancellation, and live-gate acceptance tests. Primary review replaced its
+  generic endpoint guardrail-only coverage with actual Receiver Guard
+  persistence, runtime arbitration, no-endpoint-on-hold, and recovery-summary
+  coverage.
+
+Acceptance evidence: the combined GRS-0 through GRS-5 authority, discovery,
+proposal, guided UI, Software Administration, family/store/manifest, native
+writer, launch, receiver scheduler, cross-radio Guard, runtime recovery,
+responsiveness, and adjacent regression partition passes **600 tests**.
+**Eight tests are explicitly skipped live gates**: RTL-SDR/SDR++ reversible
+control, real shared-resource arbitration, macOS/Linux guided setup, Windows
+guided setup, a physical transceiver/backend, live Fast Light, stock/Improved/
+Subspace JS8, and a multi-node VarAC Cluster. Changed Python modules compile and
+`git diff --check` passes. Automated tests changed no runtime database, native
+application profile, external application, radio/receiver endpoint, commit, or
+remote repository.

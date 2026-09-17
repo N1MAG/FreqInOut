@@ -2442,6 +2442,9 @@ class SchedulerEngine(QObject):
             status = status_by_key.get(endpoint_key)
             receiver = dict(receiver_rows.get(profile_id, {})) if isinstance(receiver_rows, dict) else {}
             receiver_state = str(receiver.get("state") or "").strip().lower()
+            receiver_detail = str(receiver.get("detail") or "").strip()
+            receiver_recovery = str(receiver.get("recovery_action") or "").strip()
+            receiver_reason = str(receiver.get("reason_code") or "").strip()
             retry_seconds = 0.0
             state_code = "verification_unavailable"
             label = "Applied · verification unavailable"
@@ -2463,11 +2466,11 @@ class SchedulerEngine(QObject):
             if receiver_state == "manual_tuning":
                 state_code = "manual_tuning"
                 label = "Manual tuning"
-                detail = "FIO shows the scheduled receiver frequency but does not control this endpoint."
+                detail = receiver_detail or "FIO shows the scheduled receiver frequency but does not control this endpoint."
             elif receiver_state == "safety_hold":
                 state_code = "waiting_shared_resource"
                 label = "Waiting for shared RF resource"
-                detail = "Central RF safety policy is holding this endpoint."
+                detail = receiver_detail or "Central RF safety policy is holding this endpoint."
             elif lane is not None and lane.state in {"running", "pending", "half_open"}:
                 state_code = "applying_schedule"
                 label = "Applying schedule"
@@ -2484,7 +2487,7 @@ class SchedulerEngine(QObject):
             elif receiver_state == "receiver_unavailable":
                 state_code = "receiver_unavailable"
                 label = "Receiver unavailable"
-                detail = "Use manual tuning or retry only this receiver endpoint."
+                detail = receiver_detail or "Use manual tuning or retry only this receiver endpoint."
             elif status is not None and (status.known or status_refreshing_with_recent_readback):
                 expected_frequency = int(expected.get("frequency_hz") or 0)
                 actual_frequency = status.frequency_hz
@@ -2586,6 +2589,8 @@ class SchedulerEngine(QObject):
                 "state": state_code,
                 "label": label,
                 "detail": detail,
+                "reason_code": receiver_reason,
+                "recovery_action": receiver_recovery,
                 "retry_seconds": retry_seconds,
                 "endpoint_label": endpoint_key.safe_label,
             }
@@ -7778,6 +7783,16 @@ class SchedulerEngine(QObject):
                         "actual": actual,
                         "result_status": result.status,
                         "reason_code": result.reason_code,
+                        "detail": (
+                            "Receive-only tuning completed and readback matched."
+                            if verified_success
+                            else (result.detail or result.reason_code or result.status)
+                        ),
+                        "recovery_action": (
+                            ""
+                            if verified_success
+                            else "Use manual tuning, confirm the receiver application and endpoint, then retry Test Control."
+                        ),
                     }
                 )
                 self._receiver_desired_by_profile[device_profile_id] = row
@@ -7845,6 +7860,17 @@ class SchedulerEngine(QObject):
             timeout_s=timeout_s,
         )
         if not submission.accepted:
+            row = dict(self._receiver_desired_by_profile.get(device_profile_id, {}))
+            row.update(
+                {
+                    "state": "receiver_unavailable",
+                    "result_status": submission.disposition,
+                    "reason_code": f"receiver_endpoint_{submission.disposition}",
+                    "detail": "Receiver endpoint lane did not accept the scheduled tune request.",
+                    "recovery_action": "Wait for the active endpoint operation to finish, or retry receiver control.",
+                }
+            )
+            self._receiver_desired_by_profile[device_profile_id] = row
             self._record_scheduler_event(
                 "skip",
                 f"receiver_endpoint_{submission.disposition}",
@@ -7890,6 +7916,16 @@ class SchedulerEngine(QObject):
             "source": source,
             "endpoint_key": endpoint_key.canonical,
             "device_name": str(lane.get("device_name") or ""),
+            "detail": (
+                "Receiver retune is queued for verified control."
+                if automated
+                else "Receiver control is not currently verified for this exact endpoint; tune manually."
+            ),
+            "recovery_action": (
+                "Wait for receiver tune/readback."
+                if automated
+                else "Test receiver control to enable automatic retuning, or continue with manual tuning."
+            ),
         }
         self._receiver_desired_by_profile[device_profile_id] = desired
         entry_key = (
@@ -7900,6 +7936,14 @@ class SchedulerEngine(QObject):
             str(desired.get("bandwidth_hz") or ""),
         )
         if frequency_hz is None or frequency_hz <= 0:
+            self._receiver_desired_by_profile[device_profile_id].update(
+                {
+                    "state": "receiver_unavailable",
+                    "reason_code": "receiver_frequency_invalid",
+                    "detail": "Receive-only schedule row has no valid frequency.",
+                    "recovery_action": "Correct the assigned receive schedule frequency.",
+                }
+            )
             self._record_scheduler_health_issue(
                 "receiver-frequency",
                 "receive-only schedule row has no valid frequency",
@@ -7930,7 +7974,17 @@ class SchedulerEngine(QObject):
         }
         conflict = self._coordination_conflict_status(entry, source=source, force=force)
         if bool(conflict.get("blocked")):
-            self._receiver_desired_by_profile[device_profile_id]["state"] = "safety_hold"
+            self._receiver_desired_by_profile[device_profile_id].update(
+                {
+                    "state": "safety_hold",
+                    "detail": str(conflict.get("detail") or conflict.get("summary") or "").strip(),
+                    "reason_code": "receiver_shared_resource_conflict",
+                    "guard_signature": self._coordination_conflict_signature(conflict),
+                    "recovery_action": (
+                        "Clear the named shared antenna/front-end conflict; FIO will retry on the next schedule evaluation."
+                    ),
+                }
+            )
             self._record_scheduler_event(
                 "blocked",
                 "receiver_shared_resource_conflict",
@@ -7945,7 +7999,14 @@ class SchedulerEngine(QObject):
             return
         receiver, identity = self._receiver_context_for_profile(device_profile_id)
         if receiver is None or identity is None:
-            self._receiver_desired_by_profile[device_profile_id]["state"] = "receiver_unavailable"
+            self._receiver_desired_by_profile[device_profile_id].update(
+                {
+                    "state": "receiver_unavailable",
+                    "detail": "Receiver control is unavailable; use manual tuning.",
+                    "reason_code": "receiver_control_unavailable",
+                    "recovery_action": "Start the receiver application, verify its endpoint, and retry Test Control.",
+                }
+            )
             self._record_scheduler_health_issue(
                 "receiver-control",
                 "receiver control is unavailable; use manual tuning",

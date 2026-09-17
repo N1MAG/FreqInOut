@@ -180,5 +180,27 @@ def apply_js8call_multisettings_plan(
     return target
 
 
+def verify_js8call_multisettings_plan(
+    plan: JS8CallManagedProfilePlan,
+    *,
+    ini_path: Path,
+) -> bool:
+    """Read back one exact MultiSettings section after a qualified write."""
+
+    target = Path(ini_path).expanduser()
+    if not target.is_file():
+        return False
+    parser = configparser.ConfigParser(interpolation=None)
+    parser.optionxform = str
+    try:
+        parser.read_string(target.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, configparser.Error):
+        return False
+    section = f"MultiSettings/{plan.profile_name}"
+    if not parser.has_section(section):
+        return False
+    return all(parser.get(section, key, fallback=None) == str(value) for key, value in plan.settings.items())
+
+
 def _ports_by_service(proposal: RadioInstanceProposal) -> Mapping[str, int]:
     return {assignment.service: int(assignment.assigned_port) for assignment in proposal.ports}

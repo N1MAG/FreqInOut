@@ -811,12 +811,26 @@ class SoftwareAdministrationWorkspace(QWidget):
             {"id": assignment.radio_id, "name": assignment.radio_name}
             for assignment in family.assignments
         )
+        selected_radio = next(
+            (
+                row
+                for row in radios
+                if int(row.get("id", row.get("radio_id", 0)) or 0)
+                == int(self._radio_id or 0)
+            ),
+            {},
+        )
+        radio_role = str(
+            selected_radio.get("device_class", selected_radio.get("radio_role", "tx_rx"))
+            or "tx_rx"
+        ).strip().lower()
         assistant = SoftwareInstanceAssistant(
             family.key,
             radios=radios,
             existing_instances=self._instance_inventory.get(family.key, ()),
             varac_clusters=self._varac_clusters,
             selected_radio_id=self._radio_id,
+            radio_role=radio_role,
             parent=self.editor_host,
         )
         assistant.completed.connect(self._on_instance_assistant_completed)

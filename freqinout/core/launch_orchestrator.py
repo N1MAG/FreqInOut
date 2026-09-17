@@ -304,6 +304,41 @@ class LaunchOrchestrator(QObject):
         )
         return self._with_effective_launch_preview(plan)
 
+    def preview_manual_plan(self, radio_profile_id: int) -> LaunchPlan:
+        """Preview the selected-radio plan through the startup planner path.
+
+        Manual station start changes only the requested radio scope; recipe,
+        startup inclusion, dependencies, and readiness stay identical.
+        """
+
+        return self.preview_startup_plan(
+            scope_radio_id=int(radio_profile_id),
+            trigger="manual",
+        )
+
+    def preview_radio_recipe_plan(
+        self,
+        radio_profile_id: int,
+        *,
+        bundle_override: Optional[Mapping[str, Any]] = None,
+    ) -> LaunchPlan:
+        """Preview known recipes and explicit operator-start states for review."""
+
+        profiles = self.multi_radio_store.list_device_profiles()
+        bundles = {
+            int(profile["id"]): self.get_radio_launch_bundle(int(profile["id"]))
+            for profile in profiles
+            if int(profile.get("id", 0) or 0) > 0
+        }
+        if bundle_override is not None:
+            bundles[int(radio_profile_id)] = dict(bundle_override)
+        plan = self.planner.plan_review(
+            profiles,
+            bundles,
+            scope_radio_id=int(radio_profile_id),
+        )
+        return self._with_effective_launch_preview(plan)
+
     def _with_effective_launch_preview(self, plan: LaunchPlan) -> LaunchPlan:
         """Resolve executable selection separately from planner-owned launch arguments.
 
@@ -314,7 +349,7 @@ class LaunchOrchestrator(QObject):
         instances = []
         for instance in plan.instances:
             queue_item = instance.as_queue_item()
-            command, _description = self._resolve_launch_command(queue_item)
+            command, _description = (None, "operator start") if instance.operator_starts else self._resolve_launch_command(queue_item)
             instances.append(replace(instance, effective_command=tuple(command or ())))
         return LaunchPlan(trigger=plan.trigger, scope_radio_id=plan.scope_radio_id, instances=tuple(instances))
 
@@ -343,7 +378,7 @@ class LaunchOrchestrator(QObject):
     def start_radio_startup_sequence(self, radio_profile_id: int) -> bool:
         if self._active or not self.launch_allowed():
             return False
-        plan = self.preview_startup_plan(scope_radio_id=int(radio_profile_id), trigger="manual")
+        plan = self.preview_manual_plan(int(radio_profile_id))
         queue = plan.queue()
         if not queue:
             return False
@@ -439,6 +474,12 @@ class LaunchOrchestrator(QObject):
                 "application_data_root",
                 "storage_mode",
                 "effective_command",
+                "working_directory",
+                "profile_selector",
+                "execution_scope",
+                "startup_included",
+                "bundle_enabled",
+                "operator_starts",
             ):
                 if key in item:
                     result[key] = item[key]
@@ -630,8 +671,19 @@ class LaunchOrchestrator(QObject):
             creationflags = 0
             if platform.system() == "Windows":
                 creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-            cwd = self._infer_launch_cwd(name, cmd, cmd_desc)
-            subprocess.Popen(cmd, shell=False, creationflags=creationflags, cwd=cwd)
+            cwd = self._infer_launch_cwd(name, cmd, cmd_desc, queue_item)
+            raw_environment = queue_item.get("environment", {}) if isinstance(queue_item, Mapping) else {}
+            environment = None
+            if isinstance(raw_environment, Mapping) and raw_environment:
+                environment = os.environ.copy()
+                environment.update(
+                    {
+                        str(key): str(value)
+                        for key, value in raw_environment.items()
+                        if str(key).strip()
+                    }
+                )
+            subprocess.Popen(cmd, shell=False, creationflags=creationflags, cwd=cwd, env=environment)
             if name == "JS8Call":
                 try:
                     self._persist_planned_js8_storage(queue_item)
@@ -1120,7 +1172,13 @@ class LaunchOrchestrator(QObject):
             return [first_candidate]
         return None
 
-    def _infer_launch_cwd(self, name: str, cmd: List[str], cmd_desc: str) -> Optional[str]:
+    def _infer_launch_cwd(
+        self,
+        name: str,
+        cmd: List[str],
+        cmd_desc: str,
+        item: Any = None,
+    ) -> Optional[str]:
         """
         For configured paths, launch from the app/script directory so relative
         resources resolve the same as direct desktop launch.
@@ -1128,6 +1186,10 @@ class LaunchOrchestrator(QObject):
         if not cmd:
             return None
         try:
+            if isinstance(item, Mapping):
+                configured = str(item.get("working_directory", "") or "").strip()
+                if configured:
+                    return str(Path(configured).expanduser())
             if name == "VarAC" and cmd_desc == "configured launch command":
                 varac_root = str(self.settings.get("varac_path", "") or "").strip()
                 if varac_root:

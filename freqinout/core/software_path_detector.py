@@ -6,7 +6,7 @@ import platform
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from freqinout.core.config_autodiscovery import (
     JS8CALL_APP_NAMES,
@@ -33,8 +33,17 @@ class SoftwarePathDetector:
         self.system = platform.system()
         self.home = Path.home()
 
-    def detect_fast_light(self) -> Dict[str, PathDetectionResult]:
+    def detect_fast_light(
+        self,
+        *,
+        include_application_paths: bool = True,
+    ) -> Dict[str, PathDetectionResult]:
         results: Dict[str, PathDetectionResult] = {}
+        if not include_application_paths:
+            results["fldigi_log_path"] = self._detect_fldigi_log_dir()
+            results["message_paths.flmsg"] = self._detect_flmsg_messages_dir()
+            results["message_paths.flamp"] = self._detect_flamp_messages_dir()
+            return results
         results["path_flrig"] = self._detect_program_path(
             key="path_flrig",
             label="FLRig launch path",
@@ -88,8 +97,17 @@ class SoftwarePathDetector:
         results["message_paths.flamp"] = self._detect_flamp_messages_dir()
         return results
 
-    def detect_js8(self) -> Dict[str, PathDetectionResult]:
+    def detect_js8(
+        self,
+        *,
+        file_profiles: Optional[Sequence[Any]] = None,
+        include_application_paths: bool = True,
+    ) -> Dict[str, PathDetectionResult]:
         results: Dict[str, PathDetectionResult] = {}
+        if not include_application_paths:
+            results["js8_directed_path"] = self._detect_js8_directed_path(file_profiles=file_profiles)
+            results["js8_forms_path"] = self._detect_js8_forms_path()
+            return results
         results["path_js8call"] = self._detect_install_target(
             key="path_js8call",
             label="JS8Call install folder",
@@ -124,7 +142,7 @@ class SoftwarePathDetector:
             ),
             prefer_bundle_dir=True,
         )
-        results["js8_directed_path"] = self._detect_js8_directed_path()
+        results["js8_directed_path"] = self._detect_js8_directed_path(file_profiles=file_profiles)
         results["js8_forms_path"] = self._detect_js8_forms_path()
         results["path_js8spotter"] = self._detect_program_path(
             key="path_js8spotter",
@@ -336,9 +354,16 @@ class SoftwarePathDetector:
                 )
         return self._not_found("message_paths.flamp", "FLAmp message path", "No NBEMS FLAMP directory found", "directory")
 
-    def _detect_js8_directed_path(self) -> PathDetectionResult:
-        file_profiles = discover_js8call_file_profiles(platform=self.system, home=self.home)
-        selected_profile = select_js8call_file_profile(file_profiles)
+    def _detect_js8_directed_path(
+        self,
+        *,
+        file_profiles: Optional[Sequence[Any]] = None,
+    ) -> PathDetectionResult:
+        profiles = tuple(file_profiles) if file_profiles is not None else discover_js8call_file_profiles(
+            platform=self.system,
+            home=self.home,
+        )
+        selected_profile = select_js8call_file_profile(profiles)
         if selected_profile is not None:
             return self._result(
                 "js8_directed_path",
@@ -348,7 +373,7 @@ class SoftwarePathDetector:
                 selected_profile.reason,
                 "file",
             )
-        if sum(1 for profile in file_profiles if profile.directed_path) > 1:
+        if sum(1 for profile in profiles if profile.directed_path) > 1:
             return self._not_found(
                 "js8_directed_path",
                 "JS8Call DIRECTED.TXT path",

@@ -55,6 +55,9 @@ def test_gui_thread_waits_are_bounded_and_allowlisted() -> None:
         "freqinout/gui/settings_tab.py": [
             "gpg_thread.wait(1200)",
             "software_thread.wait(1200)",
+                "guided_thread.wait(1200)",
+                "native_thread.wait(1200)",
+                "preview_thread.wait(1200)",
         ],
         "freqinout/gui/station_bbs_tab.py": ["thread.wait(1000)"],
     }

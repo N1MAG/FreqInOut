@@ -52,6 +52,9 @@ class PlannedInstance:
     launch_path_override: str = ""
     launch_command_override: str = ""
     launch_arguments: Tuple[str, ...] = ()
+    working_directory: str = ""
+    environment: Tuple[Tuple[str, str], ...] = ()
+    profile_selector: str = ""
     rig_name: str = ""
     rig_name_source: str = ""
     application_data_root: str = ""
@@ -62,6 +65,11 @@ class PlannedInstance:
     readiness_policy: Tuple[Tuple[str, Any], ...] = ()
     configuration_paths: Tuple[Tuple[str, str], ...] = ()
     execution_scope: str = STANDARD_EXECUTION_SCOPE
+    known_recipe: bool = False
+    startup_included: bool = False
+    bundle_enabled: bool = False
+    operator_starts: bool = False
+    monitor_health: bool = True
 
     def as_queue_item(self) -> Dict[str, Any]:
         return {
@@ -73,6 +81,9 @@ class PlannedInstance:
             "launch_path_override": self.launch_path_override,
             "launch_command_override": self.launch_command_override,
             "launch_arguments": list(self.launch_arguments),
+            "working_directory": self.working_directory,
+            "environment": dict(self.environment),
+            "profile_selector": self.profile_selector,
             "rig_name": self.rig_name,
             "rig_name_source": self.rig_name_source,
             "application_data_root": self.application_data_root,
@@ -83,6 +94,11 @@ class PlannedInstance:
             "readiness_policy": dict(self.readiness_policy),
             "configuration_paths": dict(self.configuration_paths),
             "execution_scope": self.execution_scope,
+            "known_recipe": self.known_recipe,
+            "startup_included": self.startup_included,
+            "bundle_enabled": self.bundle_enabled,
+            "operator_starts": self.operator_starts,
+            "monitor_health": self.monitor_health,
         }
 
 
@@ -107,6 +123,46 @@ class StationLaunchPlanner:
         scope_radio_id: Optional[int] = None,
         trigger: str = "startup",
     ) -> LaunchPlan:
+        return self._plan(
+            profiles,
+            bundles,
+            scope_radio_id=scope_radio_id,
+            trigger=trigger,
+            review_all=False,
+        )
+
+    def plan_review(
+        self,
+        profiles: Sequence[Mapping[str, Any]],
+        bundles: Mapping[int, Mapping[str, Any]],
+        *,
+        scope_radio_id: Optional[int] = None,
+        trigger: str = "review",
+    ) -> LaunchPlan:
+        """Return every configured recipe, including explicit operator-start rows.
+
+        Review is intentionally broader than execution: it exposes disabled
+        bundle/startup policy without making either state launchable.  Startup
+        and manual execution continue to use :meth:`plan_startup`.
+        """
+
+        return self._plan(
+            profiles,
+            bundles,
+            scope_radio_id=scope_radio_id,
+            trigger=trigger,
+            review_all=True,
+        )
+
+    def _plan(
+        self,
+        profiles: Sequence[Mapping[str, Any]],
+        bundles: Mapping[int, Mapping[str, Any]],
+        *,
+        scope_radio_id: Optional[int],
+        trigger: str,
+        review_all: bool,
+    ) -> LaunchPlan:
         candidates: List[Tuple[int, int, PlannedInstance]] = []
         ordered_profiles = sorted(
             (profile for profile in profiles if isinstance(profile, Mapping)),
@@ -116,22 +172,43 @@ class StationLaunchPlanner:
             radio_id = int(profile.get("id", 0) or 0)
             if radio_id <= 0 or (scope_radio_id is not None and radio_id != int(scope_radio_id)):
                 continue
-            if int(profile.get("runtime_active", 0) or 0) != 1:
+            if not review_all and int(profile.get("runtime_active", 0) or 0) != 1:
                 continue
             bundle = bundles.get(radio_id, {})
-            if not _truthy(bundle.get("launch_enabled", False)):
+            bundle_enabled = _truthy(bundle.get("launch_enabled", False))
+            if not review_all and not bundle_enabled:
                 continue
             normalized_items = normalize_launch_items(bundle.get("items", []))
+            if review_all:
+                normalized_items = self._with_configured_review_components(profile, normalized_items)
             if is_observer_profile(profile):
                 validate_observer_launch_items(normalized_items)
             for order, raw_item in enumerate(normalized_items):
                 item = self._with_profile_overrides(profile, raw_item)
-                if not item["enabled"] or not item["startup"]:
+                item_readiness = item.get("readiness_policy", {})
+                operator_start_row = bool(
+                    isinstance(item_readiness, Mapping)
+                    and _truthy(item_readiness.get("operator_starts", False))
+                )
+                if not item["enabled"] or (
+                    not review_all and (not item["startup"] or operator_start_row)
+                ):
                     continue
                 name = str(item["name"])
                 dependencies = tuple(item["dependencies"] or DEFAULT_DEPENDENCIES.get(name, ()))
                 identity = self._identity(profile, item)
                 readiness = dict(item["readiness_policy"])
+                operator_starts = _truthy(readiness.pop("operator_starts", False))
+                working_directory = str(readiness.pop("working_directory", "") or "").strip()
+                profile_selector = str(readiness.pop("profile_selector", "") or "").strip()
+                raw_environment = readiness.pop("environment", {})
+                environment = tuple(
+                    sorted(
+                        (str(key), str(value))
+                        for key, value in raw_environment.items()
+                        if str(key).strip()
+                    )
+                ) if isinstance(raw_environment, Mapping) else ()
                 if name == "JS8Call":
                     readiness.setdefault("host", str(profile.get("js8_host", "127.0.0.1") or "127.0.0.1"))
                     readiness.setdefault("port", int(profile.get("js8_port", 2442) or 2442))
@@ -161,6 +238,9 @@ class StationLaunchPlanner:
                         if name == "JS8Call"
                         else (str(value) for value in configured_arguments)
                     ),
+                    working_directory=working_directory,
+                    environment=environment,
+                    profile_selector=profile_selector,
                     rig_name=str(js8_values.get("rig_name", "")),
                     rig_name_source=str(js8_values.get("rig_name_source", "")),
                     application_data_root=str(js8_values.get("application_data_root", "")),
@@ -170,6 +250,15 @@ class StationLaunchPlanner:
                     readiness_policy=tuple(sorted(readiness.items())),
                     configuration_paths=self._configuration_paths(name, profile),
                     execution_scope=execution_scope(item),
+                    known_recipe=bool(
+                        str(item.get("launch_path_override", "") or "").strip()
+                        or str(item.get("launch_command_override", "") or "").strip()
+                        or operator_starts
+                    ),
+                    startup_included=bool(item["startup"]),
+                    bundle_enabled=bundle_enabled,
+                    operator_starts=operator_starts,
+                    monitor_health=bool(item.get("monitor_health", True)),
                 )
                 candidates.append((int(profile.get("display_order", 0) or 0), order, instance))
         deduped: Dict[str, Tuple[int, int, PlannedInstance]] = {}
@@ -188,6 +277,9 @@ class StationLaunchPlanner:
                 launch_path_override=existing.launch_path_override,
                 launch_command_override=existing.launch_command_override,
                 launch_arguments=existing.launch_arguments,
+                working_directory=existing.working_directory,
+                environment=existing.environment,
+                profile_selector=existing.profile_selector,
                 rig_name=existing.rig_name,
                 rig_name_source=existing.rig_name_source,
                 application_data_root=existing.application_data_root,
@@ -198,6 +290,11 @@ class StationLaunchPlanner:
                 readiness_policy=existing.readiness_policy,
                 configuration_paths=existing.configuration_paths,
                 execution_scope=existing.execution_scope,
+                known_recipe=existing.known_recipe,
+                startup_included=existing.startup_included,
+                bundle_enabled=existing.bundle_enabled,
+                operator_starts=existing.operator_starts,
+                monitor_health=existing.monitor_health,
             )
             deduped[instance.instance_identity] = (prior[0], prior[1], merged)
         ordered = self._dependency_order(list(deduped.values()))
@@ -209,17 +306,95 @@ class StationLaunchPlanner:
         return LaunchPlan(trigger=trigger, scope_radio_id=scope_radio_id, instances=instances)
 
     @staticmethod
+    def _with_configured_review_components(
+        profile: Mapping[str, Any],
+        items: Sequence[Mapping[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Expose configured Fast Light components missing from legacy bundles.
+
+        Older profiles often persisted FLMsg/FLAmp selection and executable
+        paths without component launch rows.  Review must still show an exact
+        per-component state, but it must not silently opt those recipes into
+        startup.  The durable instance key remains radio-scoped unless the
+        profile explicitly records an intentionally shared key.
+        """
+
+        result = [dict(item) for item in items]
+        existing_names = {str(item.get("name", "") or "").strip() for item in result}
+        radio_id = int(profile.get("id", 0) or 0)
+        fast_key = str(
+            profile.get("fast_light_system_key", "")
+            or profile.get("fast_light_instance_key", "")
+            or f"radio-{radio_id}"
+        ).strip()
+        scope = "receive_only" if is_observer_profile(profile) else STANDARD_EXECUTION_SCOPE
+        for name, use_key, path_key in (
+            ("FLRig", "use_flrig", "flrig_path"),
+            ("FLDigi", "use_fldigi", "fldigi_path"),
+            ("FLMsg", "use_flmsg", "flmsg_path"),
+            ("FLAmp", "use_flamp", "flamp_path"),
+        ):
+            if name in existing_names or not _truthy(profile.get(use_key, False)):
+                continue
+            # Observer profiles can use FLDigi/FLMsg/FLAmp only; FLRig would
+            # imply radio control authority and remains invalid.
+            if is_observer_profile(profile) and name == "FLRig":
+                continue
+            prefix = name.casefold()
+            explicit_key = str(profile.get(f"{prefix}_instance_key", "") or "").strip()
+            result.append(
+                {
+                    "name": name,
+                    "instance_key": explicit_key or f"fast-light:{fast_key}:{prefix}",
+                    "enabled": True,
+                    "startup": False,
+                    "monitor_health": False,
+                    "launch_path_override": str(profile.get(path_key, "") or "").strip(),
+                    "launch_command_override": "",
+                    "dependencies": list(DEFAULT_DEPENDENCIES.get(name, ())),
+                    "readiness_policy": {
+                        "execution_scope": scope,
+                        "operator_starts": True,
+                        "readiness": "operator_confirmed",
+                    },
+                    "execution_scope": scope,
+                }
+            )
+        return result
+
+    @staticmethod
     def _configuration_paths(name: str, profile: Mapping[str, Any]) -> Tuple[Tuple[str, str], ...]:
         """Expose only launch-relevant native resources to pure preflight checks."""
 
-        if name != "VarAC":
+        values: Dict[str, Any]
+        if name == "JS8Call":
+            values = {
+                "profile_path": profile.get("js8_profile_path", ""),
+                "data_root": profile.get("js8_message_storage_root", profile.get("application_data_root", "")),
+                "directed_path": profile.get("js8_directed_path", ""),
+            }
+        elif name == "FLRig":
+            values = {"configuration_path": profile.get("flrig_config_path", "")}
+        elif name in {"FLDigi", "FLMsg", "FLAmp"}:
+            prefix = name.casefold()
+            values = {
+                "configuration_path": profile.get(f"{prefix}_config_path", ""),
+                "message_path": profile.get(f"{prefix}_message_path", ""),
+            }
+        elif name == "SDR++":
+            values = {
+                "receiver_target": profile.get("sdr_target", ""),
+                "receiver_endpoint": profile.get("sdr_endpoint", ""),
+            }
+        elif name == "VarAC":
+            values = {
+                "ini_path": profile.get("varac_ini_path", ""),
+                "db_path": profile.get("varac_db_path", ""),
+                "incoming_path": profile.get("varac_incoming_path", ""),
+                "outbox_dir": profile.get("varac_outbox_dir", ""),
+            }
+        else:
             return ()
-        values = {
-            "ini_path": profile.get("varac_ini_path", ""),
-            "db_path": profile.get("varac_db_path", ""),
-            "incoming_path": profile.get("varac_incoming_path", ""),
-            "outbox_dir": profile.get("varac_outbox_dir", ""),
-        }
         return tuple(
             (key, str(value or "").strip())
             for key, value in values.items()
@@ -404,6 +579,13 @@ class StationLaunchPlanner:
         except ValueError:
             normalized_command = command
         name = str(item.get("name", "") or "").strip()
+        instance_key = str(item.get("instance_key", "") or "").strip()
+        readiness = item.get("readiness_policy", {})
+        if not isinstance(readiness, Mapping):
+            readiness = {}
+        arguments = readiness.get("launch_arguments", ())
+        if not isinstance(arguments, (list, tuple)):
+            arguments = ()
         endpoint: Dict[str, Any] = {}
         if name == "JS8Call":
             endpoint = {
@@ -417,7 +599,22 @@ class StationLaunchPlanner:
             endpoint = {"host": profile.get("fldigi_host"), "port": profile.get("fldigi_port")}
         elif name == "VarAC":
             endpoint = {"ini": profile.get("varac_ini_path"), "node": profile.get("varac_node_id")}
-        payload = {"name": name.casefold(), "command": normalized_command, "path": path, "endpoint": endpoint}
+        payload = {
+            "name": name.casefold(),
+            "instance_key": instance_key.casefold(),
+            "command": normalized_command,
+            "path": path,
+            "arguments": [str(value) for value in arguments],
+            "working_directory": str(readiness.get("working_directory", "") or "").strip(),
+            "environment": {
+                str(key): str(value)
+                for key, value in readiness.get("environment", {}).items()
+            } if isinstance(readiness.get("environment", {}), Mapping) else {},
+            "profile_selector": str(readiness.get("profile_selector", "") or "").strip(),
+            "operator_starts": _truthy(readiness.get("operator_starts", False)),
+            "execution_scope": execution_scope(item),
+            "endpoint": endpoint,
+        }
         return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:24]
 
     @staticmethod

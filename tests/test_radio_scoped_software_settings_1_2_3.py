@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 import types
 from pathlib import Path
 
@@ -1743,7 +1744,7 @@ def test_settings_multirig_autoconfig_preview_is_in_card_and_non_destructive() -
         : source.index("self.device_profile_detail_card = QFrame()")
     ]
     preview_block = source[
-        source.index("def _preview_multi_rig_autoconfiguration")
+        source.index("class _MultiRigAutoconfigPreviewWorker")
         : source.index("def _multi_rig_radio_catalog")
     ]
 
@@ -1751,7 +1752,8 @@ def test_settings_multirig_autoconfig_preview_is_in_card_and_non_destructive() -
     assert 'self.multi_rig_autoconfig_preview_label.setObjectName("multiRigAutoconfigPreview")' in build_block
     assert "build_single_rig_upgrade_preview(" in preview_block
     assert "build_autoconfig_proposal(" in preview_block
-    assert "extra_app_paths=self._multi_rig_autoconfig_extra_app_paths(settings_values)" in preview_block
+    assert "extra_app_paths=SettingsTab._multi_rig_autoconfig_extra_app_paths(self.settings_values)" in preview_block
+    assert "worker.moveToThread(thread)" in preview_block
     assert "ensure_multi_rig_migration(" not in preview_block
     assert "create_config_backup(" not in preview_block
     assert 'source_surface="settings.configure_automatically.multirig.preview"' in preview_block
@@ -1918,10 +1920,12 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "_GuidedRadioAutofillWorker(" in dialog_block
     guided_worker_block = source[
         source.index("class _GuidedRadioAutofillWorker")
-        : source.index("class _GpgKeyProbeWorker")
+        : source.index("class _MultiRigAutoconfigPreviewWorker")
     ]
-    assert "build_autoconfig_proposal(" in guided_worker_block
-    assert "discover_js8call_file_profiles()" in guided_worker_block
+    assert "self.coordinator.discover(" in guided_worker_block
+    assert "legacy_payload_from_snapshot(snapshot)" in guided_worker_block
+    assert "build_autoconfig_proposal(" not in guided_worker_block
+    assert "discover_js8call_file_profiles()" not in guided_worker_block
     assert 'configure_auto_status.setToolTip("\\n".join(review.detail_lines))' in dialog_block
     assert "select_js8call_file_profile(" in planner_source
     assert "tcp_port=initial_js8_port" in planner_source
@@ -1958,7 +1962,7 @@ def test_settings_js8_directed_path_has_field_level_autofill() -> None:
     assert "build_js8_path_row(" in js8_block
 
 
-def test_settings_js8_autofill_uses_selected_radio_port_for_directed_path(monkeypatch, tmp_path) -> None:
+def test_settings_js8_worker_uses_selected_radio_port_for_directed_path(tmp_path) -> None:
     from freqinout.core.config_autodiscovery import JS8CallFileProfile
     from freqinout.core.software_path_detector import PathDetectionResult
     import freqinout.gui.settings_tab as settings_tab_module
@@ -1999,25 +2003,60 @@ def test_settings_js8_autofill_uses_selected_radio_port_for_directed_path(monkey
             reason="C",
         ),
     )
-    monkeypatch.setattr(settings_tab_module, "discover_js8call_file_profiles", lambda: profiles)
+    from freqinout.core.guided_radio_software_model import RadioRole, SoftwareFamily
+    from freqinout.core.guided_software_discovery import DiscoveryRequest
+    from freqinout.core.guided_software_proposals import DiscoveryEvidence, DiscoverySnapshot
+    from freqinout.gui.settings_tab import _SoftwareAutofillWorker
 
-    tab = SettingsTab.__new__(SettingsTab)
-    tab.js8_port_edit = Edit("2444")
-    tab._selected_settings_feedback_target = lambda: ("3", "FIO-C")
-    original = {
-        "js8_directed_path": PathDetectionResult(
-            key="js8_directed_path",
-            label="JS8Call DIRECTED.TXT path",
-            path=str(path_a),
-            confidence="verified",
-            reason="First profile would be wrong",
-            exists=True,
-            target_type="file",
-        )
-    }
+    class Coordinator:
+        def discover(self, request, *, cancel_probe):
+            assert cancel_probe() is False
+            return DiscoverySnapshot(
+                "js8-port-match",
+                request.generation,
+                evidence=tuple(
+                    DiscoveryEvidence(
+                        f"js8-profile-{index}",
+                        "js8-profile-scan",
+                        f"{profile.name}: {profile.confidence}",
+                        {
+                            "record_type": "js8_profile",
+                            "name": profile.name,
+                            "ini_path": profile.ini_path,
+                            "save_dir": profile.save_dir,
+                            "tcp_server_port": profile.tcp_server_port,
+                            "directed_path": profile.directed_path,
+                            "all_path": profile.all_path,
+                            "inbox_path": profile.inbox_path,
+                            "application_data_root": profile.application_data_root,
+                            "rig_name": profile.rig_name,
+                            "confidence": profile.confidence,
+                            "reason": profile.reason,
+                            "storage_mode": profile.storage_mode,
+                        },
+                    )
+                    for index, profile in enumerate(profiles)
+                ),
+            )
 
-    scoped = tab._radio_scoped_js8_autofill_results(original)
+        def cancel(self, _session_key, _generation):
+            return None
 
+    request = DiscoveryRequest(
+        "settings-js8-test",
+        "settings-js8-port-match",
+        1,
+        1,
+        RadioRole.TRANSCEIVER,
+        (SoftwareFamily.JS8CALL,),
+        {},
+    )
+    worker = _SoftwareAutofillWorker(Coordinator(), request, "js8", js8_port="2444", profile_name="FIO-C")
+    emitted = []
+    worker.finished.connect(lambda _generation, _section, results: emitted.append(results))
+    worker.run()
+
+    scoped = emitted[0]
     assert scoped["js8_directed_path"].path == str(path_c)
     assert scoped["js8_directed_path"].reason == "C"
 
@@ -2139,7 +2178,10 @@ def test_settings_multirig_autoconfig_preview_button_updates_label_and_feedback(
     tab = SettingsTab()
     try:
         tab.multi_rig_preview_autoconfig_btn.click()
-        app.processEvents()
+        deadline = time.monotonic() + 2.0
+        while tab.multi_rig_autoconfig_preview_label.isHidden() and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
 
         assert tab.multi_rig_autoconfig_preview_label.isHidden() is False
         assert "FIO will create first radio" in tab.multi_rig_autoconfig_preview_label.text()
@@ -3187,7 +3229,10 @@ def test_settings_autofill_replace_suggestions_is_wired_without_modal() -> None:
         source.index("def _dismiss_autofill_preserved_suggestions")
         : source.index("def _autofill_replace_summary")
     ]
-    table_block = source[source.index("def _make_autofill_review_table") : source.index("def _detect_autofill_results")]
+    table_block = source[
+        source.index("def _make_autofill_review_table")
+        : source.index("def _attempt_scoped_autofill")
+    ]
     refresh_table_block = source[
         source.index("def _refresh_autofill_review_table")
         : source.index("def _autofill_preserved_copy_summary")
@@ -4486,7 +4531,7 @@ def test_radio_profile_guided_add_dialog_copy_is_distinct_from_advanced_edit() -
 
     assert SettingsTab._device_profile_dialog_title(None) == "Guided Add Radio"
     assert SettingsTab._device_profile_dialog_title({"id": 7}) == "Radio Details"
-    assert SettingsTab._device_profile_dialog_save_text(None) == "Save Radio"
+    assert SettingsTab._device_profile_dialog_save_text(None) == "Save Radio and Software"
     assert SettingsTab._device_profile_dialog_save_text({"id": 7}) == "Save Changes"
     assert "one step at a time" in SettingsTab._device_profile_dialog_intro(None)
     assert "software used by that radio" in SettingsTab._device_profile_dialog_intro(None)

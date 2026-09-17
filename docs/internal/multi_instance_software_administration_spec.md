@@ -11,6 +11,7 @@ Governing product/UI contract: `multirig_product_ui_contract.md`
 Related specifications:
 
 - `settings_configuration_assistant_spec.md`
+- `guided_radio_software_configuration_spec.md`
 - `js8call_modern_variant_compatibility_spec.md`
 - `multi_endpoint_scheduler_concurrency_spec.md`
 - `production_reliability_and_workflow_remediation_spec.md`

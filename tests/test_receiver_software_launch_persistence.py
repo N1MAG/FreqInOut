@@ -106,5 +106,6 @@ def test_receiver_launch_failure_is_visible_after_profile_save(monkeypatch, tmp_
 
     saved = tab._last_persisted_device_profile or {}
     assert int(saved.get("id", 0) or 0) > 0
-    assert warnings and warnings[-1][0] == "Receiver Launch Setup"
-    assert "profile was saved" in warnings[-1][1]
+    assert warnings and warnings[-1][0] == "Saved — launch bundle retry required"
+    assert "reviewed launch bundle still needs to be applied" in warnings[-1][1]
+    assert "Settings → Radios → RTL-SDR → Launch Control" in warnings[-1][1]

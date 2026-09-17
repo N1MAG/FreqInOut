@@ -65,7 +65,7 @@ def test_store_derives_rf_conflict_policies_from_shared_resources(monkeypatch, t
             "frontend_group": "front-a",
         }
     )
-    store.save_device_profile(
+    observer = store.save_device_profile(
         {
             "name": "Observer",
             "control_backend": "manual",
@@ -76,8 +76,13 @@ def test_store_derives_rf_conflict_policies_from_shared_resources(monkeypatch, t
     )
 
     policies = store.list_station_coordination_policies("rf_conflict")
-    assert len(policies) == 1
-    policy = policies[0]
+    assert len(policies) == 3
+    policy = next(
+        item
+        for item in policies
+        if {int(item["source_device_id"]), int(item["target_device_id"])}
+        == {int(first["id"]), int(second["id"])}
+    )
     assert int(policy["source_device_id"]) == min(int(first["id"]), int(second["id"]))
     assert int(policy["target_device_id"]) == max(int(first["id"]), int(second["id"]))
     assert policy["trigger"]["antenna_groups"] == ["ANT-1"]
@@ -86,8 +91,24 @@ def test_store_derives_rf_conflict_policies_from_shared_resources(monkeypatch, t
     assert policy["action"]["warning"] == "primary_runtime_rf_overlap"
     assert policy["safety_mode"] == "prompt"
 
+    receiver_policies = [
+        item
+        for item in policies
+        if int(observer["id"]) in {int(item["source_device_id"]), int(item["target_device_id"])}
+    ]
+    assert len(receiver_policies) == 2
+    assert all(item["trigger"]["receiver_guard"] is True for item in receiver_policies)
+    assert all(item["trigger"]["antenna_groups"] == ["ANT-1"] for item in receiver_policies)
+    assert all(item["trigger"]["amplifier_groups"] == [] for item in receiver_policies)
+    assert all(item["safety_mode"] == "block" for item in receiver_policies)
+
     store.save_device_profile({"id": int(second["id"]), "antenna_group": ""})
-    assert store.list_station_coordination_policies("rf_conflict") == []
+    remaining = store.list_station_coordination_policies("rf_conflict")
+    assert len(remaining) == 1
+    assert {int(remaining[0]["source_device_id"]), int(remaining[0]["target_device_id"])} == {
+        int(first["id"]),
+        int(observer["id"]),
+    }
 
 
 def test_store_derives_blocking_band_overlap_policy_for_observer(monkeypatch, tmp_path):

@@ -50,6 +50,24 @@ def test_draft_payload_is_stable_and_normalizes_store_style_names() -> None:
     assert draft.payload()["executable_path"] == "/apps/js8"
 
 
+def test_js8_draft_retains_exact_native_writer_evidence() -> None:
+    draft = normalize_instance_draft(
+        {
+            "family": "js8call",
+            "name": "Field JS8",
+            "js8_variant_family": "js8call_subspace_4_1",
+            "js8_variant_version": "4.1.0",
+            "js8_writer_platform": "linux",
+            "js8_writer_operation": "create",
+        }
+    )
+
+    assert draft.variant == "js8call_subspace_4_1"
+    assert draft.version == "4.1.0"
+    assert draft.payload()["js8_variant_family"] == "js8call_subspace_4_1"
+    assert draft.payload()["js8_variant_version"] == "4.1.0"
+
+
 def test_conflicts_are_explicit_and_importing_same_row_is_safe() -> None:
     existing = [{"id": 3, "name": "North API", "host": "127.0.0.1", "port": 2443, "install_path": "/apps/js8"}]
     findings = instance_conflicts(
@@ -61,6 +79,34 @@ def test_conflicts_are_explicit_and_importing_same_row_is_safe() -> None:
         {"family_key": "js8call", "name": "North API", "id": 3, "radio_id": 7, "rig_name": "north", "host": "127.0.0.1", "port": 2443, "path": "/apps/js8"},
         existing,
     )
+
+
+def test_unsaved_radio_owner_uses_authoritative_assistant_without_fake_radio_id() -> None:
+    app = _app()
+    assistant = SoftwareInstanceAssistant(
+        "js8call",
+        unsaved_owner_key="guided-radio-draft-7",
+        unsaved_radio_label="Field SDR",
+        initial_draft={
+            "instance_name": "Field SDR JS8Call",
+            "rig_name": "FIELD-SDR",
+            "application_path": "/apps/js8call",
+            "host": "127.0.0.1",
+            "port": 2443,
+        },
+    )
+    try:
+        draft = assistant.draft()
+        assert draft.radio_id is None
+        assert draft.owner_draft_key == "guided-radio-draft-7"
+        assert draft.owner_label == "Field SDR"
+        assert assistant.radio_combo.isEnabled() is False
+        assert "inactive setup draft" in assistant.radio_combo.currentText()
+        assert "radio_required" not in {finding.code for finding in assistant.validation()}
+        assert draft.payload()["owner_draft_key"] == "guided-radio-draft-7"
+    finally:
+        assistant.deleteLater()
+        app.processEvents()
 
 
 def test_assistant_has_family_specific_steps_and_emits_only_after_review() -> None:
@@ -144,6 +190,9 @@ def test_family_fields_are_scoped_and_draft_round_trips_every_field() -> None:
         assert assistant._field_widgets["secondary_port"].isHidden() is False
         assert assistant._field_widgets["rig_name"].isHidden()
         assistant.family_combo.setCurrentIndex(2)
+        assert assistant._field_widgets["cluster_id"].isHidden()
+        cluster_path = assistant._field_widgets["cluster_path"]
+        cluster_path.setCurrentIndex(cluster_path.findData("join_cluster"))
         assert assistant._field_widgets["cluster_id"].isHidden() is False
         assert assistant._field_widgets["udp_port"].isHidden()
         assistant._field_widgets["instance_name"].setText("VarAC North")
