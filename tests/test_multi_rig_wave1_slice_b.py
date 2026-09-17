@@ -60,10 +60,11 @@ def test_settings_tab_add_device_profile_persists(monkeypatch, tmp_path):
 
     tab = SettingsTab()
     try:
+        operating_profile_id = int(tab.multi_radio_store.ensure_builtin_operating_profiles()[0]["id"])
         monkeypatch.setattr(
             tab,
             "_open_device_profile_dialog",
-            lambda existing=None: {
+            lambda existing=None, **_kwargs: {
                 "name": "Remote JS8",
                 "control_backend": "js8call",
                 "deployment_mode": "minimal",
@@ -72,6 +73,7 @@ def test_settings_tab_add_device_profile_persists(monkeypatch, tmp_path):
                 "launch_enabled": False,
                 "launch_path": "C:/Apps/JS8Call/JS8Call.exe",
                 "notes": "Field kit",
+                "guided_operating_profile_id": operating_profile_id,
             },
         )
         tab._add_device_profile()

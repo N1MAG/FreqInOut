@@ -55,6 +55,7 @@ a = Analysis(
     binaries=qt_plugin_binaries,
     datas=[
         ('freqinout/gui/qml', 'freqinout/gui/qml'),
+        ('freqinout/resources/spotter_forms', 'freqinout/resources/spotter_forms'),
         ('config/leaflet', 'config/leaflet'),
         ('config/shortwave/eibi', 'config/shortwave/eibi'),
         ('assets', 'assets'),

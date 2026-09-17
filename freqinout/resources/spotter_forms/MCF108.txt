@@ -1,0 +1,163 @@
+Station Schedule|F!108
+
+. Version: 01/29/2026 - @SITREP
+
+# KN4AM
+
+! Station Schedule and Temporary Closing/Reopening Notification
+
+. 
+!!! Standard Station Operation:
+
+? Station activity level on JS8Call/JS8Spotter (attended or unattended):
+@1 Station attempts to operate 24/7
+@2 Station operates daily on a schedule
+@3 Station operates daily as available
+@4 Station operates weekly
+@5 Station operates only incidentially
+
+? Time (UTC) normal station opening time:
+@0 N/A 24 hour operation
+@A 01:00
+@B 02:00
+@C 03:00
+@D 04:00
+@E 05:00
+@F 06:00
+@G 07:00
+@H 08:00
+@I 09:00
+@J 10:00
+@K 11:00
+@L 12:00
+@M 13:00
+@N 14:00
+@O 15:00
+@P 16:00
+@Q 17:00
+@R 18:00
+@S 19:00
+@T 20:00
+@U 21:00
+@V 22:00
+@W 23:00
+@X 24:00
+
+
+? Time (UTC) normal station closing time:
+@0 N/A 24 hour operation
+@A 01:00
+@B 02:00
+@C 03:00
+@D 04:00
+@E 05:00
+@F 06:00
+@G 07:00
+@H 08:00
+@I 09:00
+@J 10:00
+@K 11:00
+@L 12:00
+@M 13:00
+@N 14:00
+@O 15:00
+@P 16:00
+@Q 17:00
+@R 18:00
+@S 19:00
+@T 20:00
+@U 21:00
+@V 22:00
+@W 23:00
+@X 24:00
+
+
+? Primary Frequency for this station:
+@0 None of these - See Additional Information field
+@A 80m 3.578 MHz (JS8Call Standard)
+@B 80m 3.585 MHz
+@C 80m 3.588 MHz
+@D 40m 7.078 MHz (JS8Call Standard)
+@E 40m 7.107 MHz
+@F 40m 7.110 MHz
+@G 40m 7.115 MHz
+@H 20m 14.078 MHz (JS8Call Standard)
+@I 20m 14.107 MHz
+@J 20m 14.110 MHz
+@K 20m 14.115 MHz
+
+. 
+!!! Scheduled Temporary Closing/Reopening Dates:
+? Station Closing Date:
+@0 N/A
+@A 01
+@B 02
+@C 03
+@D 04
+@E 05
+@F 06
+@G 07
+@H 08
+@I 09
+@J 10
+@K 11
+@L 12
+@M 13
+@N 14
+@O 15
+@P 16
+@Q 17
+@R 18
+@S 19
+@T 20
+@U 21
+@V 22
+@W 23
+@X 24
+@Y 25
+@Z 26
+@1 27
+@2 28
+@3 29
+@4 30
+@5 31
+@6 See Additional Info.
+
+? Scheduled Station Reopening date:
+@0 N/A or Unknown
+@A 01
+@B 02
+@C 03
+@D 04
+@E 05
+@F 06
+@G 07
+@H 08
+@I 09
+@J 10
+@K 11
+@L 12
+@M 13
+@N 14
+@O 15
+@P 16
+@Q 17
+@R 18
+@S 19
+@T 20
+@U 21
+@V 22
+@W 23
+@X 24
+@Y 25
+@Z 26
+@1 27
+@2 28
+@3 29
+@4 30
+@5 31
+@6 See Additional Info.
+.
+[ST] State (2-letter code):
+[GR] Maidenhead Grid Square:
+[AI] Additional Information:

@@ -6,4 +6,5 @@ include CHANGELOG.md
 include packaging/pyinstaller_runtime_qt.py
 recursive-include docs *.md *.yaml
 recursive-include freqinout *.py *.qml
+recursive-include freqinout/resources/spotter_forms *.txt
 recursive-include config/shortwave/eibi *.csv *.TXT

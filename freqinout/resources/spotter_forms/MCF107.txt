@@ -1,0 +1,68 @@
+Request for Information (RFI)|F!107
+
+. Version: 10/07/2025 - @SITREP
+# Form published 08/19/2025. SitRepNet.com - KN4AM
+
+. Please provide the following information no later than the Expire Date shown below.
+. Include the Request Serial Number in the Comments section of report you are sending.
+.
+[IN] Information Needed (Brief description):
+[FM] Reply by sending this JS8Spotter form:
+[SN] Serial Number for this RFI (Date/Time code or other). Include this in your response:
+? Reply to this Request For Information by using the following method:
+@1 Send the requested MCForm(s) on 7.078
+@2 Other - see details in comments
+[AI] Send your response to this Call Sign or to this Group call (using "@" Group call):
+. 
+. If the following 3 fields are blank, then this request applies to ALL locations.
+[ST] State (2-letter code):
+[GR] Maidenhead Grid Square:
+[CT] City or County or Other:
+. 
+!!! Expire Date for this request:
+? Expire Month:
+@A JAN
+@B FEB
+@C MAR
+@D APR
+@E MAY
+@F JUN
+@G JUL
+@H AUG
+@I SEP
+@J OCT
+@K NOV
+@L DEC
+
+? Expire Date:
+@A 01
+@B 02
+@C 03
+@D 04
+@E 05
+@F 06
+@G 07
+@H 08
+@I 09
+@J 10
+@K 11
+@L 12
+@M 13
+@N 14
+@O 15
+@P 16
+@Q 17
+@R 18
+@S 19
+@T 20
+@U 21
+@V 22
+@W 23
+@X 24
+@Y 25
+@Z 26
+@1 27
+@2 28
+@3 29
+@4 30
+@5 31

@@ -1,0 +1,53 @@
+4SQRP Net Checkin|F!700
+
+# Form updated 1/15/2025. This is a default JS8Spotter MCForms form. See kf7mix.com for details.
+
+! 4SQRP Net Checkin
+!! Informal QRP JS8Call Net
+. The 4SQRP JS8Call net is for all low-power operators who are interested in connecting digitally,
+. leveraging the extreme weak-signal capabilities of JS8Call, and JS8Spotter MCForms.
+. Learn more and join 4SQRP at https://www.4sqrp.com/
+
+? What is your status and location?
+@1 *All operations normal, operating from QTH
+@2 All operations normal, operating portable or away from QTH
+@3 All operations normal, operating field day, POTA, SOTA
+@E Situation report, retrieve form F!301 for details
+
+? What is your current transmit power?
+@1 Less than 1 watt
+@2 1-5 watts
+@3 5-20 watts
+@4 More than a QRP operator would care to admit
+
+? What class of rig are you currently using?
+@1 Commercial QRP base
+@2 Commercial QRP portable
+@3 Homebrew QRP base
+@4 Homebrew QRP portable
+@5 Commercial 100W capable
+@6 Other
+
+!!! Local Conditions
+? What is the current forecast weather for today at your QTH?
+@1 Sunny
+@2 Partly Cloudy
+@3 Cloudy
+@4 Light Rain
+@5 Moderate Rain
+@6 Heavy Rain
+@7 Snow
+@8 Sleet or Ice
+@9 Thunderstorms
+@A Severe weather expected
+
+? Current expected high temperature range?
+@1 Below 0F
+@2 0F - 32F
+@3 32F - 55F
+@4 55F - 75F
+@5 75F - 85F
+@6 85F - 95F
+@7 Above 95F
+
+

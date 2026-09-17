@@ -386,6 +386,7 @@ from freqinout.core.js8_spotter_forms import (
     normalize_form_code,
     parse_spotter_form_fields,
     parse_spotter_form_guidance,
+    resolve_spotter_forms_dir,
     spotter_operator_autofill_kind,
 )
 from freqinout.core.js8_spotter_decode import (
@@ -8676,7 +8677,10 @@ class MessageViewerTab(QWidget):
             )
             if configured:
                 return configured
-        return self._spotter_forms_dir_usable(self.settings.get("js8_forms_path", self.forms_path))
+        configured = self._spotter_forms_dir_usable(
+            self.settings.get("js8_forms_path", self.forms_path)
+        )
+        return str(resolve_spotter_forms_dir(configured))
 
     def _clear_spotter_form_caches(self) -> None:
         self._form_cache.clear()

@@ -61,8 +61,8 @@ _TASKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("launch", "Launch"), ("health", "Health"), ("advanced", "Advanced"),
     ),
     "commstat": (
-        ("overview", "Overview"), ("transport_mapping", "Transport Mapping"),
-        ("installation", "Installation"), ("launch", "Launch"), ("health", "Health"),
+        ("overview", "Overview"), ("transport_mapping", "JS8 Endpoint Bindings"),
+        ("health", "Shared Service Health"),
         ("advanced", "Advanced"),
     ),
     "external_spotter": (
@@ -126,6 +126,7 @@ class SoftwareAdministrationWorkspace(QWidget):
         self._available_radios: tuple[dict[str, Any], ...] = ()
         self._instance_inventory: dict[str, tuple[dict[str, Any], ...]] = {}
         self._varac_clusters: tuple[dict[str, Any], ...] = ()
+        self._managed_root = ""
         self._build_ui()
         self.apply_theme(self._theme)
 
@@ -240,6 +241,7 @@ class SoftwareAdministrationWorkspace(QWidget):
         radios: Iterable[Mapping[str, Any]],
         inventory_by_family: Mapping[str, Iterable[Mapping[str, Any]]],
         varac_clusters: Iterable[Mapping[str, Any]] = (),
+        managed_root: str = "",
     ) -> None:
         """Cache Settings-owned values used when the explicit assistant opens."""
 
@@ -251,6 +253,7 @@ class SoftwareAdministrationWorkspace(QWidget):
             for family, rows in inventory_by_family.items()
         }
         self._varac_clusters = tuple(dict(row) for row in varac_clusters if isinstance(row, Mapping))
+        self._managed_root = str(managed_root or "").strip()
 
     def show_family_summary(self, family: Optional[SoftwareFamilySummary]) -> None:
         """Render the non-editing ``All`` context from the cached snapshot."""
@@ -831,6 +834,7 @@ class SoftwareAdministrationWorkspace(QWidget):
             varac_clusters=self._varac_clusters,
             selected_radio_id=self._radio_id,
             radio_role=radio_role,
+            managed_root=self._managed_root,
             parent=self.editor_host,
         )
         assistant.completed.connect(self._on_instance_assistant_completed)

@@ -21,6 +21,7 @@ from freqinout.core.js8_spotter_forms import (
     form_codes_enabled_for,
     forms_enabled_for,
     normalize_form_code,
+    resolve_spotter_forms_dir,
 )
 from freqinout.core.js8_spotter_decode import decode_spotter_form_text, split_spotter_form_text
 from freqinout.core.js8_spotter_codec import unwrap_native_js8_form_payload
@@ -165,10 +166,8 @@ class JS8FormDecoder:
     def _load_form_definition(self, form_id: str) -> List[Dict]:
         if form_id in self._form_cache:
             return self._form_cache[form_id]
-        forms_dir = (self.settings.get("js8_forms_path", "") or "").strip()
-        if not forms_dir:
-            return []
-        path = Path(forms_dir) / f"MCF{form_id}.txt"
+        forms_dir = resolve_spotter_forms_dir(self.settings.get("js8_forms_path", ""))
+        path = forms_dir / f"MCF{form_id}.txt"
         if not path.exists():
             return []
         questions: List[Dict] = []

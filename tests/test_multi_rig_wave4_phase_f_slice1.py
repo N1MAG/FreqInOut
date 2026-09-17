@@ -259,7 +259,7 @@ def test_settings_tab_persists_observer_fields_and_preferred_bands(monkeypatch, 
             if int(tab.device_profiles_table.item(row, 3).data(Qt.UserRole) or 0) == int(observer["id"])
         )
         assert tab.device_profiles_table.item(row_index, 8).text() == "SDR++ · Manual tuning · VFO A · endpoint saved"
-        assert tab.device_profiles_table.item(row_index, 13).text() == "Observer / SDR"
+        assert tab.device_profiles_table.item(row_index, 13).text() == "Receive-only SDR"
 
         _select_device_profiles(tab, [int(observer["id"])])
         tab._update_device_profile_action_buttons()

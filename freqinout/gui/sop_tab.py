@@ -60,6 +60,7 @@ from freqinout.core.condition_sop_revert import revert_condition_sop_audit_row
 from freqinout.core.observation_queries import ObservationQuery, operational_activity_snapshot
 from freqinout.core.schedule_source_sets import assigned_plan_rf_guard_impacts_for_sop_update
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.js8_spotter_forms import discover_spotter_forms, resolve_spotter_forms_dir
 from freqinout.core.sop_manager import SOPManager
 from freqinout.core.sop_action_model import SopActionDraftCollection
 from freqinout.gui.freq_planner_tab import FreqPlannerTab
@@ -1069,7 +1070,7 @@ class _LegacySOPTab(QWidget):
         return sorted(values, key=lambda x: (len(x), x))
 
     def _load_spotter_forms(self) -> List[Tuple[str, str]]:
-        forms_dir = Path(self.settings.get("js8_forms_path", "") or "")
+        forms_dir = resolve_spotter_forms_dir(self.settings.get("js8_forms_path", ""))
         try:
             forms_path = str(forms_dir.resolve())
         except Exception:
@@ -1083,21 +1084,9 @@ class _LegacySOPTab(QWidget):
             return list(self._spotter_forms_cache_value)
 
         out: List[Tuple[str, str]] = []
-        if not forms_dir.exists():
-            self._spotter_forms_cache_key = cache_key
-            self._spotter_forms_cache_value = []
-            self._action_catalog_cache_key = None
-            self._action_catalog_cache_value = None
-            return out
-        for fn in sorted(forms_dir.glob("MCF*.txt")):
-            try:
-                num = fn.stem.replace("MCF", "").strip()
-                if not num.isdigit():
-                    continue
-                code = f"F!{num}"
-                out.append((f"js8_spotter_{code}", code))
-            except Exception:
-                continue
+        for definition in discover_spotter_forms(forms_dir):
+            code = definition.form_code
+            out.append((f"js8_spotter_{code}", code))
         self._spotter_forms_cache_key = cache_key
         self._spotter_forms_cache_value = list(out)
         self._action_catalog_cache_key = None

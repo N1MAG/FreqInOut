@@ -49,10 +49,12 @@ def test_task_schemas_keep_external_tools_out_of_js8call() -> None:
     assert "path_commstat" not in js8
     assert "path_js8spotter" not in js8
     assert not any("expect" in key.lower() for key in js8)
-    assert "path_commstat" in _field_keys("commstat")
+    assert "path_commstat" not in _field_keys("commstat")
+    assert {"js8_host", "js8_port"}.issubset(_field_keys("commstat"))
     assert "path_js8spotter" in _field_keys("external_spotter")
     fio = _field_keys("fio_spotter")
-    assert "js8_forms_path" in fio and "js8_host" in fio and "js8_port" in fio
+    assert "js8_forms_path" not in fio
+    assert "js8_host" in fio and "js8_port" in fio
     assert not any("expect" in key.lower() for key in fio)
     assert "dependencies" in SOFTWARE_EDITOR_TASKS["fio_spotter"]
     assert "operational_workspace" in SOFTWARE_EDITOR_TASKS["fio_spotter"]
@@ -61,10 +63,10 @@ def test_task_schemas_keep_external_tools_out_of_js8call() -> None:
 def test_fio_spotter_editor_is_dependency_mapping_and_operational_route_only() -> None:
     editor = _editor("fio_spotter", "dependencies", {"js8_forms_path": "/forms", "js8_host": "127.0.0.1", "js8_port": 2442})
     try:
-        assert editor.field_widget("js8_forms_path") is not None
+        assert editor.field_widget("js8_forms_path") is None
         assert editor.field_widget("js8_host") is not None
         assert editor.field_widget("js8_port") is not None
-        assert editor.task_action_button.property("software_action") == "validate"
+        assert editor.task_action_button.property("software_action") == "fio_spotter"
         assert editor.field_widget("expect_rules") is None
     finally:
         editor.deleteLater()

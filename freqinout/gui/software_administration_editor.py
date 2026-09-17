@@ -152,20 +152,16 @@ SOFTWARE_EDITOR_TASKS: dict[str, dict[str, SoftwareEditorTask]] = {
         ), action="bbs", action_label="Open BBS service"),
     },
     "commstat": {
-        "overview": T("CommStat overview", "CommStat is a standalone tool mapped to this radio's JS8 transport."),
-        "transport_mapping": T("Transport Mapping", "CommStat uses the selected radio's configured JS8Call endpoint.", (
+        "overview": T(
+            "CommStat overview",
+            "CommStat is one station-shared process. Each selected radio contributes only a binding to its JS8Call endpoint.",
+        ),
+        "transport_mapping": T("JS8 Endpoint Bindings", "Review the selected radio's binding to the station-shared CommStat process.", (
             F("js8_host", "JS8 transport host", "readonly"),
             F("js8_port", "JS8 transport port", "readonly"),
         )),
-        "installation": T("Installation", "Choose the standalone CommStat launcher or shortcut.", (
-            F("path_commstat", "CommStat application", "path", browse=True),
-        )),
-        "launch": T("Launch", "Choose the standalone CommStat launcher used for this radio mapping.", (
-            F("path_commstat", "CommStat application", "path", browse=True),
-        )),
-        "health": T("Health", "Run an explicit check without probing during navigation.", action="validate", action_label="Check CommStat"),
-        "advanced": T("Advanced", "The transport remains owned by the selected radio's JS8Call instance.", (
-            F("path_commstat", "CommStat application", "path", browse=True),
+        "health": T("Shared Service Health", "Run an explicit station-shared health check without probing during navigation.", action="validate", action_label="Check CommStat"),
+        "advanced": T("Advanced", "The shared process is configured once at station scope; this radio owns only its JS8 endpoint binding.", (
             F("js8_host", "JS8 transport host", "readonly"),
             F("js8_port", "JS8 transport port", "readonly"),
         )),
@@ -187,11 +183,10 @@ SOFTWARE_EDITOR_TASKS: dict[str, dict[str, SoftwareEditorTask]] = {
     },
     "fio_spotter": {
         "overview": T("FIO Spotter overview", "FIO Spotter is built into FIO. Rules, Expect queries, watches, forms, and activity live in its top-level workspace.", action="fio_spotter", action_label="Open FIO Spotter"),
-        "dependencies": T("Dependencies & Radio Mapping", "Review the forms folder and JS8 transport selected for this radio.", (
-            F("js8_forms_path", "MCF forms folder", "path", browse=True),
+        "dependencies": T("Dependencies & Radio Mapping", "Review the JS8 transport selected for this radio. Built-in forms require no per-radio MCF folder.", (
             F("js8_host", "JS8 transport host", "readonly"),
             F("js8_port", "JS8 transport port", "readonly"),
-        ), action="validate", action_label="Check dependencies"),
+        ), action="fio_spotter", action_label="Open FIO Spotter"),
         "operational_workspace": T("FIO Spotter workspace", "Manage rules, Expect queries, watches, forms, and activity in the operational workspace.", action="fio_spotter", action_label="Open FIO Spotter"),
     },
 }

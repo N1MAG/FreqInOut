@@ -7,6 +7,17 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 
+class _CompleteTransaction:
+    def __enter__(self):
+        return self
+
+    def complete(self) -> None:
+        return None
+
+    def __exit__(self, _exc_type, _exc, _tb) -> bool:
+        return False
+
+
 def _application_or_skip():
     from PySide6.QtWidgets import QApplication
 
@@ -123,7 +134,7 @@ def test_observer_guided_flow_orders_model_first_and_stages_distinct_js8(monkeyp
             QApplication.processEvents()
         review_label = dialog.findChild(QLabel, "guidedSaveReview")
         assert review_label is not None
-        assert "Operating Model: Receive-only SDR" in review_label.text()
+        assert "FIO Behavior: Receive-only monitoring" in review_label.text()
         assert "JS8Call (receive-only; launch with FIO)" in review_label.text()
         assert "no Compose/Expect sending, QSY, PTT, or scheduler authority" in review_label.text()
 
@@ -148,7 +159,7 @@ def test_transceiver_guided_flow_keeps_stable_numbering_and_selectable_model(mon
         assert all(step is not None and not step.isHidden() for step in steps)
         model_step = steps[1]
         assert model_step is not None
-        assert model_step.text() == "2. Operating Model"
+        assert model_step.text() == "2. FIO Behavior"
         assert model_step.isEnabled()
         assert model_step.property("guidedStepApplicable") is True
         model_step.click()
@@ -176,7 +187,7 @@ def test_existing_observer_custom_receive_only_model_is_preselected_on_edit(monk
         combo = dialog.findChild(QComboBox, "guidedOperatingModel")
         assert combo is not None
         assert combo.currentData() == 91
-        assert combo.currentText() == "Field SDR Watch (receive-only)"
+        assert combo.currentText() == "Field SDR Watch"
 
     _open_receiver_dialog(
         monkeypatch,
@@ -222,8 +233,9 @@ def test_add_radio_save_persists_selected_model_for_nonfirst_transceiver(monkeyp
     tab.multi_radio_store = SimpleNamespace(
         list_device_profiles=lambda: [{"id": 1, "name": "Primary"}],
         set_device_operating_profile=lambda radio_id, model_id, **kwargs: assigned.append((radio_id, model_id, kwargs)),
+        guided_save_transaction=lambda: _CompleteTransaction(),
     )
-    tab._open_device_profile_dialog = lambda existing=None: {
+    tab._open_device_profile_dialog = lambda existing=None, **_kwargs: {
         "id": None,
         "name": "Second Rig",
         "device_class": "tx_rx",
@@ -273,8 +285,9 @@ def test_first_transceiver_is_activated_only_after_selected_model_assignment() -
         list_device_profiles=lambda: [],
         set_device_operating_profile=assign,
         set_runtime_primary_device_profile=activate,
+        guided_save_transaction=lambda: _CompleteTransaction(),
     )
-    tab._open_device_profile_dialog = lambda existing=None: {
+    tab._open_device_profile_dialog = lambda existing=None, **_kwargs: {
         "id": None,
         "name": "First Rig",
         "device_class": "tx_rx",

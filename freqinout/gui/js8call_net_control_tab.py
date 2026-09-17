@@ -44,6 +44,7 @@ from freqinout.core.js8_spotter_forms import (
     extract_form_codes,
     forms_enabled_for,
     legacy_default_forms_for,
+    resolve_spotter_forms_dir,
 )
 from freqinout.core.message_ingest import MessageIngestor
 from freqinout.core.ingest_runtime_status import active_runtime_ingest_inventory
@@ -778,15 +779,14 @@ class JS8CallNetControlTab(QWidget):
             self._poll_timer.setInterval(refresh * 1000)
 
         # Spotter forms dropdown
-        forms_dir = Path(data.get("js8_forms_path", "") or "")
+        forms_dir = resolve_spotter_forms_dir(data.get("js8_forms_path", ""))
         self.spotter_combo.clear()
         forms = []
-        if forms_dir.exists() and forms_dir.is_dir():
-            for definition in discover_spotter_forms(forms_dir):
-                label = definition.form_code
-                if definition.title:
-                    label = f"{definition.form_code} - {definition.title}"
-                forms.append((definition.form_code, label))
+        for definition in discover_spotter_forms(forms_dir):
+            label = definition.form_code
+            if definition.title:
+                label = f"{definition.form_code} - {definition.title}"
+            forms.append((definition.form_code, label))
         if forms:
             for code, label in forms:
                 self.spotter_combo.addItem(label, code)

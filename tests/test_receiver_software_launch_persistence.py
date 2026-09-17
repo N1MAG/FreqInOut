@@ -5,6 +5,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
+from freqinout.core.launch_bundle_store import LaunchBundleStore
 from freqinout.core.receiver_software_stack import build_receiver_launch_items
 from freqinout.gui.settings_tab import SettingsTab
 
@@ -75,8 +76,7 @@ def test_receiver_launch_bundle_is_saved_only_after_profile_has_real_id(monkeypa
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
     store = MultiRadioStore(settings_db_path())
     _seed_primary_radio(store)
-    launch = _LaunchRecorder()
-    tab = _settings_tab_for_persistence(store, launch)
+    tab = _settings_tab_for_persistence(store, _LaunchRecorder())
 
     assert tab._persist_device_profile(_observer_values()) is True
 
@@ -84,28 +84,32 @@ def test_receiver_launch_bundle_is_saved_only_after_profile_has_real_id(monkeypa
     assert int(saved.get("id", 0) or 0) > 0
     assert int(saved.get("launch_enabled", 0) or 0) == 0
     assert str(saved.get("launch_path", "") or "") == ""
-    assert len(launch.calls) == 1
-    radio_id, items, enabled = launch.calls[0]
-    assert radio_id == int(saved["id"])
-    assert enabled is True
-    assert [item["name"] for item in items] == ["SDR++"]
+    bundle = LaunchBundleStore(store.db_path).get_bundle(int(saved["id"]))
+    assert bundle["launch_enabled"] is True
+    assert [item["name"] for item in bundle["items"]] == ["SDR++"]
 
 
 def test_receiver_launch_failure_is_visible_after_profile_save(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
     store = MultiRadioStore(settings_db_path())
     _seed_primary_radio(store)
-    tab = _settings_tab_for_persistence(store, _LaunchRecorder(fail=True))
+    tab = _settings_tab_for_persistence(store, _LaunchRecorder())
+    monkeypatch.setattr(
+        store,
+        "save_radio_launch_bundle",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("synthetic launch-bundle failure")
+        ),
+    )
     warnings: list[tuple[str, str]] = []
     monkeypatch.setattr(
         "freqinout.gui.settings_tab.QMessageBox.warning",
         lambda _parent, title, detail: warnings.append((str(title), str(detail))),
     )
 
-    assert tab._persist_device_profile(_observer_values()) is False
+    with store.guided_save_transaction():
+        assert tab._persist_device_profile(_observer_values()) is False
 
-    saved = tab._last_persisted_device_profile or {}
-    assert int(saved.get("id", 0) or 0) > 0
-    assert warnings and warnings[-1][0] == "Saved — launch bundle retry required"
-    assert "reviewed launch bundle still needs to be applied" in warnings[-1][1]
-    assert "Settings → Radios → RTL-SDR → Launch Control" in warnings[-1][1]
+    assert all(row.get("name") != "RTL-SDR" for row in store.list_device_profiles())
+    assert warnings and warnings[-1][0] == "Radio setup not saved"
+    assert "Nothing from this guided save will be retained" in warnings[-1][1]

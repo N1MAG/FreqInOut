@@ -1,0 +1,31 @@
+@SITREP Basic Check-in|F!104
+
+. Version: 10/08/2025 - @SITREP
+# See SitRepNet.com for details regarding @SITREP. KN4AM
+!! Basic Check-in
+
+? Current status - Subjective description of the situation at your QTH
+@1 *All operations normal, nothing significant to report (NSTR) - Green
+@2 Under control, but degraded current or anticipated situation - Yellow
+@3 Significant current problems - Red
+.
+
+!!! Current relevant MCForms
+? Situation Report
+@0 *Nothing significant to report at this time
+@E Situation report currently active - E? F!304 for details
+
+? Awareness/Alert Report
+@0 *Nothing significant to report at this time
+@E Awareness/Alert Report currently active - E? F!305 for details
+.
+.
+[FM] Other relevant current report(s): 
+!!! Enter F! number(s) and "ALERT" if appropriate. Leave blank if nothing to report.
+.
+.
+[ST] State (2-letter code):
+[GR] Maidenhead Grid Square:
+.
+
+. More info - https://www.sitrepnet.com/

@@ -1,8 +1,13 @@
 # Guided Radio And Software Configuration Specification
 
 Status: authoritative product and implementation specification; policy approved
-2026-09-16; GRS-0 through GRS-5 automated exit gates passed 2026-09-17;
-operator-assisted live gates remain explicitly pending as listed below
+2026-09-16; GRS-0 through GRS-5 and GRS-6.1 through GRS-6.3 automated exit gates passed
+2026-09-17, but
+the first operator-assisted transceiver run exposed unresolved P0/P1
+distinct-instance and existing-station regressions. Release qualification is
+therefore **open and blocked** pending GRS-6 and a repeated live gate. No
+existing application configuration may be treated as safe to replace, clone,
+or reuse through this flow until that gate passes.
 
 Governing delivery contract: `project_delivery_rules.md`
 
@@ -82,6 +87,15 @@ an instance always selects one atomic identity bundle.
 8. **The UI remains usable while work runs.** Filesystem discovery, profile
    parsing, endpoint qualification, process inventory, and native configuration
    writes never run on or synchronously wait from the GUI thread.
+9. **Intent controls inference.** `Create a distinct instance`, `Use an existing
+   instance`, and `Use a shared station service` are materially different
+   operations. Discovery may supply an installed executable to all three, but
+   it may never turn a distinct-instance request into reuse of an existing
+   profile, data root, endpoint, manifest, or launch identity.
+10. **Existing configuration is protected evidence.** A new-radio transaction
+    reads existing identities only to avoid collisions or to offer an explicit
+    reuse choice. It does not edit, relink, clone from, or write an existing
+    native profile unless the operator chooses that exact operation at Review.
 
 ## Terminology And Durable Identity
 
@@ -89,9 +103,14 @@ an instance always selects one atomic identity bundle.
 
 - **Transceiver:** a radio capable of transmit and receive. PTT, QSY, scheduler,
   and application transmit behavior remain separately capability-gated.
-- **Observer / SDR:** a receive-only radio. It may be tuned automatically only
+- **Receive-only SDR:** a receive-only radio. It may be tuned automatically only
   through a qualified receive-only adapter. It never receives PTT or transmit
   authority.
+
+`Observer / SDR` remains an internal compatibility term only. Operator-facing
+Add Radio, Review, Health, and assignment surfaces use exactly **Transceiver**
+and **Receive-only SDR**. They do not append a second `(receive-only)` suffix to
+a label that already says `Receive-only SDR`.
 
 ### Software instance source
 
@@ -144,6 +163,14 @@ port `2442` restores that candidate's complete bundle. Creating a second
 instance may propose `2443`, but the proposal must also carry a distinct rig
 name, profile/data root, message files, and launch identity.
 
+For a managed distinct instance, FIO creates an immutable draft key when the
+operator chooses `Create a distinct instance`. The radio name supplies the
+human-facing label and a sanitized path/rig-name stem; an immutable suffix
+prevents two similarly named radios from colliding. Back/Next navigation,
+discovery refresh, and later display-name changes do not silently change native
+profile roots, ports, selectors, or launch identity. Renaming or relocating a
+native identity is a separate reviewed clone/migrate operation.
+
 ## Capability Matrix
 
 | Software family | Observer / SDR | Transceiver | Default authority |
@@ -181,9 +208,18 @@ operator chooses whether to discard them or return to the prior role.
 
 ### 2. Operating Model
 
-The page lists only compatible enabled models and clearly explains their
-capabilities. A fresh station always has protected defaults for a transceiver
-and a receive-only SDR.
+Step 1 already establishes the hardware role as **Transceiver** or
+**Receive-only SDR**. Step 2 does not ask that question again. It answers the
+operator question **How should FIO use this radio?** and may be titled
+`FIO Behavior` while retaining `Operating Model` as the durable configuration
+term.
+
+The page lists only role-compatible enabled models and explains their behavior
+in plain language. A fresh station always has protected defaults named
+**Standard transceiver operations** and **Receive-only monitoring**. A model
+name must not look like a schedule or frequency plan. In particular,
+`Daily HF Schedule` is not an acceptable default Operating Model label; plan
+and schedule choices belong only in Step 6.
 
 The operator can:
 
@@ -197,6 +233,11 @@ items while disabling PTT, transmit, Compose sending, Expect replies, retrieval
 transmissions, and transmit net-control actions. It may enable receiver
 scheduler ownership only after receiver-control verification.
 
+The selected model is summarized by capabilities rather than repeating the
+role in a suffix. Advanced reusable models remain available when their behavior
+genuinely differs, but the normal path requires no knowledge of FIO's model,
+plan, or assignment schema.
+
 ### 3. Software
 
 The page first asks what the radio will use, then expands one concise card for
@@ -206,6 +247,33 @@ Receive may preselect cards but do not bypass their configuration.
 Each external family requires an explicit instance-source choice. The
 recommended choice for a second local radio or SDR is **Create a distinct
 instance**. Choosing **Use an existing instance** reveals bounded candidates.
+
+Before proposing values, FIO resolves the selected source against one immutable
+station-inventory snapshot containing saved application rows, manifests,
+launch bundles, device projections, retained drafts in the current transaction,
+and intentional station-shared services. That same snapshot and generation are
+used by Add Radio, Software Administration, Review, and final persistence.
+
+The normal decisions are:
+
+| Operator choice | FIO may reuse | FIO must make distinct |
+| --- | --- | --- |
+| Create a distinct instance | installed application binary and a qualified version recipe | stable instance key, native profile/config root, application-data/message/log roots, TCP/UDP endpoints, rig/profile selector, manifest, and launch identity |
+| Use an existing instance | the complete selected source-locked bundle | nothing inside that bundle; edits require `Clone as distinct` |
+| Use a shared station service | only an application explicitly defined as shared, plus deliberate radio-to-service bindings | each radio-owned endpoint binding and its capability/safety scope |
+| Connect manually or remotely | nothing inferred beyond reviewed evidence | the explicit endpoint/command/path identity entered by the operator |
+
+Using an installed binary is not the same as using an existing instance. A
+distinct-instance request never preselects an existing native profile, settings
+file, data folder, message file, endpoint, or manifest merely because only one
+was discovered. If FIO cannot construct a complete collision-free bundle, the
+card remains `Needs attention` and names the unsupported native step; it does
+not manufacture a hybrid bundle.
+
+`Configure Automatically` operates per selected source. It fills the complete
+new proposal for `Create a distinct instance`, restores the complete candidate
+for `Use an existing instance`, and adds only a mapping for a shared service.
+It does not apply a loose collection of individually preserved fields.
 
 The page renders immediately from a cached discovery snapshot. If the snapshot
 is absent or stale, FIO may begin one bounded background discovery after the
@@ -349,11 +417,33 @@ A new local instance proposal includes:
 - effective launch command and startup/readiness policy; and
 - receive-only execution scope when assigned to an observer.
 
+The normal managed proposal derives the visible instance name and rig/profile
+stem from the configured radio name. It places the new settings/profile and
+application-data/message roots in a dedicated FIO-managed location for that
+stable instance key. An existing JS8 settings file, application-data directory,
+`DIRECTED.TXT`, TCP API port, or UDP port is never the default for a distinct
+proposal. The application binary may be shared; the instance identity may not.
+
+FIO owns version- and platform-qualified launch recipes for stock JS8Call,
+Improved, and Subspace. Each recipe defines the executable, exact rig/profile
+selector arguments, working directory/environment, application-data semantics,
+TCP and applicable UDP claims, readiness policy, and native-writer capability.
+The normal workflow shows a concise `Launch with FIO` summary, not an empty
+`Custom launch command` field. A custom command is Advanced-only. When no exact
+recipe is qualified, FIO says `Operator setup required`, preserves the inactive
+draft, and gives exact steps without pretending the instance is launch-ready.
+
 The port allocator checks saved application records, manifests, launch bundles,
 the current transaction, and family-internal conflicts. A new proposal may use
 `2443` when `2442` belongs to an existing instance, but the entire new identity
 must use the new proposal. Importing the `2442` instance imports its whole
 bundle unchanged.
+
+The inventory and allocation rule applies independently to every applicable
+TCP and UDP endpoint; it is not limited to device-profile projections. Final
+Save consumes the exact reviewed bundle fingerprint and inventory generation.
+If either changed, Save fails closed before mutating an existing row, link,
+manifest, native file, or launch bundle.
 
 On an observer, FIO never issues JS8 transmit, Expect, retrieval, Compose, or
 PTT actions. A managed native writer must also apply and verify the reviewed
@@ -403,6 +493,22 @@ FLDigi-to-FLRig relationship, executable paths, effective commands, and
 version-qualified readiness. FIO never claims a native profile writer for an
 unsupported version.
 
+The operator-facing Fast Light instance name defaults to exactly the configured
+radio name; the UI does not append `Fast Light`. Internally, the family contains
+separate stable FLRig and FLDigi component identities. For a transceiver, a
+qualified platform/version recipe supplies each component's profile folder,
+endpoint, executable, exact arguments/working directory, launch order, and
+readiness policy. For a receive-only SDR it supplies FLDigi only. A single
+family-level command or a blank `optional launch command` is not a complete
+managed proposal.
+
+The normal flow displays the resolved launch summary. Per-component custom
+commands and profile overrides are Advanced-only and appear only when the
+operator chooses a custom/manual source or the installed version lacks a
+qualified recipe. Reusing the FLRig/FLDigi executable is allowed; reusing an
+existing radio's native profile folders, endpoints, or attributable log roots
+is not the default for `Create a distinct instance`.
+
 Fast Light persistence distinguishes three identities:
 
 1. station-shared FLMsg/FLAmp executable and default message-root identity;
@@ -441,6 +547,13 @@ Membership records cluster ID, unique positive instance number, shared database
 where applicable, counter refresh, gateway handler, and PTT-lock policy. Node
 creation precedes membership. Standalone VarAC never implies cluster mode.
 
+Selecting VarAC for another radio defaults to **Standalone VarAC**, even when a
+VarAC node or cluster already exists. Existing VarAC configuration is collision
+evidence and an optional explicit import source; it is never evidence that the
+new radio should join or create a cluster. Only an operator selection of
+`Join an existing cluster` or `Create a cluster and add this node` creates
+cluster fields or membership.
+
 The cluster record owns normalized cluster ID, shared database, counter refresh,
 gateway selection, and PTT-lock policy. Membership owns the cluster reference,
 radio/node reference, enabled state, and a positive instance number unique among
@@ -477,6 +590,46 @@ item. External Spotter and CommStat use their own reviewed instance contracts.
 For an observer, any supporting application must have a receive-only execution
 scope and cannot access send/preflight paths. Unsupported combinations are
 shown with a concise reason rather than silently omitted after selection.
+
+The FIO Spotter MCF catalog is a built-in FIO dependency, not a radio-scoped
+external software instance. The normal flow resolves the packaged or configured
+station MCF catalog automatically and does not ask for an `MCF Forms Folder`.
+An optional custom catalog is Advanced station configuration; it is not copied
+from a JS8 instance and creates no Spotter launch identity.
+
+CommStat is one intentional station-shared process by default. Selecting
+CommStat for another radio does not create a duplicate executable, profile, or
+launch item. It creates or reviews a binding from that shared CommStat identity
+to the exact radio-owned JS8 instance/endpoint. One CommStat launch item is
+deduplicated by its durable shared identity, while each radio binding remains
+visible and collision-checked. An observer binding is receive-only; no CommStat
+mapping expands the capability of its radio or JS8 transport. If a future
+CommStat version requires separate processes, that behavior requires an
+explicit version-qualified contract rather than silent duplication.
+
+### Existing-Instance Protection And Review
+
+An imported existing instance is source-locked as one fingerprinted bundle.
+Identity fields are read-only in the import path. If the operator changes a
+profile, data root, endpoint, command, selector, or other identity field, the
+workflow changes to `Clone as distinct`, allocates a new immutable identity and
+resources, and leaves the source unchanged.
+
+Review groups decisions by operator intent rather than exposing implementation
+fields:
+
+- **New instance for `<radio>`:** distinct identity, profile/data roots,
+  endpoints, and resolved launch behavior;
+- **Existing instance:** exact source owner and unchanged fingerprint;
+- **Shared station service:** one service identity plus the new radio binding;
+- **Operator action required:** the exact unsupported native step and safe
+  inactive state.
+
+Known launch recipes are shown as resolved facts. `Custom launch command`, raw
+settings paths, and application-data roots are hidden from the normal scan path
+unless FIO cannot qualify a recipe or the operator opens Advanced. Hiding these
+fields never hides a collision, unverified writer, external action, or unsafe
+capability.
 
 ## Native Configuration Writer Contract
 
@@ -702,6 +855,20 @@ operator-facing guidance.
 6. Required-family failure retains an inactive resumable draft; optional-family
    failure saves the radio with an exact per-app `Complete later` route and no
    misleading overall success.
+7. With an existing JS8 bundle on one TCP/UDP pair and a retained unsaved draft
+   on the next pair, Add Radio `Create a distinct instance` proposes the next
+   collision-free pair plus a new stable key, rig selector, profile/data roots,
+   message files, manifest, and launch identity. It does not select either
+   existing profile.
+8. Back/Next, discovery refresh, and radio display-name edits do not change a
+   reviewed draft identity. A stale inventory generation or altered bundle
+   fingerprint blocks Save before any mutation.
+9. Import shows a source-locked JS8 or Fast Light bundle. Editing an identity
+   field requires `Clone as distinct`; Cancel and Save never mutate or hybridize
+   the source application row or manifest.
+10. Production Add Radio and Software Administration use the same proposal and
+    inventory coordinator; no loose-field draft path can bypass atomic bundle
+    validation.
 
 ### Observer / SDR
 
@@ -752,6 +919,11 @@ operator-facing guidance.
 9. Case-insensitive duplicate VarAC cluster IDs and duplicate enabled member
    numbers fail before mutation; cluster-shared and node-local databases cannot
    be silently exchanged.
+10. Adding another VarAC node defaults to standalone and creates no cluster
+    record or membership until the operator explicitly chooses create or join.
+11. A managed Fast Light proposal produces separate FLRig and FLDigi component
+    identities, recipes, roots, endpoints, and readiness evidence. The visible
+    family name is the radio name without an appended `Fast Light` suffix.
 
 ### Launch and platform behavior
 
@@ -769,6 +941,28 @@ operator-facing guidance.
    separate transceiver-scoped identity.
 7. Review exposes the Launch plan to keyboard and accessibility inspection
    without opening generic Advanced details.
+8. Known JS8 and Fast Light recipes require no custom-command input in the
+   normal path. Each generated command's selector, working directory, and data
+   root match the reviewed atomic claims exactly.
+9. One station-shared CommStat process can bind to multiple distinct radio-owned
+   JS8 endpoints. It launches once, shows every binding, and is never
+   deduplicated or reassigned solely by process name.
+
+### Existing-station UX and logical defaults
+
+1. Add Radio uses the operator-facing role labels `Transceiver` and
+   `Receive-only SDR` consistently; no redundant `(receive-only)` suffix is
+   appended.
+2. Step 2 presents FIO behavior, not a schedule. Protected defaults are
+   `Standard transceiver operations` and `Receive-only monitoring`; schedule
+   names appear only in Step 6.
+3. Selecting built-in FIO Spotter resolves the station MCF catalog without a
+   normal-flow folder question and creates no external launch item.
+4. Selecting CommStat on an additional radio offers the existing shared service
+   and the new JS8 binding rather than a duplicate CommStat instance.
+5. `Create a distinct instance` may reuse an installed executable but never
+   preselects another radio's profile, settings file, data/message root,
+   endpoint, or launch identity.
 
 ### Performance, concurrency, and UI
 
@@ -815,8 +1009,9 @@ existing runtime data is unchanged.
 
 ### GRS-1 — Shared Discovery And Proposal Planning
 
-Status: passed 2026-09-17. The Qt-free coordinator, scanner adapters, and pure
-proposal planner are `guided_software_discovery.py`,
+Status: pure-model automated gate passed 2026-09-17; production Add Radio
+integration is reopened by GRS-6. The Qt-free coordinator, scanner adapters,
+and pure proposal planner are `guided_software_discovery.py`,
 `guided_software_discovery_sources.py`, and `guided_software_proposals.py`.
 Settings Add Radio and explicit Software Auto-Fill share the coordinator and
 perform discovery only from worker threads. This slice changes no runtime
@@ -827,17 +1022,20 @@ schema, native application configuration, endpoint, radio, or ownership.
 - Add structured timing/cancellation telemetry and deterministic port/resource
   planning.
 
-Exit: bounded/cancel/stale-result/performance tests pass; no discovery writes or
-GUI-thread I/O occur; the `2443`/existing-profile regression is impossible.
+Original automated exit: bounded/cancel/stale-result/performance tests passed;
+no discovery writes or GUI-thread I/O occurred. The pure proposal prevents the
+`2443`/existing-profile regression, but the 2026-09-17 live run proved Add Radio
+could bypass that proposal. GRS-6 must close the production-route gap.
 
 ### GRS-2 — Unified Guided UX
 
-Status: passed 2026-09-17. Add Radio now uses the stable seven-position
+Status: automated UX gate passed 2026-09-17; distinct-instance production
+integration is reopened by GRS-6. Add Radio uses the stable seven-position
 workflow for both transceivers and observers, adapts Guard and Schedule content
-without hiding steps, and opens the authoritative Software Instance Assistant
-against an opaque unsaved-radio owner key rather than a fake persisted ID.
-Cancel remains a no-write boundary; app preparation is preview-only until the
-final reviewed transaction in a later slice.
+without hiding steps, and opens the Software Instance Assistant against an
+opaque unsaved-radio owner key rather than a fake persisted ID. The live run
+showed that this handoff did not include the authoritative existing-instance
+inventory or atomic proposal. Cancel remains a no-write boundary.
 
 - Bind Add Radio to the shared Software Administration workflow and draft.
 - Implement stable seven-step content, responsibility cards, resumable handoff,
@@ -922,6 +1120,215 @@ Exit: no unresolved P0/P1 regressions; performance budgets pass; live external
 gates are recorded explicitly rather than inferred from automated tests; release
 documentation matches actual supported capabilities.
 
+The 2026-09-17 transceiver run did not pass this live exit. `Create a distinct
+instance` offered an existing JS8 profile/port bundle, Software Administration
+showed existing JS8 settings/data paths, Fast Light required confusing manual
+identity/launch input, CommStat appeared duplicative, FIO Spotter exposed an MCF
+folder that should be resolved by FIO, and existing VarAC made cluster intent
+ambiguous. The operator canceled; no successful configuration claim is made.
+
+### GRS-6 — Existing-Station Distinct-Instance Remediation
+
+Status: automated implementation passed 2026-09-17. GRS-6.1 through GRS-6.5
+passed their automated exit gates; the repeated operator-assisted live route
+remains a release blocker. This reopens the affected GRS-1 through GRS-4
+integration claims without discarding their valid pure-model and safety work.
+
+GRS-6 proceeds sequentially:
+
+1. **Authority and inventory:** connect Add Radio and Software Administration
+   to one immutable inventory/proposal coordinator; create a stable draft key;
+   lock imports; reject loose-field hybrid persistence.
+2. **JS8 and Fast Light recipes:** generate complete radio-name-derived,
+   collision-free per-platform identities, roots, TCP/UDP endpoints, component
+   commands, dependencies, and launch summaries. Known recipes require no
+   normal-flow custom command.
+3. **Supporting-family decisions:** resolve built-in Spotter MCF catalog;
+   implement one shared CommStat identity with per-JS8 bindings; make VarAC
+   standalone the default and cluster create/join explicit.
+4. **Task-oriented UX:** separate Radio Role from FIO Behavior, use the approved
+   labels, show resolved choices and Why, and keep raw paths/commands in
+   Advanced or exact recovery guidance.
+5. **Transactional and live qualification:** prove final Save consumes the
+   reviewed fingerprint/generation, fault injection preserves existing native
+   and FIO configuration, and repeat the reported TriMode path against an
+   already-configured station on the current macOS worktree before broader
+   platform gates.
+
+#### GRS-6.1 Exit Evidence — Authority And Inventory
+
+Passed 2026-09-17. Add Radio and Software Administration now consume the same
+immutable saved-plus-retained inventory contract. A new draft receives an
+opaque identity derived from the setup transaction and family, not from an
+editable radio or instance label. Retained drafts reserve their endpoints in
+the same collision view used by later proposals.
+
+An imported instance is a source-locked complete identity. Its endpoints,
+profile/configuration roots, data/message roots, and launch identity are not
+editable in place; `Clone as a distinct instance` returns to the core distinct
+proposal path and retains only safe executable/version evidence. Both
+production persistence routes re-read the selected source and reject a changed
+or missing source fingerprint before mutation. The atomic store remains the
+last collision authority and rolls back application, manifest, launch, and
+radio-link changes together.
+
+The focused authority/inventory, assistant, Add Radio, Software Administration,
+settings adapter, observer, responsiveness, and adjacent regression partition
+passes. GRS-6.1 does not claim that dedicated JS8/Fast Light native roots and
+qualified launch recipes are complete; those are the GRS-6.2 exit gate.
+
+#### GRS-6.2 Exit Evidence — JS8 And Fast Light Recipes
+
+Passed 2026-09-17. Add Radio and Software Administration now resolve managed
+software from FIO's configuration-owned `managed-instances` root rather than
+the operator's executable-search folder. JS8Call recipes use the stable draft
+identity for the profile and `--rig-name`, allocate distinct TCP and UDP
+claims, and derive the actual platform/rig-specific Qt application-data root
+used by `DIRECTED.TXT`, `ALL.TXT`, and `inbox.db3`. The recipe root, save/forms
+roots, and native profile planner agree. A blank managed root fails closed.
+
+Stock 2.2.0, Improved 3.0.3, and Subspace 4.1.0.478 are exact qualified JS8
+contracts; another variant/version remains inactive with an explicit Advanced
+operator route. Fast Light resolves separate FLRig and FLDigi configuration
+roots, endpoints, launch arguments, readiness checks, and dependency order.
+An observer receives an FLDigi-only receive-scope recipe. FLMsg and FLAmp remain
+explicit station-shared components rather than disappearing from launch review.
+
+Qualified recipes hide recipe-owned profile/data fields and custom-command
+inputs from the normal flow while displaying exact component commands, roots,
+endpoints, dependencies, readiness, execution scope, and startup policy.
+Persistence projects that same reviewed recipe into component launch rows;
+unsupported recipes never invent a command or relative path. The automated
+GRS-0 through GRS-6.2 integration partition passes 479 tests with eight explicit
+live-gate skips; compilation and diff checks pass. Live native application
+behavior remains part of GRS-6.5 and is not inferred from these tests.
+
+#### GRS-6.3 Exit Evidence — Supporting-Family Decisions
+
+Passed 2026-09-17. FIO now packages the complete 30-form station Spotter
+catalog and resolves it whenever an optional Advanced custom catalog is blank,
+missing, or invalid. Add Radio and Software Administration no longer present a
+per-radio MCF folder or Spotter install/launch identity. Compose, receive
+decode, FIO Spotter catalog mapping, JS8 NCS, and SOP consumers all use the same
+resolver. Packaging metadata and the frozen-app specification include the
+catalog.
+
+CommStat remains one station-shared process identity. Each selected radio
+persists a distinct binding to its own JS8 instance and endpoint, while launch
+rows use the constant `commstat:station-shared` identity and inherit the one
+reviewed station launch target. The station launch planner therefore starts at
+most one process and retains all participating radio bindings. Disabling one
+radio binding removes only that row and leaves other bindings intact.
+
+A new VarAC instance now defaults to **Standalone VarAC** even when an existing
+node or cluster is discovered. Managed standalone creation, import, and manual
+selection are explicit setup choices; Create cluster and Join cluster are
+separate opt-in choices with concise Why guidance. No discovery result silently
+selects cluster membership.
+
+The GRS-6.3 supporting-family, persistence, launch, Add Radio, Software
+Administration, guided/settings, Spotter ingest/compose/NCS/SOP, and adjacent
+partitions pass. A monolithic Qt pytest process remains unsuitable as a release
+gate because unrelated GUI/background-thread suites can abort when combined;
+the same affected tests pass in isolated project-standard partitions. No native
+application profile, runtime endpoint, radio, commit, or remote repository was
+changed by the automated gate.
+
+#### GRS-6.4 Exit Evidence — Task-Oriented Role And Behavior UX
+
+Passed 2026-09-17. Fresh Add Radio exposes exactly **Transceiver** and
+**Receive-only SDR** as hardware roles. A retained legacy gateway value is
+preserved through a compatibility-only item when an existing profile is edited;
+it is never offered for a new radio and is not coerced to a transceiver during
+save.
+
+Step 2 is now **FIO Behavior**. The protected normal choices are presented as
+**Standard transceiver operations** and **Receive-only monitoring**, even when
+an existing database retains an older generated display name. Custom behavior
+names and durable Operating Model IDs remain unchanged. Capability and concise
+Why summaries explain the selected feature/safety boundary; schedule timing and
+Frequency Plan selection remain solely in the Schedule step. Redundant
+`(receive-only)` suffixes were removed from guided behavior and schedule
+choices.
+
+For a qualified FIO-managed JS8Call or Fast Light recipe, the normal
+Connections page shows the endpoint and a resolved summary but hides
+recipe-owned executable, profile, data, and custom-command fields. Review shows
+the exact effective component commands, working directories, dependencies,
+configuration/data roots, endpoints, execution scope, and recovery route.
+Unknown recipes still fail closed and expose their explicit Advanced recovery
+path.
+
+The primary core/migration partition passes 126 tests, built-in behavior/store
+checks pass 15 tests, and the independently rerun GRS-6.4 language, real-widget,
+responsive guided/settings, SDR, and assistant partition passes 79 tests.
+Changed Python modules compile and `git diff --check` passes. No runtime
+database, native application profile, external process, endpoint, radio,
+commit, or remote repository was changed by this gate.
+
+#### GRS-6.5 Exit Evidence — Transactional Save And Qualification
+
+Automated implementation passed 2026-09-17. Add/Edit Radio now carries the
+reviewed inventory generation and full fingerprint from Review into Final
+Save. Software Administration carries the same evidence for a single-family
+instance review. Both production routes rebuild current durable inventory
+immediately before native work and again when an asynchronous native result
+returns. A mismatch fails before database mutation, restores any completed
+native write, and presents a task-oriented Software/Review recovery route.
+
+One outer SQLite transaction now owns the radio profile, FIO Behavior
+assignment, managed application rows, manifests, launch components,
+CommStat/radio binding, schedule assignment, runtime activation, and
+receive-only launch bundle. Existing store helpers retain their public
+contracts, but their nested commits and rollbacks are deferred to the outer
+transaction on the GUI thread. Final Save commits only after every required
+step succeeds. An early return, validation failure, injected exception,
+schedule/activation failure, receiver-launch failure, or database commit
+failure rolls back the complete FIO change set. If qualified native files were
+already applied, the existing backup/restore worker is invoked as part of the
+failure route. No schema or destructive data migration was required.
+
+Review shows a compact inventory generation/reference rather than raw internal
+state. Save is single-activation: the button disables before the payload is
+handed to the transaction owner, an indeterminate progress card is painted,
+and a second click cannot submit a duplicate apply. Deselected software drafts
+are removed from the final reviewed fingerprint so the save does not reject
+its own current review.
+
+Acceptance evidence includes stable/current-versus-stale fingerprint tests,
+cancellation purity, no duplicate asynchronous apply, native failure recovery,
+explicit-completion transactions, injected rollback after radio/software/
+manifest/launch writes, receiver-launch rollback, narrow and large-font UI,
+and adjacent guided/store/settings regressions. The focused GRS-6.5 tests plus
+the Settings persistence adapter pass 27 tests; the combined guided integration
+partition passes 293 tests,
+and the selected 56-file guided/multi-rig/receiver/performance surface contains
+789 passing tests when run in project-standard isolated processes. The focused
+responsiveness/performance partition passes 75 tests. Python compilation and
+`git diff --check` pass.
+
+The monolithic GUI collection still reproduces the known Qt/background-thread
+process abort; the same files pass in fresh processes and no GRS-6.5 failure
+remains. Automated tests use temporary state only and did not change the
+operator's runtime database, third-party profiles, applications, endpoints,
+radio, git history, or remote repository. The exact TriMode/current-station
+route below remains an explicit operator-assisted live release gate; this
+document does not infer live application behavior from automated tests.
+
+GRS-6 automated exit requires all existing guided suites plus production-route
+tests for the acceptance items added above, responsiveness instrumentation,
+fault-injection rollback, `compileall`, and `git diff --check`. Its live exit
+requires the maintainer to complete or deliberately retain an inactive draft
+for this exact route:
+
+`Settings -> Radios -> Add Radio -> TriMode -> Transceiver -> Fast Light + JS8Call + FIO Spotter + CommStat + VarAC -> Configure Automatically -> Software Administration -> Review`
+
+The live evidence must show a new JS8 profile/data identity and non-conflicting
+TCP/UDP endpoints, resolved Fast Light component recipes, built-in MCF catalog,
+one shared CommStat binding, standalone VarAC unless cluster is explicitly
+chosen, exact launch summaries, responsive navigation, and no mutation of the
+existing station configuration before final reviewed Save.
+
 ## Approved Product Decisions
 
 - The JS8 create/import/manual instance logic also governs Fast Light.
@@ -938,3 +1345,11 @@ documentation matches actual supported capabilities.
 - Verified SDR++ control may perform automatic receive retuning; manual or
   unverified receivers retain reminder-only schedules.
 - None of these decisions grants an observer PTT or transmit authority.
+- `Create a distinct instance` reuses only a qualified executable/recipe by
+  default; it never silently reuses another instance's profile, data, endpoint,
+  or manifest.
+- CommStat is station-shared with explicit per-JS8 bindings unless a future
+  version-qualified contract requires separate processes.
+- Additional VarAC nodes default to standalone; cluster mode is always opt-in.
+- FIO Spotter's normal MCF catalog is resolved by FIO and is not a radio-scoped
+  external launch or folder-selection task.

@@ -15,4 +15,5 @@ Third-party components:
   Author: Joseph D. Lyman, KF7MIX
   License: MIT for JS8Spotter. FreqInOut includes built-in FIO Spotter
   workflows that compose, decode, and import JS8Spotter-compatible MCForms
-  traffic without requiring the external JS8Spotter application.
+  traffic without requiring the external JS8Spotter application. The packaged
+  station MCForms catalog is retained with this attribution.

@@ -10,8 +10,9 @@ processes.
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
+import uuid
 from typing import Any, Iterable, Mapping, Optional
 
 from PySide6.QtCore import Qt, Signal
@@ -34,6 +35,19 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from freqinout.core.guided_instance_inventory import (
+    GuidedInstanceInventorySnapshot,
+    build_guided_instance_inventory,
+    distinct_draft_seed,
+    source_identity_fingerprint,
+    stable_draft_instance_key,
+)
+from freqinout.core.guided_launch_recipes import (
+    GuidedLaunchRecipeResolution,
+    recipe_draft_updates,
+    recipe_resolution_from_mapping,
+    resolve_guided_launch_recipe,
+)
 from freqinout.gui.current_page_stack import CurrentPageStack
 from freqinout.gui.theme import active_app_theme, button_height_for_font, button_style, label_style
 
@@ -124,6 +138,14 @@ class SoftwareInstanceDraft:
     radio_id: Optional[int] = None
     owner_draft_key: str = ""
     owner_label: str = ""
+    draft_instance_key: str = ""
+    inventory_generation: int = 0
+    inventory_fingerprint: str = ""
+    source_fingerprint: str = ""
+    source_locked: bool = False
+    launch_recipe: Mapping[str, Any] = field(default_factory=dict)
+    launch_recipe_status: str = ""
+    launch_recipe_fingerprint: str = ""
     radio_role: str = "tx_rx"
     mode: str = "managed"
     ownership: str = "fio-managed"
@@ -239,11 +261,23 @@ class SoftwareInstanceDraft:
             "writer_operation": self.writer_operation,
             "owner_draft_key": self.owner_draft_key,
             "owner_label": self.owner_label,
+            "draft_instance_key": self.draft_instance_key,
+            "inventory_generation": int(self.inventory_generation or 0),
+            "inventory_fingerprint": self.inventory_fingerprint,
+            "source_fingerprint": self.source_fingerprint,
+            "source_locked": self.source_locked,
+            "launch_recipe": dict(self.launch_recipe),
+            "launch_recipe_status": self.launch_recipe_status,
+            "launch_recipe_fingerprint": self.launch_recipe_fingerprint,
             "radio_role": self.radio_role,
             "instance_key": (
                 f"{self.family_key}:{self.imported_system_key}"
                 if self.imported_system_key
-                else (f"{self.family_key}:{self.imported_id}" if self.imported_id else "")
+                else (
+                    f"{self.family_key}:{self.imported_id}"
+                    if self.imported_id
+                    else self.draft_instance_key
+                )
             ),
             "application_system_key": self.imported_system_key,
             "host": self.host,
@@ -370,12 +404,29 @@ def normalize_instance_draft(value: Mapping[str, Any] | SoftwareInstanceDraft) -
         if family == "varac"
         else row.get("fldigi_checkin_dir")
     )
+    source_fingerprint = _text(row.get("source_fingerprint"))
+    imported_id = _int(row.get("imported_id") or row.get("id"))
+    source_locked = _bool(row.get("source_locked", bool(imported_id and mode == "discover")))
+    if source_locked and not source_fingerprint and family in dict(SUPPORTED_INSTANCE_FAMILIES):
+        source_fingerprint = source_identity_fingerprint(family, row)
     return SoftwareInstanceDraft(
         family_key=family,
         instance_name=_text(row.get("instance_name") or row.get("name")),
         radio_id=_int(row.get("radio_id")),
         owner_draft_key=_text(row.get("owner_draft_key")),
         owner_label=_text(row.get("owner_label")),
+        draft_instance_key=_text(row.get("draft_instance_key") or row.get("instance_key")),
+        inventory_generation=_int(row.get("inventory_generation")) or 0,
+        inventory_fingerprint=_text(row.get("inventory_fingerprint")),
+        source_fingerprint=source_fingerprint,
+        source_locked=source_locked,
+        launch_recipe=(
+            dict(row.get("launch_recipe") or {})
+            if isinstance(row.get("launch_recipe"), Mapping)
+            else {}
+        ),
+        launch_recipe_status=_text(row.get("launch_recipe_status")),
+        launch_recipe_fingerprint=_text(row.get("launch_recipe_fingerprint")),
         radio_role=_text(row.get("radio_role") or row.get("device_class") or "tx_rx").lower(),
         mode=mode,
         ownership=ownership,
@@ -412,7 +463,7 @@ def normalize_instance_draft(value: Mapping[str, Any] | SoftwareInstanceDraft) -
         cluster_gateway=_bool(row.get("cluster_gateway", False)),
         cluster_ptt_lock=_bool(row.get("cluster_ptt_lock", False)),
         notes=_text(row.get("notes")),
-        imported_id=_int(row.get("imported_id") or row.get("id")),
+        imported_id=imported_id,
         imported_system_key=_text(row.get("imported_system_key") or row.get("system_key")),
         replace_existing=_bool(row.get("replace_existing", False)),
         replacement_instance_id=_int(row.get("replacement_instance_id")),
@@ -541,6 +592,9 @@ def instance_conflicts(
     wanted_path = current.application_path.casefold()
     for raw in existing_instances:
         row = raw if isinstance(raw, Mapping) else {}
+        existing_draft_key = _text(row.get("draft_instance_key") or row.get("instance_key"))
+        if current.draft_instance_key and existing_draft_key == current.draft_instance_key:
+            continue
         existing_id = _int(row.get("id"))
         if current.imported_id and existing_id == current.imported_id:
             continue
@@ -606,12 +660,15 @@ class SoftwareInstanceAssistant(QWidget):
         *,
         radios: Iterable[Mapping[str, Any]] = (),
         existing_instances: Iterable[Mapping[str, Any]] = (),
+        inventory_snapshot: GuidedInstanceInventorySnapshot | None = None,
         varac_clusters: Iterable[Mapping[str, Any]] = (),
         selected_radio_id: Optional[int] = None,
         unsaved_owner_key: str = "",
         unsaved_radio_label: str = "",
         radio_role: str = "tx_rx",
         initial_draft: Mapping[str, Any] | SoftwareInstanceDraft | None = None,
+        launch_recipe_resolution: GuidedLaunchRecipeResolution | Mapping[str, Any] | None = None,
+        managed_root: str = "",
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -619,10 +676,20 @@ class SoftwareInstanceAssistant(QWidget):
         self._family_locked = bool(requested_family)
         self._family_key = requested_family
         self._existing_instances = tuple(dict(row) for row in existing_instances if isinstance(row, Mapping))
+        inventory_family = requested_family or "js8call"
+        self._inventory_snapshot = (
+            inventory_snapshot
+            if isinstance(inventory_snapshot, GuidedInstanceInventorySnapshot)
+            else build_guided_instance_inventory(
+                {inventory_family: self._existing_instances},
+                generation=0,
+            )
+        )
         self._radios = tuple(dict(row) for row in radios if isinstance(row, Mapping))
         self._varac_clusters = tuple(dict(row) for row in varac_clusters if isinstance(row, Mapping))
         self._selected_radio_id = _int(selected_radio_id)
         self._unsaved_owner_key = _text(unsaved_owner_key)
+        self._assistant_draft_owner_key = self._unsaved_owner_key or f"assistant-{uuid.uuid4().hex}"
         self._unsaved_radio_label = _text(unsaved_radio_label) or "Unsaved radio draft"
         self._radio_role = _text(radio_role).lower() or "tx_rx"
         self._radio_assignments: dict[int, Mapping[str, Any]] = {}
@@ -630,9 +697,19 @@ class SoftwareInstanceAssistant(QWidget):
         self._replacement_confirmed = False
         self._imported_id: Optional[int] = None
         self._imported_system_key = ""
+        self._draft_instance_key = ""
+        self._inventory_fingerprint = self._inventory_snapshot.fingerprint
+        self._source_fingerprint = ""
+        self._source_locked = False
+        self._selected_source_payload: dict[str, Any] = {}
+        self._loading_draft = False
         self._discovery_selected = False
         self._writer_platform = ""
         self._writer_operation = "create"
+        self._managed_root = _text(managed_root)
+        self._launch_recipe_resolution: GuidedLaunchRecipeResolution | None = None
+        self._launch_recipe_resolution_supplied = launch_recipe_resolution is not None
+        self._resolving_launch_recipe = False
         self._discovery_results: tuple[Mapping[str, Any], ...] = ()
         self._step = 0
         self._field_widgets: dict[str, QWidget] = {}
@@ -658,6 +735,8 @@ class SoftwareInstanceAssistant(QWidget):
                 }
             )
             self._set_draft(seeded)
+        if launch_recipe_resolution is not None:
+            self.set_launch_recipe_resolution(launch_recipe_resolution)
         # A workspace-launched operation is intentionally scoped to exactly
         # one family; changing family would mix the supplied inventory and
         # radio link columns.  A standalone assistant (no family argument)
@@ -733,8 +812,10 @@ class SoftwareInstanceAssistant(QWidget):
         self.cancel_button.setAccessibleName("Cancel adding software instance")
         self.cancel_button.clicked.connect(self.cancelled.emit)
         self.back_button = QPushButton("Back")
+        self.back_button.setAccessibleName("Back one software setup step")
         self.back_button.clicked.connect(self._back)
         self.next_button = QPushButton("Next")
+        self.next_button.setAccessibleName("Continue software setup")
         self.next_button.setDefault(True)
         self.next_button.clicked.connect(self._next)
         actions.addWidget(self.cancel_button)
@@ -809,7 +890,21 @@ class SoftwareInstanceAssistant(QWidget):
         self.discovery_list.setAccessibleName("Discovered software configurations")
         self.discovery_list.itemSelectionChanged.connect(self._import_selected_discovery)
         layout.addWidget(self.discovery_list, 1)
+        self.source_lock_banner = QLabel()
+        self.source_lock_banner.setObjectName("softwareInstanceSourceLockBanner")
+        self.source_lock_banner.setAccessibleName("Imported software identity status")
+        self.source_lock_banner.setWordWrap(True)
+        layout.addWidget(self.source_lock_banner)
+        self.clone_distinct_button = QPushButton("Clone as a distinct instance")
+        self.clone_distinct_button.setObjectName("softwareInstanceCloneDistinct")
+        self.clone_distinct_button.setAccessibleName("Clone imported software as a distinct instance")
+        self.clone_distinct_button.setToolTip(
+            "Keep only shared executable and version evidence, then allocate a new identity, ports, profiles, and data paths."
+        )
+        self.clone_distinct_button.clicked.connect(self._clone_as_distinct)
+        layout.addWidget(self.clone_distinct_button)
         self.source_buttons["managed"].setChecked(True)
+        self._set_source_locked(False)
         self.pages.addWidget(page)
 
     def _new_form_page(self, heading: str, fields: tuple[tuple[str, str, str], ...]) -> QFormLayout:
@@ -820,6 +915,7 @@ class SoftwareInstanceAssistant(QWidget):
         outer.addWidget(hint)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         form_widget = QWidget()
         form = QFormLayout(form_widget)
         form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
@@ -869,7 +965,7 @@ class SoftwareInstanceAssistant(QWidget):
 
     def _build_files_page(self) -> None:
         self._new_form_page(
-            "Files: keep profiles/configuration, logs, and message/data storage attributable to this instance. Existing files are imported for review; external changes require an explicit supported apply.",
+            "Files: choose application executables and operator-owned paths. For a qualified FIO-managed JS8Call or Fast Light recipe, FIO derives profile and data roots from the stable instance identity and shows them in Launch and Review; unsupported recipes expose the Advanced path fields for recovery.",
             (
                 ("application_path", "Application / FLRig path", "Path to the application or launcher"),
                 ("secondary_application_path", "FLDigi path", "Fast Light FLDigi application (optional)"),
@@ -888,6 +984,14 @@ class SoftwareInstanceAssistant(QWidget):
                 ("cluster_instance_number", "VarAC cluster instance", "Optional positive instance number"),
             ),
         )
+        self.varac_cluster_why_label = QLabel(
+            "Standalone is the safe default even when another VarAC node or cluster is detected. "
+            "Choose Create cluster or Join cluster only when coordinated cluster routing and shared BBS behavior are intentional."
+        )
+        self.varac_cluster_why_label.setObjectName("softwareInstanceVaracClusterWhy")
+        self.varac_cluster_why_label.setAccessibleName("Why VarAC defaults to standalone")
+        self.varac_cluster_why_label.setWordWrap(True)
+        self._active_form.addRow("Why", self.varac_cluster_why_label)
         for key, text in (
             ("cluster_gateway", "Use this node as the new cluster gateway"),
             ("cluster_ptt_lock", "Enable cluster PTT lock"),
@@ -902,11 +1006,34 @@ class SoftwareInstanceAssistant(QWidget):
 
     def _build_launch_page(self) -> None:
         self._new_form_page(
-            "Launch: review what FIO may start. An empty command leaves launching operator-managed. Startup selection is a preference, not permission to rewrite an application configuration.",
-            (("launch_command", "Launch command", "Optional command FIO may launch"), ("notes", "Notes", "Why this instance exists or what it is connected to")),
+            "Launch: review the resolved application recipe. Qualified managed recipes show exact component commands; unsupported applications retain an Advanced recovery override.",
+            (("launch_command", "Advanced launch override", "Operator-provided recovery command"), ("notes", "Notes", "Why this instance exists or what it is connected to")),
         )
+        self.launch_recipe_status_label = QLabel()
+        self.launch_recipe_status_label.setObjectName("softwareInstanceLaunchRecipeStatus")
+        self.launch_recipe_status_label.setAccessibleName("Resolved launch recipe status")
+        self.launch_recipe_status_label.setWordWrap(True)
+        self.launch_recipe_components_label = QLabel()
+        self.launch_recipe_components_label.setObjectName("softwareInstanceLaunchRecipeComponents")
+        self.launch_recipe_components_label.setAccessibleName("Resolved launch recipe components")
+        self.launch_recipe_components_label.setWordWrap(True)
+        self.launch_recipe_components_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.launch_recipe_recovery_label = QLabel()
+        self.launch_recipe_recovery_label.setObjectName("softwareInstanceLaunchRecipeRecovery")
+        self.launch_recipe_recovery_label.setAccessibleName("Launch recipe recovery action")
+        self.launch_recipe_recovery_label.setWordWrap(True)
+        self.launch_recipe_status_heading = QLabel("Resolved recipe")
+        self.launch_recipe_status_heading.setAccessibleName("Resolved launch recipe heading")
+        self.launch_recipe_components_heading = QLabel("Effective components")
+        self.launch_recipe_components_heading.setAccessibleName("Effective launch components heading")
+        self.launch_recipe_recovery_heading = QLabel("Recovery")
+        self.launch_recipe_recovery_heading.setAccessibleName("Launch recipe recovery heading")
+        self._active_form.insertRow(0, self.launch_recipe_status_heading, self.launch_recipe_status_label)
+        self._active_form.insertRow(1, self.launch_recipe_components_heading, self.launch_recipe_components_label)
+        self._active_form.insertRow(2, self.launch_recipe_recovery_heading, self.launch_recipe_recovery_label)
         launch = QCheckBox("Launch this instance at startup")
         launch.setAccessibleName("Launch software instance at startup")
+        launch.toggled.connect(self._on_launch_policy_changed)
         self._field_widgets["launch_at_startup"] = launch
         launch_label = QLabel("Startup policy")
         self._field_labels["launch_at_startup"] = launch_label
@@ -933,6 +1060,198 @@ class SoftwareInstanceAssistant(QWidget):
         self._active_form.addRow(advanced_label, advanced_tx)
         self._active_form.addRow(acknowledgement_label, advanced_ack)
 
+    @staticmethod
+    def _launch_component_lines(resolution: GuidedLaunchRecipeResolution) -> list[str]:
+        """Format core-resolved component facts without reconstructing recipes."""
+
+        lines: list[str] = []
+        for component in resolution.components:
+            lines.append(component.label or component.component_key or "Application")
+            lines.append(
+                f"  Effective command: {component.effective_command_text or 'Operator starts this application'}"
+            )
+            lines.append(
+                f"  Working directory: {component.working_directory or 'Application default'}"
+            )
+            lines.append(
+                "  Dependencies: "
+                + (", ".join(component.dependencies) if component.dependencies else "None")
+            )
+            if component.profile_selector:
+                lines.append(f"  Profile selector: {component.profile_selector}")
+            lines.append(
+                "  Configuration roots: "
+                + (", ".join(component.configuration_roots) if component.configuration_roots else "None")
+            )
+            lines.append(
+                "  Data roots: "
+                + (", ".join(component.data_roots) if component.data_roots else "None")
+            )
+            endpoints = []
+            for endpoint in component.endpoints:
+                name = _text(endpoint.get("name")) or "Endpoint"
+                protocol = _text(endpoint.get("protocol")) or "service"
+                host = _text(endpoint.get("host")) or "application-defined"
+                port = _int(endpoint.get("port")) or 0
+                target = f"{protocol}://{host}:{port}" if port else f"{protocol}://{host}"
+                endpoints.append(f"{name} {target}")
+            lines.append("  Endpoints: " + (", ".join(endpoints) if endpoints else "None"))
+            readiness = ", ".join(
+                f"{key}={value}" for key, value in sorted(component.readiness.items())
+            )
+            lines.append(f"  Readiness policy: {readiness or 'Operator-confirmed'}")
+            lines.append(
+                "  Launch policy: "
+                + (
+                    "Operator starts this application"
+                    if component.operator_starts
+                    else "Launch at FIO startup"
+                    if component.launch_at_startup
+                    else "Available for manual launch from FIO"
+                )
+            )
+        return lines
+
+    def _on_launch_policy_changed(self, _checked: bool) -> None:
+        if not self._loading_draft:
+            self._resolve_launch_recipe()
+        self._refresh_review_if_needed()
+
+    def set_launch_recipe_resolution(
+        self,
+        resolution: GuidedLaunchRecipeResolution | Mapping[str, Any] | None,
+    ) -> None:
+        """Apply one already-resolved core recipe to this presentation surface."""
+
+        self._launch_recipe_resolution_supplied = resolution is not None
+        if resolution is None:
+            self._launch_recipe_resolution = None
+        elif isinstance(resolution, GuidedLaunchRecipeResolution):
+            self._launch_recipe_resolution = resolution
+        elif isinstance(resolution, Mapping):
+            self._launch_recipe_resolution = recipe_resolution_from_mapping(resolution)
+        else:
+            raise TypeError("resolution must be a GuidedLaunchRecipeResolution, mapping, or None")
+        self._apply_launch_recipe_updates()
+        self._apply_launch_recipe_presentation()
+        self._refresh_review_if_needed()
+
+    def _resolve_launch_recipe(self) -> None:
+        if self._resolving_launch_recipe or self._family_key not in {"js8call", "fast_light"}:
+            self._apply_launch_recipe_presentation()
+            return
+        if self._launch_recipe_resolution_supplied and self._launch_recipe_resolution is not None:
+            self._apply_launch_recipe_presentation()
+            return
+        self._resolving_launch_recipe = True
+        try:
+            resolution = resolve_guided_launch_recipe(
+                self.draft().payload(),
+                managed_root=self._managed_root,
+            )
+            self._launch_recipe_resolution = resolution
+            self._apply_launch_recipe_updates()
+            self._apply_launch_recipe_presentation()
+        finally:
+            self._resolving_launch_recipe = False
+
+    def _apply_launch_recipe_updates(self) -> None:
+        resolution = self._launch_recipe_resolution
+        if resolution is None:
+            return
+        updates = recipe_draft_updates(resolution)
+        if not resolution.qualified:
+            return
+        self._loading_draft = True
+        try:
+            for key, value in updates.items():
+                widget = self._field_widgets.get(key)
+                if isinstance(widget, QLineEdit):
+                    widget.setText(str(value if value is not None else ""))
+                elif isinstance(widget, QCheckBox):
+                    widget.setChecked(bool(value))
+                elif isinstance(widget, QComboBox):
+                    index = widget.findData(value)
+                    if index >= 0:
+                        widget.setCurrentIndex(index)
+        finally:
+            self._loading_draft = False
+
+    def _apply_launch_recipe_presentation(self) -> None:
+        if not hasattr(self, "launch_recipe_status_label"):
+            return
+        resolution = self._launch_recipe_resolution
+        supported_family = self._family_key in {"js8call", "fast_light"}
+        self.launch_recipe_status_label.setVisible(supported_family)
+        self.launch_recipe_status_heading.setVisible(supported_family)
+        self.launch_recipe_components_label.setVisible(
+            supported_family and resolution is not None and bool(resolution.components)
+        )
+        self.launch_recipe_components_heading.setVisible(
+            supported_family and resolution is not None and bool(resolution.components)
+        )
+        self.launch_recipe_recovery_label.setVisible(
+            supported_family and resolution is not None and bool(resolution.recovery_action)
+        )
+        self.launch_recipe_recovery_heading.setVisible(
+            supported_family and resolution is not None and bool(resolution.recovery_action)
+        )
+        if resolution is None:
+            self.launch_recipe_status_label.setText(
+                "Recipe pending. Complete Identity, Connections, and Files, then return here."
+            )
+            self.launch_recipe_components_label.clear()
+            self.launch_recipe_recovery_label.clear()
+        else:
+            status = resolution.status.replace("_", " ").title()
+            self.launch_recipe_status_label.setText(
+                f"{status} — {resolution.summary or 'Review the resolved launch details below.'}"
+            )
+            self.launch_recipe_components_label.setText(
+                "\n".join(self._launch_component_lines(resolution))
+            )
+            self.launch_recipe_recovery_label.setText(resolution.recovery_action)
+        command = self._field_widgets.get("launch_command")
+        command_label = self._field_labels.get("launch_command")
+        raw_override_visible = (
+            not supported_family
+            or resolution is None
+            or bool(resolution.raw_override_allowed)
+        )
+        if command is not None:
+            command.setVisible(raw_override_visible)
+            command.setEnabled(raw_override_visible and not self._source_locked)
+        if command_label is not None:
+            command_label.setVisible(raw_override_visible)
+        qualified_managed = bool(
+            supported_family and resolution is not None and resolution.qualified
+        )
+        recipe_owned_paths = {
+            "js8call": ("configuration_path", "storage_path"),
+            "fast_light": (
+                "configuration_path",
+                "secondary_configuration_path",
+                "storage_path",
+                "secondary_storage_path",
+            ),
+        }.get(self._family_key, ())
+        for key in recipe_owned_paths:
+            widget = self._field_widgets.get(key)
+            label = self._field_labels.get(key)
+            base_visible = key in _FAMILY_FIELDS.get(self._family_key, frozenset())
+            if (
+                self._family_key == "fast_light"
+                and self._radio_role == "observer"
+                and key == "configuration_path"
+            ):
+                base_visible = False
+            visible = base_visible and not qualified_managed
+            if widget is not None:
+                widget.setVisible(visible)
+                widget.setEnabled(visible and not self._source_locked)
+            if label is not None:
+                label.setVisible(visible)
+
     def _add_line(self, key: str, label: str, placeholder: str) -> None:
         if key == "variant":
             combo = QComboBox()
@@ -949,7 +1268,11 @@ class SoftwareInstanceAssistant(QWidget):
             return
         if key == "cluster_path":
             combo = QComboBox()
+            combo.setObjectName("softwareInstanceClusterPath")
             combo.setAccessibleName(label)
+            combo.setToolTip(
+                "Standalone is the default. Create or join a cluster only when this node intentionally participates in coordinated routing or shared BBS behavior."
+            )
             combo.addItem("Standalone VarAC node", "standalone")
             combo.addItem("Create a new cluster", "create_cluster")
             combo.addItem("Join an existing cluster", "join_cluster")
@@ -1006,7 +1329,18 @@ class SoftwareInstanceAssistant(QWidget):
         normalized = _text(family_key).lower()
         if normalized not in {key for key, _label in SUPPORTED_INSTANCE_FAMILIES}:
             normalized = "js8call"
+        if (
+            self._launch_recipe_resolution is not None
+            and self._launch_recipe_resolution.family_key != normalized
+            and not self._launch_recipe_resolution_supplied
+        ):
+            self._launch_recipe_resolution = None
         self._family_key = normalized
+        if not self._draft_instance_key:
+            self._draft_instance_key = stable_draft_instance_key(
+                self._assistant_draft_owner_key,
+                normalized,
+            )
         if hasattr(self, "family_combo"):
             index = self.family_combo.findData(normalized)
             if index >= 0 and self.family_combo.currentIndex() != index:
@@ -1306,10 +1640,85 @@ class SoftwareInstanceAssistant(QWidget):
                 widget = self._field_widgets.get(key)
                 if isinstance(widget, QCheckBox):
                     widget.setChecked(False)
+        self.varac_cluster_why_label.setVisible(self._family_key == "varac")
+        self._apply_launch_recipe_presentation()
+
+    def _set_source_locked(self, locked: bool) -> None:
+        """Keep imported identity fields immutable until the operator clones."""
+
+        self._source_locked = bool(locked)
+        for key, widget in self._field_widgets.items():
+            if key == "notes":
+                continue
+            widget.setEnabled(not self._source_locked)
+        if hasattr(self, "source_lock_banner"):
+            self.source_lock_banner.setVisible(self._source_locked)
+            self.source_lock_banner.setText(
+                "Imported identity is source-locked. Endpoints, profiles, data paths, and launch details "
+                "remain unchanged. Choose Clone as a distinct instance to allocate a separate identity."
+                if self._source_locked else ""
+            )
+        if hasattr(self, "clone_distinct_button"):
+            self.clone_distinct_button.setVisible(self._source_locked)
+            self.clone_distinct_button.setEnabled(self._source_locked)
+        self._apply_launch_recipe_presentation()
+
+    def _clone_as_distinct(self) -> None:
+        """Replace an imported bundle with one safe core-generated draft seed."""
+
+        if not self._source_locked:
+            return
+        current = self.draft()
+        source = dict(self._selected_source_payload or current.payload())
+        proposal_owner = self._unsaved_owner_key or f"software-assistant-{id(self):x}"
+        seed = distinct_draft_seed(
+            self._family_key,
+            owner_draft_key=proposal_owner,
+            snapshot=self._inventory_snapshot,
+            source=source,
+        )
+        family_title = dict(SUPPORTED_INSTANCE_FAMILIES).get(self._family_key, "Software")
+        seed.update(
+            {
+                "instance_name": (
+                    f"{self._unsaved_radio_label} {family_title}"
+                    if self._unsaved_owner_key
+                    else f"{current.instance_name or family_title} copy"
+                ),
+                "owner_draft_key": self._unsaved_owner_key,
+                "owner_label": self._unsaved_radio_label if self._unsaved_owner_key else "",
+                "radio_role": self._radio_role,
+                "launch_at_startup": current.launch_at_startup,
+                "notes": current.notes,
+            }
+        )
+        self._selected_source_payload = {}
+        self._set_draft(normalize_instance_draft(seed))
+        self.set_operation_status(
+            "Distinct draft created. Review the newly allocated identity, ports, profiles, and data paths before applying."
+        )
+        self._refresh()
 
     def _refresh_source(self) -> None:
+        selected_modes = [key for key, button in self.source_buttons.items() if button.isChecked()]
+        if not selected_modes:
+            return
         discover = self.source_buttons["discover"].isChecked()
-        mode = next((key for key, button in self.source_buttons.items() if button.isChecked()), "managed")
+        mode = selected_modes[0]
+        if not self._loading_draft and mode == "managed" and self._source_locked:
+            self._clone_as_distinct()
+            return
+        if not self._loading_draft and mode == "remote" and self._source_locked:
+            self._loading_draft = True
+            try:
+                self.source_buttons["discover"].setChecked(True)
+            finally:
+                self._loading_draft = False
+            self.set_operation_status(
+                "The imported identity remains locked. Clone it as a distinct instance before changing to manual or remote setup.",
+                error=True,
+            )
+            return
         ownership = self._field_widgets.get("ownership")
         if isinstance(ownership, QComboBox):
             desired_ownership = {
@@ -1321,12 +1730,12 @@ class SoftwareInstanceAssistant(QWidget):
             if index >= 0:
                 ownership.setCurrentIndex(index)
         if not discover and self._discovery_selected:
-            # Keep copied values as a starting point, but do not overwrite the
-            # discovered application's durable record when the operator has
-            # changed to a new-local or remote setup path.
             self._imported_id = None
             self._imported_system_key = ""
+            self._source_fingerprint = ""
+            self._source_locked = False
             self._discovery_selected = False
+            self._set_source_locked(False)
         self.discover_button.setVisible(discover)
         self.discovery_list.setVisible(discover and bool(self._discovery_results))
         self.discovery_hint.setText(
@@ -1341,7 +1750,23 @@ class SoftwareInstanceAssistant(QWidget):
             return
         value = item.data(Qt.UserRole)
         if isinstance(value, Mapping):
-            imported = normalize_instance_draft({**value, "family_key": self._family_key})
+            source = dict(value)
+            fingerprint = _text(source.get("source_fingerprint")) or source_identity_fingerprint(
+                self._family_key,
+                source,
+            )
+            source.update(
+                {
+                    "family_key": self._family_key,
+                    "mode": "discover",
+                    "ownership": "operator-managed",
+                    "inventory_fingerprint": self._inventory_snapshot.fingerprint,
+                    "source_fingerprint": fingerprint,
+                    "source_locked": True,
+                }
+            )
+            self._selected_source_payload = dict(source)
+            imported = normalize_instance_draft(source)
             self._discovery_selected = True
             self._set_draft(imported)
 
@@ -1349,7 +1774,7 @@ class SoftwareInstanceAssistant(QWidget):
         """Render host-provided results and never scan on its own."""
 
         self._discovery_results = tuple(dict(row) for row in results if isinstance(row, Mapping))
-        self._discovery_selected = False
+        self._discovery_selected = bool(self._source_locked)
         self.discovery_list.clear()
         for row in self._discovery_results:
             name = _text(row.get("name") or row.get("instance_name")) or "Unnamed configuration"
@@ -1371,34 +1796,52 @@ class SoftwareInstanceAssistant(QWidget):
         self._radio_role = draft.radio_role or self._radio_role
         self._imported_id = draft.imported_id
         self._imported_system_key = draft.imported_system_key
+        self._draft_instance_key = draft.draft_instance_key or self._draft_instance_key
+        self._inventory_fingerprint = draft.inventory_fingerprint or self._inventory_snapshot.fingerprint
+        self._source_fingerprint = draft.source_fingerprint
+        self._source_locked = bool(draft.source_locked)
+        if self._source_locked:
+            self._discovery_selected = True
+            if not self._selected_source_payload:
+                self._selected_source_payload = dict(values)
         self._writer_platform = draft.writer_platform
         self._writer_operation = draft.writer_operation or "create"
-        source_button = self.source_buttons.get(draft.mode)
-        if source_button is not None:
-            source_button.setChecked(True)
-        for key, widget in self._field_widgets.items():
-            value = values.get(key, "")
-            if isinstance(widget, QLineEdit):
-                widget.setText(str(value if value is not None else ""))
-            elif isinstance(widget, QCheckBox):
-                widget.setChecked(bool(value))
-            elif isinstance(widget, QComboBox):
-                index = widget.findData(value)
-                if index >= 0:
-                    widget.setCurrentIndex(index)
-                elif widget.isEditable():
-                    widget.setCurrentText(str(value if value is not None else ""))
-        radio_index = self.radio_combo.findData(draft.radio_id)
-        if radio_index >= 0:
-            self.radio_combo.setCurrentIndex(radio_index)
-        # A discovered row is evidence owned by the operator until an
-        # explicit supported managed apply is reviewed and confirmed.
-        if draft.imported_id is not None:
-            self.source_buttons["discover"].setChecked(True)
-            operator_index = self._field_widgets["ownership"].findData("operator-managed")
-            if operator_index >= 0 and draft.ownership == "fio-managed":
-                self._field_widgets["ownership"].setCurrentIndex(operator_index)
+        if draft.launch_recipe and not self._launch_recipe_resolution_supplied:
+            self._launch_recipe_resolution = recipe_resolution_from_mapping(draft.launch_recipe)
+        elif not draft.launch_recipe and not self._launch_recipe_resolution_supplied:
+            self._launch_recipe_resolution = None
+        self._loading_draft = True
+        try:
+            source_button = self.source_buttons.get(draft.mode)
+            if source_button is not None:
+                source_button.setChecked(True)
+            for key, widget in self._field_widgets.items():
+                value = values.get(key, "")
+                if isinstance(widget, QLineEdit):
+                    widget.setText(str(value if value is not None else ""))
+                elif isinstance(widget, QCheckBox):
+                    widget.setChecked(bool(value))
+                elif isinstance(widget, QComboBox):
+                    index = widget.findData(value)
+                    if index >= 0:
+                        widget.setCurrentIndex(index)
+                    elif widget.isEditable():
+                        widget.setCurrentText(str(value if value is not None else ""))
+            radio_index = self.radio_combo.findData(draft.radio_id)
+            if radio_index >= 0:
+                self.radio_combo.setCurrentIndex(radio_index)
+            # A discovered row is evidence owned by the operator until an
+            # explicit supported managed apply is reviewed and confirmed.
+            if draft.imported_id is not None or draft.source_locked:
+                self.source_buttons["discover"].setChecked(True)
+                operator_index = self._field_widgets["ownership"].findData("operator-managed")
+                if operator_index >= 0 and draft.ownership == "fio-managed":
+                    self._field_widgets["ownership"].setCurrentIndex(operator_index)
+        finally:
+            self._loading_draft = False
         self._sync_family_fields()
+        self._set_source_locked(self._source_locked)
+        self._apply_launch_recipe_presentation()
 
     def draft(self) -> SoftwareInstanceDraft:
         def value(key: str) -> str:
@@ -1424,12 +1867,21 @@ class SoftwareInstanceAssistant(QWidget):
             return bool(widget.isChecked()) if isinstance(widget, QCheckBox) else False
 
         radio_id = _int(self.radio_combo.currentData())
+        resolution = self._launch_recipe_resolution
         return SoftwareInstanceDraft(
             family_key=self._family_key,
             instance_name=value("instance_name"),
             radio_id=radio_id,
             owner_draft_key=self._unsaved_owner_key,
             owner_label=self._unsaved_radio_label if self._unsaved_owner_key else "",
+            draft_instance_key=self._draft_instance_key,
+            inventory_generation=int(self._inventory_snapshot.generation),
+            inventory_fingerprint=self._inventory_fingerprint or self._inventory_snapshot.fingerprint,
+            source_fingerprint=self._source_fingerprint,
+            source_locked=self._source_locked,
+            launch_recipe=resolution.to_mapping() if resolution is not None else {},
+            launch_recipe_status=resolution.status if resolution is not None else "",
+            launch_recipe_fingerprint=resolution.fingerprint if resolution is not None else "",
             radio_role=self._radio_role,
             mode=next((key for key, button in self.source_buttons.items() if button.isChecked()), "managed"),
             ownership=str(self._field_widgets["ownership"].currentData() or "fio-managed"),
@@ -1493,6 +1945,23 @@ class SoftwareInstanceAssistant(QWidget):
                     "Run Find existing configurations and select one result, or choose the new local or remote setup path.",
                 )
             )
+        if (
+            draft.source_locked
+            and draft.imported_id is not None
+            and not self._inventory_snapshot.source_is_current(
+                draft.family_key,
+                draft.imported_id,
+                draft.source_fingerprint,
+            )
+        ):
+            findings.append(
+                InstanceConflict(
+                    "import_source_stale",
+                    "error",
+                    "Imported identity changed",
+                    "Refresh discovery and review the complete source identity before applying it.",
+                )
+            )
         return tuple(findings)
 
     def _refresh_review_if_needed(self) -> None:
@@ -1500,6 +1969,7 @@ class SoftwareInstanceAssistant(QWidget):
             self._refresh_review()
 
     def _refresh_review(self) -> None:
+        self._resolve_launch_recipe()
         draft = self.draft()
         family = dict(SUPPORTED_INSTANCE_FAMILIES).get(draft.family_key, draft.family_key)
         radio = self.radio_combo.currentText()
@@ -1512,6 +1982,12 @@ class SoftwareInstanceAssistant(QWidget):
             f"Source: {draft.mode.replace('-', ' ').title()}",
             f"Ownership: {draft.ownership.replace('-', ' ').title()}",
         ]
+        resolution = self._launch_recipe_resolution
+        qualified_managed = bool(
+            draft.mode == "managed"
+            and resolution is not None
+            and resolution.qualified
+        )
         if self._replacement_instance is not None:
             old = self._replacement_instance
             old_name = _text(old.get("name") or old.get("instance_name")) or "existing instance"
@@ -1534,36 +2010,51 @@ class SoftwareInstanceAssistant(QWidget):
                     f"Rig name: {draft.rig_name or 'Not set'}",
                     f"TCP API: {endpoint}",
                     f"UDP: {draft.host}:{draft.udp_port}" if draft.udp_port else "UDP: Not configured",
-                    f"Application: {draft.application_path or 'Not set'}",
-                    f"Settings profile: {draft.configuration_path or 'Not set'}",
-                    f"Message data: {draft.storage_path or 'Not set'}",
                 )
             )
+            if not qualified_managed:
+                lines.extend(
+                    (
+                        f"Application: {draft.application_path or 'Not set'}",
+                        f"Settings profile: {draft.configuration_path or 'Not set'}",
+                        f"Message data: {draft.storage_path or 'Not set'}",
+                    )
+                )
         elif draft.family_key == "fast_light":
             if draft.radio_role == "observer":
                 lines.extend(
                     (
                         "Scope: Receive-only; FLRig, CAT, PTT, TX, and automatic send unavailable",
                         f"FLDigi endpoint: {draft.host}:{draft.secondary_port}" if draft.secondary_port else "FLDigi endpoint: Not configured",
-                        f"FLDigi application/config: {draft.secondary_application_path or 'Not set'} · {draft.secondary_configuration_path or 'Not set'}",
-                        f"FLMsg/FLAmp: {draft.flmsg_application_path or 'Operator start / not selected'} · {draft.flamp_application_path or 'Operator start / not selected'}",
-                        f"FLDigi logs/check-ins: {draft.storage_path or 'Not set'} · {draft.secondary_storage_path or 'Not set'}",
                     )
                 )
+                if not qualified_managed:
+                    lines.extend(
+                        (
+                            f"FLDigi application/config: {draft.secondary_application_path or 'Not set'} · {draft.secondary_configuration_path or 'Not set'}",
+                            f"FLMsg/FLAmp: {draft.flmsg_application_path or 'Operator start / not selected'} · {draft.flamp_application_path or 'Operator start / not selected'}",
+                            f"FLDigi logs/check-ins: {draft.storage_path or 'Not set'} · {draft.secondary_storage_path or 'Not set'}",
+                        )
+                    )
             else:
                 lines.extend(
                     (
                         f"FLRig endpoint: {endpoint}",
                         f"FLDigi endpoint: {draft.host}:{draft.secondary_port}" if draft.secondary_port else "FLDigi endpoint: Not configured",
-                        f"FLRig application/config: {draft.application_path or 'Not set'} · {draft.configuration_path or 'Not set'}",
-                        f"FLDigi application/config: {draft.secondary_application_path or 'Not set'} · {draft.secondary_configuration_path or 'Not set'}",
-                        f"FLMsg/FLAmp: {draft.flmsg_application_path or 'Operator start / not selected'} · {draft.flamp_application_path or 'Operator start / not selected'}",
-                        f"FLDigi logs/check-ins: {draft.storage_path or 'Not set'} · {draft.secondary_storage_path or 'Not set'}",
                         "Fast Light mode: Advanced TX requested"
                         if draft.advanced_tx_requested
                         else "Fast Light mode: Receive-safe",
                     )
                 )
+                if not qualified_managed:
+                    lines.extend(
+                        (
+                            f"FLRig application/config: {draft.application_path or 'Not set'} · {draft.configuration_path or 'Not set'}",
+                            f"FLDigi application/config: {draft.secondary_application_path or 'Not set'} · {draft.secondary_configuration_path or 'Not set'}",
+                            f"FLMsg/FLAmp: {draft.flmsg_application_path or 'Operator start / not selected'} · {draft.flamp_application_path or 'Operator start / not selected'}",
+                            f"FLDigi logs/check-ins: {draft.storage_path or 'Not set'} · {draft.secondary_storage_path or 'Not set'}",
+                        )
+                    )
         else:
             lines.extend(
                 (
@@ -1577,16 +2068,33 @@ class SoftwareInstanceAssistant(QWidget):
                     + (f" · instance {draft.cluster_instance_number}" if draft.cluster_instance_number else ""),
                 )
             )
-        lines.extend(
-            (
-                f"Launch command: {draft.launch_command or 'Use configured application path'}",
-                f"Launch at FIO startup: {'Yes' if draft.launch_at_startup else 'No'}",
+        if draft.family_key in {"js8call", "fast_light"} and resolution is not None:
+            lines.extend(
                 (
-                    "External configuration: eligible for reviewed native apply"
-                    if draft.family_key == "js8call" and draft.variant and draft.version and draft.configuration_path
-                    else "External configuration: operator action required unless an exact supported writer is qualified"
-                ),
+                    "",
+                    "Launch recipe",
+                    f"Status: {resolution.status.replace('_', ' ').title()}",
+                    f"Summary: {resolution.summary or 'No recipe summary available'}",
+                    *self._launch_component_lines(resolution),
+                )
             )
+            if resolution.recovery_action:
+                lines.append(f"Recovery: {resolution.recovery_action}")
+            if resolution.raw_override_allowed:
+                lines.append(
+                    f"Advanced launch override: {draft.launch_command or 'Not set'}"
+                )
+        else:
+            lines.extend(
+                (
+                    f"Launch command: {draft.launch_command or 'Use configured application path'}",
+                    f"Launch at FIO startup: {'Yes' if draft.launch_at_startup else 'No'}",
+                )
+            )
+        lines.append(
+            "External configuration: eligible for reviewed native apply"
+            if draft.family_key == "js8call" and draft.variant and draft.version and draft.configuration_path
+            else "External configuration: operator action required unless an exact supported writer is qualified"
         )
         self.review_label.setText("\n".join(lines))
         findings = self.validation()
@@ -1596,6 +2104,8 @@ class SoftwareInstanceAssistant(QWidget):
             self.conflict_label.setText("No name, endpoint, or path conflicts found in the loaded inventory. Confirm before saving.")
 
     def _refresh(self) -> None:
+        if self._step in {5, len(self.STEP_TITLES) - 1}:
+            self._resolve_launch_recipe()
         self.pages.setCurrentIndex(self._step)
         self.step_label.setText(f"Step {self._step + 1} of {len(self.STEP_TITLES)} · {self.STEP_TITLES[self._step]}")
         self.back_button.setEnabled(self._step > 0)

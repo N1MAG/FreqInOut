@@ -36,9 +36,9 @@ from freqinout.core.multi_rig_guardrails import (
 DEFAULT_DEVICE_SYSTEM_KEY = "default_device"
 DEFAULT_DEVICE_NAME = "Default Radio"
 DEFAULT_OPERATING_SYSTEM_KEY = "default_operating"
-DEFAULT_OPERATING_NAME = "Default Operating Profile"
+DEFAULT_OPERATING_NAME = "Standard transceiver operations"
 DEFAULT_RECEIVE_ONLY_OPERATING_SYSTEM_KEY = "receive_only_sdr"
-DEFAULT_RECEIVE_ONLY_OPERATING_NAME = "Receive-only SDR"
+DEFAULT_RECEIVE_ONLY_OPERATING_NAME = "Receive-only monitoring"
 DEFAULT_FREQUENCY_PLAN_SYSTEM_KEY = "default_frequency_plan"
 DEFAULT_FREQUENCY_PLAN_NAME = "Default Frequency Plan"
 DEFAULT_JS8_INSTANCE_SYSTEM_KEY = "default_js8_instance"
@@ -3473,6 +3473,105 @@ def _remove_instance_launch_links_conn(
         )
 
 
+_COMMSTAT_SHARED_INSTANCE_KEY = "commstat:station-shared"
+
+
+def _sync_station_shared_commstat_binding_conn(
+    conn: sqlite3.Connection,
+    *,
+    radio_profile_id: int,
+) -> None:
+    """Project one radio/JS8 binding onto the shared CommStat launch identity."""
+
+    radio_id = int(radio_profile_id)
+    profile = _record_by_id(conn, "device_profiles", radio_id) or {}
+    js8_instance_id = _coerce_optional_int(profile.get("js8_instance_id"))
+    enabled = bool(_coerce_bool_int(profile.get("use_commstat"), False))
+    if not enabled or js8_instance_id is None:
+        conn.execute(
+            "DELETE FROM radio_launch_bundle_items WHERE radio_profile_id=? AND instance_key=?",
+            (radio_id, _COMMSTAT_SHARED_INSTANCE_KEY),
+        )
+        return
+
+    js8_row = _record_by_id(conn, "js8_instances", int(js8_instance_id)) or {}
+    shared_row = conn.execute(
+        """
+        SELECT command_override, path_override, launch_at_startup
+          FROM radio_launch_bundle_items
+         WHERE instance_key=? AND radio_profile_id<>?
+      ORDER BY launch_at_startup DESC, updated_utc DESC
+         LIMIT 1
+        """,
+        (_COMMSTAT_SHARED_INSTANCE_KEY, radio_id),
+    ).fetchone()
+    command_override = str(shared_row[0] or "").strip() if shared_row is not None else ""
+    path_override = str(shared_row[1] or "").strip() if shared_row is not None else ""
+    launch_at_startup = bool(int(shared_row[2] or 0)) if shared_row is not None else False
+    if not path_override:
+        path_override = str(js8_row.get("commstat_launch_path", "") or "").strip()
+    if not path_override:
+        discovered = conn.execute(
+            """
+            SELECT commstat_launch_path FROM js8_instances
+             WHERE TRIM(COALESCE(commstat_launch_path, ''))<>''
+          ORDER BY updated_utc DESC, id ASC LIMIT 1
+            """
+        ).fetchone()
+        path_override = str(discovered[0] or "").strip() if discovered is not None else ""
+
+    now_iso = _utc_now_iso()
+    conn.execute(
+        """
+        INSERT INTO radio_launch_bundles
+            (radio_profile_id, schema_version, launch_enabled, migrated_from_legacy, updated_utc)
+        VALUES (?, 1, 0, 0, ?)
+        ON CONFLICT(radio_profile_id) DO UPDATE SET updated_utc=excluded.updated_utc
+        """,
+        (radio_id, now_iso),
+    )
+    readiness = {
+        "execution_scope": "station_shared_utility",
+        "bound_js8_instance_id": int(js8_instance_id),
+        "bound_js8_host": str(js8_row.get("host", "127.0.0.1") or "127.0.0.1"),
+        "bound_js8_port": int(js8_row.get("port", 2442) or 2442),
+    }
+    conn.execute(
+        """
+        INSERT INTO radio_launch_bundle_items (
+            radio_profile_id, instance_key, app_name, display_order, enabled,
+            launch_at_startup, monitor_health, command_override, path_override,
+            dependencies_json, readiness_json, updated_utc
+        ) VALUES (?, ?, 'CommStat', 60, 1, ?, 1, ?, ?, ?, ?, ?)
+        ON CONFLICT(radio_profile_id, instance_key) DO UPDATE SET
+            app_name=excluded.app_name,
+            display_order=excluded.display_order,
+            enabled=1,
+            command_override=CASE
+                WHEN TRIM(excluded.command_override)<>'' THEN excluded.command_override
+                ELSE radio_launch_bundle_items.command_override
+            END,
+            path_override=CASE
+                WHEN TRIM(excluded.path_override)<>'' THEN excluded.path_override
+                ELSE radio_launch_bundle_items.path_override
+            END,
+            dependencies_json=excluded.dependencies_json,
+            readiness_json=excluded.readiness_json,
+            updated_utc=excluded.updated_utc
+        """,
+        (
+            radio_id,
+            _COMMSTAT_SHARED_INSTANCE_KEY,
+            1 if launch_at_startup else 0,
+            command_override,
+            path_override,
+            json.dumps(["JS8Call"]),
+            json.dumps(readiness, sort_keys=True),
+            now_iso,
+        ),
+    )
+
+
 def _remove_varac_cluster_links_for_device_conn(
     conn: sqlite3.Connection,
     *,
@@ -5275,9 +5374,15 @@ def ensure_multi_rig_migration(
         if operating:
             explicit_plan_name = _coerce_text(operating_plan_name, "")
             existing_plan_name = _coerce_text(operating.get("name", ""), "")
-            fallback_names = {DEFAULT_OPERATING_NAME, "Migrated Single-Rig Plan", ""}
+            fallback_names = {
+                DEFAULT_OPERATING_NAME,
+                "Default Operating Profile",
+                "Daily HF Schedule",
+                "Migrated Single-Rig Plan",
+                "",
+            }
             if explicit_plan_name or existing_plan_name in fallback_names:
-                plan_name = explicit_plan_name or "Daily HF Schedule"
+                plan_name = explicit_plan_name or DEFAULT_OPERATING_NAME
                 conn.execute(
                     "UPDATE operating_profiles SET name=?, updated_utc=? WHERE id=?",
                     (plan_name, _utc_now_iso(), int(operating["id"])),
@@ -5648,6 +5753,88 @@ def mirror_legacy_settings_into_runtime_active_device(
     return _resolve_device_profile_links_conn(conn, _record_by_id(conn, "device_profiles", int(active_id)) or existing)
 
 
+class _GuidedTransactionConnection:
+    """Connection facade that keeps nested store helpers in one transaction.
+
+    Existing store methods intentionally own their normal transaction boundary.
+    Guided radio save is the one workflow that must compose several of those
+    methods atomically.  While that workflow is active on this thread, commits,
+    rollbacks, and nested BEGIN statements are deferred to the outer owner.
+    """
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._connection = connection
+
+    def __enter__(self) -> "_GuidedTransactionConnection":
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> bool:
+        return False
+
+    def execute(self, sql: str, parameters: Any = ()) -> sqlite3.Cursor:
+        statement = str(sql or "").strip().upper().rstrip(";")
+        if statement.startswith("BEGIN"):
+            return self._connection.execute("SELECT 1")
+        return self._connection.execute(sql, parameters)
+
+    def executemany(self, sql: str, parameters: Any) -> sqlite3.Cursor:
+        return self._connection.executemany(sql, parameters)
+
+    def executescript(self, sql: str) -> sqlite3.Cursor:
+        return self._connection.executescript(sql)
+
+    def commit(self) -> None:
+        return None
+
+    def rollback(self) -> None:
+        return None
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._connection, name)
+
+
+class GuidedSaveTransaction:
+    """Outer transaction for one reviewed Add/Edit Radio activation."""
+
+    def __init__(self, store: "MultiRadioStore") -> None:
+        self._store = store
+        self._connection: sqlite3.Connection | None = None
+        self._complete = False
+
+    def __enter__(self) -> "GuidedSaveTransaction":
+        if getattr(self._store._transaction_local, "connection", None) is not None:
+            raise RuntimeError("A guided radio save transaction is already active on this thread.")
+        connection = self._store._open_connection()
+        connection.execute("BEGIN IMMEDIATE")
+        self._connection = connection
+        self._store._transaction_local.connection = connection
+        return self
+
+    def complete(self) -> None:
+        """Mark the full reviewed plan successful and eligible to commit."""
+
+        self._complete = True
+
+    def __exit__(self, exc_type: object, _exc: object, _tb: object) -> bool:
+        connection = self._connection
+        self._store._transaction_local.connection = None
+        if connection is None:
+            return False
+        try:
+            if exc_type is None and self._complete:
+                try:
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+            else:
+                connection.rollback()
+        finally:
+            connection.close()
+            self._connection = None
+        return False
+
+
 class MultiRadioStore:
     def __init__(self, db_path: Optional[Path] = None) -> None:
         self.db_path = Path(db_path) if db_path else settings_db_path()
@@ -5656,8 +5843,9 @@ class MultiRadioStore:
         # every settings table and column on every runtime operation.
         self._schema_ready = False
         self._schema_lock = threading.Lock()
+        self._transaction_local = threading.local()
 
-    def _connect(self) -> sqlite3.Connection:
+    def _open_connection(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
@@ -5672,8 +5860,18 @@ class MultiRadioStore:
                     self._schema_ready = True
         return conn
 
+    def _connect(self) -> sqlite3.Connection:
+        active = getattr(self._transaction_local, "connection", None)
+        if isinstance(active, sqlite3.Connection):
+            return _GuidedTransactionConnection(active)  # type: ignore[return-value]
+        return self._open_connection()
+
     def _connect_readonly(self) -> sqlite3.Connection:
         """Open a migrated settings snapshot without repair or normalization."""
+
+        active = getattr(self._transaction_local, "connection", None)
+        if isinstance(active, sqlite3.Connection):
+            return _GuidedTransactionConnection(active)  # type: ignore[return-value]
 
         return connect_sqlite_readonly(
             self.db_path,
@@ -5694,6 +5892,126 @@ class MultiRadioStore:
         """
 
         return self._connect_readonly()
+
+    def guided_save_transaction(self) -> GuidedSaveTransaction:
+        """Return the atomic boundary for one reviewed guided radio save.
+
+        The context rolls back unless ``complete()`` is called.  Consequently,
+        validation failures and early returns cannot leave a partial radio,
+        assignment, software instance, manifest, schedule, or launch bundle.
+        """
+
+        return GuidedSaveTransaction(self)
+
+    def save_radio_launch_bundle(
+        self,
+        radio_profile_id: int,
+        *,
+        launch_enabled: bool,
+        items: Any,
+    ) -> None:
+        """Persist a receiver launch bundle inside the active save boundary.
+
+        ``LaunchBundleStore`` remains the normal administration API.  This
+        narrow equivalent lives here because its rows are part of guided radio
+        activation and therefore must share the same SQLite connection as the
+        new radio, assignments, and managed software instances.
+        """
+
+        radio_id = int(radio_profile_id)
+        raw_items = items if isinstance(items, (list, tuple)) else ()
+        normalized: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw in raw_items:
+            if not isinstance(raw, Mapping):
+                continue
+            name = str(raw.get("name", "") or "").strip()
+            instance_key = str(raw.get("instance_key", name) or name).strip()
+            if not name or not instance_key or instance_key.casefold() in seen:
+                continue
+            seen.add(instance_key.casefold())
+            dependencies = raw.get("dependencies", ())
+            if not isinstance(dependencies, (list, tuple)):
+                dependencies = ()
+            readiness = raw.get("readiness_policy", {})
+            if not isinstance(readiness, Mapping):
+                readiness = {}
+            normalized_readiness = dict(readiness)
+            execution_scope = str(raw.get("execution_scope", "") or "").strip()
+            if execution_scope:
+                normalized_readiness["execution_scope"] = execution_scope
+            normalized.append(
+                {
+                    "name": name,
+                    "instance_key": instance_key,
+                    "enabled": _coerce_bool_int(raw.get("enabled", True), True),
+                    "startup": _coerce_bool_int(raw.get("startup", False), False),
+                    "monitor_health": _coerce_bool_int(
+                        raw.get("monitor_health", raw.get("enabled", True)), True
+                    ),
+                    "command": str(raw.get("launch_command_override", "") or "").strip(),
+                    "path": str(raw.get("launch_path_override", "") or "").strip(),
+                    "dependencies": [
+                        str(value).strip() for value in dependencies if str(value).strip()
+                    ],
+                    "readiness": normalized_readiness,
+                }
+            )
+
+        now_iso = _utc_now_iso()
+        with self._connect() as conn:
+            if conn.execute(
+                "SELECT 1 FROM device_profiles WHERE id=?", (radio_id,)
+            ).fetchone() is None:
+                raise KeyError(f"Unknown radio profile id: {radio_id}")
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO radio_launch_bundles
+                        (radio_profile_id, schema_version, launch_enabled,
+                         migrated_from_legacy, updated_utc)
+                    VALUES (?, 1, ?, 0, ?)
+                    ON CONFLICT(radio_profile_id) DO UPDATE SET
+                        schema_version=1,
+                        launch_enabled=excluded.launch_enabled,
+                        updated_utc=excluded.updated_utc
+                    """,
+                    (radio_id, 1 if launch_enabled else 0, now_iso),
+                )
+                conn.execute(
+                    "DELETE FROM radio_launch_bundle_items WHERE radio_profile_id=?",
+                    (radio_id,),
+                )
+                for order, item in enumerate(normalized):
+                    conn.execute(
+                        """
+                        INSERT INTO radio_launch_bundle_items (
+                            radio_profile_id, instance_key, app_name, display_order,
+                            enabled, launch_at_startup, monitor_health,
+                            command_override, path_override, dependencies_json,
+                            readiness_json, updated_utc
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            radio_id,
+                            item["instance_key"],
+                            item["name"],
+                            order,
+                            int(bool(item["enabled"])),
+                            int(bool(item["startup"])),
+                            int(bool(item["monitor_health"])),
+                            item["command"],
+                            item["path"],
+                            json.dumps(item["dependencies"], sort_keys=True),
+                            json.dumps(item["readiness"], sort_keys=True),
+                            now_iso,
+                        ),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
 
     def get_all_kv_settings(self) -> Dict[str, Any]:
         with self._connect() as conn:
@@ -6270,6 +6588,11 @@ class MultiRadioStore:
             conn.commit()
             saved = _record_by_system_key(conn, "device_profiles", system_key) or {}
 
+        if saved:
+            _sync_station_shared_commstat_binding_conn(
+                conn,
+                radio_profile_id=int(saved.get("id", 0) or 0),
+            )
         _sync_derived_coordination_policies_conn(conn)
         if saved:
             _refresh_assigned_plan_validation_for_device_conn(conn, int(saved.get("id", 0) or 0), emit_events=False)
@@ -7571,7 +7894,70 @@ class MultiRadioStore:
             for item in manifest.get("resource_claims", ()) or ()
             if isinstance(item, Mapping)
         }
-        if family_key == "js8call":
+        raw_evidence = manifest.get("evidence", {})
+        if not isinstance(raw_evidence, Mapping):
+            raw_evidence = {}
+        raw_recipe = raw_evidence.get("launch_recipe", {})
+        if not isinstance(raw_recipe, Mapping):
+            raw_recipe = {}
+        raw_components = raw_recipe.get("components", ())
+        qualified_components = (
+            tuple(item for item in raw_components if isinstance(item, Mapping))
+            if str(raw_recipe.get("status", "") or "").strip() == "qualified_managed"
+            else ()
+        )
+        if qualified_components and family_key in {"js8call", "fast_light"}:
+            order_by_component = {"flrig": 10, "fldigi": 20, "flmsg": 30, "flamp": 31, "js8call": 50}
+            name_by_component = {
+                "flrig": "FLRig",
+                "fldigi": "FLDigi",
+                "flmsg": "FLMsg",
+                "flamp": "FLAmp",
+                "js8call": "JS8Call",
+            }
+            recipe_rows = []
+            for component in qualified_components:
+                component_key = str(component.get("component_key", "") or "").strip().lower()
+                if component_key not in name_by_component:
+                    raise ValueError(f"Unsupported managed launch component: {component_key or 'blank'}")
+                scope = str(component.get("execution_scope", "standard") or "standard").strip().lower()
+                readiness = dict(component.get("readiness") or {})
+                readiness.update(
+                    {
+                        "launch_arguments": [
+                            str(value) for value in component.get("arguments", ()) or ()
+                        ],
+                        "working_directory": str(component.get("working_directory", "") or "").strip(),
+                        "profile_selector": str(component.get("profile_selector", "") or "").strip(),
+                        "execution_scope": scope,
+                        "operator_starts": bool(component.get("operator_starts", False)),
+                    }
+                )
+                if scope == RECEIVE_ONLY_EXECUTION_SCOPE:
+                    readiness.update(
+                        {
+                            "receive_only_ingest": True,
+                            "transmit_authority": False,
+                        }
+                    )
+                instance_key = (
+                    f"fast-light:station-shared:{component_key}"
+                    if scope == "station_shared_utility"
+                    else f"{manifest_key}:{component_key}"
+                )
+                recipe_rows.append(
+                    (
+                        instance_key,
+                        name_by_component[component_key],
+                        order_by_component[component_key],
+                        "",
+                        str(component.get("executable", "") or "").strip(),
+                        [str(value) for value in component.get("dependencies", ()) or ()],
+                        readiness,
+                    )
+                )
+            rows = tuple(recipe_rows)
+        elif family_key == "js8call":
             js8_readiness = {
                 "host": str(saved_app.get("host", "127.0.0.1") or "127.0.0.1"),
                 "port": int(saved_app.get("port", 2442) or 2442),
@@ -7708,6 +8094,11 @@ class MultiRadioStore:
                     json.dumps(readiness, sort_keys=True),
                     now_iso,
                 ),
+            )
+        if family_key == "js8call":
+            _sync_station_shared_commstat_binding_conn(
+                conn,
+                radio_profile_id=int(radio_profile_id),
             )
 
     def get_js8_instance(self, js8_instance_id: int) -> Optional[Dict[str, Any]]:

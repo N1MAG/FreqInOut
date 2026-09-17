@@ -52,7 +52,7 @@ GUIDED_NATIVE_WRITER_REGISTRY = NativeWriterRegistry(
         for variant, version in (
             ("js8call_2_2", "2.2.0"),
             ("js8call_improved_3_0_3", "3.0.3"),
-            ("js8call_subspace_4_1", "4.1.0"),
+            ("js8call_subspace_4_1", "4.1.0.478"),
         )
         for platform in ("linux", "macos", "windows")
         for operation in (NativeWriterOperation.CREATE, NativeWriterOperation.UPDATE)
@@ -183,6 +183,8 @@ def build_guided_external_app_config_plan(
     selected_varac = include_varac or any(proposal.varac_enabled for proposal in proposals)
     if selected_varac:
         _add_varac_integration_action(actions, proposals, paths)
+
+    _add_commstat_shared_binding_action(actions, proposals, paths)
 
     if not allow_external_writes:
         selected_apps = sorted({app for proposal in proposals for app in proposal.enabled_apps})
@@ -575,6 +577,62 @@ def _varac_review_items() -> Tuple[str, str]:
     return (
         "VarAC guided setup is read/import only: FIO remembers paths and monitors VarAC data without rewriting VarAC.ini or VarAC DB.",
         "Use the dedicated VarAC BBS settings workflow for explicit [BBS] section sync; cluster membership remains read-only in this release.",
+    )
+
+
+def _add_commstat_shared_binding_action(
+    actions: list[GuidedAppConfigAction],
+    proposals: Sequence[RadioInstanceProposal],
+    paths: Mapping[str, str],
+) -> None:
+    """Add one station-shared CommStat process with radio-owned JS8 routes.
+
+    CommStat is not cloned per radio.  Each selected radio contributes a
+    binding to its distinct JS8Call endpoint while the launch identity stays
+    station-scoped and therefore de-duplicates in the launch planner.
+    """
+
+    bindings = tuple(
+        proposal
+        for proposal in proposals
+        if {"js8call", "commstat"}.issubset(
+            {str(app or "").strip().lower() for app in proposal.enabled_apps}
+        )
+    )
+    if not bindings:
+        return
+    radio_bindings = ", ".join(
+        f"{proposal.instance_name}:{proposal.name}" for proposal in bindings
+    )
+    target = str(
+        paths.get("commstat_launch_path")
+        or paths.get("commstat")
+        or "FIO station-shared CommStat service"
+    )
+    actions.append(
+        GuidedAppConfigAction(
+            action_id="commstat:station-shared-bindings",
+            app_id="commstat",
+            instance_name="Station CommStat",
+            action_type="remember_shared_service_bindings",
+            target=target,
+            summary=(
+                "Use one station-shared CommStat process and bind it to each "
+                "selected radio's distinct JS8Call endpoint."
+            ),
+            requires_backup=False,
+            writes_external_config=False,
+            details={
+                "execution_scope": "station_shared_utility",
+                "instance_key": "commstat:station-shared",
+                "radio_bindings": radio_bindings,
+                "radio_keys": ", ".join(proposal.instance_name for proposal in bindings),
+            },
+            notes=(
+                "FIO launches or monitors one CommStat process for the station.",
+                "Each radio keeps its own JS8Call API/profile binding; CommStat is not duplicated per radio.",
+            ),
+        )
     )
 
 

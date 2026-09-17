@@ -80,6 +80,31 @@ _OPERATOR_AUTOFILL_FIELDS: Mapping[str, Mapping[str, str]] = {
 }
 
 
+def bundled_spotter_forms_dir() -> Path:
+    """Return FIO's packaged station-level Spotter form catalog."""
+
+    return Path(__file__).resolve().parent.parent / "resources" / "spotter_forms"
+
+
+def resolve_spotter_forms_dir(configured_dir: object = None) -> Path:
+    """Resolve an optional advanced custom catalog, then the bundled catalog.
+
+    The normal guided path deliberately supplies no per-radio folder.  A
+    configured custom catalog remains an advanced station-level override, but
+    an empty, missing, or invalid override always falls back to FIO's catalog.
+    """
+
+    configured = str(configured_dir or "").strip()
+    if configured:
+        try:
+            candidate = Path(configured).expanduser()
+            if candidate.exists() and candidate.is_dir():
+                return candidate
+        except (OSError, TypeError, ValueError):
+            pass
+    return bundled_spotter_forms_dir()
+
+
 def normalize_form_code(value: object) -> str:
     text = str(value or "").strip().upper()
     if not text:
@@ -118,7 +143,7 @@ def _read_form_title(path: Path) -> str:
 
 def discover_spotter_forms(forms_dir: object) -> List[SpotterFormDefinition]:
     try:
-        root = Path(str(forms_dir or "")).expanduser()
+        root = resolve_spotter_forms_dir(forms_dir)
     except Exception:
         return []
     if not root.exists() or not root.is_dir():

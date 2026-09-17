@@ -337,7 +337,7 @@ def test_explicit_migration_writes_key_map_columns(monkeypatch, tmp_path):
     assert varac["launch_cmd"] == "varac --portable"
     assert varac["incoming_path"] == "/messages/varac"
 
-    assert operating["name"] == "Daily HF Schedule"
+    assert operating["name"] == "Standard transceiver operations"
     assert operating["scheduler_enabled"] == 0
     assert operating["use_launch_control"] == 0
 

@@ -1,0 +1,29 @@
+Power Stability Report|F!306
+
+# Form published 03/07/2025. SitRepNet.com - KN4AM
+
+! Power Stability Report
+
+[ST] State (2-letter code):
+[GR] Maidenhead Grid Square:
+[CT] City or County:
+. 
+. 
+? Power status over the last 48 hours:
+@0 Power system functioning normally
+@1 Brief power failure lasting < 5 minutes
+@2 Power failure lasting > 5 minutes, but < 2 hours
+@3 Power failure lasting > 2 hours, but < 24 hours
+@4 Power failure lasting 24 hours or longer
+@5 Power system unreliable - multiple power failures of any length
+@6 Rolling brownouts, planned and announced
+
+? Grid down capabilities at your station:
+@1 Battery capacity for at least 24hrs of continuous low-duty-cycle operating time, solar or generator charging available
+@2 Battery capacity for at least 48hrs of continuous low-duty-cycle operating time, solar or generator charging available
+@3 Battery capacity for at least 72hrs of continuous low-duty-cycle operating time, solar or generator charging available
+@4 Battery capacity for at least 24hrs of continuous low-duty-cycle operating time, no off-grid charging ability
+@5 Battery capacity for at least 48hrs of continuous low-duty-cycle operating time, no off-grid charging ability
+@6 Battery capacity for at least 72hrs of continuous low-duty-cycle operating time, no off-grid charging ability
+@7 Limited (0-23hrs) or no battery capacity
+

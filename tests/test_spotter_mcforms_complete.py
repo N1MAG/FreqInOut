@@ -14,9 +14,11 @@ from freqinout.core.js8_spotter_forms import (
     SPOTTER_COMMENTS_KEY,
     SPOTTER_COMMENTS_MAX_LENGTH,
     discover_spotter_forms,
+    bundled_spotter_forms_dir,
     form_id_enabled,
     normalize_form_code,
     parse_spotter_form_fields,
+    resolve_spotter_forms_dir,
     spotter_operator_autofill_kind,
 )
 from freqinout.core.js8_expect_store import update_mcform_response_datecode
@@ -153,6 +155,22 @@ def test_alphabetic_catalog_form_ids_are_supported(tmp_path: Path) -> None:
     assert update_mcform_response_datecode(
         "F!BDN Y GR[DN70] #AB12", "F!BDN", datecode="#CD34"
     ) == "F!BDN Y GR[DN70] #CD34"
+
+
+def test_builtin_catalog_is_default_and_complete(tmp_path: Path) -> None:
+    assert resolve_spotter_forms_dir("") == bundled_spotter_forms_dir()
+    assert resolve_spotter_forms_dir(tmp_path / "missing") == bundled_spotter_forms_dir()
+    forms = discover_spotter_forms("")
+    assert len(forms) == 30
+    assert {form.form_code for form in forms} >= {"F!100", "F!701C", "F!BDN"}
+
+
+def test_valid_advanced_catalog_overrides_builtin(tmp_path: Path) -> None:
+    (tmp_path / "MCF100.txt").write_text("Custom|F!100\n? Ready\n@Y *Yes\n", encoding="utf-8")
+    assert resolve_spotter_forms_dir(tmp_path) == tmp_path
+    assert [(form.form_code, form.title) for form in discover_spotter_forms(tmp_path)] == [
+        ("F!100", "Custom")
+    ]
 
 
 @pytest.mark.skipif(not REFERENCE_FORMS.is_dir(), reason="reference SuperSpotter catalog is not installed")

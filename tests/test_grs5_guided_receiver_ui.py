@@ -74,7 +74,8 @@ def test_guided_dialog_exposes_receiver_guard_schedule_cards_and_persists_observ
     assert 'if observer_mode and int(row.get("receive_only", 0) or 0) != 1:' in source
     assert "or observer_mode" in source[source.index("schedule_choice = _selected_guided_schedule_path()") :]
     assert "guided_recovery_presentation(needs_attention_app=instance_name)" in source
-    assert "launch_bundle_retry_app=radio_name" in source
+    assert "save_radio_launch_bundle" in source
+    assert '"Radio setup not saved"' in source
     assert "Saved — verification pending" in (
         Path(__file__).parents[1] / "freqinout" / "gui" / "guided_receiver_presentation.py"
     ).read_text(encoding="utf-8")

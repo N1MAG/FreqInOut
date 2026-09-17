@@ -35,7 +35,7 @@ from freqinout.core.guided_setup import guided_setup_wizard_view
 STEP_IDS = ("radio", "model", "software", "connection", "guard", "schedule", "review")
 STEP_LABELS = (
     "Radio",
-    "Operating Model",
+    "FIO Behavior",
     "Software",
     "Connections",
     "Safety",
@@ -155,7 +155,7 @@ def test_shared_wizard_model_defines_the_stable_seven_step_language() -> None:
 
     assert view.steps == tuple(zip(STEP_IDS, STEP_LABELS))
     assert view.current_step_id == "radio"
-    assert view.next_label == "Operating Model"
+    assert view.next_label == "FIO Behavior"
 
 
 @pytest.mark.parametrize("setup_type", ("sdr_observer", "js8_only"))

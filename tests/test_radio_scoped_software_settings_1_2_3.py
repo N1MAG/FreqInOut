@@ -189,7 +189,7 @@ def test_settings_add_radio_button_opens_guided_dialog(monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     called = {"count": 0}
 
-    def fake_open_dialog(self, existing=None):
+    def fake_open_dialog(self, existing=None, **_kwargs):
         called["count"] += 1
         return None
 
@@ -905,7 +905,11 @@ def test_unrelated_settings_save_preserves_spotter_mappings_without_legacy_mappe
 
         saved = SettingsManager()
         assert saved.get(MAPPER_SETTINGS_KEY) == mappings
-        assert [row["form_code"] for row in effective_mapping_rows(saved)] == ["F!103"]
+        effective = effective_mapping_rows(saved)
+        assert len(effective) == 30
+        saved_row = next(row for row in effective if row["form_code"] == "F!103")
+        assert saved_row["purpose"] == "Net Check-in"
+        assert saved_row["net"] is True
         assert projection_calls == [{"refresh_multi_radio": False}]
         assert not hasattr(tab, "spotter_mapper_table")
     finally:
@@ -1790,7 +1794,7 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "guided_setup_autofill_review(" in dialog_block
     assert "Kept existing:" in guided_setup_source
     assert "Review before Save" in guided_setup_source
-    assert "FIO Spotter forms {fio_spotter_forms}" in source
+    assert "FIO Spotter catalog {fio_spotter_forms}" in source
     assert "External JS8Spotter app {external_spotter}" in source
     assert "Spotter {spotter}" not in source
     assert 'use_external_js8spotter_chk = QCheckBox("External JS8Spotter")' in dialog_block
@@ -5261,7 +5265,7 @@ def test_radio_profile_inventory_details_summarize_selected_profile() -> None:
         ("id", "7"),
         ("system_key", "field_radio"),
         ("instance", "2"),
-        ("class", "Observer / SDR / Minimal"),
+        ("class", "Receive-only SDR / Minimal"),
         ("model", "Icom IC-705"),
         ("runtime", "Enabled; Station Default; Inactive"),
     )

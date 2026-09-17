@@ -532,7 +532,10 @@ def guided_setup_field_visibility(
 
 ADD_RADIO_WIZARD_STEPS: Tuple[Tuple[str, str], ...] = (
     ("radio", "Radio"),
-    ("model", "Operating Model"),
+    # ``model`` is the durable/persistence term.  The guided workflow uses
+    # operator language so this step answers what FIO will do with the radio,
+    # without making a schedule or database concept part of normal setup.
+    ("model", "FIO Behavior"),
     ("software", "Software"),
     ("connection", "Connections"),
     ("guard", "Safety"),
@@ -587,7 +590,11 @@ def guided_setup_wizard_view(
     )
     detail_by_step = {
         "radio": "Choose the radio model, name, role, and setup type.",
-        "model": "Choose or create a compatible Operating Model for this radio role.",
+        "model": (
+            "Choose how FIO should use this receive-only radio."
+            if observer_mode
+            else "Choose how FIO should use this radio."
+        ),
         "software": software_detail,
         "connection": connection_detail,
         "guard": guard_detail,
@@ -1614,7 +1621,13 @@ def _guided_app_instance_step(*, lane_key: str, radio_label: str) -> GuidedSetup
             title="VarAC Setup",
             prompt=f"Which VarAC setup belongs to {radio_label}?",
             choices=(
-                GuidedSetupChoice(APP_INSTANCE_EXISTING, "Use detected VarAC config", recommended=True),
+                GuidedSetupChoice(
+                    APP_INSTANCE_MANAGED,
+                    "Create a distinct standalone VarAC instance",
+                    recommended=True,
+                    detail="Starts separate from every existing node or cluster; cluster membership must be chosen explicitly.",
+                ),
+                GuidedSetupChoice(APP_INSTANCE_EXISTING, "Use detected VarAC config"),
                 GuidedSetupChoice(APP_INSTANCE_MANUAL, "Choose VarAC files manually"),
             ),
             status="needs_input",

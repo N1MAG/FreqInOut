@@ -61,8 +61,8 @@ def build_single_rig_upgrade_preview(
     requested_plan_name = str(operating_plan_name or "").strip()
     if requested_plan_name:
         operating_profile["name"] = requested_plan_name
-    elif str(operating_profile.get("name", "") or "") == DEFAULT_OPERATING_NAME:
-        operating_profile["name"] = "Daily HF Schedule"
+    elif not str(operating_profile.get("name", "") or "").strip():
+        operating_profile["name"] = DEFAULT_OPERATING_NAME
 
     roles = _enabled_roles_from_radio_profile(radio_profile)
     referenced_data_paths = collect_referenced_data_paths_not_backed_up(settings_values)

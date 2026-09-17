@@ -1,8 +1,15 @@
 # Multi-Instance Software Administration Specification
 
-Status: MIS-0 through MIS-5 complete; automated exit gate passed. Live Linux
-multi-process and radio/PTT qualification remains an
-operator-assisted release check.
+Status: MIS-0 through MIS-5 automated gate passed. The 2026-09-17 Add Radio
+operator run reopened distinct-instance integration qualification: the shared
+pure model was not enforced by every production Add Radio path. GRS-6.1 now
+enforces shared inventory, stable draft identity, source-locked import, and
+explicit clone semantics on both production routes. GRS-6.2 adds one resolved
+JS8/Fast Light recipe contract shared by Add Radio, Software Administration,
+native planning, launch review, and persistence. GRS-6.3 through GRS-6.5 now
+pass their automated gates, including final-save inventory revalidation and
+atomic cross-family persistence. Release remains blocked on the repeated
+operator-assisted live route in `guided_radio_software_configuration_spec.md`.
 
 Governing delivery contract: `project_delivery_rules.md`
 
@@ -96,6 +103,22 @@ second. It does not imply that ordinary single-instance VarAC requires cluster
 mode. It must detect duplicate node paths, launch identities, and cluster
 instance numbers before saving.
 
+An additional VarAC node defaults to standalone even when another node or
+cluster exists. Cluster create/join is an explicit operator branch; discovery
+of existing VarAC or cluster data does not select it.
+
+### Station-Shared Supporting Services
+
+FIO Spotter is built into FIO. Its station MCF catalog is resolved by FIO and is
+not an external software instance, per-radio launch item, or normal-flow folder
+choice.
+
+CommStat is a station-shared service by default. One durable CommStat process
+identity may have multiple bindings, each naming an exact radio-owned JS8
+instance/endpoint and capability scope. Adding a radio creates a binding rather
+than another CommStat process. The launch planner starts the shared identity
+once and never deduplicates distinct radio bindings by process name alone.
+
 ## Durable Instance Manifest
 
 Existing application-specific tables remain authoritative for operational
@@ -155,7 +178,14 @@ FIO proposes ports from family-specific ranges after checking:
 1. persisted application records;
 2. saved launch bundles and manifests;
 3. all ports proposed in the current transaction;
-4. family-internal overlap, such as FLRig and FLDigi claiming one TCP endpoint.
+4. every retained unsaved draft in the guided session;
+5. family-internal overlap, such as FLRig and FLDigi claiming one TCP endpoint.
+
+Add Radio and Software Administration consume the same immutable inventory
+snapshot and proposal generation. A distinct proposal may reuse an installed
+binary but not an existing native profile, data/message root, endpoint,
+manifest, or launch identity. An imported candidate is source-locked; changing
+an identity field requires `Clone as distinct`.
 
 Live reachability is checked explicitly from Health after save. It is not
 performed while navigating the assistant and is not treated as proof that the

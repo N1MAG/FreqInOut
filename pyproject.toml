@@ -36,4 +36,4 @@ dev = [
 include = ["freqinout*"]
 
 [tool.setuptools.package-data]
-freqinout = ["gui/qml/*.qml"]
+freqinout = ["gui/qml/*.qml", "resources/spotter_forms/*.txt"]

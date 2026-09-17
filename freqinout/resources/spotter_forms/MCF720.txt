@@ -1,0 +1,35 @@
+Price Survey Report|F!720
+
+. Version 01/12/2026
+# KN4AM - @SITREP - SitRepNet.com
+
+! Local Price Survey - @SITREP
+
+. This is a test project of the Bulletin Distribution Net
+. Send to either a specified call sign, or to @SITREP
+.
+
+!!! Location:
+[ST] State (2-letter code) or other description such as "USA", or SE Region, or East Coast, etc.:
+[GR] Maidenhead Grid Square, or leave blank if not applicable:
+.
+!!! Prices:
+[ML] Whole milk, 1 gallon:
+[EG] Eggs, Extra-large, 1 dozen:
+[CF] Coffee, Folgers Classic Roast Ground:
+[BF] Beef, ground, 80/20, 1 pound:
+[BR] Beer, Budweiser American Lagar, 24 ea. 12 oz:
+[BD] Bread, Wonder Round up, 1 loaf:
+[GA] Gasoline, regular, 1 gallon:
+[DS] Diesel, 1 gallon:
+
+? Information source:
+@0 Local/regional chain
+@1 Walmart
+@2 Something else
+
+? Power Reliability:
+@0 No power failure in last 7 days
+@1 One or more power failures in last 7 days
+
+[AI] Additional information:

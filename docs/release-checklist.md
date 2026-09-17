@@ -119,6 +119,20 @@ python tools/perf_benchmark.py summarize --name "^(main_window|messages|map|oper
 
 ## 10) Guided Radio / Software Qualification
 
+Release hold: the 2026-09-17 existing-station TriMode Add Radio run failed the
+distinct-instance qualification. Do not mark this section complete until GRS-6
+passes its automated gate and the exact operator route is repeated successfully.
+
+GRS-6.1 authority/inventory gate passed 2026-09-17: Add Radio and Software
+Administration share one saved-plus-retained collision inventory; draft keys
+are stable; imports are source-locked; explicit clone creates a distinct draft;
+and stale imported sources fail before persistence. GRS-6.2 recipe gate passed
+2026-09-17: Add Radio and Software Administration use the configuration-owned
+managed root; exact stock/Improved/Subspace JS8 identities use distinct
+profile, platform data, TCP, and UDP claims; Fast Light resolves component
+roots, commands, dependencies, and receive-only scope; and unsupported recipes
+fail closed. GRS-6.3 through GRS-6.5 and all live checks remain open.
+
 - Add and edit one transceiver and one receive-only SDR through all seven
   guided steps. Confirm Back, Next, Cancel, role changes, Review, and final Save
   remain responsive while software discovery or endpoint work is running.
@@ -136,6 +150,24 @@ python tools/perf_benchmark.py summarize --name "^(main_window|messages|map|oper
   JS8Call Improved, Subspace, FLRig, FLDigi, FLMsg, FLAmp, and VarAC as
   applicable. Verify an intentional manual-start choice is not reported as an
   error or pending verification.
+- On a station that already has working JS8Call, Fast Light, CommStat, and VarAC
+  configuration, add another TriMode transceiver and choose `Create a distinct
+  instance`. Confirm JS8 receives a new stable rig/profile/data identity and
+  collision-free TCP/UDP ports; no existing profile, settings file, data root,
+  endpoint, native file, manifest, or launch bundle is selected or modified.
+- Confirm Fast Light uses the radio name as its visible family identity and
+  resolves separate FLRig/FLDigi profile roots, endpoints, commands, dependency,
+  and readiness without asking for a normal-flow custom command.
+- Confirm FIO Spotter resolves its built-in MCF catalog without a per-radio
+  folder question; CommStat remains one station-shared process with an explicit
+  binding to the new radio's JS8 endpoint; and additional VarAC defaults to
+  standalone unless the operator explicitly selects cluster create/join.
+- Confirm Step 1 uses `Transceiver` or `Receive-only SDR`, Step 2 explains FIO
+  behavior with no schedule-like model name or redundant receive-only suffix,
+  and schedule selection remains in Step 6.
+- Cancel once from Software Administration and once from Review. Verify the
+  existing working application records, native profiles, files, launch bundles,
+  and radio links are byte-for-byte/row-for-row unchanged.
 - Record operator-assisted evidence separately for macOS, Linux, Windows, a
   physical transceiver/backend, RTL-SDR with SDR++, live Fast Light, all three
   JS8 variants, and a multi-node VarAC Cluster. Automated tests do not close

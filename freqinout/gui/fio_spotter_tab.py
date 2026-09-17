@@ -44,6 +44,7 @@ from freqinout.core.js8_spotter_forms import (
     effective_mapping_rows,
     factory_mapping_for_form,
     normalize_mapping_row,
+    resolve_spotter_forms_dir,
 )
 from freqinout.core.js8spotter_importer import import_js8spotter_database, preview_js8spotter_import
 from freqinout.core.perf_metrics import emit_span
@@ -2811,10 +2812,11 @@ class FioSpotterTab(QWidget):
         if not hasattr(self, "forms_table"): return
         selected = self._selected_form_row()
         selected_code = _text((selected or {}).get("form_code")).upper()
-        path = _text(self.forms_path.text() or self.settings.get("js8_forms_path", ""))
-        definitions = discover_spotter_forms(path)[:_MAX_ROWS] if path else []
+        configured_path = _text(self.forms_path.text() or self.settings.get("js8_forms_path", ""))
+        path = str(resolve_spotter_forms_dir(configured_path))
+        definitions = discover_spotter_forms(configured_path)[:_MAX_ROWS]
         paths = {form.form_code: form.path for form in definitions}
-        mappings = effective_mapping_rows(self.settings, path)[:_MAX_ROWS] if path else []
+        mappings = effective_mapping_rows(self.settings, configured_path)[:_MAX_ROWS]
         try:
             expect_by_key = {
                 _text(entry.get("expect_key")).upper(): entry
@@ -2823,7 +2825,7 @@ class FioSpotterTab(QWidget):
         except Exception:
             expect_by_key = {}
         self.forms_state.setText(
-            f"Forms folder: {path or 'Not configured'} — {len(mappings)} catalog entries "
+            f"Forms catalog: {path} — {len(mappings)} catalog entries "
             f"(bounded to {_MAX_ROWS}). Select which FIO services receive each form, then Save mappings."
         )
         self.forms_table.setUpdatesEnabled(False)

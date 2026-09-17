@@ -85,6 +85,12 @@ def test_blank_station_can_prepare_builtin_models_without_creating_a_radio(monke
         DEFAULT_OPERATING_SYSTEM_KEY,
         DEFAULT_RECEIVE_ONLY_OPERATING_SYSTEM_KEY,
     }
+    assert {
+        row["system_key"]: row["name"] for row in models
+    } == {
+        DEFAULT_OPERATING_SYSTEM_KEY: "Standard transceiver operations",
+        DEFAULT_RECEIVE_ONLY_OPERATING_SYSTEM_KEY: "Receive-only monitoring",
+    }
     assert store.list_device_profiles() == []
 
 

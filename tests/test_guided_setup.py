@@ -787,7 +787,12 @@ def test_guided_setup_includes_read_only_varac_app_instance_step() -> None:
 
     assert app_step.title == "VarAC Setup"
     assert app_step.prompt == "Which VarAC setup belongs to IC-705?"
-    assert [choice.choice_id for choice in app_step.choices] == [APP_INSTANCE_EXISTING, APP_INSTANCE_MANUAL]
+    assert [choice.choice_id for choice in app_step.choices] == [
+        APP_INSTANCE_MANAGED,
+        APP_INSTANCE_EXISTING,
+        APP_INSTANCE_MANUAL,
+    ]
+    assert app_step.choices[0].recommended is True
     assert "VarAC keeps frequency scheduling" in app_step.hint
 
 
@@ -1359,7 +1364,7 @@ def test_guided_setup_wizard_view_returns_ui_ready_navigation_state() -> None:
     radio = guided_setup_wizard_view("radio")
     assert radio.current_index == 0
     assert radio.previous_label == ""
-    assert radio.next_label == "Operating Model"
+    assert radio.next_label == "FIO Behavior"
     assert radio.can_go_back is False
     assert radio.can_go_next is True
     assert radio.visible_sections == ("radio",)
@@ -1402,7 +1407,7 @@ def test_guided_setup_wizard_view_keeps_empty_software_step_for_receiver() -> No
     from freqinout.core.guided_setup import guided_setup_wizard_view
 
     radio = guided_setup_wizard_view("radio", software_visible=False)
-    assert radio.next_label == "Operating Model"
+    assert radio.next_label == "FIO Behavior"
     assert [step_id for step_id, _label in radio.steps] == [
         "radio",
         "model",

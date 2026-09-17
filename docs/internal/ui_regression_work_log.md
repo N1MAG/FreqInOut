@@ -7286,3 +7286,268 @@ Subspace JS8, and a multi-node VarAC Cluster. Changed Python modules compile and
 `git diff --check` passes. Automated tests changed no runtime database, native
 application profile, external application, radio/receiver endpoint, commit, or
 remote repository.
+
+## 2026-09-17 — Existing-station guided-flow operator qualification review
+
+Status: live qualification failed safely because the operator canceled before
+configuration. Release remains blocked pending GRS-6 implementation and a repeat
+of the exact existing-station TriMode route.
+
+Observable report: from `Settings -> Radios -> Add Radio`, the operator chose a
+TriMode transceiver with Fast Light, JS8Call, FIO Spotter, CommStat, and VarAC,
+then used Configure Automatically and entered Software Administration. The flow
+mixed new-instance intent with existing-station evidence: it selected an
+existing JS8 profile/endpoint and later showed the existing settings/data paths;
+Fast Light appended its family name and exposed unresolved profile/launch work;
+CommStat appeared to require duplication; FIO Spotter exposed an MCF folder;
+and existing VarAC made cluster intent ambiguous. Step 2 also showed a
+schedule-like Operating Model name and redundant receive-only wording.
+
+Primary review found that the pure atomic proposal model is not connected to
+the production Add Radio path. Add Radio hand-builds loose drafts, omits the
+existing-instance inventory supplied by Software Administration, and can defer
+collision and completeness checks until persistence. This invalidates the
+earlier live-readiness inference even though the pure-model automated suites
+passed.
+
+Specification decisions:
+
+- operator-facing roles are `Transceiver` and `Receive-only SDR`; Step 2
+  describes FIO behavior and never uses a schedule-like model name;
+- `Create a distinct instance` may reuse a qualified binary/recipe but always
+  creates a stable radio-name-derived identity, dedicated profile/data/message
+  roots, collision-free TCP/UDP claims, manifest, and launch identity;
+- imported bundles are source-locked; identity edits require `Clone as
+  distinct`;
+- qualified JS8 and Fast Light recipes hide custom launch fields from the
+  normal flow and show the resolved effective commands;
+- FIO Spotter resolves its built-in MCF catalog; CommStat is one shared process
+  with explicit per-JS8 bindings; additional VarAC defaults to standalone and
+  cluster mode is opt-in; and
+- final Save consumes the reviewed bundle fingerprint and inventory generation
+  or fails before mutation.
+
+Work packages and model ownership:
+
+- `gpt-5.6-sol`, high reasoning: operator-feedback interpretation, architecture,
+  configuration/transaction safety, cross-family decisions, specification,
+  release-checklist reconciliation, and final integration review.
+- `gpt-5.6-terra`, medium reasoning: read-only JS8/Fast Light production-path,
+  profile/root/port, launch-recipe, and acceptance-gap audit.
+- `gpt-5.6-luna`, medium reasoning: read-only CommStat/VarAC/FIO Spotter/MCF,
+  label-consistency, and acceptance-gap audit.
+
+No code, runtime database, native application profile, endpoint, radio, or user
+configuration was changed. Documentation checks for the new contract are the
+only gate in this review slice; implementation and automated acceptance begin
+with GRS-6 package 1.
+
+## 2026-09-17 — GRS-6.1 authority and inventory
+
+Status: automated exit gate passed. Add Radio and Software Administration now
+use the same immutable saved-plus-retained inventory model. Unsaved instances
+carry opaque, family-scoped draft keys that survive navigation and display-name
+changes. Retained drafts reserve endpoints for later proposals in the same
+transaction.
+
+Imported instances are source-locked complete identities. The normal fields
+cannot create a mixed old/new bundle; the operator must choose `Clone as a
+distinct instance`, which keeps only safe executable/version evidence and
+allocates a fresh identity and endpoints. Both production save paths re-read
+the imported application and reject a missing or changed source fingerprint
+before any mutation. The atomic store remains the final endpoint/resource
+collision and rollback boundary.
+
+Work packages and model ownership:
+
+- Primary `gpt-5.6-sol`, high reasoning: authority/inventory architecture,
+  immutable fingerprint model, persistence-time source validation, atomic
+  manifest preservation, delegated-diff review, performance correction,
+  integration tests, and specification/work-log reconciliation.
+- `gpt-5.6-terra`, medium reasoning: bounded assistant/Add Radio wiring,
+  imported-source lock presentation, explicit clone interaction, retained
+  draft inventory, and focused UI tests. Primary review corrected opaque key
+  propagation and reduced Add Radio inventory loading to one manifest read.
+- `gpt-5.6-luna`, medium reasoning: focused pure proposal/inventory acceptance
+  tests for shared inventory, stable ownership, distinct identities, source
+  locks, cancellation, and retained endpoint reservations.
+
+Automated tests use temporary or in-memory state only. No runtime database,
+native application profile, external process, endpoint, radio, commit, or
+remote repository was changed. Dedicated JS8/Fast Light roots and qualified
+launch recipes remain the next sequential GRS-6.2 slice.
+
+## 2026-09-17 — GRS-6.2 JS8 and Fast Light managed recipes
+
+Status: automated exit gate passed. Add Radio and Software Administration now
+pass the same Settings-owned `managed-instances` root into the instance
+assistant. The executable-search folder is no longer misused as a profile
+root, and a missing managed root fails closed instead of producing relative
+paths.
+
+Known JS8Call recipes resolve one stable draft/profile identity, exact
+`--rig-name`, distinct TCP/UDP endpoints, configuration/save/forms roots, and
+the platform/rig-specific Qt application-data root. Native profile planning and
+launch review now use the same opaque draft identity. Qualification is exact
+for stock 2.2.0, Improved 3.0.3, and Subspace 4.1.0.478; another build remains
+inactive with an Advanced recovery route. Fast Light resolves separate FLRig
+and FLDigi roots, commands, dependencies, endpoints, readiness, and execution
+scope. An observer receives FLDigi only; FLMsg/FLAmp remain explicit shared
+utility components.
+
+Qualified recipes hide their derived profile/data/custom-command fields from
+the normal form and show the exact effective recipe in Launch and Review.
+Unsupported or operator-managed flows retain the Advanced fields. The durable
+manifest stores the reviewed recipe fingerprint, and atomic adoption projects
+the same component commands into the launch bundle.
+
+Work packages and model ownership:
+
+- Primary `gpt-5.6-sol`, high reasoning: recipe/path/version architecture,
+  JS8 native-planner alignment, Settings managed-root integration, canonical
+  qualification, persistence projection, delegated-diff review and correction,
+  full integration gate, and specification/work-log reconciliation.
+- `gpt-5.6-terra`, medium reasoning: bounded Launch/Review presentation,
+  derived-field visibility, accessible navigation, horizontal-scroll guard,
+  and focused UI tests. Primary review corrected the managed-root source and
+  JS8 profile/data semantics before accepting the UI package.
+- `gpt-5.6-luna`, medium reasoning: focused Settings/core integration tests for
+  fail-closed roots, canonical version/platform alignment, draft-key native
+  planning, and workspace-to-assistant root propagation. Primary review
+  replaced a source-introspection assertion with a behavioral Qt test.
+
+Acceptance evidence: the combined GRS-0 through GRS-6.2 guided authority,
+discovery, proposal, Software Administration, family/store/manifest, native
+writer, launch, receiver scheduler/Guard, inventory, recipe, responsive UI, and
+adjacent regression partition passes **479 tests** with **eight explicitly
+skipped live gates**. Focused integration tests pass 81 tests before the final
+UI refinement and the delegated UI partitions pass 66 and 47 tests. Changed
+Python modules compile and `git diff --check` passes. No runtime database,
+native application profile, external application, endpoint, radio, commit, or
+remote repository was changed.
+
+## 2026-09-17 — GRS-6.3 supporting-family decisions
+
+Status: automated exit gate passed. FIO Spotter now uses a packaged 30-form
+station catalog by default across setup, compose, receive decoding, FIO Spotter,
+JS8 NCS, and SOP. The radio flow no longer asks for an MCF folder or invents a
+Spotter process. An optional custom catalog remains an explicitly Advanced
+station override.
+
+CommStat is presented and persisted as one station-shared process with one
+binding per radio-owned JS8 endpoint. Launch rows use the same durable identity,
+so planner deduplication produces one process with all radio bindings; removing
+one binding preserves the others. VarAC starts as standalone and exposes Create
+cluster and Join cluster only as explicit choices with Why guidance.
+
+Work packages and model ownership:
+
+- Primary `gpt-5.6-sol`, high reasoning: supporting-family architecture,
+  packaged-catalog resolver and runtime consumers, CommStat plan/persistence/
+  launch integration, VarAC blueprint contract, delegated-diff review,
+  integration corrections, packaging checks, and specification/work-log
+  reconciliation.
+- `gpt-5.6-terra`, medium reasoning: bounded Add Radio, Software
+  Administration, supporting-family editor, CommStat binding, Spotter built-in,
+  and VarAC intent UI plus focused real-widget tests.
+- `gpt-5.6-luna`, medium reasoning: focused supporting-family core contracts,
+  planner deduplication, binding preservation, bounded inventory, cancellation,
+  and packaged-catalog acceptance tests.
+
+Acceptance evidence: the combined GRS-6.3 UI/settings partition passes 357
+tests; supporting-family/store/launch/Spotter partitions pass 87 tests, the FIO
+Spotter UI passes 27 tests in isolation, and the message-ingest/Spotter/NCS
+partition passes 76 tests with the SOP partition passing two. Changed Python
+modules compile and diff checks pass. The monolithic pytest process can abort
+when unrelated Qt widgets and background readers share one interpreter; the
+same affected tests pass in isolated partitions, so project-standard isolated
+partitions remain authoritative. No runtime database, native application
+profile, external process, endpoint, radio, commit, or remote repository was
+changed.
+
+## 2026-09-17 — GRS-6.4 task-oriented role and behavior UX
+
+Status: automated exit gate passed. Fresh Add Radio now offers only the exact
+operator roles `Transceiver` and `Receive-only SDR`; existing legacy gateway
+values are retained through a compatibility-only edit choice and cannot be
+silently converted. Step 2 is `FIO Behavior`, with protected normal choices
+shown as `Standard transceiver operations` and `Receive-only monitoring`.
+Existing custom behavior names and durable Operating Model IDs remain intact.
+
+The normal flow shows a resolved role, a capability-oriented behavior summary,
+and a concise Why explanation. Schedule timing and Frequency Plan selection
+remain in the Schedule step, and redundant receive-only suffixes are gone.
+Qualified managed JS8Call and Fast Light recipes no longer ask the operator to
+edit recipe-owned executable/profile/data/custom-command fields in Connections;
+exact resolved component facts remain visible in Review. Unsupported recipes
+retain a fail-closed Advanced recovery route.
+
+Work packages and model ownership:
+
+- Primary `gpt-5.6-sol`, high reasoning: role/behavior architecture, protected
+  fresh-default naming, compatibility and migration review, delegated-diff
+  review, integration corrections, exit-gate execution, and specification/work
+  log reconciliation.
+- `gpt-5.6-terra`, medium reasoning: bounded Add Radio role/behavior labels,
+  resolved/Why summaries, managed-recipe field visibility, compatibility-only
+  legacy-role presentation, and focused real-widget tests.
+- `gpt-5.6-luna`, medium reasoning: focused pure contract tests for exact roles,
+  FIO Behavior/schedule separation, and qualified-versus-unsupported recipe
+  behavior.
+
+Acceptance evidence: the core/migration partition passes 126 tests; protected
+built-in behavior/store and performance checks pass 15 tests; and the
+independently rerun GRS-6.4 language, real-widget, responsive guided/settings,
+SDR, and assistant partition passes 79 tests. Changed Python modules compile
+and `git diff --check` passes. No runtime database, native application profile,
+external process, endpoint, radio, commit, or remote repository was changed.
+
+## 2026-09-17 — GRS-6.5 transactional Final Save
+
+Status: automated exit gate passed; the operator-assisted TriMode/current-
+station route remains an explicit release blocker.
+
+Final Save now carries and revalidates the reviewed inventory generation and
+fingerprint before native work and again after asynchronous native apply.
+Software Administration applies the same fail-before-mutation check. Stale
+reviews save nothing, restore an already-applied qualified native change, and
+present the Software/Review recovery task.
+
+Add/Edit Radio now executes radio, behavior assignment, software application,
+manifest, launch, CommStat binding, schedule, activation, and receive-only
+launch-bundle persistence within one explicit-completion SQLite transaction.
+Nested store commits are deferred to the outer owner. Any early return,
+injected later-family failure, receiver-launch failure, or commit exception
+rolls back the full FIO change set. Qualified native changes continue to use
+the existing backup/apply/readback/restore worker. No schema migration or
+destructive data rewrite was introduced.
+
+The Review page shows a compact inventory generation/reference. Final Save is
+single-activation and paints progress before work begins; duplicate clicks are
+ignored. The final fingerprint includes only selected retained software
+drafts, avoiding a false stale-review failure after deselection.
+
+Work packages and model ownership:
+
+- Primary `gpt-5.6-sol`, high reasoning: transaction/concurrency architecture,
+  transaction-aware receiver launch persistence, pre/post-native inventory
+  revalidation, failure/rollback integration, delegated-diff review,
+  regression correction, exit-gate execution, and specification/work-log
+  reconciliation.
+- `gpt-5.6-terra`, medium reasoning: bounded reviewed-inventory card,
+  accessible stale-review recovery presentation, nonblocking single-submit
+  progress guard, narrow/large-font behavior, and focused real-widget tests.
+- `gpt-5.6-luna`, medium reasoning: focused cancellation, native-failure,
+  duplicate-submit, fingerprint-stability, and missing-revalidation acceptance
+  tests. Primary integration closed the reported revalidation gap and added
+  behavioral stale-inventory and atomic multi-write fault-injection coverage.
+
+Acceptance evidence: focused GRS-6.5/store/UI/settings tests pass 27 tests; the
+combined guided integration partition passes 293 tests; 56 selected guided,
+multi-rig, receiver, SDR, schedule, launch, responsive, and performance files
+collect 789 tests and pass when run in fresh project-standard processes; the
+focused performance/responsiveness partition passes 75 tests. A monolithic Qt
+run reproduced the already-documented GUI/background-thread process abort, so
+isolated files remain authoritative. Python compilation and `git diff --check`
+pass. Automated tests used temporary state and changed no runtime database,
+third-party profile, external process, endpoint, radio, commit, or remote.

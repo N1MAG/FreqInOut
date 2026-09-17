@@ -1,0 +1,59 @@
+Open Source Information Report|F!308
+
+. Version: 10/20/2025 - @SITREP
+
+# Release date APR 22, 2025 - KN4AM - @SITREP - SitRepNet.com
+
+! Information Exchange - @SITREP
+. Information reporting for news bulletins.
+.
+[SU] Subject :
+.
+
+? Primary Category:
+@E Economy
+@G Government
+@P Political
+@I Infrastructure
+@T Terrorism
+@M Military
+@W Weather / Natural event
+@H Health / Medical
+@S Supply Chain
+@C Civil Unrest
+@O Other
+.
+
+!!! Affected Area:
+[ST] State (2-letter code) or geographic region. Leave blank if not applicable:
+[GR] Maidenhead Grid Square. Leave blank if not applicable:
+.
+
+? Situation Time Frame:
+@0 General information, unknown time frame
+@1 Anticipated within the next week/month
+@2 Imminent - hours to days
+@3 Currently happening
+@4 After action report
+
+? Source Reliability:
+@A Reliable - No doubt
+@B Usually Reliable - Minor doubt
+@C Fairly Reliable - Some doubt of authenticity
+@D Not Usually Reliable - Significant doubt about authenticity
+@E Unreliable - Lacking in authenticity
+@F Cannot be Judged - No basis for evaluating reliability
+
+? Information Content:
+@1 Confirmed - Confirmed by other independent sources, logical, consistent
+@2 Probably True - Not confirmed, but logical and consistent
+@3 Possibly True - Not confirmed, reasonably logical, agrees with other info
+@4 Doubtfully True - Not confirmed, possible, not logical, no other info
+@5 Improbable - Not confirmed, not logical, contradicted by other info
+@6 Cannot be Judged - No basis for evaluating validity of information
+
+[AI] Additional Information:
+. ______________________________________________________________________
+. 1) Subject field should be 5 words or less
+. 2) Additional Information - brief, and only if needed
+. 3) Enter F! number(s) and/or "ALERT" if appropriate, or further info, or leave blank if nothing additional to report.

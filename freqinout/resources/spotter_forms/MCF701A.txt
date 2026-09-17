@@ -1,0 +1,91 @@
+MAGNET SitRep|F!701A
+
+! MAGNET Situation Report (SitRep), Revision 05/13/2026
+. Use this form to report/update a situation/event in a specified location/region based on personal or reliable sources. Keep all free-form answers as brief as possible.
+
+!! Instructions for TO/FROM:
+. To: your hub or alt callsign, @MRXX, or @MAGNET for flash information affecting outside of your region. 
+. From: your callsign.
+
+[TO] Box 1 - Recipient (TO):
+
+[FR] Box 2 - Sender (FROM):
+
+? Box 3 - Message Precedence:
+@R Routine
+@P Priority
+
+? Box 4 - Incident Status:
+@N New
+@O Ongoing
+@R Resolved
+@U Unknown
+
+? Box 5 - Category Impacted:
+@E Economy
+@P Politics
+@I Infrastructure
+@A Crime
+@T Terrorism
+@M Military Conflict
+@W Climate / Environment
+@H Health / Wellness
+@S Supply Chain
+@C Civil Unrest
+
+? Box 6 - News Source:
+@L Local News
+@N National News
+@I International News
+@H Human INT
+@S Social Media
+@W Website
+
+? Box 7 - Source Trust Level:
+@1 Trusted / High = Strong reporting. Usable immediately
+@2 Trusted / Medium = Reliable source, moderate confirmation. Usable with routine review
+@3 Trusted / Low = Reliable source, but weak support. Verify before acting
+@4 Questionable / High = Mixed source, but strongly corroborated. Use with caution
+@5 Questionable / Medium = Moderate reliability, partial support. Needs confirmation
+@6 Questionable / Low = Weak reporting. Low priority until validated
+@7 Unknown / High = Unknown source, but confirmed elsewhere. Use cautiously
+@8 Unknown / Medium = Unproven source with some support. Treat as lead only
+@9 Unknown / Low = Rumor / unverified. Do not rely on this alone
+
+? Box 8 - Impacted Region:
+@1 MR01
+@2 MR02
+@3 MR03
+@4 MR04
+@5 MR05
+@6 MR06
+@7 MR07
+@8 MR08
+@9 MR09
+@0 MR10
+@A All Regions
+
+!! Instructions for State, Country:
+. Enter the state as a two-characters abbreviation, and the country as a three-character abbreviation.
+
+[ST] Box 9 - State:
+
+[CC] Box 10 - Country:
+
+[GR] Box 11 - Grid:
+
+? Box 12 - Affected Area Size:
+@L Local
+@R Regional
+@N National
+@I International
+@U Unknown
+
+!! Instructions for Narrative
+. Be as brief as possible, using telegram style wording. e.g. "POLITICAL UNRESET IS LEADING TO REPORTS OF LOOTING, RIOTING, AND MAJOR PROPERTY DAMAGE THROUGHOUT THE CITY. AUTHORITIES ARE WORKING TO RESTORE LAW AND ORDER THROUGH INCREASED POLICE PRESENCE THROUGHOUT THE CITY" would become "LOOTING RIOTS PROP DMG, ADDL POLICE DEPLOYED". Any information that is already covered by the form should NOT be repeated in the narrative.
+
+[NA] Box 13 - Narrative:
+
+[DA] Box 14 - Date (YYMMDD-HHMMZ):
+
+
