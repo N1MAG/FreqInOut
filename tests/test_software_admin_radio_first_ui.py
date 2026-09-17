@@ -10,7 +10,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QPushButton
+from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QDialog, QPushButton
 
 from freqinout.core.software_administration_model import build_software_administration_snapshot
 from freqinout.gui.software_administration_workspace import SoftwareAdministrationWorkspace
@@ -460,6 +460,56 @@ def test_saved_observer_radio_receives_selected_operating_model() -> None:
         operating_profile_id=0,
     ) is True
     assert store.assigned == (19, 73)
+
+
+def test_settings_add_radio_observer_software_allows_js8_and_builtin_spotter() -> None:
+    """Observer setup keeps JS8 and built-in FIO Spotter independently selectable."""
+    from freqinout.gui.settings_tab import SettingsTab
+
+    app = _app()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(SettingsTab, "_maybe_backfill_js8_geo", lambda self: None)
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status", lambda self: None)
+    seen: dict[str, object] = {}
+
+    def _inspect_dialog(dialog: QDialog) -> int:
+        dialog.show()
+        app.processEvents()
+        setup_combo = dialog.findChild(QComboBox, "guidedSetupType")
+        assert setup_combo is not None
+        setup_combo.setCurrentIndex(setup_combo.findData("sdr_observer"))
+        app.processEvents()
+        software_step = dialog.findChild(QPushButton, "guidedWizardStep_software")
+        assert software_step is not None
+        software_step.click()
+        app.processEvents()
+        checks = {check.text(): check for check in dialog.findChildren(QCheckBox)}
+        js8 = checks["JS8Call"]
+        fio = checks["FIO Spotter"]
+        external = checks["External JS8Spotter"]
+        seen["js8_enabled"] = js8.isEnabled()
+        seen["fio_enabled"] = fio.isEnabled()
+        seen["external_enabled"] = external.isEnabled()
+        js8.click()
+        fio.click()
+        seen["js8_checked"] = js8.isChecked()
+        seen["fio_checked"] = fio.isChecked()
+        return QDialog.Rejected
+
+    monkeypatch.setattr(QDialog, "exec", _inspect_dialog)
+    tab = SettingsTab()
+    try:
+        tab.add_device_profile_btn.click()
+        app.processEvents()
+        assert seen["js8_enabled"] is True
+        assert seen["fio_enabled"] is True
+        assert seen["external_enabled"] is False
+        assert seen["js8_checked"] is True
+        assert seen["fio_checked"] is True
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+        monkeypatch.undo()
 
 
 def test_workspace_radio_chip_names_ownership_and_occupied_action_is_replace() -> None:

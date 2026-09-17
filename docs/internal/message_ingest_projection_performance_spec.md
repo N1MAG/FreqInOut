@@ -436,6 +436,14 @@ Additional gates:
 
 - no watchdog event during startup, a 500-message burst, historical catch-up,
   filtering, Settings save, or shutdown;
+- mature propagation tables perform zero row rewrites during ordinary schema
+  assurance. Legacy normalization updates only malformed rows, and the
+  full-table duplicate collapse runs only before the unique event-key index is
+  first established;
+- startup splash progress may repaint its own surface but must not pump the
+  global Qt event queue during `MainWindow` construction. Deferred Ops Center,
+  Settings, mesh, scheduler, and projection work begins only after the usable
+  shell boundary;
 - one changed row does not rewrite a fixed 5,000-row source window;
 - unchanged activation produces zero projection writes;
 - 500 incoming messages become queryable within five seconds while UI heartbeat

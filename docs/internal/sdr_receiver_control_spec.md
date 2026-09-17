@@ -322,6 +322,20 @@ for a new assignment. It must never reuse or silently replace another radio's
 instance. SDR++ application launch and JS8Call instance launch are separate
 reviewed selections in one guided setup.
 
+Built-in **FIO Spotter** is independently selectable for an observer. In that
+context it enables receive/decode, forms, watches, and Inbox projection only.
+The assigned receive-only Operating Model remains the authoritative boundary
+that removes Compose, Expect replies, retrieval transmissions, QSY, and PTT.
+The external JS8Spotter application remains unavailable unless it gains a
+separate reviewed receive-only contract.
+
+`Configure Automatically` is an explicit discovery action, never a dialog-open
+side effect. App detection and JS8Call profile parsing run on one bounded worker
+outside Qt's GUI thread. The dialog remains navigable, visibly reports the
+search in progress, preserves every operator-entered value, and applies results
+only while the initiating dialog remains current. Cancel requests cancellation;
+late results cannot create or save a radio.
+
 The guided workflow saves the observer inactive and non-primary, assigns the
 selected receive-only model, creates/adopts the optional JS8Call instance, and
 only then may activate the receiver. A first/only observer never becomes the
@@ -403,6 +417,10 @@ From Shortwave or a listening reminder:
 - Opening Resources or Shortwave performs no receiver discovery.
 - Opening receiver setup paints before probing and acknowledges within 150 ms on
   the Linux baseline.
+- Opening or navigating Guided Add Radio performs no application/profile
+  filesystem crawl. An explicit Configure Automatically search may take longer
+  on a large JS8Call profile inventory, but it never blocks paint, navigation,
+  Cancel, or the operating-system window watchdog.
 - One explicit probe is bounded to 2 seconds for a local endpoint unless the
   adapter documents a shorter limit.
 - API state uses push events where stable; otherwise visible-only polling is no

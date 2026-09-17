@@ -375,6 +375,7 @@ class ControlFreqTab(QWidget):
     _local_nets_outlook_ready = Signal(int, object, object)
     _shortwave_listening_outlook_ready = Signal(int, object, object)
     _shortwave_listening_action_ready = Signal(object)
+    _propagation_ready = Signal(int, object, object)
     # Local Nets are reminder-only.  The host owns persistence and typed routing;
     # this presentation seam deliberately carries the immutable projection item
     # back to the host instead of interpreting it as a scheduler row.
@@ -540,6 +541,11 @@ class ControlFreqTab(QWidget):
         self._message_summary_applied_id = 0
         self._message_summary_cache_rows: List[List[str]] = []
         self._message_summary_ready.connect(self._on_message_summary_ready)
+        self._propagation_executor: Optional[ThreadPoolExecutor] = None
+        self._propagation_pending = False
+        self._propagation_followup = False
+        self._propagation_request_id = 0
+        self._propagation_ready.connect(self._on_propagation_ready)
         self._focus_executor: Optional[ThreadPoolExecutor] = None
         self._focus_suggestion_request_id = 0
         self._focus_snapshot_request_id = 0
@@ -3005,6 +3011,18 @@ class ControlFreqTab(QWidget):
 
     def _shutdown_background_executors(self) -> None:
         self._shutdown_message_summary_executor()
+        propagation_executor = self._propagation_executor
+        self._propagation_executor = None
+        self._propagation_pending = False
+        self._propagation_followup = False
+        self._propagation_request_id += 1
+        if propagation_executor is not None:
+            try:
+                propagation_executor.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                propagation_executor.shutdown(wait=False)
+            except Exception as exc:
+                log.debug("ControlFreq: propagation executor shutdown failed: %s", exc)
         shortwave_executor = self._shortwave_listening_outlook_executor
         self._shortwave_listening_outlook_executor = None
         self._shortwave_listening_outlook_provider = None
@@ -9628,106 +9646,143 @@ class ControlFreqTab(QWidget):
         national_points = [STATE_CENTERS[s] for s in LOWER48_STATES if s in STATE_CENTERS]
         blend_settings = self._blend_settings_snapshot()
 
-        # Compute modeled top-2 for each window
+        # Capture immutable inputs on the GUI thread, then run propagation
+        # scoring off-thread.  Mature empirical history can make this operation
+        # CPU-heavy; it must never monopolize Qt's event loop during first paint
+        # or a tab activation.
         morning_mid = dawn_local + (day_start_local - dawn_local) / 2
         day_mid = day_start_local + (sunset_local - day_start_local) / 2
         night_mid = night_start + (night_end - night_start) / 2
         window_mid = {"morning": morning_mid, "day": day_mid, "night": night_mid}
+        if self._propagation_pending:
+            self._propagation_followup = True
+            return
+        self._propagation_request_id += 1
+        request_id = self._propagation_request_id
+        self._propagation_pending = True
+        self._set_prop_summary("RF Readiness: updating propagation guidance…")
 
-        nat_scores = {}
-        reg_scores = {}
-        for window, mid_local in window_mid.items():
-            bands = sorted(window_bands.get(window) or all_bands)
-            nat_scores[window] = self._top_bands_modeled(
-                bands, mid_local, user_ll, points=national_points
-            )
-            reg_scores[window] = self._top_bands_modeled(
-                bands,
-                mid_local,
-                user_ll,
-                points=regional_points,
-                origin_grid6=user_grid,
-                target_type=target_type,
-                target_id=target_id,
-                blend_settings=blend_settings,
-            )
+        def _work() -> Dict[str, object]:
+            nat_scores: Dict[str, List[Tuple[str, float]]] = {}
+            reg_scores: Dict[str, List[Tuple[str, float]]] = {}
+            modeled_nat: Dict[str, List[Tuple[str, float]]] = {}
+            modeled_reg: Dict[str, List[Tuple[str, float]]] = {}
+            for window, mid_local in window_mid.items():
+                bands = sorted(window_bands.get(window) or all_bands)
+                nat_scores[window] = self._top_bands_modeled(
+                    bands, mid_local, user_ll, points=national_points
+                )
+                reg_scores[window] = self._top_bands_modeled(
+                    bands,
+                    mid_local,
+                    user_ll,
+                    points=regional_points,
+                    origin_grid6=user_grid,
+                    target_type=target_type,
+                    target_id=target_id,
+                    blend_settings=blend_settings,
+                )
+                modeled_nat[window] = self._top_bands_modeled(
+                    list(PROP_BANDS), mid_local, user_ll, points=national_points
+                )
+                modeled_reg[window] = self._top_bands_modeled(
+                    list(PROP_BANDS),
+                    mid_local,
+                    user_ll,
+                    points=regional_points,
+                    origin_grid6=user_grid,
+                    target_type=target_type,
+                    target_id=target_id,
+                    blend_settings=blend_settings,
+                )
+            return {
+                "nat_scores": nat_scores,
+                "reg_scores": reg_scores,
+                "modeled_nat": modeled_nat,
+                "modeled_reg": modeled_reg,
+                "target_label": target_label,
+                "user_grid": user_grid,
+                "has_schedule_bands": bool(all_bands),
+                "now_local": now_local,
+                "blend_enabled": bool(blend_settings.get("prop_blend_enabled", 1)),
+            }
 
-        schedule_rows: List[List[str]] = []
-        schedule_rows.append(
-            [
-                "National",
-                self._format_band_list(nat_scores["morning"]) or "--",
-                self._format_band_list(nat_scores["day"]) or "--",
-                self._format_band_list(nat_scores["night"]) or "--",
-            ]
-        )
-        schedule_rows.append(
-            [
-                "Regional",
-                self._format_band_list(reg_scores["morning"]) or "--",
-                self._format_band_list(reg_scores["day"]) or "--",
-                self._format_band_list(reg_scores["night"]) or "--",
-            ]
+        if self._propagation_executor is None:
+            self._propagation_executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="fio-ops-propagation",
+            )
+        future = self._propagation_executor.submit(_work)
+        future.add_done_callback(
+            lambda done, rid=request_id: self._handle_propagation_future(rid, done)
         )
 
-        modeled_nat: Dict[str, List[Tuple[str, float]]] = {}
-        modeled_reg: Dict[str, List[Tuple[str, float]]] = {}
-        for window, mid_local in window_mid.items():
-            modeled_nat[window] = self._top_bands_modeled(
-                PROP_BANDS, mid_local, user_ll, points=national_points
-            )
-            modeled_reg[window] = self._top_bands_modeled(
-                PROP_BANDS,
-                mid_local,
-                user_ll,
-                points=regional_points,
-                origin_grid6=user_grid,
-                target_type=target_type,
-                target_id=target_id,
-                blend_settings=blend_settings,
-            )
+    def _handle_propagation_future(self, request_id: int, future: Future) -> None:
+        try:
+            payload: object = future.result()
+            error = ""
+        except Exception as exc:
+            payload = {}
+            error = str(exc)
+        try:
+            self._propagation_ready.emit(int(request_id), payload, error)
+        except RuntimeError:
+            pass
 
-        modeled_rows: List[List[str]] = []
-        modeled_rows.append(
-            [
-                "National",
-                self._format_band_list(modeled_nat["morning"]) or "--",
-                self._format_band_list(modeled_nat["day"]) or "--",
-                self._format_band_list(modeled_nat["night"]) or "--",
-            ]
-        )
-        modeled_rows.append(
-            [
-                "Regional",
-                self._format_band_list(modeled_reg["morning"]) or "--",
-                self._format_band_list(modeled_reg["day"]) or "--",
-                self._format_band_list(modeled_reg["night"]) or "--",
-            ]
-        )
-        self._set_sectioned_prop_rows("Schedule-based Forecast", schedule_rows, "Modeled Forecast", modeled_rows)
-        schedule_note = " | no scheduled bands" if not all_bands else ""
-        self.prop_hint.setText(f"Tip: {target_label} | origin {user_grid}{schedule_note}")
-        self._set_prop_summary(
-            self._format_prop_readiness_summary(
+    def _on_propagation_ready(self, request_id: int, payload: object, error: object) -> None:
+        self._propagation_pending = False
+        if request_id != self._propagation_request_id:
+            return
+        if error:
+            log.debug("ControlFreq: propagation worker failed: %s", error)
+            self._set_prop_summary("RF Readiness: propagation guidance is temporarily unavailable.")
+        else:
+            result = dict(payload) if isinstance(payload, dict) else {}
+            nat_scores = dict(result.get("nat_scores") or {})
+            reg_scores = dict(result.get("reg_scores") or {})
+            modeled_nat = dict(result.get("modeled_nat") or {})
+            modeled_reg = dict(result.get("modeled_reg") or {})
+
+            def _rows(label: str, national: Dict[str, object], regional: Dict[str, object]) -> List[List[str]]:
+                return [
+                    [label, *(self._format_band_list(list(national.get(window) or ())) or "--" for window in ("morning", "day", "night"))],
+                    ["Regional", *(self._format_band_list(list(regional.get(window) or ())) or "--" for window in ("morning", "day", "night"))],
+                ]
+
+            self._set_sectioned_prop_rows(
+                "Schedule-based Forecast",
+                _rows("National", nat_scores, reg_scores),
+                "Modeled Forecast",
+                _rows("National", modeled_nat, modeled_reg),
+            )
+            target_label = str(result.get("target_label") or "Region --")
+            user_grid = str(result.get("user_grid") or "")
+            schedule_note = "" if bool(result.get("has_schedule_bands")) else " | no scheduled bands"
+            self.prop_hint.setText(f"Tip: {target_label} | origin {user_grid}{schedule_note}")
+            now_local = result.get("now_local")
+            if not isinstance(now_local, dt.datetime):
+                now_local = dt.datetime.now(dt.timezone.utc)
+            self._set_prop_summary(
+                self._format_prop_readiness_summary(
+                    target_label=target_label,
+                    schedule_scores=reg_scores,
+                    modeled_scores=modeled_reg,
+                    now_local=now_local,
+                )
+            )
+            active_window = self._prop_window_for_time(now_local)
+            active_scores = list(reg_scores.get(active_window) or modeled_reg.get(active_window) or ())
+            self._render_prop_band_ladder(
+                active_scores,
                 target_label=target_label,
-                schedule_scores=reg_scores,
-                modeled_scores=modeled_reg,
-                now_local=now_local,
+                evidence_label=(
+                    "modeled + observed outcomes" if bool(result.get("blend_enabled")) else "modeled"
+                ),
             )
-        )
-        active_window = self._prop_window_for_time(now_local)
-        active_scores = reg_scores.get(active_window) or modeled_reg.get(active_window) or []
-        evidence_label = (
-            "modeled + observed outcomes"
-            if bool(blend_settings.get("prop_blend_enabled", 1))
-            else "modeled"
-        )
-        self._render_prop_band_ladder(
-            active_scores,
-            target_label=target_label,
-            evidence_label=evidence_label,
-        )
-        self._sync_propagation_box_height()
+            self._sync_propagation_box_height()
+        if self._propagation_followup:
+            self._propagation_followup = False
+            QTimer.singleShot(0, self._refresh_propagation_snapshot)
 
     def _set_prop_summary(self, text: str) -> None:
         label = getattr(self, "prop_summary_label", None)

@@ -291,6 +291,20 @@ inactive and recoverable rather than silently applying a default. Every step
 control uses a font-derived height and the complete strip wraps without clipping
 at the supported compact size.
 
+The model inventory is self-healing at this boundary: protected default and
+receive-only models must exist and be enabled before the selector is populated,
+including when an early development database retained a disabled protected row.
+The repair must update the protected row in place and must not duplicate models,
+create a radio, or change runtime-primary selection.
+
+Application and JS8Call-profile discovery is operator-triggered, bounded
+background work. Opening the dialog, choosing a setup type, changing steps,
+painting, and resizing are cache-only. `Configure Automatically` disables only
+its own action while a worker searches; the rest of the dialog remains usable
+and existing field values are never overwritten. No global event-loop pump may
+run deferred Settings, Ops Center, mesh, or scheduler timers during main-window
+construction merely to repaint startup progress.
+
 The embedded instance assistant must visibly present its complete guided path:
 `Purpose -> Find or create -> Identity -> Connections -> Files -> Launch ->
 Review`. The current step is themed and selected, prior steps remain available,

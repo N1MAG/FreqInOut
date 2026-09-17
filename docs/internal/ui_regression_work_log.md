@@ -4,6 +4,55 @@ All new entries must follow the authoritative multi-model delivery contract in
 `docs/internal/project_delivery_rules.md` and record the required package/model,
 primary-review, acceptance, and exit-gate evidence.
 
+## 2026-09-16 — Startup and Guided Add Radio performance recovery
+
+Status: implementation exit gate passed locally; production-sized Linux
+confirmation remains operator-assisted.
+
+The supplied Linux log showed a 77.0-second startup: propagation schema
+assurance consumed 24.1 seconds, MainWindow construction consumed 48.1 seconds,
+and first usable shell arrived at 76.3 seconds. Hotspot captures also showed
+Guided Add Radio parsing JS8Call profiles synchronously on Qt's GUI thread for
+more than one minute, plus first-render propagation scoring saturating the GUI
+thread. These were code defects, not a launch-command or screenshot mismatch.
+
+Propagation schema assurance now updates only malformed legacy rows and runs
+the expensive event-key duplicate collapse only before the unique index is
+created. Startup progress inside MainWindow no longer pumps the global Qt event
+queue, which had been executing deferred tab work before the window existed.
+Mesh starts at the existing post-shell lifecycle boundary. Ops Center
+propagation scoring and Guided Add Radio application/profile discovery now use
+single-worker background lanes with stale/late-result guards and bounded
+shutdown ownership.
+
+Guided Add Radio repairs stale disabled protected Operating Models in place and
+always presents a real compatible model ID. Receive-only SDR Software permits
+independent JS8Call and built-in FIO Spotter selection; FIO Spotter is limited
+to receive/decode, forms, watches, and Inbox projection by the receive-only
+Operating Model, while external JS8Spotter remains unavailable.
+
+Work packages and model ownership:
+
+- Primary high-reasoning model: log/hotspot integration, startup/concurrency
+  architecture, propagation schema repair, worker integration, specification,
+  delegated-diff review, and exit gate.
+- `gpt-5.6-terra` high: independent launch/hotspot diagnosis.
+- `gpt-5.6-luna` medium: exact Add Radio model/FIO Spotter UI audit and focused
+  observer regression test.
+- `gpt-5.6-terra` medium: performance boundary audit and focused schema,
+  post-shell mesh, background discovery, and protected-model tests.
+
+Acceptance evidence: **269** focused startup, propagation, guided setup,
+Settings, mesh, and Ops Center tests pass; **299** broader radio-scoped software,
+runtime, soak-controller, and main-shell tests pass after updating two obsolete
+source-shape assertions for the new worker boundary. A real isolated 20-second
+Qt smoke reached first usable shell in **604.0 ms**, constructed MainWindow in
+**550.9 ms**, observed **32.9 ms** maximum event-loop lag, and shut down in
+**19.2 ms**. A 100,000-row mature propagation database completed repeat schema
+assurance in **64.7 ms** with **zero row changes**. Changed Python modules
+compile and `git diff --check` passes. No runtime endpoint, production database,
+commit, or remote repository was changed by the automated gate.
+
 ## 2026-09-16 — Add Radio Step 2 Operating Model assignment
 
 Status: implementation and code-level automated acceptance complete. Native

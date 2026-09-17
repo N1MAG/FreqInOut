@@ -1344,7 +1344,6 @@ class MainWindow(QMainWindow):
         _connect_or_log("open_logs_requested -> log window", self.settings_tab.open_logs_requested, self._open_logs_window)
         _connect_or_log("log_level_changed -> log indicator", self.settings_tab.log_level_changed, self._update_log_indicator)
         log.info("Main window initialized.")
-        self._start_mesh_runtime_if_enabled()
         # Sync sidebar filters initially
         self._sync_map_filters_from_tab()
         self._update_log_indicator()
@@ -6761,6 +6760,12 @@ class MainWindow(QMainWindow):
         if self._shutting_down or self._post_shell_services_started:
             return
         self._post_shell_services_started = True
+        # Connecting optional radios/mesh transports is runtime work, not shell
+        # construction.  Some BLE stacks take tens of seconds to time out; even
+        # though the adapter owns a worker, starting it during MainWindow.__init__
+        # creates enough callback and discovery pressure to delay the first
+        # painted frame on slower systems.
+        self._start_mesh_runtime_if_enabled()
         background = getattr(self, "background_ingest", None)
         if self._background_ingest_start_pending and background is not None:
             try:

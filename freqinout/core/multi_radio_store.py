@@ -6315,6 +6315,16 @@ class MultiRadioStore:
                     conn,
                     _seed_operating_defaults(_load_kv_settings(conn)),
                 )
+            elif int(operating.get("enabled", 1) or 0) != 1:
+                # The default model is a protected invariant in current builds,
+                # but early development databases could retain a disabled row.
+                # Repair that stale state so Guided Add Radio never presents an
+                # empty model picker for an otherwise valid transceiver.
+                conn.execute(
+                    "UPDATE operating_profiles SET enabled=1, updated_utc=? WHERE id=?",
+                    (_utc_now_iso(), int(operating["id"])),
+                )
+                operating = _record_by_id(conn, "operating_profiles", int(operating["id"])) or operating
             receiver = _ensure_receive_only_operating_profile_conn(conn, commit=False)
             conn.commit()
             return [dict(operating), dict(receiver)]

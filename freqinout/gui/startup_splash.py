@@ -108,6 +108,18 @@ class StartupSplash:
         self.update_status(message)
 
     def update_status(self, message: str) -> None:
+        self.update_status_without_event_pump(message)
+        self._process_events()
+
+    def update_status_without_event_pump(self, message: str) -> None:
+        """Update splash text without dispatching application timers.
+
+        MainWindow construction creates deferred timers intentionally. Pumping
+        the global event queue from a progress callback allowed those expensive
+        post-construction jobs to run before the window was shown, turning a
+        splash repaint into a multi-second startup stall.
+        """
+
         text = str(message or "").strip() or "Starting FIO..."
         self._last_message = text
         self._splash.showMessage(
@@ -115,7 +127,7 @@ class StartupSplash:
             int(Qt.AlignLeft | Qt.AlignBottom),
             QColor(self._theme["text"]),
         )
-        self._process_events()
+        self._splash.repaint()
 
     def finish(self, widget: Optional[QWidget]) -> None:
         try:

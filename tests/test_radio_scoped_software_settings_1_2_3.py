@@ -1915,7 +1915,13 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "varac_outbox_wrap" in varac_field_block
     assert "varac_bbs_wrap" in varac_field_block
     assert "varac_bbs_archive_wrap" in varac_field_block
-    assert "build_autoconfig_proposal(" in dialog_block
+    assert "_GuidedRadioAutofillWorker(" in dialog_block
+    guided_worker_block = source[
+        source.index("class _GuidedRadioAutofillWorker")
+        : source.index("class _GpgKeyProbeWorker")
+    ]
+    assert "build_autoconfig_proposal(" in guided_worker_block
+    assert "discover_js8call_file_profiles()" in guided_worker_block
     assert 'configure_auto_status.setToolTip("\\n".join(review.detail_lines))' in dialog_block
     assert "select_js8call_file_profile(" in planner_source
     assert "tcp_port=initial_js8_port" in planner_source

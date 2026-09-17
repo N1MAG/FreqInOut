@@ -863,6 +863,58 @@ class _SoftwareAutofillWorker(QObject):
             self.failed.emit(self.generation, self.section, str(exc))
 
 
+class _GuidedRadioAutofillWorker(QObject):
+    """Collect guided-radio discovery evidence without blocking Qt's GUI thread."""
+
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, settings_values: Mapping[str, Any], *, apps_base: str, observer_mode: bool) -> None:
+        super().__init__()
+        self.settings_values = dict(settings_values or {})
+        self.apps_base = str(apps_base or "").strip()
+        self.observer_mode = bool(observer_mode)
+        self._cancel_event = threading.Event()
+
+    def request_cancel(self) -> None:
+        self._cancel_event.set()
+
+    def run(self) -> None:
+        try:
+            if self._cancel_event.is_set():
+                self.finished.emit({"cancelled": True})
+                return
+            detector = SoftwarePathDetector(self.settings_values)
+            proposal = build_autoconfig_proposal(
+                radio_count=1,
+                home=Path.home(),
+                app_search_paths=app_search_paths_with_radio_apps_base(
+                    self.apps_base,
+                    home=Path.home(),
+                ),
+                busy_checker=lambda _host, _port: False,
+            )
+            js8_results = detector.detect_js8()
+            js8_file_profiles = discover_js8call_file_profiles()
+            fast_results: Dict[str, PathDetectionResult] = {}
+            varac_results: Dict[str, PathDetectionResult] = {}
+            if not self.observer_mode:
+                fast_results = detector.detect_fast_light()
+                varac_results = detector.detect_varac()
+            self.finished.emit(
+                {
+                    "cancelled": self._cancel_event.is_set(),
+                    "install_candidates": tuple(proposal.candidates),
+                    "fast_results": fast_results,
+                    "js8_results": js8_results,
+                    "varac_results": varac_results,
+                    "js8_file_profiles": tuple(js8_file_profiles),
+                }
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class _GpgKeyProbeWorker(QObject):
     """Run bounded GPG executable/key discovery away from the GUI thread."""
 
@@ -956,6 +1008,11 @@ class SettingsTab(QWidget):
     # must never open an endpoint or perform a probe in the Qt event handler.
     receiver_control_test_requested = Signal(dict)
     receiver_control_test_completed = Signal(dict)
+    # Python object ids are pointer-width values and may exceed Qt's 32-bit
+    # ``int`` signal type on 64-bit platforms.
+    _guided_radio_autofill_finished = Signal(object, object)
+    _guided_radio_autofill_failed = Signal(object, str)
+    _guided_radio_autofill_released = Signal(object)
     SECTION_HEALTH_STATE_ROLE = int(Qt.UserRole) + 1
     SECTION_HEALTH_KEY_ROLE = int(Qt.UserRole) + 2
     SECTION_STACK_INDEX_ROLE = int(Qt.UserRole) + 3
@@ -1041,6 +1098,11 @@ class SettingsTab(QWidget):
         self._software_autofill_active_request: Dict[str, Any] | None = None
         self._software_autofill_pending_request: Dict[str, Any] | None = None
         self._software_autofill_shutdown = False
+        self._guided_radio_autofill_jobs: Dict[int, Tuple[QThread, _GuidedRadioAutofillWorker]] = {}
+        self._guided_radio_autofill_callbacks: Dict[int, Tuple[Any, Any]] = {}
+        self._guided_radio_autofill_finished.connect(self._on_guided_radio_autofill_finished)
+        self._guided_radio_autofill_failed.connect(self._on_guided_radio_autofill_failed)
+        self._guided_radio_autofill_released.connect(self._on_guided_radio_autofill_released)
         self._radio_profile_software_flag_checks: Dict[str, QCheckBox] = {}
         self._refreshing_radio_profile_software_flags = False
         self._radio_profile_timer_policy_controls: Dict[str, QWidget] = {}
@@ -12560,11 +12622,46 @@ class SettingsTab(QWidget):
         self._software_autofill_thread = None
         self._software_autofill_worker = None
         self._software_autofill_active_request = None
+        for job_id, (guided_thread, guided_worker) in tuple(
+            getattr(self, "_guided_radio_autofill_jobs", {}).items()
+        ):
+            guided_worker.request_cancel()
+            if guided_thread.isRunning():
+                guided_thread.requestInterruption()
+                guided_thread.quit()
+                if not guided_thread.wait(1200):
+                    guided_thread.setParent(None)
+                    _DETACHED_SOFTWARE_AUTOFILL_JOBS[job_id] = (guided_thread, guided_worker)
+                    guided_thread.finished.connect(
+                        lambda ident=job_id: _release_detached_software_autofill_job(ident)
+                    )
+            self._guided_radio_autofill_jobs.pop(job_id, None)
+            self._guided_radio_autofill_callbacks.pop(job_id, None)
         timer = getattr(self, "_mesh_ble_scan_timer", None)
         if isinstance(timer, QTimer):
             timer.stop()
         if self._mesh_ble_scan_is_active():
             self._cancel_mesh_ble_scan()
+
+    def _on_guided_radio_autofill_finished(self, job_id: int, payload: object) -> None:
+        """Apply guided discovery results on the SettingsTab GUI thread."""
+
+        callbacks = self._guided_radio_autofill_callbacks.get(int(job_id))
+        if callbacks is not None:
+            callbacks[0](payload)
+
+    def _on_guided_radio_autofill_failed(self, job_id: int, detail: str) -> None:
+        """Report guided discovery failure on the SettingsTab GUI thread."""
+
+        callbacks = self._guided_radio_autofill_callbacks.get(int(job_id))
+        if callbacks is not None:
+            callbacks[1](detail)
+
+    def _on_guided_radio_autofill_released(self, job_id: int) -> None:
+        """Release a finished guided discovery job and its dialog callbacks."""
+
+        self._guided_radio_autofill_jobs.pop(int(job_id), None)
+        self._guided_radio_autofill_callbacks.pop(int(job_id), None)
 
     def _on_mesh_ble_scan_progress(self, advertisements: tuple) -> None:
         devices = tuple(item for item in advertisements if isinstance(item, MeshCoreBleAdvertisement))
@@ -24613,7 +24710,13 @@ class SettingsTab(QWidget):
             for row in (getattr(self, "operating_profiles", ()) or ())
             if isinstance(row, Mapping)
         ]
-        if not operating_model_inventory:
+        enabled_operating_models = [
+            row for row in operating_model_inventory if int(row.get("enabled", 1) or 0) == 1
+        ]
+        if (
+            not enabled_operating_models
+            or not any(int(row.get("receive_only", 0) or 0) == 1 for row in enabled_operating_models)
+        ):
             try:
                 ensure_models = getattr(self.multi_radio_store, "ensure_builtin_operating_profiles", None)
                 if callable(ensure_models):
@@ -27341,35 +27444,16 @@ class SettingsTab(QWidget):
             _update_guided_save_review()
             _update_guided_save_button()
 
-        def _apply_dialog_autoconfigure() -> None:
+        def _apply_dialog_autoconfigure_results(payload: Mapping[str, Any]) -> None:
             nonlocal app_autoconfigure_attempted
             filled: List[str] = []
             preserved: List[str] = []
             observer_mode = str(device_class_combo.currentData() or "").strip().lower() == "observer"
-            _persist_radio_apps_base_folder()
-            install_candidates: Sequence[Any] = ()
-            fast_results: Dict[str, PathDetectionResult] = {}
-            js8_results: Dict[str, PathDetectionResult] = {}
-            varac_results: Dict[str, PathDetectionResult] = {}
-            js8_file_profiles: Sequence[Any] = ()
-            if not observer_mode or use_js8call_chk.isChecked():
-                try:
-                    install_candidates = build_autoconfig_proposal(
-                        radio_count=1,
-                        home=Path.home(),
-                        app_search_paths=app_search_paths_with_radio_apps_base(
-                            radio_apps_base_edit.text().strip(),
-                            home=Path.home(),
-                        ),
-                        busy_checker=lambda _host, _port: False,
-                    ).candidates
-                except Exception:
-                    install_candidates = ()
-                js8_results = self.software_path_detector.detect_js8()
-                js8_file_profiles = discover_js8call_file_profiles()
-                if not observer_mode:
-                    fast_results = self.software_path_detector.detect_fast_light()
-                    varac_results = self.software_path_detector.detect_varac()
+            install_candidates = tuple(payload.get("install_candidates") or ())
+            fast_results = dict(payload.get("fast_results") or {})
+            js8_results = dict(payload.get("js8_results") or {})
+            varac_results = dict(payload.get("varac_results") or {})
+            js8_file_profiles = tuple(payload.get("js8_file_profiles") or ())
             app_autoconfigure_attempted = True
             _update_detected_app_choices(install_candidates)
             _update_js8_profile_choices(js8_file_profiles)
@@ -27459,7 +27543,72 @@ class SettingsTab(QWidget):
             else:
                 _set_guided_wizard_step("connection")
 
-        configure_auto_btn.clicked.connect(_apply_dialog_autoconfigure)
+        def _start_dialog_autoconfigure() -> None:
+            if not configure_auto_btn.isEnabled():
+                return
+            observer_mode = str(device_class_combo.currentData() or "").strip().lower() == "observer"
+            if observer_mode and not use_js8call_chk.isChecked():
+                configure_auto_status.setText("Select JS8Call first, then configure its receive-only instance.")
+                return
+            _persist_radio_apps_base_folder()
+            configure_auto_btn.setEnabled(False)
+            configure_auto_btn.setText("Searching…")
+            configure_auto_status.setText(
+                "Searching in the background. You can continue reviewing this radio while FIO checks installed apps and profiles."
+            )
+            worker = _GuidedRadioAutofillWorker(
+                self.settings.all(),
+                apps_base=radio_apps_base_edit.text().strip(),
+                observer_mode=observer_mode,
+            )
+            thread = QThread(self)
+            job_id = id(thread)
+            self._guided_radio_autofill_jobs[job_id] = (thread, worker)
+            worker.moveToThread(thread)
+
+            def _finish(payload: object) -> None:
+                configure_auto_btn.setText("Configure Automatically")
+                configure_auto_btn.setEnabled(True)
+                result = dict(payload) if isinstance(payload, Mapping) else {}
+                if result.get("cancelled"):
+                    configure_auto_status.setText("Search cancelled. Existing settings were not changed.")
+                    return
+                try:
+                    if dlg.isVisible():
+                        _apply_dialog_autoconfigure_results(result)
+                except RuntimeError:
+                    return
+
+            def _fail(detail: str) -> None:
+                try:
+                    configure_auto_btn.setText("Configure Automatically")
+                    configure_auto_btn.setEnabled(True)
+                    configure_auto_status.setText(
+                        "Search could not complete. Existing settings were not changed; paths can still be entered manually."
+                    )
+                except RuntimeError:
+                    return
+                log.warning("Guided Add Radio discovery failed: %s", detail)
+
+            self._guided_radio_autofill_callbacks[job_id] = (_finish, _fail)
+            thread.started.connect(worker.run)
+            worker.finished.connect(
+                lambda payload, ident=job_id: self._guided_radio_autofill_finished.emit(ident, payload)
+            )
+            worker.failed.connect(
+                lambda detail, ident=job_id: self._guided_radio_autofill_failed.emit(ident, detail)
+            )
+            worker.finished.connect(thread.quit)
+            worker.failed.connect(thread.quit)
+            worker.finished.connect(worker.deleteLater)
+            worker.failed.connect(worker.deleteLater)
+            thread.finished.connect(
+                lambda ident=job_id: self._guided_radio_autofill_released.emit(ident)
+            )
+            thread.finished.connect(thread.deleteLater)
+            thread.start()
+
+        configure_auto_btn.clicked.connect(_start_dialog_autoconfigure)
 
         def _update_dialog_readiness() -> None:
             if guided_wizard_step_id != "review":
@@ -27552,7 +27701,11 @@ class SettingsTab(QWidget):
             use_flmsg_chk.setEnabled(not observer_mode)
             use_flamp_chk.setEnabled(not observer_mode)
             use_js8call_chk.setEnabled(True)
-            use_js8spotter_chk.setEnabled(not observer_mode)
+            # Built-in FIO Spotter is useful to an observer for decode, forms,
+            # watches, and Inbox projection.  The receive-only Operating Model
+            # removes Compose/Expect transmit authority; do not hide the safe
+            # receive-side integration merely because the radio cannot transmit.
+            use_js8spotter_chk.setEnabled(True)
             use_external_js8spotter_chk.setEnabled(not observer_mode)
             use_commstat_chk.setEnabled(not observer_mode)
             use_varac_chk.setEnabled(not observer_mode)
@@ -27626,7 +27779,6 @@ class SettingsTab(QWidget):
                     use_fldigi_chk,
                     use_flmsg_chk,
                     use_flamp_chk,
-                    use_js8spotter_chk,
                     use_external_js8spotter_chk,
                     use_commstat_chk,
                     use_varac_chk,
@@ -27637,6 +27789,11 @@ class SettingsTab(QWidget):
                 use_js8call_chk.setToolTip(
                     "Create or update a distinct JS8Call instance owned by this SDR. "
                     "It remains excluded from transmit, compose, QSY, and scheduler targets."
+                )
+                use_js8spotter_chk.setEnabled(True)
+                use_js8spotter_chk.setToolTip(
+                    "Enable FIO Spotter receive, decode, forms, watches, and Inbox projection for this SDR. "
+                    "The receive-only Operating Model keeps Compose and Expect sending unavailable."
                 )
                 _set_row_visible(radio_apps_base_wrap, setup_started and use_js8call_chk.isChecked())
                 _set_row_visible(configure_auto_wrap, setup_started and use_js8call_chk.isChecked())

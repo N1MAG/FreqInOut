@@ -942,24 +942,44 @@ def _ensure_prop_contact_events(conn: sqlite3.Connection) -> None:
             WHERE event_key IS NULL OR TRIM(event_key) = ''
             """
         )
-    # Safety: normalize categorical fields to reduce downstream parsing edge-cases.
-    cur.execute("UPDATE prop_contact_events SET target_type = UPPER(TRIM(target_type)) WHERE target_type IS NOT NULL")
-    cur.execute("UPDATE prop_contact_events SET outcome = UPPER(TRIM(outcome)) WHERE outcome IS NOT NULL")
-    cur.execute("UPDATE prop_contact_events SET source = UPPER(TRIM(source)) WHERE source IS NOT NULL")
-    cur.execute("UPDATE prop_contact_events SET band = UPPER(TRIM(band)) WHERE band IS NOT NULL")
-    cur.execute("UPDATE prop_contact_events SET origin_grid6 = UPPER(TRIM(origin_grid6)) WHERE origin_grid6 IS NOT NULL")
-    cur.execute("UPDATE prop_contact_events SET target_grid6 = UPPER(TRIM(target_grid6)) WHERE target_grid6 IS NOT NULL")
-    # Safety: collapse duplicate event_key rows to avoid index creation failure.
-    cur.execute(
-        """
-        DELETE FROM prop_contact_events
-        WHERE id NOT IN (
-            SELECT MIN(id)
-            FROM prop_contact_events
-            GROUP BY event_key
+    # Safety repairs must be idempotent *and* cheap on a mature database.  The
+    # old unconditional UPDATEs rewrote every propagation row on every launch,
+    # while the unconditional GROUP BY/DELETE scanned the whole table even
+    # after uniqueness had already been enforced.  Repair only malformed rows,
+    # and perform the legacy de-duplication only once while creating the unique
+    # index that prevents future duplicates.
+    for column in (
+        "target_type",
+        "outcome",
+        "source",
+        "band",
+        "origin_grid6",
+        "target_grid6",
+    ):
+        cur.execute(
+            f"""UPDATE prop_contact_events
+                   SET {column} = UPPER(TRIM({column}))
+                 WHERE {column} IS NOT NULL
+                   AND {column} <> UPPER(TRIM({column}))"""
         )
-        """
+    unique_index_exists = bool(
+        cur.execute(
+            """SELECT 1 FROM sqlite_master
+                 WHERE type='index' AND name='idx_prop_contact_events_event_key'
+                 LIMIT 1"""
+        ).fetchone()
     )
+    if not unique_index_exists:
+        cur.execute(
+            """
+            DELETE FROM prop_contact_events
+            WHERE id NOT IN (
+                SELECT MIN(id)
+                FROM prop_contact_events
+                GROUP BY event_key
+            )
+            """
+        )
     cur.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_prop_contact_events_event_key ON prop_contact_events(event_key)"
     )
@@ -1052,23 +1072,41 @@ def _ensure_prop_outcome_stats(conn: sqlite3.Connection) -> None:
             "updated_utc": "TEXT",
         },
     )
-    # Safety: keep stats in valid ranges after schema drift/manual edits.
-    cur.execute("UPDATE prop_outcome_stats SET month = MIN(12, MAX(1, CAST(month AS INTEGER))) WHERE month IS NOT NULL")
+    # As above, repair only malformed legacy rows.  Unconditional normalization
+    # made this table a full write transaction during every cold start.
+    cur.execute(
+        """UPDATE prop_outcome_stats
+              SET month = MIN(12, MAX(1, CAST(month AS INTEGER)))
+            WHERE month IS NOT NULL
+              AND (typeof(month) <> 'integer' OR month < 1 OR month > 12)"""
+    )
     cur.execute(
         """
         UPDATE prop_outcome_stats
         SET utc_hour_bucket = MIN(23, MAX(0, CAST(utc_hour_bucket AS INTEGER)))
         WHERE utc_hour_bucket IS NOT NULL
+          AND (typeof(utc_hour_bucket) <> 'integer' OR utc_hour_bucket < 0 OR utc_hour_bucket > 23)
         """
     )
-    cur.execute("UPDATE prop_outcome_stats SET attempt_count = MAX(0, CAST(attempt_count AS INTEGER))")
-    cur.execute("UPDATE prop_outcome_stats SET success_count = MAX(0, CAST(success_count AS INTEGER))")
-    cur.execute("UPDATE prop_outcome_stats SET weighted_attempt = MAX(0, weighted_attempt)")
-    cur.execute("UPDATE prop_outcome_stats SET weighted_success = MAX(0, weighted_success)")
-    cur.execute("UPDATE prop_outcome_stats SET band = UPPER(TRIM(band)) WHERE band IS NOT NULL")
-    cur.execute("UPDATE prop_outcome_stats SET origin_grid6 = UPPER(TRIM(origin_grid6)) WHERE origin_grid6 IS NOT NULL")
-    cur.execute("UPDATE prop_outcome_stats SET distance_bucket = UPPER(TRIM(distance_bucket)) WHERE distance_bucket IS NOT NULL")
-    cur.execute("UPDATE prop_outcome_stats SET target_type = UPPER(TRIM(target_type)) WHERE target_type IS NOT NULL")
+    for column in ("attempt_count", "success_count"):
+        cur.execute(
+            f"""UPDATE prop_outcome_stats
+                   SET {column} = MAX(0, CAST({column} AS INTEGER))
+                 WHERE typeof({column}) <> 'integer' OR {column} < 0"""
+        )
+    for column in ("weighted_attempt", "weighted_success"):
+        cur.execute(
+            f"""UPDATE prop_outcome_stats
+                   SET {column} = MAX(0, {column})
+                 WHERE {column} < 0"""
+        )
+    for column in ("band", "origin_grid6", "distance_bucket", "target_type"):
+        cur.execute(
+            f"""UPDATE prop_outcome_stats
+                   SET {column} = UPPER(TRIM({column}))
+                 WHERE {column} IS NOT NULL
+                   AND {column} <> UPPER(TRIM({column}))"""
+        )
     cur.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_prop_outcome_stats_lookup

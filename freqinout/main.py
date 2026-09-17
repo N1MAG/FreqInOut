@@ -160,7 +160,14 @@ def main():
         stage_started = time.perf_counter()
         from freqinout.gui.main_window import MainWindow
 
-        win = MainWindow(startup_status=splash.update_status if splash is not None else None)
+        # MainWindow deliberately queues database/UI work for later event-loop
+        # ticks.  Its progress callback must not pump the global event queue or
+        # those timers run before the shell exists.
+        win = MainWindow(
+            startup_status=(
+                splash.update_status_without_event_pump if splash is not None else None
+            )
+        )
         _emit_startup_stage("main_window_construct", stage_started, app_start=startup_started)
 
         if splash is not None:
