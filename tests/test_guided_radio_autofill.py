@@ -241,6 +241,82 @@ def test_radio_autofill_uses_js8_profile_port_before_default(tmp_path: Path) -> 
     assert suggestions["js8_profile_path"] == str(directed_path.parent)
     assert not review
 
+    distinct, distinct_review = guided_radio_autofill_suggestions(
+        current={"js8_port": ""},
+        selected={"js8call": True},
+        backend="manual",
+        observer_mode=False,
+        install_candidates=(),
+        fast_results={},
+        js8_results={},
+        varac_results={},
+        js8_file_profiles=(
+            JS8CallFileProfile(
+                name="FIO-C",
+                ini_path="/tmp/JS8Call.ini",
+                save_dir=str(directed_path.parent),
+                tcp_server_port="2444",
+                directed_path=str(directed_path),
+                all_path="",
+                confidence="verified",
+                reason="Matched profile",
+            ),
+        ),
+        default_ports={"js8call": "2445"},
+        profile_name="FIO-C",
+        source_modes={"js8call": "create"},
+    )
+    assert distinct["js8_port"] == "2445"
+    assert "js8_profile_path" not in distinct
+    assert "js8_directed_path" not in distinct
+    assert not any("profile" in line.casefold() for line in distinct_review)
+
+
+def test_observer_autofill_prepares_receive_companions_without_flrig_or_existing_js8_profile(
+    tmp_path: Path,
+) -> None:
+    existing_profile = JS8CallFileProfile(
+        name="Existing",
+        ini_path=str(tmp_path / "existing" / "JS8Call.ini"),
+        save_dir=str(tmp_path / "existing"),
+        tcp_server_port="2442",
+        directed_path=str(tmp_path / "existing" / "DIRECTED.TXT"),
+        all_path=str(tmp_path / "existing" / "ALL.TXT"),
+        confidence="verified",
+        reason="Existing radio",
+    )
+    candidates = (
+        types.SimpleNamespace(app_id="flrig", executable=True, path="/usr/bin/flrig"),
+        types.SimpleNamespace(app_id="fldigi", executable=True, path="/usr/bin/fldigi"),
+        types.SimpleNamespace(app_id="js8call", executable=True, path="/usr/bin/js8call"),
+    )
+
+    suggestions, review = guided_radio_autofill_suggestions(
+        current={"js8_port": ""},
+        selected={"flrig": False, "fldigi": True, "js8call": True},
+        backend="flrig",
+        observer_mode=True,
+        install_candidates=candidates,
+        fast_results={},
+        js8_results={},
+        varac_results={},
+        js8_file_profiles=(existing_profile,),
+        default_ports={"flrig": "12346", "fldigi": "7363", "js8call": "2443"},
+        profile_name="Receiver",
+        source_modes={"fast_light": "create", "js8call": "create"},
+    )
+
+    assert suggestions["sdr_host"] == "127.0.0.1"
+    assert suggestions["fldigi_path"] == "/usr/bin/fldigi"
+    assert suggestions["fldigi_port"] == "7363"
+    assert suggestions["js8_install_path"] == "/usr/bin/js8call"
+    assert suggestions["js8_port"] == "2443"
+    assert "flrig_path" not in suggestions
+    assert "flrig_port" not in suggestions
+    assert "js8_profile_path" not in suggestions
+    assert "js8_directed_path" not in suggestions
+    assert review == ("Observer SDR endpoint was prepared when blank.",)
+
 
 def test_radio_autofill_keeps_js8_directed_manual_when_profiles_are_ambiguous(tmp_path: Path) -> None:
     path_a = tmp_path / "FIO-A" / "DIRECTED.TXT"
@@ -285,6 +361,7 @@ def test_radio_autofill_keeps_js8_directed_manual_when_profiles_are_ambiguous(tm
     )
 
     assert "js8_port" not in suggestions
+
     assert "js8_directed_path" not in suggestions
     assert "js8_profile_path" not in suggestions
     assert review == (
@@ -529,6 +606,22 @@ def test_radio_autofill_leaves_varac_db_and_cluster_manual() -> None:
     assert "fldigi_port" not in suggestions
     assert "js8_host" not in suggestions
     assert "js8_port" not in suggestions
+
+    distinct, _distinct_review = guided_radio_autofill_suggestions(
+        current={},
+        selected={"varac": True},
+        backend="manual",
+        observer_mode=False,
+        install_candidates=(),
+        fast_results={},
+        js8_results={},
+        varac_results=varac_results,
+        js8_file_profiles=(),
+        default_ports={},
+        profile_name="New Radio",
+        source_modes={"varac": "create"},
+    )
+    assert distinct == {"varac_install_path": "/Applications/VarAC"}
 
 
 def test_radio_autofill_uses_available_varac_production_fixture_read_only() -> None:

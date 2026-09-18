@@ -7324,6 +7324,7 @@ class MultiRadioStore:
         varac_cluster_db_id: Optional[int] = None,
         varac_cluster_instance_number: Optional[int] = None,
         varac_create_cluster_values: Optional[Mapping[str, Any]] = None,
+        varac_existing_standalone_node_id: Optional[int] = None,
         require_observer_receive_only: bool = False,
     ) -> Dict[str, Any]:
         """Persist one reviewed application instance and radio link atomically.
@@ -7396,6 +7397,52 @@ class MultiRadioStore:
                     raise ValueError("Only VarAC instances can create a VarAC cluster.")
                 if create_cluster_values and cluster_db_id_value is not None:
                     raise ValueError("Choose either a new VarAC cluster or an existing cluster, not both.")
+                existing_standalone_node_id = (
+                    int(varac_existing_standalone_node_id)
+                    if varac_existing_standalone_node_id is not None
+                    else _coerce_optional_int(
+                        create_cluster_values.get(
+                            "existing_standalone_node_id",
+                            create_cluster_values.get("existing_varac_node_id", create_cluster_values.get("existing_node_id")),
+                        )
+                    )
+                )
+                gateway_for_new_cluster = _coerce_bool_int(
+                    create_cluster_values.get("gateway_for_new_cluster", False),
+                    False,
+                )
+                gateway_existing_standalone = _coerce_bool_int(
+                    create_cluster_values.get("gateway_existing_standalone", False),
+                    False,
+                )
+                if gateway_for_new_cluster and gateway_existing_standalone:
+                    raise ValueError("Choose exactly one VarAC cluster gateway policy.")
+                if gateway_existing_standalone and existing_standalone_node_id is None:
+                    raise ValueError(
+                        "An existing standalone node is required for the selected gateway policy."
+                    )
+                if existing_standalone_node_id is not None and cluster_db_id_value is not None:
+                    raise ValueError("Choose either an existing VarAC cluster or an existing standalone node to seed a new cluster.")
+                if existing_standalone_node_id is not None and not create_cluster_values:
+                    raise ValueError("An existing standalone VarAC node can only be included when creating a new cluster.")
+                existing_standalone_device_id: Optional[int] = None
+                if existing_standalone_node_id is not None:
+                    if family != "varac":
+                        raise ValueError("Only VarAC instances can include an existing standalone node.")
+                    existing_standalone = _record_by_id(conn, "varac_nodes", existing_standalone_node_id)
+                    if existing_standalone is None:
+                        raise KeyError(f"Unknown existing standalone VarAC node id: {existing_standalone_node_id}")
+                    existing_standalone_device = conn.execute(
+                        "SELECT id, device_class FROM device_profiles WHERE varac_node_id=? LIMIT 1",
+                        (existing_standalone_node_id,),
+                    ).fetchone()
+                    if existing_standalone_device is None:
+                        raise ValueError("The selected VarAC node is not assigned to a radio and cannot seed a cluster.")
+                    existing_standalone_device_id = int(existing_standalone_device[0] or 0)
+                    if str(existing_standalone_device[1] or "").strip().lower() == "observer":
+                        raise ValueError("An observer / SDR profile cannot seed a VarAC cluster.")
+                    if _device_has_varac_cluster_membership(conn, existing_standalone_device_id):
+                        raise ValueError("The selected VarAC node already belongs to a cluster; choose a standalone node.")
                 family_link_column = _SOFTWARE_INSTANCE_ASSIGNMENTS[family][0]
                 expected_current = (
                     _coerce_optional_int(expected_current_instance_id)
@@ -7540,6 +7587,35 @@ class MultiRadioStore:
                             ),
                         )
                         cluster_db_id_value = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+                        if existing_standalone_device_id is not None:
+                            existing_member_number = _coerce_int(
+                                create_cluster_values.get("existing_standalone_instance_number", 1),
+                                1,
+                            )
+                            new_member_number = _coerce_int(varac_cluster_instance_number, 0)
+                            if existing_member_number <= 0 or new_member_number <= 0:
+                                raise ValueError("VarAC cluster instance numbers must be positive integers.")
+                            if existing_member_number == new_member_number:
+                                raise ValueError(
+                                    f"VarAC cluster instance {new_member_number} is already assigned. Choose another instance number before saving."
+                                )
+                            try:
+                                conn.execute(
+                                    """
+                                    INSERT INTO varac_cluster_members
+                                        (cluster_id, device_profile_id, instance_number, enabled, created_utc, updated_utc)
+                                    VALUES (?, ?, ?, 1, ?, ?)
+                                    """,
+                                    (
+                                        int(cluster_db_id_value),
+                                        int(existing_standalone_device_id),
+                                        existing_member_number,
+                                        now_iso,
+                                        now_iso,
+                                    ),
+                                )
+                            except sqlite3.IntegrityError as exc:
+                                raise ValueError("Unable to retain the existing VarAC standalone node as a cluster member.") from exc
                 current_link = _coerce_optional_int(profile.get(link_column))
                 if current_link is not None and current_link != int(saved_app["id"]) and not replace_existing:
                     raise ValueError(
@@ -7662,10 +7738,15 @@ class MultiRadioStore:
                         """,
                         (int(cluster_db_id_value), radio_id, instance_number, now_iso, now_iso),
                     )
-                    if bool(create_cluster_values.get("gateway_for_new_cluster", False)):
+                    if gateway_for_new_cluster:
                         conn.execute(
                             "UPDATE varac_clusters SET gateway_handler_device_id=?, updated_utc=? WHERE id=?",
                             (radio_id, now_iso, int(cluster_db_id_value)),
+                        )
+                    elif gateway_existing_standalone:
+                        conn.execute(
+                            "UPDATE varac_clusters SET gateway_handler_device_id=?, updated_utc=? WHERE id=?",
+                            (int(existing_standalone_device_id), now_iso, int(cluster_db_id_value)),
                         )
                     _sync_varac_cluster_member_enabled_flags_conn(conn)
                 conn.commit()

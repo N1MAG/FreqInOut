@@ -165,7 +165,14 @@ def test_selected_radio_status_and_import_metadata_are_preserved() -> None:
         assistant.set_operation_status("Discovery could not be completed.", error=True)
         assert assistant.operation_status_label.text().startswith("Discovery")
         assistant.set_discovery_results(
-            ({"id": 18, "system_key": "js8-north", "name": "North imported", "host": "127.0.0.1", "port": 2448},)
+            ({
+                "id": 18,
+                "system_key": "js8-north",
+                "name": "North imported",
+                "host": "127.0.0.1",
+                "port": 2448,
+                "candidate_classification": "usable_existing",
+            },)
         )
         assistant.discovery_list.setCurrentRow(0)
         draft = assistant.draft()
@@ -237,7 +244,13 @@ def test_discovery_requires_an_explicit_candidate_selection() -> None:
         assistant._field_widgets["instance_name"].setText("Candidate")
         assert "discovery_selection_required" in {item.code for item in assistant.validation()}
         assistant.set_discovery_results(
-            ({"name": "Detected JS8", "rig_name": "field", "host": "127.0.0.1", "port": 2450},)
+            ({
+                "name": "Detected JS8",
+                "rig_name": "field",
+                "host": "127.0.0.1",
+                "port": 2450,
+                "candidate_classification": "usable_existing",
+            },)
         )
         assistant.discovery_list.setCurrentRow(0)
         assert "discovery_selection_required" not in {item.code for item in assistant.validation()}

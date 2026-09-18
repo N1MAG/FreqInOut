@@ -80,6 +80,42 @@ def test_qualified_js8_recipe_hides_raw_override_and_reviews_exact_component_fac
         app.processEvents()
 
 
+def test_qualified_managed_paths_are_resolved_before_files_page_is_shown() -> None:
+    app = _app()
+    assistant = SoftwareInstanceAssistant(
+        "js8call",
+        unsaved_owner_key="radio-draft-files",
+        unsaved_radio_label="Field receiver",
+        managed_root="/managed",
+        initial_draft={
+            "family_key": "js8call",
+            "mode": "managed",
+            "draft_instance_key": "draft-js8call-files",
+            "instance_name": "Field receiver",
+            "variant": "js8call_2_2",
+            "version": "2.2.0",
+            "application_path": "/apps/js8call",
+            "host": "127.0.0.1",
+            "port": 2443,
+            "udp_port": 2243,
+        },
+    )
+    try:
+        _show_step(assistant, 4)
+        draft = assistant.draft()
+        assert draft.launch_recipe_status == "qualified_managed"
+        assert draft.configuration_path == "/managed/draft-js8call-files/js8call"
+        assert "fio-draft-js8call-files" in draft.storage_path
+        assert draft.storage_path != "/managed/draft-js8call-files/js8call/save"
+        assert assistant._field_widgets["configuration_path"].isHidden()
+        assert assistant._field_widgets["storage_path"].isHidden()
+        assert assistant.prepared_details_button.isChecked() is False
+        assert assistant.prepared_details_group.isHidden()
+    finally:
+        assistant.deleteLater()
+        app.processEvents()
+
+
 def test_qualified_fast_light_review_preserves_component_order_and_dependencies() -> None:
     app = _app()
     assistant = SoftwareInstanceAssistant(
@@ -167,6 +203,10 @@ def test_source_lock_wins_over_operator_start_raw_override() -> None:
         "udp_port": 2242,
         "application_path": "/apps/js8call",
         "launch_command": "/apps/js8call --rig-name EXISTING",
+        # Classification is supplied by the immutable inventory core; this
+        # test exercises source-lock behavior after explicit import.
+        "candidate_classification": "usable_existing",
+        "usable_existing": True,
     }
     assistant = SoftwareInstanceAssistant(
         "js8call",

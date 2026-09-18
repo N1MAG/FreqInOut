@@ -389,6 +389,9 @@ from freqinout.core.guided_instance_inventory import (
     distinct_draft_seed,
     source_identity_fingerprint,
 )
+from freqinout.core.guided_varac_configuration import (
+    recommend_varac_arrangement_from_snapshots,
+)
 from freqinout.gui.guided_receiver_presentation import (
     guided_recovery_presentation,
     receiver_state_presentation,
@@ -10221,7 +10224,44 @@ class SettingsTab(QWidget):
         except Exception:
             log.exception("Failed loading software instance manifests for review.")
             manifests = []
-        return self._enrich_software_instance_rows(family, rows, manifests)
+        try:
+            profiles = self.multi_radio_store.list_device_profiles()
+        except Exception:
+            log.exception("Failed loading radio links for software inventory review.")
+            profiles = []
+        enriched = self._enrich_software_instance_rows(family, rows, manifests)
+        snapshot = build_guided_instance_inventory(
+            {family: enriched},
+            linked_ids_by_family=self._linked_software_instance_ids(profiles),
+            generation=0,
+        )
+        return tuple(dict(row) for row in snapshot.rows_for(family))
+
+    @staticmethod
+    def _linked_software_instance_ids(
+        profiles: Sequence[Mapping[str, Any]],
+    ) -> Dict[str, tuple[int, ...]]:
+        """Project durable radio links from one already-loaded profile snapshot."""
+
+        columns = {
+            "js8call": "js8_instance_id",
+            "fast_light": "fast_light_config_id",
+            "varac": "varac_node_id",
+        }
+        linked: Dict[str, tuple[int, ...]] = {}
+        for family, column in columns.items():
+            values: set[int] = set()
+            for profile in profiles:
+                if not isinstance(profile, Mapping):
+                    continue
+                try:
+                    value = int(profile.get(column) or 0)
+                except (TypeError, ValueError):
+                    value = 0
+                if value > 0:
+                    values.add(value)
+            linked[family] = tuple(sorted(values))
+        return linked
 
     def _current_guided_instance_inventory(
         self,
@@ -10234,6 +10274,7 @@ class SettingsTab(QWidget):
 
         try:
             manifests = self.multi_radio_store.list_software_instance_manifests()
+            profiles = self.multi_radio_store.list_device_profiles()
             loaders = {
                 "js8call": self.multi_radio_store.list_js8_instances,
                 "fast_light": self.multi_radio_store.list_fast_light_configs,
@@ -10254,6 +10295,7 @@ class SettingsTab(QWidget):
         return build_guided_instance_inventory(
             saved,
             retained_drafts=retained_drafts,
+            linked_ids_by_family=self._linked_software_instance_ids(profiles),
             generation=max(0, int(generation or 0)),
         )
 
@@ -10324,6 +10366,9 @@ class SettingsTab(QWidget):
                 }.get(str(manifest.get("management_mode") or "").strip().lower(), "operator-managed")
                 row.update(
                     {
+                        "manifest_present": True,
+                        "manifest_id": manifest.get("instance_key") or manifest.get("id") or "",
+                        "observed_fingerprint": manifest.get("observed_fingerprint") or "",
                         "ownership": ownership,
                         "mode": "discover" if manifest.get("provenance") == "detected" else "managed",
                         "application_path": manifest.get("executable_path") or row.get("install_path") or row.get("flrig_path"),
@@ -14465,7 +14510,29 @@ class SettingsTab(QWidget):
             combined = list(self._software_instance_inventory(family))
             discovered = result_map.get("__instance_candidates__")
             if isinstance(discovered, (list, tuple)):
-                combined.extend(dict(row) for row in discovered if isinstance(row, Mapping))
+                detected_rows: List[Dict[str, Any]] = []
+                for raw_row in discovered:
+                    if not isinstance(raw_row, Mapping):
+                        continue
+                    row = dict(raw_row)
+                    # Bounded native discovery is explicit source evidence,
+                    # but it does not imply FIO ownership.  Give the immutable
+                    # detected bundle a stable evidence key, then let the core
+                    # classifier decide whether it is complete enough for the
+                    # explicit recovery/import picker.
+                    if str(row.get("provenance") or "").strip().lower() == "detected":
+                        evidence_fingerprint = source_identity_fingerprint(family, row)
+                        row.setdefault(
+                            "system_key",
+                            f"detected-{family}-{evidence_fingerprint[:16]}",
+                        )
+                        row["observed_fingerprint"] = source_identity_fingerprint(family, row)
+                    detected_rows.append(row)
+                detected_snapshot = build_guided_instance_inventory(
+                    {family: detected_rows},
+                    generation=int(generation),
+                )
+                combined.extend(dict(row) for row in detected_snapshot.rows_for(family))
             deduped: List[Dict[str, Any]] = []
             identities: set[tuple[str, str, str]] = set()
             for row in combined:
@@ -21039,6 +21106,7 @@ class SettingsTab(QWidget):
         js8_file_profiles: Sequence[Any],
         default_ports: Mapping[str, str],
         profile_name: str = "",
+        source_modes: Mapping[str, str] | None = None,
     ) -> Tuple[Dict[str, str], Tuple[str, ...]]:
         return guided_radio_autofill_suggestions(
             current=current,
@@ -21052,6 +21120,7 @@ class SettingsTab(QWidget):
             js8_file_profiles=js8_file_profiles,
             default_ports=default_ports,
             profile_name=profile_name,
+            source_modes=source_modes,
         )
 
     def _detect_migration_roles(self) -> set[str]:
@@ -24423,6 +24492,24 @@ class SettingsTab(QWidget):
         except Exception:
             log.exception("Failed loading guided software manifests.")
             guided_manifests = []
+        try:
+            guided_profiles = self.multi_radio_store.list_device_profiles()
+        except Exception:
+            log.exception("Failed loading guided software radio links.")
+            guided_profiles = []
+        try:
+            guided_varac_cluster_rows = self.multi_radio_store.list_varac_clusters()
+            guided_varac_membership_rows = self.multi_radio_store.list_varac_cluster_members()
+            guided_varac_topology_snapshot_available = True
+        except Exception:
+            # The arrangement presentation must fail closed.  An unavailable
+            # read-only cluster snapshot is not evidence that a cluster is
+            # absent, so only the safe standalone preparation route remains.
+            log.exception("Failed loading guided VarAC arrangement snapshot.")
+            guided_varac_cluster_rows = []
+            guided_varac_membership_rows = []
+            guided_varac_topology_snapshot_available = False
+        guided_linked_instance_ids = self._linked_software_instance_ids(guided_profiles)
         guided_saved_instance_rows = {
             "js8call": self._enrich_software_instance_rows(
                 "js8call", self.multi_radio_store.list_js8_instances(), guided_manifests
@@ -24437,6 +24524,7 @@ class SettingsTab(QWidget):
         guided_instance_inventory_generation = 0
         guided_instance_inventory_snapshot = build_guided_instance_inventory(
             guided_saved_instance_rows,
+            linked_ids_by_family=guided_linked_instance_ids,
             generation=guided_instance_inventory_generation,
         )
 
@@ -24448,6 +24536,7 @@ class SettingsTab(QWidget):
             guided_instance_inventory_snapshot = build_guided_instance_inventory(
                 guided_saved_instance_rows,
                 retained_drafts=retained_drafts,
+                linked_ids_by_family=guided_linked_instance_ids,
                 generation=guided_instance_inventory_generation,
             )
             return guided_instance_inventory_snapshot
@@ -24472,6 +24561,8 @@ class SettingsTab(QWidget):
         layout.addWidget(intro)
 
         scroll = QScrollArea(dlg)
+        scroll.setObjectName("guidedRadioSetupBodyScroll")
+        scroll.setAccessibleName("Guided radio setup body")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -24672,20 +24763,16 @@ class SettingsTab(QWidget):
         guided_wizard_detail_label.setObjectName("guidedWizardDetail")
         guided_wizard_detail_label.setWordWrap(True)
         guided_wizard_layout.addWidget(guided_wizard_detail_label)
-        guided_wizard_nav_row = QHBoxLayout()
-        guided_wizard_nav_row.setContentsMargins(0, 0, 0, 0)
-        guided_wizard_nav_row.setSpacing(8)
         guided_wizard_back_btn = QPushButton("Back")
         guided_wizard_back_btn.setObjectName("guidedWizardBack")
         guided_wizard_back_btn.setAccessibleName("Previous guided setup step")
         guided_wizard_next_btn = QPushButton("Next")
         guided_wizard_next_btn.setObjectName("guidedWizardNext")
         guided_wizard_next_btn.setAccessibleName("Next guided setup step")
-        guided_wizard_nav_row.addStretch(1)
-        guided_wizard_nav_row.addWidget(guided_wizard_back_btn)
-        guided_wizard_nav_row.addWidget(guided_wizard_next_btn)
-        guided_wizard_layout.addLayout(guided_wizard_nav_row)
-        body_layout.addWidget(guided_wizard_group)
+        # The purpose and step controls are a fixed header.  The current step
+        # body alone owns vertical scrolling; Back/Next are placed in the fixed
+        # action footer below after the button box is created.
+        layout.insertWidget(layout.indexOf(scroll), guided_wizard_group)
 
         readiness_card = QFrame()
         readiness_card.setFrameShape(QFrame.StyledPanel)
@@ -25213,19 +25300,52 @@ class SettingsTab(QWidget):
         software_hint_label.setWordWrap(True)
         _add_full_width_row(software_form, software_hint_label)
 
-        # Keep ownership, completion, and launch intent beside each selected
-        # family.  These controls are a draft-only projection in this slice;
-        # family persistence remains owned by Software Administration and the
-        # later family-completion delivery slices.
-        software_responsibility_group = QGroupBox("Software responsibilities")
+        # This primary action is deliberately presented before the per-family
+        # review cards.  The operator selects capabilities above, then FIO
+        # prepares a proposal before presenting technical administration.
+        configure_auto_wrap = QFrame()
+        configure_auto_wrap.setObjectName("guidedConfigureAutomaticallyCard")
+        configure_auto_wrap.setFrameShape(QFrame.StyledPanel)
+        configure_auto_wrap.setStyleSheet(
+            "QFrame#guidedConfigureAutomaticallyCard {"
+            f" background-color: {theme.get('selection_bg', theme.get('surface_alt', '#E8F3FA'))};"
+            f" border: 1px solid {theme.get('accent', '#0076A8')};"
+            " border-radius: 6px;"
+            "}"
+        )
+        configure_auto_row = QHBoxLayout(configure_auto_wrap)
+        configure_auto_row.setContentsMargins(10, 8, 10, 8)
+        configure_auto_row.setSpacing(8)
+        configure_auto_btn = QPushButton("Prepare selected software automatically")
+        configure_auto_btn.setObjectName("guidedConfigureAutomaticallyButton")
+        configure_auto_btn.setStyleSheet(button_style("primary", theme))
+        configure_auto_btn.setToolTip(
+            "Discover installed software and prepare a radio-specific plan before requesting technical corrections."
+        )
+        configure_auto_status = QLabel(
+            "Choose software above, then let FIO prepare a complete plan."
+        )
+        configure_auto_status.setObjectName("guidedConfigureAutomaticallyStatus")
+        configure_auto_status.setWordWrap(True)
+        configure_auto_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        configure_auto_row.addWidget(configure_auto_btn)
+        configure_auto_row.addWidget(configure_auto_status, 1)
+        _add_full_width_row(software_form, configure_auto_wrap)
+
+        # Add Radio starts by collecting intent, then prepares a complete
+        # proposal in the background.  Do not make an operator enter native
+        # application details before FIO has had an opportunity to discover
+        # and derive them.  The durable ownership/completion/launch controls
+        # remain below as draft projections, but are deliberately withheld
+        # until a prepared plan is available for review.
+        software_responsibility_group = QGroupBox("Choose software source")
         software_responsibility_group.setObjectName("guidedSoftwareResponsibilities")
         software_responsibility_layout = QVBoxLayout(software_responsibility_group)
         software_responsibility_layout.setContentsMargins(8, 8, 8, 8)
         software_responsibility_layout.setSpacing(8)
         software_responsibility_intro = QLabel(
-            "For each selected capability, confirm where its instance comes from, who completes native setup, "
-            "whether it is required, and who starts it. Configure details opens the shared Software "
-            "Administration editor without saving or discarding this radio draft."
+            "Choose how FIO should prepare each selected software family. FIO discovers installed software "
+            "and creates a plan before asking you to review or correct technical details."
         )
         software_responsibility_intro.setWordWrap(True)
         software_responsibility_layout.addWidget(software_responsibility_intro)
@@ -25236,6 +25356,14 @@ class SettingsTab(QWidget):
         software_launch_policy_combos: Dict[str, QComboBox] = {}
         software_detail_buttons: Dict[str, QPushButton] = {}
         software_responsibility_labels: Dict[str, QLabel] = {}
+        software_prepared_state_labels: Dict[str, QLabel] = {}
+        software_card_technical_widgets: Dict[str, List[QWidget]] = {}
+        varac_arrangement_combo: Optional[QComboBox] = None
+        varac_arrangement_hint: Optional[QLabel] = None
+        varac_arrangement_presentation: Mapping[str, Any] = {}
+        software_plan_prepared = False
+        prepared_software_families: Tuple[str, ...] = ()
+        prepared_software_context: Tuple[str, ...] = ()
         software_family_titles = {
             "receiver": "Receiver application",
             "js8call": "JS8Call family",
@@ -25252,7 +25380,7 @@ class SettingsTab(QWidget):
             "fio_spotter": "Built into FIO; maps watches, compose, decode, and Inbox activity to this radio without a separate install or forms-folder choice.",
             "external_spotter": "Optional external Spotter application; separate from built-in FIO Spotter.",
             "commstat": "Binds the one station-shared CommStat process to this radio's selected or new JS8Call endpoint.",
-            "varac": "Owns a radio-scoped VarAC node. Standalone is the safe default; create or join a cluster only intentionally.",
+            "varac": "Owns a radio-scoped VarAC node. Choose standalone, create a cluster, or join a cluster before FIO prepares its plan.",
         }
 
         for family_key, family_title in software_family_titles.items():
@@ -25272,15 +25400,15 @@ class SettingsTab(QWidget):
             source_combo.setObjectName(f"guidedSoftwareSource_{family_key}")
             source_combo.setAccessibleName(f"{family_title} instance source")
             if family_key == "fio_spotter":
-                source_combo.addItem("Built into FIO", "built_in")
+                source_combo.addItem("Included with FIO", "built_in")
             elif family_key == "commstat":
-                source_combo.addItem("Bind station CommStat to this JS8 endpoint", "station_shared")
+                source_combo.addItem("Use the station-shared CommStat service", "station_shared")
             else:
-                source_combo.addItem("Create a distinct instance", "create")
-                source_combo.addItem("Use an existing instance", "existing")
-                source_combo.addItem("Connect manually or remotely", "manual")
+                source_combo.addItem("Create a new FIO-managed instance", "create")
+                source_combo.addItem("Use an existing instance unchanged", "existing")
+                source_combo.addItem("Set up manually or connect remotely", "manual")
                 if family_key == "fast_light":
-                    source_combo.addItem("Use shared station tools", "shared")
+                    source_combo.addItem("Use station-shared Fast Light tools", "shared")
             if existing and family_key not in {"fio_spotter", "commstat"}:
                 source_combo.setCurrentIndex(max(0, source_combo.findData("existing")))
             _configure_combo_width(source_combo, minimum=210)
@@ -25322,33 +25450,71 @@ class SettingsTab(QWidget):
             if family_key in {"fio_spotter", "commstat"}:
                 launch_combo.setEnabled(False)
 
-            detail_btn = QPushButton("Continue in Software Administration")
+            detail_btn = QPushButton("Show Details / correct…")
             detail_btn.setObjectName(f"guidedSoftwareDetails_{family_key}")
-            detail_btn.setAccessibleName(f"Configure {family_title} details for this radio draft")
+            detail_btn.setAccessibleName(f"Review or correct {family_title} details for this radio draft")
             detail_btn.setToolTip(
-                "Open the shared Software Administration editor against this unsaved radio draft, then return here."
+                "Review only the prepared details that need attention, then return to this unsaved radio draft."
             )
             detail_btn.setStyleSheet(button_style("secondary", theme))
             if family_key == "fio_spotter":
-                detail_btn.setText("Review built-in mapping")
+                detail_btn.setText("Show Details / mapping…")
                 detail_btn.setToolTip(
                     "Review the JS8 transport used by built-in FIO Spotter. No external install or MCF folder is required."
                 )
             elif family_key == "commstat":
-                detail_btn.setText("Review JS8 endpoint binding")
+                detail_btn.setText("Show Details / JS8 binding…")
                 detail_btn.setToolTip(
                     "Review the JS8Call TCP endpoint that the station-shared CommStat process uses for this radio."
                 )
 
-            card_layout.addWidget(QLabel("Instance source"), 1, 0)
+            source_label = QLabel("Instance source")
+            card_layout.addWidget(source_label, 1, 0)
             card_layout.addWidget(source_combo, 1, 1)
-            card_layout.addWidget(QLabel("Completion policy"), 1, 2)
+            completion_label = QLabel("Completion policy")
+            card_layout.addWidget(completion_label, 1, 2)
             card_layout.addWidget(completion_combo, 1, 3)
-            card_layout.addWidget(QLabel("Configuration responsibility"), 2, 0)
+            management_label = QLabel("Configuration responsibility")
+            card_layout.addWidget(management_label, 2, 0)
             card_layout.addWidget(management_combo, 2, 1)
-            card_layout.addWidget(QLabel("Launch policy"), 2, 2)
+            launch_label = QLabel("Launch policy")
+            card_layout.addWidget(launch_label, 2, 2)
             card_layout.addWidget(launch_combo, 2, 3)
             card_layout.addWidget(detail_btn, 3, 3)
+            prepared_state = QLabel("Needs attention — choose a source, then prepare this software.")
+            prepared_state.setObjectName(f"guidedSoftwarePreparedState_{family_key}")
+            prepared_state.setWordWrap(True)
+            prepared_state.setAccessibleName(f"{family_title} preparation status")
+            card_layout.addWidget(prepared_state, 3, 0, 1, 3)
+            technical_widgets: List[QWidget] = [
+                completion_label,
+                completion_combo,
+                management_label,
+                management_combo,
+                launch_label,
+                launch_combo,
+                detail_btn,
+            ]
+            if family_key == "varac":
+                varac_arrangement_label = QLabel("VarAC arrangement")
+                varac_arrangement_combo = QComboBox()
+                varac_arrangement_combo.setObjectName("guidedVaracArrangement")
+                varac_arrangement_combo.setAccessibleName("VarAC arrangement")
+                _configure_combo_width(varac_arrangement_combo, minimum=260)
+                varac_arrangement_hint = QLabel(
+                    "Choose the arrangement before FIO prepares VarAC. Existing configuration is never changed until final review."
+                )
+                varac_arrangement_hint.setObjectName("guidedVaracArrangementHint")
+                varac_arrangement_hint.setWordWrap(True)
+                card_layout.addWidget(varac_arrangement_label, 2, 0)
+                card_layout.addWidget(varac_arrangement_combo, 2, 1, 1, 3)
+                card_layout.addWidget(varac_arrangement_hint, 3, 0, 1, 4)
+                card_layout.addWidget(prepared_state, 4, 0, 1, 3)
+                card_layout.addWidget(detail_btn, 4, 3)
+                card_layout.addWidget(management_label, 5, 0)
+                card_layout.addWidget(management_combo, 5, 1)
+                card_layout.addWidget(launch_label, 5, 2)
+                card_layout.addWidget(launch_combo, 5, 3)
             card_layout.setColumnStretch(1, 1)
             card_layout.setColumnStretch(3, 1)
             card.setVisible(False)
@@ -25359,8 +25525,181 @@ class SettingsTab(QWidget):
             software_completion_combos[family_key] = completion_combo
             software_launch_policy_combos[family_key] = launch_combo
             software_detail_buttons[family_key] = detail_btn
+            software_prepared_state_labels[family_key] = prepared_state
+            software_card_technical_widgets[family_key] = technical_widgets
 
         _add_full_width_row(software_form, software_responsibility_group)
+
+        def _refresh_varac_arrangement_presentation(*, preserve_selection: bool = True) -> None:
+            """Render only the immutable core recommendation before preparation.
+
+            The core adapter owns classification, topology inference, labels,
+            and next-member allocation.  This dialog merely presents that
+            result; it never treats an incomplete row as cluster evidence or
+            selects a mutating route on the operator's behalf.
+            """
+
+            nonlocal varac_arrangement_presentation
+            if varac_arrangement_combo is None:
+                return
+            previous_path = str(varac_arrangement_combo.currentData() or "").strip()
+            previous_metadata = varac_arrangement_combo.itemData(
+                varac_arrangement_combo.currentIndex(), Qt.UserRole + 1
+            )
+            if not isinstance(previous_metadata, Mapping):
+                previous_metadata = {}
+            try:
+                presentation = recommend_varac_arrangement_from_snapshots(
+                    guided_instance_inventory_snapshot.rows_for("varac"),
+                    guided_varac_cluster_rows,
+                    guided_varac_membership_rows,
+                    guided_profiles,
+                    new_radio_label=name_edit.text().strip() or "new radio",
+                )
+            except Exception:
+                log.exception("Failed building guided VarAC arrangement presentation.")
+                presentation = {
+                    "default_path": "standalone",
+                    "recommended_path": "",
+                    "join_choices": (),
+                    "standalone_candidates": (),
+                    "existing_setup_summary": "Existing setup could not be classified. Standalone remains available.",
+                    "create_choice_label": "Create a new VarAC cluster",
+                    "needs_attention": True,
+                    "topology_available": False,
+                    "why": "Review the current VarAC setup before choosing a cluster arrangement.",
+                }
+            varac_arrangement_presentation = dict(presentation)
+            with QSignalBlocker(varac_arrangement_combo):
+                varac_arrangement_combo.clear()
+
+                def _add_choice(label: str, path: str, metadata: Mapping[str, Any] | None = None) -> None:
+                    varac_arrangement_combo.addItem(label, path)
+                    varac_arrangement_combo.setItemData(
+                        varac_arrangement_combo.count() - 1,
+                        dict(metadata or {}),
+                        Qt.UserRole + 1,
+                    )
+
+                default_path = str(presentation.get("default_path") or "").strip()
+                recommended_path = str(presentation.get("recommended_path") or "").strip()
+                standalone_candidates = tuple(presentation.get("standalone_candidates") or ())
+                topology_available = bool(
+                    presentation.get(
+                        "topology_available", guided_varac_topology_snapshot_available
+                    )
+                )
+                if not default_path:
+                    _add_choice("Choose VarAC arrangement…", "")
+                standalone_label = (
+                    "Create another standalone VarAC node"
+                    if recommended_path == "create_cluster" and standalone_candidates
+                    else "Standalone VarAC node"
+                )
+                _add_choice(standalone_label, "standalone")
+                if topology_available and len(standalone_candidates) > 1:
+                    for candidate in standalone_candidates:
+                        if not isinstance(candidate, Mapping):
+                            continue
+                        label = str(candidate.get("label") or "existing standalone VarAC node").strip()
+                        _add_choice(
+                            f"Create a cluster with {label} and {presentation.get('new_radio_label') or 'new radio'}",
+                            "create_cluster",
+                            {
+                                "existing_node_id": candidate.get("node_id"),
+                                "existing_device_profile_id": candidate.get("device_profile_id"),
+                                "proposed_cluster_name": candidate.get("proposed_cluster_name"),
+                                "proposed_cluster_id": candidate.get("proposed_cluster_id"),
+                            },
+                        )
+                elif topology_available:
+                    _add_choice(
+                        str(presentation.get("create_choice_label") or "Create a new VarAC cluster"),
+                        "create_cluster",
+                        {
+                            "existing_node_id": presentation.get("recommended_existing_node_id"),
+                            "existing_device_profile_id": presentation.get(
+                                "recommended_existing_device_profile_id"
+                            ),
+                            "recommended": recommended_path == "create_cluster",
+                            "proposed_cluster_name": presentation.get(
+                                "proposed_create_cluster_name"
+                            ),
+                            "proposed_cluster_id": presentation.get(
+                                "proposed_create_cluster_id"
+                            ),
+                        },
+                    )
+                if topology_available:
+                    for choice in tuple(presentation.get("join_choices") or ()):
+                        if not isinstance(choice, Mapping):
+                            continue
+                        label = str(choice.get("label") or choice.get("cluster_id") or "VarAC cluster").strip()
+                        next_number = choice.get("next_instance_number")
+                        suffix = f" (next member {next_number})" if next_number else ""
+                        _add_choice(
+                            f"Join {label}{suffix}",
+                            "join_cluster",
+                            {
+                                "cluster_id": choice.get("cluster_id"),
+                                "cluster_db_id": choice.get("cluster_db_id"),
+                                "cluster_instance_number": next_number,
+                            },
+                        )
+
+                restore_index = -1
+                if preserve_selection and previous_path:
+                    for index in range(varac_arrangement_combo.count()):
+                        if str(varac_arrangement_combo.itemData(index) or "") != previous_path:
+                            continue
+                        metadata = varac_arrangement_combo.itemData(index, Qt.UserRole + 1)
+                        same_join = (
+                            previous_path != "join_cluster"
+                            or (
+                                isinstance(metadata, Mapping)
+                                and metadata.get("cluster_id")
+                                == previous_metadata.get("cluster_id")
+                            )
+                        )
+                        same_create = (
+                            previous_path != "create_cluster"
+                            or (
+                                isinstance(metadata, Mapping)
+                                and metadata.get("existing_node_id")
+                                == previous_metadata.get("existing_node_id")
+                            )
+                        )
+                        if same_join and same_create:
+                            restore_index = index
+                            break
+                if restore_index >= 0:
+                    varac_arrangement_combo.setCurrentIndex(restore_index)
+                elif default_path:
+                    default_index = varac_arrangement_combo.findData(default_path)
+                    varac_arrangement_combo.setCurrentIndex(default_index if default_index >= 0 else 0)
+                else:
+                    varac_arrangement_combo.setCurrentIndex(0)
+            if varac_arrangement_hint is not None:
+                summary = str(presentation.get("existing_setup_summary") or "").strip()
+                why = str(presentation.get("why") or "").strip()
+                varac_arrangement_hint.setText(
+                    " ".join(part for part in (summary, why) if part)
+                    or "Choose the arrangement before FIO prepares VarAC. Existing configuration is never changed until final review."
+                )
+
+        _refresh_varac_arrangement_presentation(preserve_selection=False)
+
+        def _selected_varac_arrangement() -> Dict[str, Any]:
+            """Return the operator's selection plus opaque core metadata."""
+
+            if varac_arrangement_combo is None:
+                return {"cluster_path": "standalone"}
+            metadata = varac_arrangement_combo.itemData(
+                varac_arrangement_combo.currentIndex(), Qt.UserRole + 1
+            )
+            selection = dict(metadata) if isinstance(metadata, Mapping) else {}
+            selection["cluster_path"] = str(varac_arrangement_combo.currentData() or "").strip()
+            return selection
 
         radio_apps_base_edit = QLineEdit(str(self.settings.get("radio_apps_base_folder", "") or ""))
         radio_apps_base_edit.setObjectName("guidedRadioAppsBaseFolder")
@@ -25382,33 +25721,6 @@ class SettingsTab(QWidget):
             radio_apps_base_wrap,
             "Optional. Point FIO at the common folder where radio-owned tools such as external JS8Spotter or VarAC are installed. Station-shared CommStat is configured separately.",
         )
-
-        configure_auto_wrap = QFrame()
-        configure_auto_wrap.setObjectName("guidedConfigureAutomaticallyCard")
-        configure_auto_wrap.setFrameShape(QFrame.StyledPanel)
-        configure_auto_wrap.setStyleSheet(
-            "QFrame#guidedConfigureAutomaticallyCard {"
-            f" background-color: {theme.get('selection_bg', theme.get('surface_alt', '#E8F3FA'))};"
-            f" border: 1px solid {theme.get('accent', '#0076A8')};"
-            " border-radius: 6px;"
-            "}"
-        )
-        configure_auto_row = QHBoxLayout(configure_auto_wrap)
-        configure_auto_row.setContentsMargins(10, 8, 10, 8)
-        configure_auto_row.setSpacing(8)
-        configure_auto_btn = QPushButton("Configure Automatically")
-        configure_auto_btn.setObjectName("guidedConfigureAutomaticallyButton")
-        configure_auto_btn.setStyleSheet(button_style("primary", theme))
-        configure_auto_btn.setToolTip(
-            "Fill blank paths, ports, and message-file locations for this radio using installed apps and existing app settings."
-        )
-        configure_auto_status = QLabel("Recommended: let FIO fill blanks, then review highlighted choices.")
-        configure_auto_status.setObjectName("guidedConfigureAutomaticallyStatus")
-        configure_auto_status.setWordWrap(True)
-        configure_auto_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        configure_auto_row.addWidget(configure_auto_btn)
-        configure_auto_row.addWidget(configure_auto_status, 1)
-        _add_full_width_row(software_form, configure_auto_wrap)
 
         app_setup_plan_group = QGroupBox("Setup Status")
         app_setup_plan_group.setObjectName("guidedAutoAppSetupPlan")
@@ -26434,9 +26746,31 @@ class SettingsTab(QWidget):
                 "varac": use_varac_chk.isChecked(),
             }.get(str(family_key or "").strip().lower(), False)
 
+        def _guided_software_plan_context() -> Tuple[str, ...]:
+            selected = tuple(
+                family_key
+                for family_key in software_responsibility_cards
+                if _guided_software_family_selected(family_key)
+            )
+            return selected + (
+                f"role:{str(device_class_combo.currentData() or '').strip().lower()}",
+                f"setup:{str(setup_type_combo.currentData() or '').strip().lower()}",
+            )
+
         def _update_software_responsibility_cards() -> None:
+            nonlocal software_plan_prepared
             selected_count = 0
             observer_mode = str(device_class_combo.currentData() or "").strip().lower() == "observer"
+            current_families = tuple(
+                family_key
+                for family_key in software_responsibility_cards
+                if _guided_software_family_selected(family_key)
+            )
+            if software_plan_prepared and _guided_software_plan_context() != prepared_software_context:
+                software_plan_prepared = False
+                configure_auto_status.setText(
+                    "Stale — reprepare required. Software choices changed; prepare selected software automatically again before reviewing details."
+                )
             for family_key, card in software_responsibility_cards.items():
                 selected = _guided_software_family_selected(family_key)
                 card.setVisible(selected)
@@ -26451,7 +26785,33 @@ class SettingsTab(QWidget):
                     software_responsibility_labels[family_key].setText(
                         "Binds the station-shared CommStat process to this receiver's JS8Call endpoint; this cannot grant send or PTT authority."
                     )
-                software_detail_buttons[family_key].setEnabled(selected)
+                prepared = bool(selected and software_plan_prepared)
+                for widget in software_card_technical_widgets[family_key]:
+                    widget.setVisible(prepared)
+                software_detail_buttons[family_key].setEnabled(prepared)
+                state_label = software_prepared_state_labels[family_key]
+                if not selected:
+                    state_label.setText("")
+                elif prepared:
+                    state_label.setText(
+                        "Ready — review or correct only the details that need attention."
+                    )
+                elif family_key == "varac":
+                    selected_arrangement = _selected_varac_arrangement()
+                    if bool(varac_arrangement_presentation.get("needs_attention")):
+                        state_label.setText(
+                            "Needs attention — choose which existing standalone VarAC node to use, then prepare this software."
+                        )
+                    elif not str(selected_arrangement.get("cluster_path") or "").strip():
+                        state_label.setText(
+                            "Needs attention — choose the VarAC arrangement, then prepare this software."
+                        )
+                    else:
+                        state_label.setText(
+                            "Needs attention — choose the VarAC arrangement, then prepare this software."
+                        )
+                else:
+                    state_label.setText("Needs attention — choose a source, then prepare this software.")
             software_responsibility_group.setVisible(selected_count > 0)
 
         def _sync_software_policy_from_source(family_key: str) -> None:
@@ -26475,6 +26835,18 @@ class SettingsTab(QWidget):
             launch_idx = launch_combo.findData(launch_value)
             if launch_idx >= 0:
                 launch_combo.setCurrentIndex(launch_idx)
+
+        def _invalidate_prepared_software_plan() -> None:
+            nonlocal software_plan_prepared, prepared_software_families, prepared_software_context
+            if not software_plan_prepared:
+                return
+            software_plan_prepared = False
+            prepared_software_families = ()
+            prepared_software_context = ()
+            configure_auto_status.setText(
+                "Stale — reprepare required. Software choices changed; prepare selected software automatically again before reviewing details."
+            )
+            _update_software_responsibility_cards()
 
         def _guided_software_editor_state() -> Dict[str, Any]:
             return {
@@ -26568,7 +26940,14 @@ class SettingsTab(QWidget):
         }
 
         def _show_guided_software_details(family_key: str) -> None:
+            nonlocal software_plan_prepared, prepared_software_families, prepared_software_context
             family = str(family_key or "").strip().lower()
+            if not software_plan_prepared:
+                configure_auto_status.setText(
+                    "Prepare selected software automatically before reviewing or correcting details."
+                )
+                _set_guided_wizard_step("software")
+                return
             if family == "receiver":
                 _set_guided_wizard_step("connection")
                 return
@@ -26620,7 +26999,7 @@ class SettingsTab(QWidget):
                 inventory_snapshot = _refresh_guided_instance_inventory(retained)
                 seed_context: Dict[str, Any] = {
                     "family_key": family,
-                    "instance_name": f"{radio_draft_label} {family_title}",
+                    "instance_name": radio_draft_label,
                     "mode": mode,
                     "ownership": ownership,
                     "launch_at_startup": launch_at_startup,
@@ -26666,15 +27045,71 @@ class SettingsTab(QWidget):
                         seed["application_path"] = ""
                         seed["port"] = 0
                     elif family == "varac":
-                        # A newly created node is always independent unless
-                        # the operator explicitly chooses Create or Join in
-                        # the authoritative instance assistant.
+                        # The core presentation owns topology inference.  The
+                        # operator's explicit arrangement and its reviewed
+                        # member metadata cross into the assistant together.
+                        arrangement_selection = _selected_varac_arrangement()
+                        arrangement = str(
+                            arrangement_selection.get("cluster_path") or "standalone"
+                        ).strip() or "standalone"
+                        is_cluster_route = arrangement in {"create_cluster", "join_cluster"}
+                        is_existing_standalone_create = (
+                            arrangement == "create_cluster"
+                            and bool(
+                                arrangement_selection.get("existing_node_id")
+                                or varac_arrangement_presentation.get(
+                                    "recommended_existing_node_id"
+                                )
+                            )
+                        )
                         seed.update(
-                            cluster_path="standalone",
-                            cluster_id="",
-                            cluster_name="",
+                            cluster_path=arrangement,
+                            cluster_id=str(
+                                arrangement_selection.get("cluster_id")
+                                or arrangement_selection.get("proposed_cluster_id")
+                                or ""
+                            ),
+                            cluster_name=str(
+                                arrangement_selection.get("proposed_cluster_name") or ""
+                            ),
                             cluster_shared_database="",
-                            cluster_instance_number=0,
+                            cluster_instance_number=int(
+                                (
+                                    arrangement_selection.get("cluster_instance_number")
+                                    or varac_arrangement_presentation.get(
+                                        "new_member_instance_number"
+                                    )
+                                )
+                                if is_cluster_route
+                                else 0
+                            ),
+                            existing_standalone_node_id=int(
+                                (
+                                    arrangement_selection.get("existing_node_id")
+                                    or varac_arrangement_presentation.get(
+                                        "recommended_existing_node_id"
+                                    )
+                                )
+                                if is_existing_standalone_create
+                                else 0
+                            ),
+                            existing_standalone_device_profile_id=int(
+                                (
+                                    arrangement_selection.get("existing_device_profile_id")
+                                    or varac_arrangement_presentation.get(
+                                        "recommended_existing_device_profile_id"
+                                    )
+                                )
+                                if is_existing_standalone_create
+                                else 0
+                            ),
+                            existing_standalone_member_number=int(
+                                varac_arrangement_presentation.get(
+                                    "existing_member_instance_number"
+                                )
+                                if is_existing_standalone_create
+                                else 0
+                            ),
                             cluster_gateway=False,
                             cluster_ptt_lock=False,
                         )
@@ -26716,17 +27151,16 @@ class SettingsTab(QWidget):
                         launch_command=str(state.get("varac_launch_cmd") or ""),
                     )
                 editor_dialog = QDialog(dlg)
-                editor_dialog.setWindowTitle(f"{family_title} — Software Administration")
+                editor_dialog.setWindowTitle(f"{family_title} setup for {radio_draft_label}")
                 editor_dialog.setAccessibleName(
-                    f"Configure {family_title} for unsaved radio draft"
+                    f"Review or correct prepared {family_title} details for {radio_draft_label}"
                 )
                 editor_dialog.resize(780, 700)
                 editor_layout = QVBoxLayout(editor_dialog)
                 handoff_note = QLabel(
-                    "Continue in Software Administration for this inactive setup draft. "
-                    "The authoritative instance assistant keeps source, identity, connections, files, "
-                    "launch, conflicts, and review together. Apply returns to Add Radio; nothing is "
-                    "saved until Save Radio and Software."
+                    "Review or correct the prepared plan for this inactive radio draft. "
+                    "FIO prepared source, identity, connections, files, launch, conflicts, and review "
+                    "together. Apply returns to Add Radio; nothing is saved until Review & Save."
                 )
                 handoff_note.setWordWrap(True)
                 editor_layout.addWidget(handoff_note)
@@ -26816,6 +27250,14 @@ class SettingsTab(QWidget):
                     )
                     applied["message_paths"] = message_paths
                 _apply_guided_software_editor_state(applied)
+                software_plan_prepared = True
+                prepared_software_families = tuple(
+                    key
+                    for key in software_responsibility_cards
+                    if _guided_software_family_selected(key)
+                )
+                prepared_software_context = _guided_software_plan_context()
+                _update_software_responsibility_cards()
                 configure_auto_status.setText(
                     f"Applied {family_title} instance review to this inactive radio draft. "
                     "Review & Save remains required."
@@ -26823,14 +27265,17 @@ class SettingsTab(QWidget):
                 return
 
             editor_dialog = QDialog(dlg)
-            editor_dialog.setWindowTitle(f"{family_title} — Radio Draft")
-            editor_dialog.setAccessibleName(f"Configure {family_title} for unsaved radio draft")
+            radio_draft_label = name_edit.text().strip() or "Unsaved radio"
+            editor_dialog.setWindowTitle(f"{family_title} setup for {radio_draft_label}")
+            editor_dialog.setAccessibleName(
+                f"Review or correct prepared {family_title} details for {radio_draft_label}"
+            )
             editor_dialog.resize(720, 620)
             editor_layout = QVBoxLayout(editor_dialog)
             handoff_note = QLabel(
-                "This is the shared Software Administration editor working on the current Add Radio draft. "
-                "The radio remains an inactive setup draft. Apply returns to the same guided step so you can "
-                "resume without losing work; nothing is saved until Review & Save."
+                "Review or correct the prepared details for the current Add Radio draft. "
+                "The radio remains an inactive setup draft. Apply returns to this guided step without losing "
+                "work; nothing is saved until Review & Save."
             )
             handoff_note.setWordWrap(True)
             editor_layout.addWidget(handoff_note)
@@ -26922,15 +27367,61 @@ class SettingsTab(QWidget):
             _show_task()
             if editor_dialog.exec() == QDialog.Accepted:
                 _apply_guided_software_editor_state(draft_state)
+                software_plan_prepared = True
+                prepared_software_families = tuple(
+                    key
+                    for key in software_responsibility_cards
+                    if _guided_software_family_selected(key)
+                )
+                prepared_software_context = _guided_software_plan_context()
+                _update_software_responsibility_cards()
                 configure_auto_status.setText(
                     f"Applied {family_title} details to this unsaved radio draft. Review & Save remains required."
                 )
 
+        def _on_software_source_changed(family_key: str) -> None:
+            _sync_software_policy_from_source(family_key)
+            source = str(
+                software_source_combos[family_key].currentData() or "create"
+            ).strip().lower()
+            if family_key == "js8call" and source == "create":
+                # A distinct-instance intent may reuse the executable, never
+                # an existing profile, message root, or API endpoint bundle.
+                js8_profile_edit.clear()
+                js8_directed_edit.clear()
+                js8_port_edit.setText(_default_instance_port("js8call"))
+                js8_profile_choice_combo.setCurrentIndex(0)
+            elif family_key == "varac" and source == "create":
+                # Existing node-local VarAC files are collision evidence only.
+                # A new node receives its own reviewed targets later.
+                for edit in (
+                    varac_db_edit,
+                    varac_ini_edit,
+                    varac_incoming_edit,
+                    varac_outbox_edit,
+                    varac_bbs_edit,
+                    varac_bbs_archive_edit,
+                    varac_launch_cmd_edit,
+                ):
+                    edit.clear()
+            _invalidate_prepared_software_plan()
+            _update_app_choice_visibility()
+
         for family_key, source_combo in software_source_combos.items():
             source_combo.currentIndexChanged.connect(
-                lambda _index, key=family_key: _sync_software_policy_from_source(key)
+                lambda _index, key=family_key: _on_software_source_changed(key)
             )
             _sync_software_policy_from_source(family_key)
+        if varac_arrangement_combo is not None:
+            def _on_varac_arrangement_changed(_index: int) -> None:
+                _invalidate_prepared_software_plan()
+
+            def _on_varac_radio_name_changed(_value: str) -> None:
+                _refresh_varac_arrangement_presentation(preserve_selection=True)
+                _invalidate_prepared_software_plan()
+
+            varac_arrangement_combo.currentIndexChanged.connect(_on_varac_arrangement_changed)
+            name_edit.textChanged.connect(_on_varac_radio_name_changed)
         for family_key, detail_btn in software_detail_buttons.items():
             detail_btn.clicked.connect(
                 lambda _checked=False, key=family_key: _show_guided_software_details(key)
@@ -27301,6 +27792,9 @@ class SettingsTab(QWidget):
                 any_visible = any_visible or visible
             js8_profile_visible = (
                 _js8_app_selected()
+                and str(
+                    software_source_combos["js8call"].currentData() or "create"
+                ).strip().lower() == "existing"
                 and (not observer_mode or use_js8call_chk.isChecked())
                 and app_autoconfigure_attempted
                 and (
@@ -27348,6 +27842,9 @@ class SettingsTab(QWidget):
                     return True
             return bool(
                 _js8_app_selected()
+                and str(
+                    software_source_combos["js8call"].currentData() or "create"
+                ).strip().lower() == "existing"
                 and js8_profile_choice_combo.count() > 2
                 and js8_profile_choice_combo.currentIndex() <= 0
             )
@@ -27395,7 +27892,10 @@ class SettingsTab(QWidget):
             for label_text, payload in choices:
                 js8_profile_choice_combo.addItem(label_text, payload)
             js8_profile_choice_combo.blockSignals(False)
-            if _js8_app_selected():
+            existing_source = str(
+                software_source_combos["js8call"].currentData() or "create"
+            ).strip().lower() == "existing"
+            if _js8_app_selected() and existing_source:
                 selected_single = _select_single_detected_choice(js8_profile_choice_combo)
                 if selected_single:
                     _apply_js8_profile_choice()
@@ -29474,7 +29974,7 @@ class SettingsTab(QWidget):
             _update_guided_save_button()
 
         def _apply_dialog_autoconfigure_results(payload: Mapping[str, Any]) -> None:
-            nonlocal app_autoconfigure_attempted
+            nonlocal app_autoconfigure_attempted, software_plan_prepared, prepared_software_families, prepared_software_context
             filled: List[str] = []
             preserved: List[str] = []
             observer_mode = str(device_class_combo.currentData() or "").strip().lower() == "observer"
@@ -29484,6 +29984,13 @@ class SettingsTab(QWidget):
             varac_results = dict(payload.get("varac_results") or {})
             js8_file_profiles = tuple(payload.get("js8_file_profiles") or ())
             app_autoconfigure_attempted = True
+            software_plan_prepared = True
+            prepared_software_families = tuple(
+                family_key
+                for family_key in software_responsibility_cards
+                if _guided_software_family_selected(family_key)
+            )
+            prepared_software_context = _guided_software_plan_context()
             _update_detected_app_choices(install_candidates)
             _update_js8_profile_choices(js8_file_profiles)
             suggestions, review_items = self._guided_radio_autofill_suggestions(
@@ -29515,6 +30022,10 @@ class SettingsTab(QWidget):
                     "js8call": _default_instance_port("js8call"),
                 },
                 profile_name=name_edit.text().strip(),
+                source_modes={
+                    family_key: str(combo.currentData() or "create")
+                    for family_key, combo in software_source_combos.items()
+                },
             )
             field_targets: Dict[str, Tuple[QLineEdit, str]] = {
                 "sdr_host": (sdr_host_edit, "Observer SDR host"),
@@ -29560,30 +30071,40 @@ class SettingsTab(QWidget):
                 radio_apps_base_used=bool(radio_apps_base_edit.text().strip()),
             )
             if _detected_app_choice_needs_operator_selection():
-                configure_auto_status.setText("Choose the highlighted app or profile, then continue.")
+                configure_auto_status.setText(
+                    "Needs attention — FIO prepared what it could. Review the highlighted family before continuing."
+                )
             else:
-                configure_auto_status.setText("FIO filled what it could. Review the paths below, then continue.")
+                configure_auto_status.setText(
+                    "Ready — FIO prepared the selected software plan. Review only the details that need attention."
+                )
             configure_auto_status.setToolTip("\n".join(review.detail_lines))
+            _update_software_responsibility_cards()
             _update_guided_app_setup_plan_review()
             _update_port_prompt_visibility()
-            if _detected_app_choice_needs_operator_selection():
-                _set_guided_wizard_step("software")
-            else:
-                _set_guided_wizard_step("connection")
+            _set_guided_wizard_step("software")
 
         def _start_dialog_autoconfigure() -> None:
-            nonlocal guided_discovery_generation, guided_discovery_revision
+            nonlocal guided_discovery_generation, guided_discovery_revision, software_plan_prepared, prepared_software_families, prepared_software_context
             if not configure_auto_btn.isEnabled():
                 return
             observer_mode = str(device_class_combo.currentData() or "").strip().lower() == "observer"
-            if observer_mode and not use_js8call_chk.isChecked():
-                configure_auto_status.setText("Select JS8Call first, then configure its receive-only instance.")
+            if use_varac_chk.isChecked() and not str(
+                _selected_varac_arrangement().get("cluster_path") or ""
+            ).strip():
+                configure_auto_status.setText(
+                    "Needs attention — choose the VarAC arrangement before FIO prepares its plan."
+                )
                 return
             _persist_radio_apps_base_folder()
+            software_plan_prepared = False
+            prepared_software_families = ()
+            prepared_software_context = ()
+            _update_software_responsibility_cards()
             configure_auto_btn.setEnabled(False)
-            configure_auto_btn.setText("Searching…")
+            configure_auto_btn.setText("Preparing…")
             configure_auto_status.setText(
-                "Searching in the background. You can continue reviewing this radio while FIO checks installed apps and profiles."
+                "Discovery in progress — preparing in the background. You can continue reviewing this radio while FIO checks installed apps and profiles."
             )
             selected_families = set()
             if observer_mode:
@@ -29613,9 +30134,9 @@ class SettingsTab(QWidget):
                 ),
             )
             if not self._guided_software_discovery.register_request(discovery_request):
-                configure_auto_btn.setText("Configure Automatically")
+                configure_auto_btn.setText("Prepare selected software automatically")
                 configure_auto_btn.setEnabled(True)
-                configure_auto_status.setText("Search could not start. Existing settings were not changed.")
+                configure_auto_status.setText("Preparation could not start. Existing settings were not changed.")
                 return
             worker = _GuidedRadioAutofillWorker(
                 self._guided_software_discovery,
@@ -29631,10 +30152,10 @@ class SettingsTab(QWidget):
                 result_request = result.get("guided_discovery_request")
                 if result_request != discovery_request or not self._guided_software_discovery.result_is_current(discovery_request):
                     return
-                configure_auto_btn.setText("Configure Automatically")
+                configure_auto_btn.setText("Prepare selected software automatically")
                 configure_auto_btn.setEnabled(True)
                 if result.get("cancelled"):
-                    configure_auto_status.setText("Search cancelled. Existing settings were not changed.")
+                    configure_auto_status.setText("Preparation cancelled. Existing settings were not changed.")
                     return
                 try:
                     if dlg.isVisible():
@@ -29644,10 +30165,10 @@ class SettingsTab(QWidget):
 
             def _fail(detail: str) -> None:
                 try:
-                    configure_auto_btn.setText("Configure Automatically")
+                    configure_auto_btn.setText("Prepare selected software automatically")
                     configure_auto_btn.setEnabled(True)
                     configure_auto_status.setText(
-                        "Search could not complete. Existing settings were not changed; paths can still be entered manually."
+                        "Preparation could not complete. Existing settings were not changed; paths can still be entered manually."
                     )
                 except RuntimeError:
                     return
@@ -30355,6 +30876,10 @@ class SettingsTab(QWidget):
         body_layout.addStretch(1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.setObjectName("guidedRadioSetupActionFooter")
+        buttons.setAccessibleName("Guided radio setup actions")
+        buttons.addButton(guided_wizard_back_btn, QDialogButtonBox.ActionRole)
+        buttons.addButton(guided_wizard_next_btn, QDialogButtonBox.ActionRole)
         save_button = buttons.button(QDialogButtonBox.Save)
         cancel_button = buttons.button(QDialogButtonBox.Cancel)
         if cancel_button is not None:
@@ -31166,12 +31691,24 @@ class SettingsTab(QWidget):
                 cluster_db_id = int(cluster.get("id") or 0) or None
             elif family == "varac" and cluster_path == "create_cluster":
                 cluster_id = str(draft.get("cluster_id") or draft.get("cluster_name") or "").strip()
+                existing_standalone_node_id = int(
+                    draft.get("existing_standalone_node_id")
+                    or draft.get("varac_existing_standalone_node_id")
+                    or 0
+                ) or None
                 create_cluster_values = {
                     "name": str(draft.get("cluster_name") or cluster_id).strip(),
                     "cluster_id": cluster_id,
                     "shared_db_path": str(draft.get("cluster_shared_database") or "").strip(),
                     "ptt_lock_enabled": bool(draft.get("cluster_ptt_lock", False)),
                     "gateway_for_new_cluster": bool(draft.get("cluster_gateway", False)),
+                    "existing_standalone_node_id": existing_standalone_node_id,
+                    "existing_standalone_instance_number": int(
+                        draft.get("existing_standalone_member_number")
+                        or draft.get("varac_existing_standalone_member_number")
+                        or 0
+                    )
+                    or None,
                 }
             try:
                 current_link_column = {
@@ -31200,6 +31737,11 @@ class SettingsTab(QWidget):
                             int(draft.get("cluster_instance_number") or 0) or None
                         ),
                         varac_create_cluster_values=create_cluster_values,
+                        varac_existing_standalone_node_id=(
+                            int(draft.get("existing_standalone_node_id") or 0) or None
+                            if cluster_path == "create_cluster"
+                            else None
+                        ),
                         **kwargs,
                     )
             except (ValueError, KeyError) as exc:

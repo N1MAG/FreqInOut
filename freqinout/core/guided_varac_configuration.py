@@ -14,7 +14,8 @@ import posixpath
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Tuple
+from types import MappingProxyType
+from typing import Any, Iterable, Mapping, Optional, Tuple
 
 from freqinout.core.guided_radio_software_model import RadioRole, radio_role_from_persisted
 
@@ -104,6 +105,7 @@ class VarACNodeIdentity:
     incoming_path: str
     outbox_path: str
     operator_starts_remotely: bool = False
+    display_name: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "node_key", _key(self.node_key, "VarAC node key"))
@@ -113,6 +115,7 @@ class VarACNodeIdentity:
         object.__setattr__(self, "launch_command", _text(self.launch_command, "VarAC launch command"))
         object.__setattr__(self, "working_directory", _text(self.working_directory, "VarAC working directory"))
         object.__setattr__(self, "operator_starts_remotely", _flag(self.operator_starts_remotely))
+        object.__setattr__(self, "display_name", _text(self.display_name, "VarAC node display name", maximum=256))
         if self.operator_starts_remotely:
             if self.launch_command or self.working_directory:
                 raise GuidedVarACConfigurationError("remote VarAC node cannot define a local launch command or working directory")
@@ -184,6 +187,92 @@ class VarACClusterMembership:
         object.__setattr__(self, "radio_key", _key(self.radio_key, "VarAC membership radio key"))
         object.__setattr__(self, "instance_number", _positive(self.instance_number, "VarAC cluster instance number"))
         object.__setattr__(self, "enabled", _flag(self.enabled))
+
+
+@dataclass(frozen=True)
+class VarACJoinChoice:
+    """A named, non-selected join option with its next safe member number."""
+
+    cluster_id: str
+    label: str
+    next_instance_number: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "cluster_id", normalize_cluster_id(self.cluster_id))
+        object.__setattr__(self, "label", _text(self.label, "VarAC cluster label", required=True, maximum=256))
+        object.__setattr__(self, "next_instance_number", _positive(self.next_instance_number, "next VarAC cluster instance number"))
+
+
+@dataclass(frozen=True)
+class VarACArrangementRecommendation:
+    """Pure topology guidance shown before VarAC node detail fields.
+
+    ``default_path`` is standalone for fresh stations and when joining an
+    existing cluster. When multiple standalone nodes make cluster creation
+    ambiguous it is ``None`` so the UI can require an explicit choice. A
+    recommendation is explanatory state only; callers must copy a choice into
+    a reviewed request before any store transaction can mutate topology.
+    """
+
+    default_path: Optional[VarACClusterPath]
+    recommended_path: Optional[VarACClusterPath]
+    recommended_existing_node_key: str
+    join_choices: Tuple[VarACJoinChoice, ...]
+    standalone_node_keys: Tuple[str, ...]
+    requires_explicit_selection: bool
+    why: str
+    create_choice_label: str = ""
+    existing_setup_summary: str = ""
+    needs_attention: bool = False
+    ambiguity: bool = False
+    standalone_node_choices: Tuple[Tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.default_path is not None:
+            object.__setattr__(self, "default_path", _enum_path(self.default_path))
+        if self.recommended_path is not None:
+            object.__setattr__(self, "recommended_path", _enum_path(self.recommended_path))
+        object.__setattr__(self, "recommended_existing_node_key", _key(self.recommended_existing_node_key, "recommended VarAC node key", required=False))
+        object.__setattr__(self, "join_choices", tuple(self.join_choices or ()))
+        object.__setattr__(self, "standalone_node_keys", tuple(_key(key, "standalone VarAC node key") for key in (self.standalone_node_keys or ())))
+        object.__setattr__(self, "requires_explicit_selection", _flag(self.requires_explicit_selection))
+        object.__setattr__(self, "why", _text(self.why, "VarAC arrangement explanation", required=True, maximum=1024))
+        object.__setattr__(self, "create_choice_label", _text(self.create_choice_label, "VarAC create choice label", maximum=256))
+        object.__setattr__(self, "existing_setup_summary", _text(self.existing_setup_summary, "VarAC existing setup summary", maximum=512))
+        object.__setattr__(self, "needs_attention", _flag(self.needs_attention))
+        object.__setattr__(self, "ambiguity", _flag(self.ambiguity))
+        choices = tuple((str(key).strip(), str(label).strip()) for key, label in (self.standalone_node_choices or ()))
+        object.__setattr__(self, "standalone_node_choices", choices)
+
+    @property
+    def has_existing_clusters(self) -> bool:
+        return bool(self.join_choices)
+
+    @property
+    def has_standalone_nodes(self) -> bool:
+        return bool(self.standalone_node_keys)
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "default_path": self.default_path.value if self.default_path else "",
+            "recommended_path": self.recommended_path.value if self.recommended_path else "",
+            "recommended_existing_node_key": self.recommended_existing_node_key,
+            "join_choices": tuple(
+                {
+                    "cluster_id": choice.cluster_id,
+                    "label": choice.label,
+                    "next_instance_number": choice.next_instance_number,
+                }
+                for choice in self.join_choices
+            ),
+            "standalone_node_keys": self.standalone_node_keys,
+            "why": self.why,
+            "create_choice_label": self.create_choice_label,
+            "existing_setup_summary": self.existing_setup_summary,
+            "needs_attention": self.needs_attention,
+            "ambiguity": self.ambiguity,
+            "standalone_node_choices": self.standalone_node_choices,
+        }
 
 
 @dataclass(frozen=True)
@@ -383,9 +472,335 @@ def plan_varac_configuration(request: VarACConfigurationRequest, inventory: VarA
     return VarACConfigurationPlan(request.request_key, request.node, request.cluster_path, cluster, membership, "", claims)
 
 
+def recommend_varac_arrangement(inventory: VarACPlanningInventory) -> VarACArrangementRecommendation:
+    """Return conditional VarAC choices without selecting or mutating one.
+
+    Disabled memberships do not reserve a member number for the next
+    proposal, matching the persistence validator. A node with any membership
+    is not treated as standalone, even when that membership is disabled: the
+    operator must explicitly review that topology first.
+    """
+
+    if not isinstance(inventory, VarACPlanningInventory):
+        raise GuidedVarACConfigurationError("VarAC inventory must be a VarACPlanningInventory")
+    membership_node_keys = {membership.node_key for membership in inventory.memberships}
+    standalone_nodes = tuple(
+        sorted(node.node_key for node in inventory.nodes if node.node_key not in membership_node_keys)
+    )
+    standalone_choices = tuple(
+        (node.node_key, node.display_name or node.node_key)
+        for node in sorted(
+            (node for node in inventory.nodes if node.node_key not in membership_node_keys),
+            key=lambda item: item.node_key,
+        )
+    )
+    choices = []
+    for cluster in sorted(inventory.clusters, key=lambda item: (item.normalized_id, item.public_id)):
+        occupied = {
+            membership.instance_number
+            for membership in inventory.memberships
+            if membership.cluster_id == cluster.normalized_id and membership.enabled
+        }
+        next_number = 1
+        while next_number in occupied:
+            next_number += 1
+        choices.append(VarACJoinChoice(cluster.normalized_id, cluster.public_id, next_number))
+
+    recommendation: Optional[VarACClusterPath] = None
+    recommended_node = ""
+    default_path: Optional[VarACClusterPath] = VarACClusterPath.STANDALONE
+    requires_selection = False
+    create_choice_label = "Create a new VarAC cluster"
+    existing_setup_summary = "No existing VarAC node or cluster is configured."
+    if standalone_nodes and not choices:
+        recommendation = VarACClusterPath.CREATE_CLUSTER
+        if len(standalone_nodes) == 1:
+            recommended_node = standalone_nodes[0]
+            default_path = None
+            requires_selection = True
+            create_choice_label = f"Create a cluster using {standalone_choices[0][1]}"
+            existing_setup_summary = f"One standalone VarAC node is configured: {standalone_choices[0][1]}."
+            why = (
+                "An existing standalone VarAC node was found. Standalone remains an explicit alternative; "
+                "choose Create a new cluster only if this new node should join that station topology."
+            )
+        else:
+            default_path = None
+            requires_selection = True
+            create_choice_label = "Create a cluster using a selected standalone node"
+            existing_setup_summary = f"{len(standalone_nodes)} standalone VarAC nodes are configured."
+            why = (
+                "Multiple standalone VarAC nodes were found. Choose which existing node to include before "
+                "creating a cluster; no topology choice is preselected."
+            )
+    elif choices:
+        existing_setup_summary = f"{len(choices)} existing VarAC cluster{'s' if len(choices) != 1 else ''} is configured."
+        why = (
+            "Existing VarAC clusters are available as explicit join choices. "
+            "Standalone remains the safe default and no cluster membership is preselected."
+        )
+    else:
+        why = (
+            "No existing VarAC node or cluster was found. Standalone is the normal default; "
+            "creating a cluster remains an explicit reviewed choice."
+        )
+    return VarACArrangementRecommendation(
+        default_path=default_path,
+        recommended_path=recommendation,
+        recommended_existing_node_key=recommended_node,
+        join_choices=tuple(choices),
+        standalone_node_keys=standalone_nodes,
+        requires_explicit_selection=requires_selection,
+        why=why,
+        create_choice_label=create_choice_label,
+        existing_setup_summary=existing_setup_summary,
+        needs_attention=requires_selection,
+        ambiguity=requires_selection,
+        standalone_node_choices=standalone_choices,
+    )
+
+
+# Clear alias for callers that describe this as a topology decision.
+varac_arrangement_recommendation = recommend_varac_arrangement
+
+
+def recommend_varac_arrangement_from_snapshots(
+    instance_rows: Iterable[Mapping[str, Any]],
+    cluster_rows: Iterable[Mapping[str, Any]],
+    membership_rows: Iterable[Mapping[str, Any]],
+    profile_rows: Iterable[Mapping[str, Any]] = (),
+    *,
+    new_radio_label: str = "new radio",
+) -> Mapping[str, Any]:
+    """Adapt already-loaded classified store projections for guided UI.
+
+    This boundary deliberately accepts projections rather than opening a
+    store or reconstructing missing VarAC paths. Only rows explicitly marked
+    ``usable_existing``/``candidate_usable`` by the GRS-7.2 classifier may
+    influence topology recommendations; diagnostic and recovery rows are
+    excluded from choices.
+    """
+
+    def positive(value: object) -> int:
+        try:
+            number = int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+        return number if number > 0 else 0
+
+    def text(value: object) -> str:
+        return str(value or "").strip()
+
+    def proposed_cluster_identity(existing_label: str = "") -> tuple[str, str]:
+        """Return a readable, collision-free identity for a prepared cluster.
+
+        The proposal is configuration owned by FIO, not a claim that FIO can
+        write VarAC's native settings.  It is derived from the already-loaded
+        snapshot so the normal guided path never opens a blank cluster-name
+        field merely to complete a plan.
+        """
+
+        labels = [part for part in (text(existing_label), new_label) if part]
+        display_name = " + ".join(labels) or "VarAC"
+        if "varac" not in display_name.casefold():
+            display_name = f"{display_name} VarAC"
+
+        slug_parts = []
+        for part in labels or ["cluster"]:
+            slug = re.sub(r"[^A-Z0-9]+", "-", part.upper()).strip("-")
+            if slug:
+                slug_parts.append(slug)
+        base_id = "-".join(("VARAC", *slug_parts))[:240].strip("-") or "VARAC-CLUSTER"
+        occupied = {str(row["cluster_id"]) for row in choices}
+        public_id = base_id
+        suffix = 2
+        while normalize_cluster_id(public_id) in occupied:
+            suffix_text = f"-{suffix}"
+            public_id = f"{base_id[: 256 - len(suffix_text)]}{suffix_text}"
+            suffix += 1
+        return display_name[:256], public_id
+
+    profile_by_node_id = {}
+    for raw_profile in tuple(profile_rows or ()):
+        if not isinstance(raw_profile, Mapping):
+            continue
+        node_id = positive(raw_profile.get("varac_node_id"))
+        profile_id = positive(raw_profile.get("id"))
+        if node_id > 0 and profile_id > 0:
+            profile_by_node_id[node_id] = {
+                "device_profile_id": profile_id,
+                "device_profile_name": text(raw_profile.get("name") or raw_profile.get("system_key") or f"Radio {profile_id}"),
+            }
+
+    usable_rows = []
+    for raw in tuple(instance_rows or ()):
+        if not isinstance(raw, Mapping):
+            continue
+        classification = text(raw.get("candidate_classification")).casefold()
+        if classification != "usable_existing" or raw.get("candidate_usable") is not True:
+            continue
+        node_id = positive(raw.get("id"))
+        if node_id <= 0:
+            continue
+        device_id = positive(
+            raw.get("device_profile_id")
+            or raw.get("assigned_device_profile_id")
+            or raw.get("radio_profile_id")
+            or raw.get("owner_radio_id")
+        ) or None
+        profile_evidence = profile_by_node_id.get(node_id, {})
+        if device_id is None:
+            device_id = profile_evidence.get("device_profile_id")
+        node_key = text(raw.get("system_key") or raw.get("instance_key"))
+        if not node_key:
+            continue
+        usable_rows.append(
+            {
+                "node_id": node_id,
+                "device_profile_id": device_id,
+                "node_key": node_key,
+                "label": text(raw.get("name") or raw.get("instance_name") or node_key),
+                "device_profile_name": profile_evidence.get("device_profile_name", ""),
+                "candidate_classification": classification,
+                "candidate_usable": True,
+            }
+        )
+    usable_rows.sort(key=lambda item: (str(item["label"]).casefold(), item["node_id"]))
+
+    memberships = tuple(row for row in (membership_rows or ()) if isinstance(row, Mapping))
+    member_node_ids = {positive(row.get("varac_node_id")) for row in memberships if positive(row.get("varac_node_id"))}
+    # The store projection normally carries device_profile_id, so support that
+    # canonical key and the node-id alias used by older snapshots.
+    member_device_ids = {positive(row.get("device_profile_id")) for row in memberships if positive(row.get("device_profile_id"))}
+    standalone = [
+        row for row in usable_rows
+        if row["node_id"] not in member_node_ids
+        and (row["device_profile_id"] is None or row["device_profile_id"] not in member_device_ids)
+    ]
+
+    choices = []
+    for raw in tuple(cluster_rows or ()):
+        if not isinstance(raw, Mapping):
+            continue
+        cluster_db_id = positive(raw.get("id"))
+        cluster_id = text(raw.get("cluster_id") or raw.get("public_id"))
+        if cluster_db_id <= 0 or not cluster_id:
+            continue
+        normalized_cluster = normalize_cluster_id(cluster_id)
+        occupied = {
+            positive(member.get("instance_number"))
+            for member in memberships
+            if (
+                positive(member.get("cluster_id")) == cluster_db_id
+                or (
+                    text(member.get("cluster_public_id"))
+                    and normalize_cluster_id(text(member.get("cluster_public_id"))) == normalized_cluster
+                )
+            )
+            and _flag(member.get("enabled", True))
+        }
+        next_number = 1
+        while next_number in occupied:
+            next_number += 1
+        label = text(raw.get("name") or cluster_id)
+        choices.append(
+            {
+                "cluster_db_id": cluster_db_id,
+                "cluster_id": normalized_cluster,
+                "label": label,
+                "next_instance_number": next_number,
+            }
+        )
+    choices.sort(key=lambda item: (str(item["label"]).casefold(), str(item["cluster_id"])))
+
+    new_label = text(new_radio_label) or "new radio"
+    enriched_standalone = []
+    for row in standalone:
+        cluster_label = text(row.get("device_profile_name") or row.get("label"))
+        proposed_name, proposed_id = proposed_cluster_identity(cluster_label)
+        enriched_standalone.append(
+            {
+                **row,
+                "proposed_cluster_name": proposed_name,
+                "proposed_cluster_id": proposed_id,
+            }
+        )
+    standalone = enriched_standalone
+    proposed_create_cluster_name, proposed_create_cluster_id = proposed_cluster_identity()
+    default_path = VarACClusterPath.STANDALONE.value
+    recommended_path = ""
+    recommended_node_id = None
+    recommended_device_id = None
+    existing_member_instance_number = None
+    new_member_instance_number = 1
+    needs_attention = False
+    ambiguity = False
+    requires_selection = False
+    if standalone and not choices:
+        recommended_path = VarACClusterPath.CREATE_CLUSTER.value
+        if len(standalone) == 1:
+            candidate = standalone[0]
+            recommended_node_id = candidate["node_id"]
+            recommended_device_id = candidate["device_profile_id"]
+            existing_member_instance_number = 1
+            new_member_instance_number = 2
+            default_path = ""
+            requires_selection = True
+            existing_setup_summary = f"Existing setup: {candidate['label']} is standalone. No VarAC cluster is configured."
+            create_choice_label = f"Create a cluster with {candidate['label']} and {new_label} — Recommended"
+            proposed_create_cluster_name = str(candidate["proposed_cluster_name"])
+            proposed_create_cluster_id = str(candidate["proposed_cluster_id"])
+        else:
+            default_path = ""
+            needs_attention = True
+            ambiguity = True
+            requires_selection = True
+            existing_member_instance_number = 1
+            new_member_instance_number = 2
+            existing_setup_summary = f"Existing setup: {len(standalone)} standalone VarAC nodes are configured. No VarAC cluster is configured."
+            create_choice_label = f"Create a cluster with a selected standalone node and {new_label} — Needs attention"
+    elif choices:
+        existing_setup_summary = f"Existing setup: {len(choices)} VarAC cluster{'s' if len(choices) != 1 else ''} configured."
+        create_choice_label = "Create a new VarAC cluster"
+    else:
+        existing_setup_summary = "Existing setup: No VarAC node or cluster is configured."
+        create_choice_label = "Create a new VarAC cluster"
+    return MappingProxyType(
+        {
+            "default_path": default_path,
+            "recommended_path": recommended_path,
+            "recommended_existing_node_id": recommended_node_id,
+            "recommended_existing_device_profile_id": recommended_device_id,
+            "existing_member_instance_number": existing_member_instance_number,
+            "new_member_instance_number": new_member_instance_number,
+            "standalone_candidates": tuple(MappingProxyType(dict(row)) for row in standalone),
+            "join_choices": tuple(MappingProxyType(dict(row)) for row in choices),
+            "existing_setup_summary": existing_setup_summary,
+            "create_choice_label": create_choice_label,
+            "proposed_create_cluster_name": proposed_create_cluster_name,
+            "proposed_create_cluster_id": proposed_create_cluster_id,
+            "needs_attention": needs_attention,
+            "ambiguity": ambiguity,
+            "requires_explicit_selection": requires_selection,
+            "why": (
+                "Choose the recommended cluster arrangement explicitly to include the existing standalone node; "
+                "otherwise keep the standalone alternative."
+                if recommended_path == VarACClusterPath.CREATE_CLUSTER.value and not needs_attention
+                else "Choose a standalone node explicitly before creating a cluster."
+                if needs_attention
+                else "Existing cluster membership is never selected automatically."
+            ),
+            "new_radio_label": new_label,
+        }
+    )
+
+
 __all__ = [
     "GuidedVarACConfigurationError", "VarACClusterIdentity", "VarACClusterMembership",
     "VarACClusterPath", "VarACConfigurationPlan", "VarACConfigurationRequest",
     "VarACNodeIdentity", "VarACPlanningInventory", "VarACResourceClaim",
-    "normalize_cluster_id", "normalize_varac_path", "plan_varac_configuration",
+    "VarACArrangementRecommendation", "VarACJoinChoice", "recommend_varac_arrangement",
+    "varac_arrangement_recommendation", "recommend_varac_arrangement_from_snapshots",
+    "normalize_cluster_id", "normalize_varac_path",
+    "plan_varac_configuration",
 ]

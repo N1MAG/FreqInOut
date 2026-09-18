@@ -123,7 +123,11 @@ def test_imported_assistant_fields_are_locked_and_clone_gets_fresh_identity():
         "profile_path": "/profiles/north",
         "application_data_root": "/data/north",
     }
-    snapshot = build_guided_instance_inventory({"js8call": (existing,)}, generation=7)
+    snapshot = build_guided_instance_inventory(
+        {"js8call": (existing,)},
+        linked_ids_by_family={"js8call": {11}},
+        generation=7,
+    )
     assistant = SoftwareInstanceAssistant(
         "js8call",
         existing_instances=snapshot.rows_for("js8call"),
@@ -208,7 +212,11 @@ def test_switching_import_to_managed_cannot_retain_source_owned_fields():
         "profile_path": "/profiles/existing",
         "application_data_root": "/data/existing",
     }
-    snapshot = build_guided_instance_inventory({"js8call": (existing,)}, generation=3)
+    snapshot = build_guided_instance_inventory(
+        {"js8call": (existing,)},
+        linked_ids_by_family={"js8call": {19}},
+        generation=3,
+    )
     assistant = SoftwareInstanceAssistant(
         "js8call",
         existing_instances=snapshot.rows_for("js8call"),

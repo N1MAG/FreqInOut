@@ -7551,3 +7551,293 @@ run reproduced the already-documented GUI/background-thread process abort, so
 isolated files remain authoritative. Python compilation and `git diff --check`
 pass. Automated tests used temporary state and changed no runtime database,
 third-party profile, external process, endpoint, radio, commit, or remote.
+
+## 2026-09-17 — GRS-7 prepare-first specification reconciliation
+
+Status: specification exit gate passed; implementation and operator-assisted
+qualification have not begun. The release gate remains open.
+
+Observable report: in `Settings -> Radios -> Add Radio`, Software Administration
+and technical fields appeared before FIO's automatic discovery/preparation had
+produced a concise plan. VarAC topology was presented after node details, Fast
+Light technical output could push actions offscreen, and the production-shaped
+station required a safe recommendation for one existing standalone VarAC node
+with no cluster.
+
+Read-only production evidence from
+`/Users/bill/RadioTools/FIO_DB_prod/current/freqinout.db` confirmed one linked
+FTDX-10 radio, one standalone VarAC node, no VarAC cluster or membership, eight
+enabled JS8Call rows with only one linked, eight enabled Fast Light rows with
+only one linked, duplicate legacy endpoint claims, and no software-instance
+manifests. The review used SQLite read-only/immutable access and changed no
+database.
+
+Specification decisions:
+
+- Step 3 now follows software/source choice, VarAC arrangement, explicit
+  `Prepare selected software automatically`, compact prepared plan, and
+  exception-only correction in that order.
+- Add Radio remains radio-first. Standalone Software Administration remains
+  software-first but consumes an Add Radio prepared plan without clearing it.
+- With standalone VarAC node(s) and no cluster, create-cluster-with-existing is
+  Recommended but never preselected; standalone remains explicit, and only final
+  reviewed Save may mutate topology.
+- Technical paths, commands, dependencies, fingerprints, and diagnostics begin
+  collapsed under family-scoped `Show details`; safety, Why, confirmation,
+  unsaved state, and existing-object impact remain visible.
+- The guided surface has a fixed header/footer and exactly one body vertical
+  scroll owner. Available work area and font metrics replace a fixed dialog
+  assumption.
+- Incomplete/unlinked application records are diagnostic-only, remain
+  unchanged, retain normalized conservative resource claims, and require a
+  separately specified maintenance workflow for cleanup.
+- Empty manifests remain supported without querying operational history, and
+  the production-shaped incomplete-record fixture is a binding GRS-7 gate.
+
+Work packages and model ownership:
+
+- Primary `gpt-5.6-sol`, high reasoning: governing-contract review, workflow and
+  VarAC architecture, persistence/concurrency and orphan-safety boundaries,
+  cross-spec reconciliation, acceptance matrix, delegated-review integration,
+  and final exit-gate decision.
+- `gpt-5.6-terra`, high reasoning: independent task sequence, wording,
+  progressive-disclosure, accessibility, responsive-layout, and contradiction
+  audit. No edits were delegated.
+- `gpt-5.6-luna`, high reasoning: read-only production database audit and
+  production-shaped safety, performance, cancellation, empty-manifest, and
+  acceptance-fixture review. No edits were delegated.
+
+Files updated:
+
+- `docs/internal/guided_radio_software_configuration_spec.md`
+- `docs/internal/multi_instance_software_administration_spec.md`
+- `docs/internal/ui_regression_work_log.md`
+
+Acceptance evidence:
+
+- `git diff --check`: passed.
+- Contradiction scan for the superseded normative phrases `Additional VarAC
+  nodes default to standalone` and `Cluster mode is an explicit branch after
+  node configuration`: passed with no matches in the two governing specs.
+- Focused atomic/cancel/UI contract partition:
+  `tests/test_grs65_atomic_guided_store.py`,
+  `tests/test_grs65_save_transaction_ui.py`, and
+  `tests/test_guided_radio_unified_ux.py`: **19 passed**.
+
+No application code, schema, runtime configuration, native profile, process,
+endpoint, radio, git history, or remote repository was changed. GRS-7 package 1
+is the next implementation slice and may not begin until explicitly requested.
+
+## 2026-09-17 — GRS-7.1 prepare-first Add Radio sequence
+
+Status: automated exit gate passed. The Add Radio Software step now leads with
+capability/source intent and `Prepare selected software automatically` before
+technical correction. Per-family completion, responsibility, launch, and
+correction controls remain unavailable until preparation succeeds. VarAC
+arrangement is an explicit pre-prepare intent and does not mutate topology.
+
+Preparation stays on the Software step and uses the compact states `Discovery
+in progress`, `Ready`, and `Needs attention`. Changes to selected families,
+source, role, setup type, or VarAC arrangement invalidate a prepared plan as
+`Stale — reprepare required`. Back/Next preserves draft choices. Technical
+correction dialogs now use `<family> setup for <radio>` titles. The existing
+generation/revision fence and dialog-close cancellation behavior remain in
+place, and Cancel remains a no-write boundary.
+
+Work packages and model ownership:
+
+- Primary `gpt-5.6-sol`, high reasoning: architecture and scope boundary,
+  concurrency/stale-publication review, delegated-diff review, integration,
+  exit-gate execution, and specification/work-log reconciliation.
+- `gpt-5.6-terra`, high reasoning: bounded prepare-first UI, compact status and
+  stale-plan presentation, source/arrangement invalidation, task-specific
+  correction titles, and compatible UI contract updates.
+- `gpt-5.6-luna`, high reasoning: focused ordering, hidden-technical-surface,
+  collapsed-details, Back/Next preservation, Cancel purity, and async-fence
+  tests.
+
+Acceptance evidence: `freqinout/gui/settings_tab.py` compiles; `git diff
+--check` passes; and the independently rerun GRS-7.1, unified guided UX,
+supporting-family, asynchronous autofill, performance, and radio-scoped
+settings partition passes **189 tests**. No schema, persistence behavior,
+native writer, software ownership, launch behavior, existing radio
+configuration, VarAC topology, runtime database, external process, endpoint,
+commit, or remote repository was changed.
+
+The next permitted slice is GRS-7.2 inventory classification. GRS-7.3 VarAC
+topology, GRS-7.4 progressive disclosure/layout, and GRS-7.5 qualification
+remain blocked on their preceding exit gates.
+
+## 2026-09-17 — GRS-7.2 classified software inventory
+
+Status: automated exit gate passed. One immutable inventory snapshot now
+classifies saved and retained rows as usable existing, explicit recovery-only,
+diagnostic-only, or retained draft using durable link, completeness, and source
+evidence. Enabled flags and executable paths do not imply ownership.
+
+Incomplete or provenance-unknown rows remain visible as disabled diagnostic
+evidence with exact reasons and cannot be imported, recommended, assigned,
+source-locked, or launched. Complete source-evidenced unassigned bundles are
+available only through explicit Find/import and are labeled recovery candidates.
+Linked complete rows remain usable with an empty manifest table, while visibly
+showing `Configuration provenance unverified` and no FIO native-ownership claim.
+
+Conservative endpoint/path claims are normalized and deduplicated. Duplicate
+legacy rows reserve the real resource once and retain a count for diagnostics;
+they do not trigger repeated scans or repeated port increments. Initial Add
+Radio, standalone Software Administration, bounded native discovery, and
+pre-Save revalidation now use the same link/manifest/classification evidence.
+
+Work packages and model ownership:
+
+- Primary `gpt-5.6-sol`, high reasoning: classification architecture,
+  source-evidence and explicit-recovery boundary, Settings integration,
+  delegated-diff review, regression fixes, exit-gate execution, and spec/work-
+  log reconciliation.
+- `gpt-5.6-luna`, high reasoning: pure classifier, normalized resource claims,
+  production-shaped synthetic fixtures, and focused core tests.
+- `gpt-5.6-terra`, high reasoning: diagnostic/recovery/provenance presentation,
+  accessibility, and focused real-widget tests.
+
+Acceptance evidence: changed Python compiles; `git diff --check` passes; and the
+integrated inventory, assistant, Settings, Software Administration, async,
+transaction, prepare-first, and performance partition passes **105 tests**.
+Tests used temporary/synthetic state. The production database was not opened or
+changed in this package. No cleanup, deletion, disable, relink, migration,
+schema, native file, process, endpoint, radio, commit, or remote change occurred.
+
+The next permitted slice is GRS-7.3 conditional VarAC topology. GRS-7.4 and
+GRS-7.5 remain blocked on their preceding exit gates.
+
+## 2026-09-17 — GRS-7.3 conditional VarAC topology
+
+Status: automated exit gate passed. Add Radio now consumes one pure,
+display-ready VarAC topology recommendation built from the already-loaded
+classified instance, radio-link, cluster, and membership snapshots. The UI does
+not synthesize missing paths or infer membership from incomplete legacy rows.
+
+Fresh setup defaults to standalone. Existing clusters expose named Join choices
+and core-calculated next member numbers while retaining standalone as the safe
+default. The production-shaped one-standalone/no-cluster case shows the exact
+existing-setup summary and named Recommended create choice with no mutating
+preselection. Multiple standalone candidates require an explicit named choice.
+Arrangement metadata survives radio rename and shared-assistant review, clears
+when returning to standalone, and reaches persistence only for create-cluster.
+
+The store transaction for create-with-existing revalidates the existing linked
+standalone node, creates the cluster, adds existing member 1 and new member 2,
+saves the new node/manifest/launch/radio link, and applies reviewed gateway/PTT
+policy atomically. Duplicate, stale, missing-link, observer, and injected-failure
+paths leave the original standalone relationship unchanged and create no new
+topology.
+
+Work packages and model ownership:
+
+- Primary `gpt-5.6-sol`, high reasoning: matrix and transaction architecture,
+  member-number ownership, delegated-diff review, integration, exit-gate
+  execution, and documentation.
+- `gpt-5.6-luna`, high reasoning: pure recommendation/snapshot adapter, store
+  transaction extension, and focused core/fault-injection tests.
+- `gpt-5.6-terra`, high reasoning: conditional Add Radio controls, exact copy,
+  shared-assistant metadata round trip, refresh safety, and real-widget tests.
+
+Acceptance evidence: focused partition **63 passed**; adjacent family,
+manifest, supporting-family, launch-recipe, radio-scoped settings, Software
+Administration, unified UX, and performance partition **250 passed**. Changed
+Python compiles and `git diff --check` passes. Tests used temporary state and did
+not alter a schema, migration, production database, native profile, process,
+endpoint, radio, commit, or remote.
+
+The next permitted slice is GRS-7.4 progressive disclosure and responsive
+layout. GRS-7.5 remains blocked on that exit gate.
+
+## 2026-09-17 — GRS-7.4 progressive disclosure and responsive layout
+
+Status: automated exit gate passed. Add Radio and the shared software-instance
+assistant now have a fixed purpose/step header, exactly one vertical body scroll
+owner, and a fixed action footer. The 900x560 Large Text route keeps Back, Next,
+Cancel, and Save reachable; the long Fast Light Files route scrolls only its
+body and has no horizontal overflow.
+
+The assistant presents compact prepared Facts, Why, safety, unsaved state, and
+existing-configuration impact on every step. Family/radio-scoped `Show details`
+starts collapsed and owns exact paths, commands, dependencies, fingerprints,
+and diagnostics. Disclosure, focus, and per-step scroll survive refresh,
+navigation, resize, theme changes, and cache publication. Qualified JS8Call and
+Fast Light recipes resolve before Files so generated roots are prepared facts,
+not blank technical questions.
+
+Primary integration additionally enforced create-versus-existing intent in the
+shared autofill path: a distinct JS8Call instance cannot inherit an existing
+profile/message bundle, a distinct VarAC node cannot inherit node-local files,
+visible instance names equal the radio name, and create-cluster gets a core-
+generated collision-free identity. Conflicting VarAC gateway policies now fail
+before mutation.
+
+Work packages and model ownership:
+
+- Primary `gpt-5.6-sol`, high reasoning: prepared-plan and intent architecture,
+  Add Radio fixed header/footer integration, VarAC generated identity and
+  gateway validation, delegated review, gate execution, and documentation.
+- `gpt-5.6-terra`, high reasoning: shared-assistant progressive disclosure,
+  one-scroll responsive layout, compact facts, and state preservation.
+- `gpt-5.6-luna`, high reasoning: focused real-widget responsive/theme/
+  accessibility/disclosure tests.
+
+Acceptance evidence: focused partition **101 passed**; adjacent Settings,
+family, persistence, Software Administration, recipe, guided-setup, and
+performance partition **328 passed**. Changed Python compiles and `git diff
+--check` passes. Tests used temporary state and did not change production data,
+native profiles, applications, endpoints, radios, commits, or remotes.
+
+The next permitted slice is GRS-7.5 final qualification.
+
+## 2026-09-17 — GRS-7.5 production-shaped and final automated qualification
+
+Status: automated gate passed; operator-assisted live release gate remains
+open. The exact Add Radio TriMode/Transceiver route is now covered by real-widget
+tests through software/source intent, built-in FIO Spotter, station-shared
+CommStat, explicit VarAC arrangement, bounded preparation publication, and
+prepared-family review actions. Add Radio retains one body scroll owner, no
+page-level horizontal overflow, and a reachable fixed footer at 1920x1080,
+1000x700, and 900x560.
+
+The supplied production `freqinout.db` was audited with SQLite immutable
+read-only access. It confirmed the intended one-linked-plus-seven-diagnostic
+JS8Call and Fast Light shape, one standalone VarAC node, no cluster or manifest,
+and normalized duplicate endpoint claims. SQL tracing confirmed that no message,
+traffic, ingest, sync, observation, or operational-history table supplied
+ownership evidence. File size and modification time were unchanged, and the
+426 MB `freqinout_nets.db` was not opened.
+
+Primary final review found and corrected an observer-path regression: SDR
+preparation no longer requires JS8Call, and selected receive-safe Fast Light or
+distinct JS8Call companions are prepared while FLRig and VarAC control/TX
+ownership remain excluded. JS8Call generated configuration is now described as
+a profile/configuration folder.
+
+Work packages and model ownership:
+
+- Primary `gpt-5.6-sol`, high reasoning: final architecture/concurrency,
+  receiver-only correction, delegated-diff review, transaction/fault and
+  acceptance integration, production-data safety, and documentation.
+- `gpt-5.6-luna`, high reasoning: immutable production-data audit,
+  production-shaped classification/claim checks, forbidden-table trace, and
+  no-write evidence.
+- `gpt-5.6-terra`, high reasoning: exact TriMode operator route, worker-boundary
+  prepared publication, responsive layout, fixed footer, and one-scroll tests.
+
+Acceptance evidence: GRS-7.5 route/production audit **8 passed**; focused
+preparation/inventory/topology/assistant/UI **103 passed**; core proposal,
+recipe, transaction, fault, and production-shaped **91 passed**; discovery,
+performance, save, manifest, and Settings adapter **65 passed**; independent
+adjacent regression partition **328 passed**. Changed Python compiles and `git
+diff --check` passes. No schema, migration, cleanup, production database, native
+profile, application process, endpoint, radio, commit, or remote changed.
+
+The remaining gate is operator-assisted: relaunch from the current worktree and
+active configuration root, exercise real installed-app discovery, and complete
+Save, Cancel, and recovery/fault routes with live JS8Call variants, Fast Light,
+VarAC, receiver/radio control, and the required macOS/Linux/Windows platforms.
+This build is ready for that testing; it is not yet a completed release
+qualification.

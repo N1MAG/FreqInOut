@@ -8,8 +8,10 @@ explicit clone semantics on both production routes. GRS-6.2 adds one resolved
 JS8/Fast Light recipe contract shared by Add Radio, Software Administration,
 native planning, launch review, and persistence. GRS-6.3 through GRS-6.5 now
 pass their automated gates, including final-save inventory revalidation and
-atomic cross-family persistence. Release remains blocked on the repeated
-operator-assisted live route in `guided_radio_software_configuration_spec.md`.
+atomic cross-family persistence. GRS-7.1 through GRS-7.5 automated and
+production-shaped gates also pass. Release remains blocked on the repeated
+operator-assisted live route in
+`guided_radio_software_configuration_spec.md`.
 
 Governing delivery contract: `project_delivery_rules.md`
 
@@ -22,6 +24,13 @@ Related specifications:
 - `js8call_modern_variant_compatibility_spec.md`
 - `multi_endpoint_scheduler_concurrency_spec.md`
 - `production_reliability_and_workflow_remediation_spec.md`
+
+This specification owns the standalone `Settings -> Software` software-first
+workspace. `guided_radio_software_configuration_spec.md` owns Add Radio
+sequencing, prepared-plan presentation, and its conditional VarAC-arrangement
+matrix. Both surfaces use the same inventory, proposal, assistant, and atomic
+persistence core. An Add Radio handoff arrives here with its prepared immutable
+plan intact; it does not restart as a blank administration task.
 
 ## Product Outcome
 
@@ -98,14 +107,19 @@ membership is a separate, persisted relationship that supplies cluster ID,
 instance number, shared database where applicable, counter refresh, gateway
 handler, and PTT-lock policy.
 
-FIO guides the operator through node creation first and cluster membership
-second. It does not imply that ordinary single-instance VarAC requires cluster
+FIO presents **VarAC arrangement** before node, Files, connection, or cluster
+detail. It does not imply that ordinary single-instance VarAC requires cluster
 mode. It must detect duplicate node paths, launch identities, and cluster
 instance numbers before saving.
 
-An additional VarAC node defaults to standalone even when another node or
-cluster exists. Cluster create/join is an explicit operator branch; discovery
-of existing VarAC or cluster data does not select it.
+The conditional arrangement matrix in
+`guided_radio_software_configuration_spec.md` is authoritative. A fresh station
+may preselect standalone. When standalone node(s) exist but no cluster exists,
+`Create a cluster with <named existing node> and this radio` is marked
+Recommended but remains unselected; standalone remains available. When a valid
+cluster exists, Join names the target but is never automatic. Discovery explains
+the recommendation and cannot create, join, convert, or modify topology. Final
+reviewed persistence remains the only mutation boundary.
 
 ### Station-Shared Supporting Services
 
@@ -237,9 +251,12 @@ The durable invariant is one-to-one within a software family:
 
 Every assignment path uses the same store service. Creating a new orphan runtime
 instance is blocked. If no radio exists, the primary action is `Create a radio
-first`. Existing unassigned records remain available through a bounded recovery
-picker and cannot launch, ingest, or participate in a VarAC cluster while
-unassigned.
+first`. A complete, source-evidenced unassigned bundle may remain available
+through a bounded recovery picker and cannot launch, ingest, or participate in a
+VarAC cluster while unassigned. An incomplete or provenance-unknown unlinked row
+is diagnostic-only and follows the orphan classification and non-destructive
+cleanup boundary in `guided_radio_software_configuration_spec.md`; it is never a
+normal existing-instance recommendation.
 
 An occupied family slot is never silently overwritten and the operator is not
 required to disassociate it first. `Replace instance` shows the current and
@@ -298,12 +315,19 @@ instance`; an occupied family slot shows `Review current` and `Replace
 instance`; no configured radio shows `Create a radio first`. `Assign existing`
 opens a family-filtered picker containing only compatible unassigned records.
 The assistant is a responsive in-workspace step surface rather than a dense
-all-fields dialog.
+all-fields dialog. When entered from Add Radio, it receives the prepared plan,
+uses a task-specific title such as `JS8Call setup for <radio>`, and exposes only
+unresolved correction or optional review. It does not clear prepared values or
+ask for recipe-owned fields again.
 
 Steps are `Purpose`, `Find or create`, `Identity`, `Connections`, `Files`,
-`Launch`, and `Review`. Completed steps use concise text/icon state. At compact
-sizes, only the active step expands; the review remains vertically scrollable
-without page-level horizontal scrolling.
+`Launch`, and `Review`. Completed steps use concise text/icon state. A fixed
+header and fixed action footer surround exactly one body vertical scroll owner;
+ordinary step forms and Review do not add a nested same-axis scroller. At compact
+sizes, only the active step expands, details begin collapsed, the footer remains
+reachable, and Review scrolls without page-level horizontal overflow. Surface
+bounds derive from available work area and active font metrics rather than one
+fixed dialog size.
 
 Normal fields use operator names. Internal IDs, source keys, hashes, and raw JSON
 remain in Advanced details. No placeholder or example contains a real or

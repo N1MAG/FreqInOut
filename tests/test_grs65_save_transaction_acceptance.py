@@ -57,6 +57,7 @@ def test_software_administration_revalidation_detects_changed_durable_inventory(
     tab = SettingsTab.__new__(SettingsTab)
     tab.multi_radio_store = SimpleNamespace(
         list_software_instance_manifests=lambda: [],
+        list_device_profiles=lambda: [],
         list_js8_instances=lambda: list(rows),
         list_fast_light_configs=lambda: [],
         list_varac_nodes=lambda: [],

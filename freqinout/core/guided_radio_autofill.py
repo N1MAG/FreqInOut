@@ -263,6 +263,7 @@ def guided_radio_autofill_suggestions(
     js8_file_profiles: Sequence[Any],
     default_ports: Mapping[str, str],
     profile_name: str = "",
+    source_modes: Mapping[str, str] | None = None,
 ) -> Tuple[Dict[str, str], Tuple[str, ...]]:
     suggestions: Dict[str, str] = {}
     review: List[str] = []
@@ -275,13 +276,16 @@ def guided_radio_autofill_suggestions(
     def _current(key: str) -> str:
         return str(current.get(key, "") or "").strip()
 
+    def _source(family: str) -> str:
+        value = str((source_modes or {}).get(family, "") or "").strip().casefold()
+        return value or "existing"  # compatibility for older direct callers
+
     backend_key = str(backend or "").strip().lower()
     if observer_mode:
         _suggest("sdr_host", "127.0.0.1")
         review.append("Observer SDR endpoint was prepared when blank.")
-        return suggestions, tuple(review)
 
-    if bool(selected.get("flrig")) or backend_key == "flrig":
+    if not observer_mode and (bool(selected.get("flrig")) or backend_key == "flrig"):
         _suggest("flrig_host", "127.0.0.1")
         _suggest("flrig_port", default_ports.get("flrig", ""))
         _suggest(
@@ -307,24 +311,31 @@ def guided_radio_autofill_suggestions(
         )
     if bool(selected.get("js8call")) or backend_key == "js8call":
         initial_js8_port = _current("js8_port")
-        selected_js8_profile = select_js8call_file_profile(
-            js8_file_profiles,
-            tcp_port=initial_js8_port,
-            profile_name=profile_name,
+        js8_source = _source("js8call")
+        use_existing_js8 = js8_source in {"existing", "discover", "import"}
+        selected_js8_profile = (
+            select_js8call_file_profile(
+                js8_file_profiles,
+                tcp_port=initial_js8_port,
+                profile_name=profile_name,
+            )
+            if use_existing_js8
+            else None
         )
         _suggest("js8_host", "127.0.0.1")
         if selected_js8_profile is not None and getattr(selected_js8_profile, "tcp_server_port", ""):
             _suggest("js8_port", getattr(selected_js8_profile, "tcp_server_port", ""))
-        elif sum(1 for profile in js8_file_profiles or () if str(getattr(profile, "directed_path", "") or "").strip()) <= 1:
+        elif js8_source in {"create", "managed", "new"}:
             _suggest("js8_port", default_ports.get("js8call", ""))
-        _suggest(
-            "js8_install_path",
-            guided_single_install_path(install_candidates, "js8call", js8_results, "path_js8call", "JS8Call", review),
-        )
+        if js8_source not in {"manual", "remote"}:
+            _suggest(
+                "js8_install_path",
+                guided_single_install_path(install_candidates, "js8call", js8_results, "path_js8call", "JS8Call", review),
+            )
         if selected_js8_profile is not None:
             _suggest("js8_directed_path", getattr(selected_js8_profile, "directed_path", ""))
             _suggest("js8_profile_path", getattr(selected_js8_profile, "save_dir", ""))
-        else:
+        elif use_existing_js8:
             review.append(
                 guided_js8_profile_review_text(
                     js8_file_profiles,
@@ -359,17 +370,20 @@ def guided_radio_autofill_suggestions(
                 review,
             ),
         )
-    if bool(selected.get("varac")):
-        _suggest(
-            "varac_install_path",
-            guided_single_install_path(install_candidates, "varac", varac_results, "varac_path", "VarAC", review),
-        )
-        _suggest("varac_db_path", guided_detection_path(varac_results, "varac_db_path"))
-        _suggest("varac_ini_path", guided_detection_path(varac_results, "varac_ini_path"))
-        _suggest("varac_incoming_path", guided_detection_path(varac_results, "message_paths.varac"))
-        _suggest("varac_outbox_dir", guided_detection_path(varac_results, "varac_outbox_dir"))
-        _suggest("varac_bbs_dir", guided_detection_path(varac_results, "varac_bbs_dir"))
-        _suggest("varac_bbs_archive_dir", guided_detection_path(varac_results, "varac_bbs_archive_dir"))
+    if bool(selected.get("varac")) and not observer_mode:
+        varac_source = _source("varac")
+        if varac_source not in {"manual", "remote"}:
+            _suggest(
+                "varac_install_path",
+                guided_single_install_path(install_candidates, "varac", varac_results, "varac_path", "VarAC", review),
+            )
+        if varac_source in {"existing", "discover", "import"}:
+            _suggest("varac_db_path", guided_detection_path(varac_results, "varac_db_path"))
+            _suggest("varac_ini_path", guided_detection_path(varac_results, "varac_ini_path"))
+            _suggest("varac_incoming_path", guided_detection_path(varac_results, "message_paths.varac"))
+            _suggest("varac_outbox_dir", guided_detection_path(varac_results, "varac_outbox_dir"))
+            _suggest("varac_bbs_dir", guided_detection_path(varac_results, "varac_bbs_dir"))
+            _suggest("varac_bbs_archive_dir", guided_detection_path(varac_results, "varac_bbs_archive_dir"))
         review.append(
             "VarAC references were stored for FIO monitoring and BBS features only. "
             "FIO did not write VarAC.ini, VarAC.db, or VarAC cluster membership."

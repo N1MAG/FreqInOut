@@ -96,7 +96,7 @@ def test_mesh_start_is_post_shell_work_and_startup_hook_is_idempotent() -> None:
 
 
 def test_guided_autoconfigure_starts_a_qthread_without_inline_discovery(monkeypatch, tmp_path) -> None:
-    """The actual Configure Automatically button moves work off the GUI thread."""
+    """The Prepare selected software button moves work off the GUI thread."""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
 
@@ -141,7 +141,7 @@ def test_guided_autoconfigure_starts_a_qthread_without_inline_discovery(monkeypa
         button = dialog.findChild(QPushButton, "guidedConfigureAutomaticallyButton")
         assert button is not None
         button.click()
-        assert button.text() == "Searching…"
+        assert button.text() == "Preparing…"
         assert button.isEnabled() is False
         loop = QEventLoop()
         QTimer.singleShot(1500, loop.quit)

@@ -1,13 +1,13 @@
 # Guided Radio And Software Configuration Specification
 
 Status: authoritative product and implementation specification; policy approved
-2026-09-16; GRS-0 through GRS-5 and GRS-6.1 through GRS-6.3 automated exit gates passed
-2026-09-17, but
-the first operator-assisted transceiver run exposed unresolved P0/P1
-distinct-instance and existing-station regressions. Release qualification is
-therefore **open and blocked** pending GRS-6 and a repeated live gate. No
-existing application configuration may be treated as safe to replace, clone,
-or reuse through this flow until that gate passes.
+2026-09-16. GRS-0 through GRS-5, GRS-6.1 through GRS-6.5, and GRS-7.1 through
+GRS-7.5 passed their automated implementation gates on 2026-09-17. The
+operator-assisted live release qualification remains **open and blocked** under
+GRS-7.5. No
+existing application configuration may be replaced, relinked, cloned, cleaned
+up, or reused through this flow until the exact operation is explicitly chosen
+and its gate passes.
 
 Governing delivery contract: `project_delivery_rules.md`
 
@@ -43,7 +43,14 @@ configuration that FIO can explain, launch, monitor, and recover.
 The normal experience must be clear enough for a first-time operator while
 remaining exact enough for a multi-radio station:
 
-`Radio -> Operating Model -> Software -> Connections -> Safety -> Schedule -> Review & Save`
+`Radio -> FIO Behavior -> Software -> Connections -> Safety -> Schedule -> Review & Save`
+
+Within **Software**, the normal task sequence is:
+
+`Choose software and source -> choose VarAC arrangement when applicable -> Prepare selected software automatically -> review the prepared plan -> resolve only items needing attention`
+
+Discovery, preparation, and the concise proposed plan always precede any prompt
+to enter or correct paths, ports, commands, profiles, databases, or folders.
 
 The workflow is complete only when FIO knows, for every selected application:
 
@@ -64,9 +71,10 @@ an instance always selects one atomic identity bundle.
 ## Product Principles
 
 1. **Radio first, software in the same session.** Add Radio establishes the
-   owning radio draft before software instances are proposed. Detailed
-   Software Administration remains the reusable implementation authority, not
-   a separate setup journey the operator must rediscover.
+   owning radio draft before software instances are proposed. It reuses the
+   Software Administration proposal and assistant core only after it has
+   produced a prepared plan; the operator is not sent to administration as the
+   first or normal setup step.
 2. **One guided language.** SDRs and transceivers use the same step positions,
    ownership choices, review language, and recovery model. Content changes by
    capability; steps do not silently vanish or renumber.
@@ -96,6 +104,16 @@ an instance always selects one atomic identity bundle.
     reads existing identities only to avoid collisions or to offer an explicit
     reuse choice. It does not edit, relink, clone from, or write an existing
     native profile unless the operator chooses that exact operation at Review.
+11. **Preparation precedes administration.** The normal path first discovers,
+    allocates, and explains a complete proposal. Detailed Software
+    Administration is a correction, import, manual, or advanced-review surface;
+    it is never the first mental step and never begins as a blank technical
+    form when FIO can derive the answer.
+12. **A proposed target is not a native-write claim.** FIO may reserve and show
+    managed roots, endpoints, commands, and intended third-party files before
+    Save. It says it will create or verify native application configuration only
+    when an exact platform/version-qualified writer satisfies the Native
+    Configuration Writer Contract.
 
 ## Terminology And Durable Identity
 
@@ -126,6 +144,24 @@ Each radio-scoped software family uses exactly one of these sources:
   station-shared, such as FLMsg or FLAmp by default.
 - **Built into FIO:** a capability mapping, not an external launch item, such as
   FIO Spotter.
+
+Durable source enums may retain the existing internal names, but Add Radio uses
+these operator-facing labels consistently:
+
+| Durable meaning | Add Radio label |
+| --- | --- |
+| Create a distinct instance | **Create a new FIO-managed instance** |
+| Use an existing instance | **Use an existing instance unchanged** |
+| Connect manually or remotely | **Set up manually or connect remotely** |
+| Use a shared station tool | **Use station-shared `<service>`** |
+| Built into FIO | **Included with FIO** |
+
+For a normal managed family, the visible identity is `Instance for: <radio
+name>`. It is a read-only summary and never appends `JS8Call Family`, `Fast
+Light`, or another implementation suffix. The opaque draft and system keys
+remain internal. **VarAC arrangement** is separate from source: standalone,
+create cluster, and join cluster are topology choices made before preparation,
+not file or connection fields.
 
 Every selected family also has a completion policy:
 
@@ -187,6 +223,53 @@ native identity is a separate reviewed clone/migrate operation.
 Direct persistence and launch-planner validation enforce the matrix. Hiding a
 choice in the UI is not the safety boundary.
 
+## Task-Oriented Redesign Brief
+
+- **Primary operator task:** Add a radio and prepare a safe, distinct, launchable
+  software set without having to understand application-specific storage,
+  command-line, or database conventions.
+- **Starting context:** The operator entered `Settings -> Radios -> Add Radio`,
+  named the radio, selected its hardware role, and chose how FIO should use it.
+  Existing station configuration is evidence for recommendations and collision
+  avoidance; it is not permission to reuse or modify anything.
+- **Completion outcome:** One reviewed transaction saves the radio, FIO Behavior,
+  prepared application identities, manifests, launch plan, safety and schedule
+  assignments, and any explicitly chosen VarAC cluster operation. Cancel or a
+  failure leaves all prior configuration unchanged.
+- **Normal task sequence:** Choose software and source; choose the VarAC
+  arrangement when VarAC is selected; prepare automatically; scan one concise
+  readiness card per family; resolve only exceptions; review; save.
+- **Primary action:** `Prepare selected software automatically` is the dominant
+  action on Step 3 after the required source and VarAC-arrangement choices are
+  complete. `Save Radio and Software` is the sole final commit action.
+- **Essential state and Why:** The radio, source/mode, proposed ownership,
+  readiness, non-conflicting endpoint summary, launch policy, safety impact,
+  and reason for any recommendation or block remain visible. Exact paths,
+  commands, fingerprints, dependencies, and raw claims are available through
+  `Show details` unless the operator must act on them.
+- **Secondary and advanced work:** `Find installed software` refreshes the
+  bounded cache. Import, manual/remote setup, executable correction, custom
+  commands, raw paths, and diagnostics appear only after preparation or through
+  an explicit Advanced route.
+- **Workspace archetype:** Guided workflow. The shared Software Instance
+  Assistant consumes an already-prepared immutable plan and corrects or reviews
+  it; it does not replace the normal Add Radio sequence with schema-shaped
+  administration.
+- **Responsive behavior:** One fixed header and one fixed action footer surround
+  one vertical scroll owner. Step controls wrap in stable order. Prepared cards
+  stack in the same reading order at medium and compact widths. Expanding
+  details cannot move the footer offscreen or introduce page-level horizontal
+  scrolling.
+- **Shared-theme and component reuse:** Step chips, source selectors, status
+  banners, readiness cards, buttons, disclosure controls, focus, warning, and
+  disabled states use `freqinout/gui/theme.py` and established shared helpers.
+  This workflow introduces no local palette or fixed text-bearing metric.
+- **Performance boundary:** Rendering uses one immutable configuration-inventory
+  snapshot. Discovery and proposal work is bounded, asynchronous, coalesced,
+  cancellable, and generation-fenced. Paint, resize, navigation, typing,
+  selection, disclosure toggles, and Review perform no filesystem, process,
+  endpoint, radio, migration, or message-history I/O.
+
 ## Guided Workflow
 
 The seven step positions remain visible throughout the workflow. A step may say
@@ -206,7 +289,7 @@ Changing the role after software selection triggers a compatibility review. It
 does not silently remove an application. Incompatible choices are named and the
 operator chooses whether to discard them or return to the prior role.
 
-### 2. Operating Model
+### 2. FIO Behavior (Operating Model)
 
 Step 1 already establishes the hardware role as **Transceiver** or
 **Receive-only SDR**. Step 2 does not ask that question again. It answers the
@@ -240,54 +323,106 @@ plan, or assignment schema.
 
 ### 3. Software
 
-The page first asks what the radio will use, then expands one concise card for
-each selected family. Presets such as JS8, Fast Light, TriMode, VarAC, or SDR
-Receive may preselect cards but do not bypass their configuration.
+The first visible section asks what the radio will use and presents the primary
+preparation action. It does not begin with responsibility cards, raw fields, or
+the title `Software Administration`. Presets such as JS8, Fast Light, TriMode,
+VarAC, or SDR Receive may preselect families but do not bypass their source or
+arrangement decisions.
 
-Each external family requires an explicit instance-source choice. The
-recommended choice for a second local radio or SDR is **Create a distinct
-instance**. Choosing **Use an existing instance** reveals bounded candidates.
+The normal sequence is binding:
+
+1. **Choose software.** Select the families this radio will use.
+2. **Choose source.** For each external radio-scoped family choose `Create a new
+   FIO-managed instance` (recommended for a second local radio), `Use an
+   existing instance unchanged`, or `Connect manually or remotely`. FIO Spotter
+   says `Included with FIO`; CommStat says `Use the station CommStat service`.
+3. **Choose VarAC arrangement.** When VarAC is selected, show the current
+   topology and choose standalone, create-cluster, join-cluster, import, or
+   manual/remote intent before showing node or cluster detail fields. The
+   conditional rules are defined in the VarAC family contract below.
+4. **Prepare selected software automatically.** This is the dominant action and
+   replaces the ambiguous `Configure Automatically` label. It resolves binaries,
+   qualified recipes, generated roots, collision-free resources, launch policy,
+   shared-service bindings, and applicable VarAC topology into complete atomic
+   proposals.
+5. **Review the prepared plan.** Show one compact family card with `Ready`,
+   `Needs attention`, `Using existing unchanged`, `Manual setup required`,
+   `Discovery in progress`, or `Stale — reprepare required`.
+6. **Resolve only exceptions.** Open the shared assistant only for an unresolved
+   choice, missing or ambiguous executable, unsupported recipe, explicit import,
+   manual/remote setup, or operator-requested review/Advanced detail.
+
+The source and VarAC-arrangement selectors are intent decisions, not technical
+configuration fields. FIO may use the current cached inventory to explain those
+choices immediately. If the cache is absent or stale, the operator's explicit
+Prepare action starts one bounded background refresh without blocking the step.
+The operator is never prompted to enter or correct paths, ports, commands,
+profiles, databases, or folders before automatic preparation has been offered
+and its result is available.
 
 Before proposing values, FIO resolves the selected source against one immutable
 station-inventory snapshot containing saved application rows, manifests,
 launch bundles, device projections, retained drafts in the current transaction,
-and intentional station-shared services. That same snapshot and generation are
-used by Add Radio, Software Administration, Review, and final persistence.
+intentional station-shared services, and conservatively classified incomplete
+records. That same snapshot and generation are used by Add Radio, Software
+Administration, Review, and final persistence.
 
-The normal decisions are:
+The source decisions have these exact boundaries:
 
 | Operator choice | FIO may reuse | FIO must make distinct |
 | --- | --- | --- |
-| Create a distinct instance | installed application binary and a qualified version recipe | stable instance key, native profile/config root, application-data/message/log roots, TCP/UDP endpoints, rig/profile selector, manifest, and launch identity |
-| Use an existing instance | the complete selected source-locked bundle | nothing inside that bundle; edits require `Clone as distinct` |
-| Use a shared station service | only an application explicitly defined as shared, plus deliberate radio-to-service bindings | each radio-owned endpoint binding and its capability/safety scope |
+| Create a new FIO-managed instance | installed application binary and a qualified version recipe | stable instance key, native profile/config root, application-data/message/log roots, TCP/UDP endpoints, rig/profile selector, manifest, and launch identity |
+| Use an existing instance unchanged | the complete selected source-locked bundle | nothing inside that bundle; edits require `Clone as distinct` |
+| Use the station service | only an application explicitly defined as shared, plus deliberate radio-to-service bindings | each radio-owned endpoint binding and its capability/safety scope |
 | Connect manually or remotely | nothing inferred beyond reviewed evidence | the explicit endpoint/command/path identity entered by the operator |
 
-Using an installed binary is not the same as using an existing instance. A
-distinct-instance request never preselects an existing native profile, settings
-file, data folder, message file, endpoint, or manifest merely because only one
-was discovered. If FIO cannot construct a complete collision-free bundle, the
-card remains `Needs attention` and names the unsupported native step; it does
-not manufacture a hybrid bundle.
+Using an installed binary is not the same as using an existing instance. A new
+managed-instance request never preselects an existing native profile, settings
+file, data folder, message file, endpoint, manifest, or incomplete legacy row
+merely because it was discovered. If FIO cannot construct a complete
+collision-free bundle, the card remains `Needs attention` and names the one
+unsupported or unresolved step; it does not manufacture a hybrid bundle.
 
-`Configure Automatically` operates per selected source. It fills the complete
-new proposal for `Create a distinct instance`, restores the complete candidate
-for `Use an existing instance`, and adds only a mapping for a shared service.
-It does not apply a loose collection of individually preserved fields.
+The prepared family card contains only information needed to decide or act:
+application, source/mode, radio identity, allocated endpoint summary, launch
+policy, readiness, and a one-line Why. Examples include:
 
-The page renders immediately from a cached discovery snapshot. If the snapshot
-is absent or stale, FIO may begin one bounded background discovery after the
-operator selects a family. `Find installed software` remains available for an
-explicit refresh. The page stays fully navigable while discovery runs.
+- `JS8Call · New FIO-managed instance · Found · API 2443 · Launch with FIO · Ready`
+- `Fast Light · New FIO-managed instance · FLRig + FLDigi found · 12346 / 7363 · Ready`
+- `VarAC · Create a cluster with FTDX-10 VarAC · Confirmation required`
 
-When a selected family needs the mature Software Administration assistant, Add
-Radio embeds that same core workflow against the unsaved radio draft. It must
-not present a reduced second implementation. If a platform limitation requires
-leaving Add Radio, FIO saves a resumable inactive setup draft and opens the exact
-`Settings -> Software -> <family> -> <radio draft>` task. Returning resumes at
-the same guided step with prior choices intact.
+Exact paths, commands, environment, selectors, fingerprints, dependencies,
+resource claims, and diagnostics are collapsed under `Show details`. A required
+warning, collision, unsupported writer, external action, unsafe capability, or
+reason the next action is disabled remains visible without expanding details.
+
+The page renders immediately from the prior coherent cached snapshot. `Find
+installed software` explicitly refreshes that cache. Preparation reuses the
+same in-flight or completed generation rather than starting a second scan. Back,
+Next, Cancel, source changes, and family changes remain responsive while work
+runs; stale results cannot modify the current draft.
+
+When a selected family needs the shared Software Instance Assistant, it opens
+against the unsaved radio draft and receives the prepared immutable proposal.
+Its title is task-specific, such as `JS8Call setup for TriMode`, not the generic
+`Software Administration`. It is a correction/review surface, not a blank form.
+Generated fields are presented as `FIO will create` or `FIO will use` and are
+read-only in the normal path. `Browse...` appears only for a missing or ambiguous
+executable or after the operator explicitly chooses manual or Advanced setup.
+
+If a platform limitation requires leaving Add Radio, FIO saves a resumable
+inactive setup draft and opens the exact
+`Settings -> Software -> <family> -> <radio draft>` task with the same prepared
+plan. Returning resumes at the same step with intent, proposal, focus, expanded
+state, and scroll position intact.
 
 ### 4. Connections
+
+Connections consumes the prepared atomic bundles from Step 3; it does not
+reconstruct them from loose fields. Normal cards confirm only the operational
+target, required endpoint choice, launch-at-startup policy, verification, and
+blocked or unsafe state. Generated executable/profile/data roots and exact
+recipe details are read-only prepared facts under `Show details`.
 
 Connections are grouped into separately titled cards by responsibility. At
 minimum, an observer using SDR++ and JS8Call sees:
@@ -300,6 +435,13 @@ minimum, an observer using SDR++ and JS8Call sees:
 Fast Light similarly separates FLRig control, FLDigi modem/logs, shared
 FLMsg/FLAmp tools, and their relationship. VarAC separates node-local paths and
 connections from optional cluster-shared configuration.
+
+When discovery cannot identify one executable unambiguously, `Choose
+application...` presents the bounded detected candidates and always includes a
+`Browse...` fallback. Browse selects an application; it does not force the
+operator to invent recipe-owned profile, storage, message, or command fields.
+Changing the application invalidates the prepared recipe and requires
+repreparation before Continue or Save.
 
 The primary receiver action is labeled **Test SDR++ receiver control** or the
 exact adapter name. Its summary names the endpoint and target. It never appears
@@ -367,10 +509,10 @@ Review is a readable operational plan, not a raw field dump. It shows:
 
 - radio role, model, activation/default intent, and control owner;
 - every selected family exactly once;
-- instance source, ownership, variant, paths, endpoints, and exclusive claims;
-- exact effective launch command, working directory, dependencies, startup and
-  health flags;
-- native configuration actions, backup targets, and operator-owned actions;
+- instance source, ownership, variant, endpoint summary, and launch policy;
+- whether FIO will create, use unchanged, share, or leave an application
+  operator-managed;
+- native configuration actions and operator-owned actions in plain language;
 - receive/tune/QSY/PTT/transmit/scheduler permissions;
 - Receiver Guard or RF Guard assignments and schedule result;
 - VarAC node and optional cluster membership, with node-local and shared
@@ -378,11 +520,15 @@ Review is a readable operational plan, not a raw field dump. It shows:
 - conflicts, warnings, verification evidence, and recovery consequences; and
 - the state that will remain if an optional live application is unavailable.
 
-Review contains a visible **Launch plan** section. It lists every external
-component, exact effective command or operator-start state, dependencies,
-execution scope, startup choice, readiness policy, and the distinction between
-known recipe, startup inclusion, and bundle enabled. This section is not hidden
-inside generic Advanced details.
+Review contains a visible compact **Launch plan** section. It lists every
+external component, `Launch with FIO` or operator-start state, startup choice,
+readiness state, and the distinction between known recipe, startup inclusion,
+and bundle enabled. `Show details` for each family reveals exact paths, commands,
+working directories, dependencies, execution scope, fingerprints, backup
+targets, and exclusive claims. This technical evidence remains keyboard and
+screen-reader accessible but is collapsed by default; it is not buried in a
+generic Advanced editor. Required warnings, existing-object impacts, unsafe or
+unknown state, and the reason Save is blocked remain visible.
 
 The primary action is **Save Radio and Software** when software is part of the
 transaction. A radio-only save is not reported as complete if selected required
@@ -423,6 +569,14 @@ application-data/message roots in a dedicated FIO-managed location for that
 stable instance key. An existing JS8 settings file, application-data directory,
 `DIRECTED.TXT`, TCP API port, or UDP port is never the default for a distinct
 proposal. The application binary may be shared; the instance identity may not.
+
+Before any correction or Files surface appears, the prepared plan already
+contains and summarizes the new rig name, profile/configuration root, Qt
+application-data root, `DIRECTED.TXT`, `ALL.TXT`, `inbox.db3`, TCP API, and
+applicable UDP claims. It labels managed targets `FIO will create` when a
+qualified writer owns the operation or `FIO will reserve; operator action
+required` when it does not. Another radio's values appear only after the
+operator explicitly chooses `Use an existing instance unchanged`.
 
 FIO owns version- and platform-qualified launch recipes for stock JS8Call,
 Improved, and Subspace. Each recipe defines the executable, exact rig/profile
@@ -509,6 +663,19 @@ qualified recipe. Reusing the FLRig/FLDigi executable is allowed; reusing an
 existing radio's native profile folders, endpoints, or attributable log roots
 is not the default for `Create a distinct instance`.
 
+Preparation resolves and summarizes the FLRig/FLDigi configuration roots,
+FLDigi log and check-in roots, endpoints, dependency order, commands, and launch
+policy before any Files or correction surface appears. The qualified normal
+path asks for no custom command or raw profile folder. FLMsg and FLAmp remain
+station-shared unless the operator explicitly selects Advanced radio-specific
+ownership.
+
+The transceiver-only Advanced option is labeled **Allow FIO to initiate Fast
+Light transmissions**. Its explanation is: `Off by default. Needed only for
+FIO-requested PTT, macros, queues, or automatic send; it does not affect
+ordinary manual FLDigi use.` It remains subject to FIO Behavior, RF Guard, and
+final preflight. The option never appears for a receive-only SDR.
+
 Fast Light persistence distinguishes three identities:
 
 1. station-shared FLMsg/FLAmp executable and default message-root identity;
@@ -537,22 +704,51 @@ fields are compatibility projections, not a competing owner. If the current
 node schema lacks a first-class field such as outbox, implementation uses an
 additive migration and preserves the existing projected value.
 
-Cluster mode is an explicit branch after node configuration:
+VarAC source and **VarAC arrangement** are separate choices. Arrangement is
+selected immediately after VarAC is chosen and before node, cluster, Files, or
+connection details. The compact inventory summary explains why an arrangement
+is recommended; discovery never silently selects a mutating cluster operation.
 
-- **Standalone VarAC**
-- **Join an existing cluster**
-- **Create a cluster and add this node**
+| Inventory state and source | Arrangement choices before Prepare | Initial state or recommendation | Preparation behavior |
+| --- | --- | --- | --- |
+| No nodes and no clusters; new managed node | Standalone; Create the first cluster | Standalone is preselected | Generate a node proposal; generate cluster resources only if Create is selected |
+| Standalone node(s), no clusters; new managed node | Standalone; Create a cluster with a named existing standalone node and this radio; Import; Manual/remote | No mutating choice is preselected; Create cluster is marked **Recommended** | Preserve the existing node and prepare a new node plus proposed two-member cluster only after explicit selection |
+| One or more valid clusters; new managed node | Standalone; Join a named existing cluster; Create a new cluster; Import; Manual/remote | Standalone is the safe initial choice; joining is never automatic | Prepare a distinct node and collision-free proposed membership for the selected named cluster |
+| Import existing | The source-locked current arrangement | Explicit imported source | Create no new cluster operation; changing arrangement requires Clone as distinct |
+| Manual/remote | Standalone/manual, or join only with explicit reviewed target evidence | Manual | Invent no command, native configuration, or membership evidence |
+
+For the production-shaped case of one existing standalone node and no cluster,
+the visible summary is:
+
+`Existing setup: FTDX-10 VarAC is standalone. No VarAC cluster is configured.`
+
+The recommended choice is:
+
+`Create a cluster with FTDX-10 VarAC and <new radio> — Recommended`
+
+Its Why text states: `Creates coordinated membership only after your final
+review; it does not change FTDX-10 now.` The operator must select that choice;
+recommendation styling is not consent. `Create another standalone VarAC node`
+remains available. `Join an existing cluster` is absent or disabled with the
+exact reason when no valid cluster exists.
+
+After arrangement selection, Prepare generates only the relevant node-local and
+cluster proposal. A managed plan shows intended launcher, working directory,
+INI, database/runtime, incoming/inbox, and outbox targets as read-only facts. If
+no qualified VarAC writer or launch recipe exists, it says **Manual VarAC
+configuration required** and gives one precise next action; blank technical
+fields are not presented as if the operator should know how to complete them.
 
 Membership records cluster ID, unique positive instance number, shared database
-where applicable, counter refresh, gateway handler, and PTT-lock policy. Node
-creation precedes membership. Standalone VarAC never implies cluster mode.
-
-Selecting VarAC for another radio defaults to **Standalone VarAC**, even when a
-VarAC node or cluster already exists. Existing VarAC configuration is collision
-evidence and an optional explicit import source; it is never evidence that the
-new radio should join or create a cluster. Only an operator selection of
-`Join an existing cluster` or `Create a cluster and add this node` creates
-cluster fields or membership.
+where applicable, counter refresh, gateway handler, and PTT-lock policy. For
+create-cluster using an existing standalone node, final Review names that node,
+the new node, both proposed memberships and instance numbers, gateway choice,
+PTT policy, node-local resources, and cluster-shared resources. One transaction
+creates the new node and cluster, adds both memberships, updates the explicitly
+reviewed existing-node relationship, saves the new radio link and launch plan,
+and enables the reviewed gateway. Cancel, Back, repreparation, stale evidence,
+or any failure leaves the existing standalone node unchanged and creates no
+cluster or membership. Standalone VarAC never implies cluster mode.
 
 The cluster record owns normalized cluster ID, shared database, counter refresh,
 gateway selection, and PTT-lock policy. Membership owns the cluster reference,
@@ -637,6 +833,13 @@ FIO may create or update third-party native configuration only through an
 application-, variant-, version-, and platform-qualified writer. There is no
 generic best-effort writer.
 
+Preparation may reserve and display intended managed roots, endpoints, launch
+arguments, and native-file targets without writing them. The plan distinguishes
+`FIO will create and verify at Save` from `FIO will reserve; operator action
+required`. Only the first state is permitted when the exact qualified writer
+below is available; proposing a path is never evidence that the native file
+exists or is valid.
+
 A supported writer must:
 
 1. detect the exact installed variant/version and target profile;
@@ -660,6 +863,47 @@ prematurely.
 
 ## Discovery And Performance Contract
 
+### Candidate classification and incomplete records
+
+A **usable existing candidate** is one complete atomic bundle with a stable
+identity, explicit ownership or source evidence, every required endpoint and
+path for its family/source, and no unresolved exclusive-resource collision. An
+enabled application row alone is not proof of a usable or FIO-managed instance.
+
+An unlinked or incomplete application row is classified as **Orphaned or
+incomplete record** when required ownership, manifest, launch, endpoint, path,
+or provenance evidence is absent. Such records:
+
+- appear only in a diagnostics/recovery view, never as the default existing-
+  instance choice;
+- never receive a launch item or radio assignment merely because their row is
+  enabled;
+- remain byte/row unchanged during discovery, preparation, Add Radio, Cancel,
+  Back, or failed Save; and
+- retain conservative resource claims until an explicit reviewed maintenance
+  operation reconciles them.
+
+The allocator normalizes claims by family, transport, host, port, profile/data
+root, log root, database, and launch identity. Duplicate legacy rows claiming
+the same resource produce one conservative collision claim rather than an
+unbounded sequence of invented reservations. A claim also owned by a complete
+linked instance remains reserved by that live identity. A new managed proposal
+chooses the next collision-free complete bundle; it never repairs, silently
+reuses, disables, relinks, renumbers, relocates, or deletes an orphan.
+
+An empty `software_instance_manifests` table is supported. Discovery uses saved
+configuration projections, application rows, launch bundles, configured paths,
+and bounded native evidence, and labels provenance **Managed evidence
+unavailable** or **Configuration provenance unverified** where appropriate. It
+does not infer FIO management from an executable path. A successful new Save
+creates the reviewed manifest atomically. Discovery never scans traffic,
+message, ingest, link-history, sync-history, or message-projection tables to
+compensate for absent manifests.
+
+Cleanup is a separate explicit maintenance workflow with preview, backup or
+recoverable disable/archive behavior, impact review, and its own acceptance
+gate. This guided workflow does not perform cleanup.
+
 ### One discovery coordinator
 
 All Add Radio software discovery uses one session-scoped coordinator and one
@@ -677,6 +921,13 @@ Discovery is:
 - safe to ignore when the operator changes radio role, family, variant, or
   closes the draft; and
 - explicit about candidates, ambiguity, elapsed time, and errors.
+
+The visible cache state uses calm, stable language: `Using cached station
+inventory`, `Refreshing software inventory...`, `Updated`, or `Could not
+refresh — using prior snapshot`. Publication preserves family/source choices,
+prepared drafts, focus, scroll position, and detail expansion. An explicit
+Prepare or `Find installed software` action may start work; ordinary navigation,
+render, resize, or family selection alone does not start a new scan.
 
 The prior snapshot remains usable during refresh. Results fill only a selected
 candidate bundle or blank proposal; they never overwrite an operator-edited
@@ -698,6 +949,10 @@ bundle.
 - Endpoint tests, process inventory, native writes, schedule projection, and
   verification use their owning background lanes and publish immutable results.
 - One slow application or endpoint cannot delay another family or radio.
+- Add Radio never queries `freqinout_nets.db` or any traffic/message/history
+  table. Large operational history cannot affect preparation latency.
+- Repeated Prepare, Back, and Next for the same current generation reuse the
+  coordinator result and do not repeat profile scans or filesystem traversal.
 
 ### Required telemetry
 
@@ -775,6 +1030,12 @@ Before mutation, FIO validates the entire transaction:
 - safety and schedule compatibility; and
 - supported native-writer plans and backups.
 
+The frozen review fingerprint includes every selected family source, the VarAC
+arrangement and named existing node/cluster when applicable, recipe and
+inventory generations, generated resources, native-writer capability/state,
+and every reviewed existing-object impact. A source, topology, inventory, or
+writer change requires repreparation and fails before FIO or native mutation.
+
 Commit order is:
 
 1. validate and freeze the review plan;
@@ -794,30 +1055,70 @@ radio. Disassociation removes only FIO assignments, launch items, and applicable
 cluster membership; it never deletes external profiles, logs, messages,
 databases, inboxes, or outboxes.
 
+Cancel releases only in-memory draft reservations. Existing complete and
+orphaned/incomplete application rows, manifests, launch items, links, native
+paths, and VarAC topology remain unchanged. A failed create-cluster transaction
+also restores the existing standalone VarAC node and leaves zero new cluster or
+membership rows.
+
 If an unavoidable post-radio compatibility failure occurs on an older database,
 the radio remains inactive and Review gives one exact resumable route. The UI
 must not report the overall operation as successful.
 
 ## UI, Responsive, And Accessibility Contract
 
-The guided workflow uses one vertical scroll owner. At 1920x1080, 1000x700, and
-900x560 in Normal and Large Text, light and dark themes:
+The guided surface has three geometry owners:
 
-- steps wrap without truncation and retain their stable order;
+1. a fixed, non-scrolling header containing purpose, selected radio/context,
+   current status, and responsive step chips;
+2. exactly one vertical `QScrollArea` containing the current step body; and
+3. a fixed, non-scrolling footer containing `Cancel`, `Back`, and one
+   state-dependent primary verb such as `Prepare selected software
+   automatically`, `Continue`, `Apply to radio draft`, or `Save Radio and
+   Software`.
+
+Ordinary forms and Review do not create a second same-axis scroll owner. A
+deliberately bounded list, log, or code-like technical value may own local
+overflow without taking over page navigation. Expanding or collapsing details
+never moves the footer offscreen.
+
+The surface bounds derive from the available screen work area, active font
+metrics, and shared spacing/control helpers; a fixed `780x700`-style assumption
+is prohibited. At 1920x1080, 1000x700, and 900x560 in Normal and Large Text,
+light and dark themes:
+
+- steps wrap without truncation and retain stable order;
+- compact mode presents one decision in a readable vertical sequence;
+- buttons wrap or stack before text is clipped;
 - primary content has no page-level horizontal scrollbar;
-- the current step, Back, Continue, Cancel, and final Save remain reachable;
-- app cards stack or wrap while preserving reading order;
-- technical detail uses progressive disclosure but never hides safety state;
-- status is communicated by text and icon as well as color;
-- every control has an accessible name, keyboard focus, and visible disabled
-  reason; and
+- the current task and fixed action footer remain reachable;
+- app cards stack while preserving reading order;
+- labels and evidence grow or wrap without overlap;
+- status publication does not rebuild the page, reset selection/focus/scroll or
+  disclosure state, produce geometry oscillation, or cause swipe-and-vanish;
+- status is communicated by semantic text and icon as well as shared themed
+  color; and
 - application, radio, profile, endpoint, and action labels never use clipped
   ellipses when the distinction affects ownership or safety.
 
-Discovery and endpoint status are inline. A modal is reserved for destructive
-replacement/role-change confirmation or a failure that cannot be represented in
-the owning card. There is no global tooltip over a section; help belongs to the
-specific label or action.
+`Show details` / `Hide details` is family-scoped, keyboard-focusable, preserves
+scroll position, and has an accessible name/description naming the family and
+radio. It may hide raw paths, commands, dependencies, fingerprints, and
+diagnostics. It never hides the target radio, selected source or VarAC
+arrangement, safety or blocked reason, required confirmation, unsaved state,
+existing-object impact, or destructive consequence.
+
+All visual treatment comes from the shared theme and component helpers. There
+is no screen-local palette, font, text-bearing control height, focus treatment,
+or imitation chip/card style. Help and tooltips belong to the specific label or
+action; there is no master tooltip over a section.
+
+Discovery and endpoint status are inline. Normal correction stays inside the
+guided page or its current drawer/stacked task. A top-level modal is reserved
+for destructive replacement/role-change confirmation or a failure that cannot
+be represented in the owning card. Opening full standalone Software
+Administration is an explicit secondary route after preparation, not the normal
+continuation.
 
 ## Error And Recovery Language
 
@@ -912,23 +1213,26 @@ operator-facing guidance.
    sharing without external writes or silent renumbering. Manual per-component
    commands remain exact and receive no generated arguments. Unknown native
    profiles remain `Configured in FIO — native profile unverified`.
-8. A transceiver's Advanced Fast Light TX acknowledgement is durable and
-   review-visible, while role, endpoint, profile, or RF Guard changes require
-   final-preflight revalidation. A stale/injected observer acknowledgement is
-   rejected.
+8. A transceiver's Advanced **Allow FIO to initiate Fast Light transmissions**
+   acknowledgement is durable and review-visible, while role, endpoint,
+   profile, or RF Guard changes require final-preflight revalidation. A stale
+   or injected observer acknowledgement is rejected.
 9. Case-insensitive duplicate VarAC cluster IDs and duplicate enabled member
    numbers fail before mutation; cluster-shared and node-local databases cannot
    be silently exchanged.
-10. Adding another VarAC node defaults to standalone and creates no cluster
-    record or membership until the operator explicitly chooses create or join.
+10. With one standalone VarAC node and no cluster, Add Radio shows the exact
+    topology, marks create-cluster-with-that-node as Recommended without
+    selecting it, retains standalone as an explicit alternative, and creates no
+    cluster or membership until final reviewed Save.
 11. A managed Fast Light proposal produces separate FLRig and FLDigi component
     identities, recipes, roots, endpoints, and readiness evidence. The visible
     family name is the radio name without an appended `Fast Light` suffix.
 
 ### Launch and platform behavior
 
-1. Every selected external app appears exactly once in Review with the exact
-   effective launch command or explicit operator-start state.
+1. Every selected external app appears exactly once in Review with a concise
+   launch policy or explicit operator-start state; `Show details` exposes the
+   exact effective command.
 2. Manual and startup launch plans are identical except for requested scope.
 3. Shared FLMsg/FLAmp launch once when intentionally shared; separate JS8,
    FLRig, FLDigi, SDR++, or VarAC identities launch separately.
@@ -986,6 +1290,66 @@ operator-facing guidance.
 8. Recovery presentation distinguishes `Saved — operator start required`,
    `Saved — verification pending`, `Saved — one app needs attention`, and
    `Saved — launch bundle retry required`, with an exact per-app retry route.
+
+### GRS-7 prepare-first and production-shaped remediation
+
+1. The exact route `Settings -> Radios -> Add Radio -> TriMode -> Transceiver`
+   shows software/source choices, applicable VarAC arrangement, and `Prepare
+   selected software automatically` before any administration, Files, raw path,
+   port, command, profile, database, or folder editor.
+2. With one complete linked JS8Call bundle on API `2442`, preparation creates a
+   new rig name, profile/data roots, `DIRECTED.TXT`, `ALL.TXT`, `inbox.db3`, and
+   unique TCP/UDP claims. It never displays or uses the existing profile unless
+   `Use an existing instance unchanged` is selected.
+3. A qualified JS8Call or Fast Light managed plan requires no raw Files or
+   custom-command input. A missing or ambiguous executable offers bounded
+   detected candidates plus `Browse...`; the operator is never stranded in a
+   blank form.
+4. The production-shaped fixture contains one linked complete JS8Call/Fast
+   Light/VarAC set, seven unlinked incomplete JS8Call rows with duplicate API
+   claims, seven unlinked incomplete Fast Light rows with duplicate endpoints,
+   and no manifests. Incomplete rows are diagnostic-only candidates, remain
+   unchanged, and contribute conservative normalized collision claims without
+   causing repeated scans or unbounded port increments.
+5. Empty-manifest discovery completes from bounded configuration evidence,
+   labels provenance unverified, never queries operational history, and creates
+   a new reviewed manifest only within successful final Save.
+6. FIO Spotter asks no catalog/folder/launch question. CommStat creates only one
+   binding to the new radio-owned JS8 endpoint and does not duplicate the
+   station service.
+7. With exactly one standalone `FTDX-10 VarAC` node and no clusters, the
+   production summary and create-cluster recommendation use the exact contract
+   copy, no mutating choice is preselected, and cluster/node detail fields do not
+   appear before arrangement selection and preparation.
+8. Choosing the standalone alternative creates no cluster rows. Choosing the
+   recommended create-cluster path reviews both members and commits new node,
+   cluster, memberships, gateway/PTT policy, launch plan, and radio link in one
+   transaction. Cancel, stale generation, duplicate member number, or injected
+   failure leaves the existing node unchanged with zero new cluster/membership
+   rows.
+9. Existing clusters produce named Join choices and the next collision-free
+   member proposal. Import remains source-locked. Manual/remote mode invents no
+   native configuration or launch command.
+10. Without a qualified VarAC writer/recipe, the plan shows `Manual VarAC
+    configuration required` and one precise next action instead of blank INI,
+    database, inbox, outbox, working-directory, or launcher fields.
+11. `Show details` starts collapsed, is family-scoped and keyboard accessible,
+    reveals exact technical evidence, preserves focus/scroll/expanded state
+    through refresh and resize, and never hides safety, Why, confirmation,
+    unsaved state, or existing-object impact.
+12. Real-widget and screenshot-shaped checks at 1920x1080, 1000x700, and
+    900x560 in Normal/Large Text and Light/Dark themes prove one body scroll
+    owner, fixed reachable footer, stable step order, no clipped/overlapping
+    control, no page-level horizontal scroll, and no swipe-and-vanish reflow.
+13. Preparation renders the cached snapshot immediately, starts at most one
+    explicit bounded worker per generation, reports progress/cancel within 250
+    ms, keeps navigation and typing responsive, and fences stale publication.
+    Repeated Prepare/Back/Next does not repeat the same filesystem/profile scan.
+14. The final frozen plan includes source, arrangement, recipe/inventory
+    generation, native-writer state, generated claims, and existing-object
+    impacts. Any mismatch fails before FIO/native mutation. Cancel and every
+    injected failure preserve byte/row-level equality for all pre-existing rows
+    and native targets.
 
 ## Delivery Slices And Exit Gates
 
@@ -1144,8 +1508,10 @@ GRS-6 proceeds sequentially:
    commands, dependencies, and launch summaries. Known recipes require no
    normal-flow custom command.
 3. **Supporting-family decisions:** resolve built-in Spotter MCF catalog;
-   implement one shared CommStat identity with per-JS8 bindings; make VarAC
-   standalone the default and cluster create/join explicit.
+   implement one shared CommStat identity with per-JS8 bindings; use the then-
+   approved safe standalone VarAC default and keep cluster create/join explicit.
+   GRS-7 supersedes only that default-selection policy with the conditional
+   arrangement matrix above.
 4. **Task-oriented UX:** separate Radio Role from FIO Behavior, use the approved
    labels, show resolved choices and Why, and keep raw paths/commands in
    Advanced or exact recovery guidance.
@@ -1220,11 +1586,12 @@ reviewed station launch target. The station launch planner therefore starts at
 most one process and retains all participating radio bindings. Disabling one
 radio binding removes only that row and leaves other bindings intact.
 
-A new VarAC instance now defaults to **Standalone VarAC** even when an existing
-node or cluster is discovered. Managed standalone creation, import, and manual
-selection are explicit setup choices; Create cluster and Join cluster are
-separate opt-in choices with concise Why guidance. No discovery result silently
-selects cluster membership.
+At this historical gate, a new VarAC instance defaulted to **Standalone VarAC**
+even when an existing node or cluster was discovered. Managed standalone
+creation, import, and manual selection were explicit setup choices; Create
+cluster and Join cluster were separate opt-in choices. GRS-7 supersedes the
+default-selection behavior with the conditional, mode-before-details matrix
+while retaining the rule that discovery never silently selects membership.
 
 The GRS-6.3 supporting-family, persistence, launch, Add Radio, Software
 Administration, guided/settings, Spotter ingest/compose/NCS/SOP, and adjacent
@@ -1315,19 +1682,324 @@ radio, git history, or remote repository. The exact TriMode/current-station
 route below remains an explicit operator-assisted live release gate; this
 document does not infer live application behavior from automated tests.
 
-GRS-6 automated exit requires all existing guided suites plus production-route
-tests for the acceptance items added above, responsiveness instrumentation,
-fault-injection rollback, `compileall`, and `git diff --check`. Its live exit
-requires the maintainer to complete or deliberately retain an inactive draft
-for this exact route:
+The historical GRS-6 automated exit required all existing guided suites plus
+production-route tests for the acceptance items added above, responsiveness
+instrumentation, fault-injection rollback, `compileall`, and `git diff --check`.
+Its live exit route was:
 
 `Settings -> Radios -> Add Radio -> TriMode -> Transceiver -> Fast Light + JS8Call + FIO Spotter + CommStat + VarAC -> Configure Automatically -> Software Administration -> Review`
 
-The live evidence must show a new JS8 profile/data identity and non-conflicting
+That live evidence must show a new JS8 profile/data identity and non-conflicting
 TCP/UDP endpoints, resolved Fast Light component recipes, built-in MCF catalog,
 one shared CommStat binding, standalone VarAC unless cluster is explicitly
 chosen, exact launch summaries, responsive navigation, and no mutation of the
 existing station configuration before final reviewed Save.
+
+### GRS-7 — Prepared Software Plan And Production-Shaped Remediation
+
+Status: specified 2026-09-17; implementation and operator-assisted live
+qualification are pending. Historical GRS-6 automated evidence remains valid,
+but it does not satisfy this newly clarified operator sequence or the
+production-shaped incomplete-record gate.
+
+GRS-7 proceeds sequentially:
+
+1. **Prepare-first sequence:** make software/source and VarAC-arrangement intent
+   the only choices before `Prepare selected software automatically`; render the
+   compact plan before any correction or administration surface.
+2. **Inventory classification:** classify complete usable candidates separately
+   from incomplete/orphan records, support empty manifests, normalize duplicate
+   conservative claims, and prevent diagnostic rows from becoming recommended
+   instances or launch items.
+3. **VarAC topology:** implement the conditional arrangement matrix, including
+   the explicit existing-standalone-to-new-cluster transaction and its
+   non-mutating cancel/failure behavior.
+4. **Progressive disclosure and layout:** consume prepared plans in the shared
+   assistant, collapse technical evidence, use one body scroll owner with fixed
+   header/footer, and preserve state across asynchronous publication.
+5. **Qualification:** run the complete GRS-7 acceptance matrix, production-
+   shaped read-only fixture checks, fault-injection, performance/lifecycle,
+   responsive/theme/accessibility partitions, and the exact live route below.
+
+Each numbered package is an exit gate; the next does not begin until the prior
+package passes. No package may delete, disable, relink, or migrate existing
+incomplete records. A cleanup tool, if later requested, requires a separate
+specification and explicit operator authorization.
+
+The GRS-7 live route is:
+
+`Settings -> Radios -> Add Radio -> TriMode -> Transceiver -> choose Fast Light + JS8Call + FIO Spotter + CommStat + VarAC -> choose each source -> choose the VarAC arrangement -> Prepare selected software automatically -> review only Needs attention cards or optionally open Software Administration -> Connections -> Safety -> Schedule -> Review & Save`
+
+The live gate must prove that preparation precedes technical correction, the
+new JS8 and Fast Light bundles are complete and collision-free, FIO Spotter and
+CommStat retain their built-in/shared contracts, the VarAC recommendation is
+conditional and non-mutating until final Save, details begin collapsed, the
+footer remains reachable, and cancel/failure changes neither the configured
+station nor incomplete legacy records.
+
+#### GRS-7.1 Exit Evidence — Prepare-First Sequence
+
+Status: automated exit gate passed 2026-09-17. Inventory classification,
+conditional VarAC recommendations, shared-assistant progressive disclosure,
+and the complete operator-assisted live route remain open under GRS-7.2 through
+GRS-7.5.
+
+The Add Radio Software step now presents capability selection and the primary
+`Prepare selected software automatically` action before per-family technical
+correction. Selected families expose only source intent, and VarAC additionally
+exposes non-mutating arrangement intent, until a prepared plan exists. A
+successful preparation stays on Software and reports compact `Ready` or `Needs
+attention` state; background work reports `Discovery in progress`; any family,
+source, role, setup-type, or VarAC-arrangement change invalidates the plan as
+`Stale — reprepare required`. Family correction actions and technical policy
+controls remain unavailable until preparation succeeds. Correction dialogs use
+task-specific `<family> setup for <radio>` titles rather than a generic
+Software Administration handoff.
+
+The existing generation/revision fence and dialog-close cancellation contract
+remain authoritative. This package changes no schema, persistence path, native
+application writer, software-instance ownership, launch behavior, existing
+radio configuration, or VarAC topology. The conditional VarAC arrangement
+matrix remains owned by GRS-7.3; the current control records intent only.
+
+Model ownership and review:
+
+- Primary `gpt-5.6-sol`, high reasoning: package boundary, lifecycle and stale-
+  publication review, delegated-diff integration, acceptance execution, and
+  specification/work-log reconciliation.
+- `gpt-5.6-terra`, high reasoning: bounded Add Radio prepare-first UI, compact
+  state presentation, plan invalidation, task-specific correction titles, and
+  compatible public-contract test updates.
+- `gpt-5.6-luna`, high reasoning: focused ordering, collapsed-details,
+  Back/Next preservation, Cancel purity, and asynchronous generation-fence
+  tests.
+
+Acceptance evidence: changed Python compiles; `git diff --check` passes; and
+the independent focused partition covering the new GRS-7.1 tests, unified
+guided UX, supporting families, asynchronous autofill, performance boundaries,
+and radio-scoped software settings passes **189 tests**. Tests used temporary
+configuration state. No runtime database, production fixture, third-party
+profile, process, endpoint, radio, commit, or remote repository was changed.
+
+#### GRS-7.2 Exit Evidence — Inventory Classification
+
+Status: automated exit gate passed 2026-09-17. VarAC topology, full shared-
+assistant progressive disclosure/layout, and operator-assisted qualification
+remain open under GRS-7.3 through GRS-7.5.
+
+One immutable inventory classifier now separates `usable_existing`,
+`recovery_only`, `diagnostic_only`, and `retained_draft` rows. It consumes
+already-loaded durable radio links and manifest/source evidence; `enabled` and
+an executable path are never ownership proof. A linked complete row remains a
+usable existing candidate when the manifest table is empty, but the UI labels
+it `Configuration provenance unverified` and does not claim native ownership.
+A complete, source-evidenced unassigned bundle appears only in the operator's
+explicit Find/import recovery picker. Incomplete or provenance-unknown rows
+remain visible as disabled diagnostics with classifier reasons and cannot be
+imported, recommended, assigned, source-locked, or launched by this workflow.
+
+Endpoint and path claims are normalized into immutable sets. Duplicate legacy
+rows therefore retain one conservative claim with a diagnostic duplicate count
+rather than forcing repeated scans or one invented port increment per duplicate
+row. Retained unsaved drafts reserve claims without becoming existing or
+diagnostic candidates. Add Radio startup, standalone Software Administration,
+bounded native discovery, and pre-Save revalidation now project the same link,
+manifest, classification, and fingerprint evidence. Empty-manifest handling
+reads only saved configuration/application/link evidence; no message, traffic,
+ingest, sync, or operational-history table is queried.
+
+Model ownership and review:
+
+- Primary `gpt-5.6-sol`, high reasoning: classification/source-evidence
+  architecture, Settings integration across initial/discovery/pre-Save paths,
+  explicit recovery distinction, delegated-diff review, regression correction,
+  gate execution, and specification/work-log reconciliation.
+- `gpt-5.6-luna`, high reasoning: immutable core classification, normalized
+  conservative claims, bounded production-shaped fixtures, empty-manifest and
+  retained-draft tests.
+- `gpt-5.6-terra`, high reasoning: disabled diagnostic presentation, explicit
+  recovery-only picker presentation, provenance warning, accessibility, and
+  focused real-widget tests.
+
+Acceptance evidence: changed Python modules compile; `git diff --check` passes;
+and the integrated GRS-7.2 inventory/UI, GRS-6 authority/recipe/transaction,
+Software Administration, async discovery, prepare-first, and performance
+partition passes **105 tests**. Synthetic fixtures reproduce one linked complete
+bundle, seven incomplete unlinked duplicate claimants, and no manifests without
+reading or changing the production database. No row, schema, cleanup state,
+native profile, process, endpoint, radio, commit, or remote repository was
+changed.
+
+#### GRS-7.3 Exit Evidence — Conditional VarAC Topology
+
+Status: automated exit gate passed 2026-09-17. Final operator-assisted
+qualification remains open under GRS-7.5.
+
+One pure snapshot adapter now consumes the already-loaded GRS-7.2 classified
+VarAC rows, durable radio links, clusters, and memberships. It emits the
+display-ready existing-setup summary, explicit arrangement choices, durable
+node/device IDs, and collision-free member proposals without opening a store or
+reconstructing incomplete native paths. Diagnostic and recovery-only rows
+cannot affect topology. A fresh station safely defaults to standalone. Existing
+clusters retain standalone as the safe default and expose named Join choices
+with the next free enabled member number. One standalone node with no cluster
+shows the exact named create-cluster recommendation but leaves the selector
+blank; multiple standalone nodes require an explicit named member choice.
+
+Add Radio presents that immutable recommendation before preparation and carries
+only the selected core metadata through the shared assistant. Technical cluster
+fields remain hidden until arrangement selection and preparation. The metadata
+survives assistant review and radio-name refresh, is cleared when the operator
+returns to standalone, and is accepted by final persistence only for an
+explicit create-cluster route.
+
+The existing-standalone create route now commits the new VarAC node, cluster,
+existing member 1, new member 2, reviewed gateway/PTT policy, manifest, launch
+plan, and new radio link in one SQLite transaction. The store revalidates the
+existing durable link and absence of any prior membership under `BEGIN
+IMMEDIATE`. Duplicate member numbers, stale assignment, observer membership,
+missing node/link, and injected failure roll back every new node, manifest,
+cluster, membership, launch, and link change while preserving the original
+standalone node and radio assignment.
+
+Model ownership and review:
+
+- Primary `gpt-5.6-sol`, high reasoning: conditional-matrix architecture,
+  display/persistence contract review, explicit member-number ownership,
+  delegated-diff integration, transaction and failure-semantics review, exit-
+  gate execution, and specification/work-log reconciliation.
+- `gpt-5.6-luna`, high reasoning: pure recommendation/snapshot adapter, atomic
+  store extension, duplicate/stale/fault-injection tests, and focused core
+  validation.
+- `gpt-5.6-terra`, high reasoning: bounded Add Radio presentation, exact copy,
+  named choices, assistant metadata preservation, refresh/route-change behavior,
+  and real-widget tests.
+
+Acceptance evidence: the focused GRS-7.3, GRS-7.2, prepare-first, assistant,
+guided VarAC, and store partition passes **63 tests**; the independently rerun
+adjacent family, manifest, supporting-family, launch-recipe, radio-scoped,
+Software Administration, unified UX, and performance partition passes **250
+tests**. Changed Python modules compile and `git diff --check` passes. Tests used
+temporary state. No schema, migration, cleanup, production database, native
+profile, external process, endpoint, radio, commit, or remote repository was
+changed.
+
+#### GRS-7.4 Exit Evidence — Progressive Disclosure And Responsive Layout
+
+Status: automated exit gate passed 2026-09-17. Final production-shaped and
+operator-assisted qualification remains open under GRS-7.5.
+
+Add Radio and the shared Software Instance Assistant now each use one vertical
+body scroll owner surrounded by a fixed purpose/step header and a fixed action
+footer. The Add Radio Back/Next actions live with Cancel and Save in the footer;
+the seven stable steps remain outside the body scroll. Dialog bounds continue
+to derive from the available work area rather than a fixed desktop assumption.
+
+The shared assistant consumes prepared state as compact family, source, radio,
+endpoint, launch, readiness, Why, safety, unsaved-state, and existing-impact
+facts. Exact paths, commands, dependencies, fingerprints, and diagnostics begin
+collapsed behind a family/radio-scoped keyboard-accessible `Show details`
+control. Disclosure, focus, and per-step scroll position survive refresh,
+navigation, resize, theme changes, and asynchronous publication. Qualified
+managed recipes resolve before the Files page is painted, so generated JS8Call
+and Fast Light roots appear as read-only prepared facts rather than blank path
+prompts.
+
+Primary integration review also closed three intent/identity gaps exposed by
+the production sequence. A `Create a new FIO-managed instance` request may
+reuse a qualified executable but cannot auto-select an existing JS8Call profile
+or VarAC node-local files; switching from existing to create clears the borrowed
+bundle. Add Radio uses exactly the operator's radio name for the visible
+software instance. An explicit create-cluster arrangement receives one core-
+generated, collision-free cluster name and public ID, and contradictory VarAC
+gateway policies fail before any write.
+
+Model ownership and review:
+
+- Primary `gpt-5.6-sol`, high reasoning: prepared-state/intent architecture,
+  Add Radio fixed-layout integration, generated VarAC cluster identity,
+  create-versus-existing safety correction, delegated-diff review, acceptance
+  execution, and specification/work-log reconciliation.
+- `gpt-5.6-terra`, high reasoning: shared-assistant single-scroll layout,
+  compact prepared facts, progressive disclosure, fixed footer, and focus/
+  scroll preservation.
+- `gpt-5.6-luna`, high reasoning: real-widget disclosure, safety/impact,
+  responsive light/dark and Normal/Large Text matrix, accessibility, and state-
+  preservation tests.
+
+Acceptance evidence: changed Python modules compile and `git diff --check`
+passes. The focused GRS-7.4, prepare-first, inventory, topology, autofill,
+assistant, recipe, and unified Add Radio partition passes **101 tests**. The
+independent adjacent family, persistence, Software Administration, Settings
+adapter, launch-recipe, performance-boundary, and guided-setup partition passes
+**328 tests**. Tests use temporary state and changed no schema, production
+database, native profile, application process, endpoint, radio, commit, or
+remote repository.
+
+#### GRS-7.5 Exit Evidence — Production-Shaped And Final Automated Qualification
+
+Status: automated gate passed 2026-09-17. The external application, hardware,
+platform, and final operator-assisted Save/Cancel route remains open and blocks
+the release claim. Automated evidence is not represented as live qualification.
+
+The exact real-widget route now covers `Settings -> Radios -> Add Radio ->
+TriMode -> Transceiver -> Software` with Fast Light, JS8Call, FIO Spotter,
+CommStat, and VarAC selected. Before preparation it verifies distinct-instance
+source intent, built-in Spotter ownership, station-shared CommStat ownership,
+and the explicit VarAC arrangement gate. A deterministic bounded-worker result
+then proves that only the prepared generation unlocks family review actions.
+The same live widget tree retains one body scroll owner, no page-level
+horizontal overflow, and a reachable fixed navigation/footer at 1920x1080,
+1000x700, and 900x560.
+
+The supplied production configuration database at
+`/Users/bill/RadioTools/FIO_DB_prod/current/freqinout.db` was opened only through
+SQLite `mode=ro&immutable=1`. The bounded projection confirmed one durably
+linked usable JS8Call/Fast Light/VarAC set, seven incomplete diagnostic-only
+JS8Call rows, seven incomplete diagnostic-only Fast Light rows, duplicate legacy
+endpoint claims normalized once, no manifests, one standalone VarAC node, and no
+cluster. The audit did not query traffic, message, ingest, sync, observation, or
+operational-history tables. File size and modification time were unchanged;
+`freqinout_nets.db` was not opened.
+
+Final primary review corrected one receiver-only integration regression found by
+the gate: preparing an SDR no longer requires JS8Call, and observer preparation
+continues through selected receive-safe Fast Light and/or distinct JS8Call
+companions while excluding FLRig and VarAC transmit/control ownership. The
+JS8Call generated configuration value is labeled accurately as a
+profile/configuration folder rather than a settings file.
+
+Model ownership and review:
+
+- Primary `gpt-5.6-sol`, high reasoning: final architecture/concurrency,
+  delegated-diff review, receiver-only integration correction, transaction and
+  fault evidence, partitioned acceptance, production-data safety review, and
+  specification/work-log reconciliation.
+- `gpt-5.6-luna`, high reasoning: immutable production-database audit,
+  production-shaped classification/claim tests, forbidden-table trace check,
+  and no-write evidence.
+- `gpt-5.6-terra`, high reasoning: exact TriMode real-widget route,
+  prepare-publication boundary, fixed navigation/footer, and responsive geometry
+  tests.
+
+Acceptance evidence: the GRS-7.5 route plus immutable production audit passes
+**8 tests**; the focused GRS-7.2 through GRS-7.4 preparation, topology,
+inventory, assistant, recipe, and UI partition passes **103 tests**; the core
+proposal/family/recipe/transaction/fault/production-shaped partition passes
+**91 tests**; the discovery, performance, save-transaction, manifest, and
+Settings-adapter partition passes **65 tests**; and the independently rerun
+adjacent family, persistence, Software Administration, launch-recipe,
+guided-setup, and performance partition passes **328 tests**. Changed Python
+compiles and `git diff --check` passes. No schema, migration, cleanup, production
+database, native profile, external process, endpoint, radio, commit, or remote
+repository was changed.
+
+The remaining operator-assisted gate must use the current worktree and active
+configuration root and must exercise real installed-app discovery plus final
+Save, Cancel, and recovery/fault behavior with live JS8Call variants, Fast Light,
+VarAC, receiver/radio control, and the required macOS/Linux/Windows platforms.
+Until that evidence is recorded, this work is ready for testing but not a
+completed release qualification.
 
 ## Approved Product Decisions
 
@@ -1350,6 +2022,10 @@ existing station configuration before final reviewed Save.
   or manifest.
 - CommStat is station-shared with explicit per-JS8 bindings unless a future
   version-qualified contract requires separate processes.
-- Additional VarAC nodes default to standalone; cluster mode is always opt-in.
+- VarAC arrangement is selected before details. A fresh station defaults to
+  standalone; one or more clusters never cause auto-join; and a station with
+  standalone node(s) but no cluster shows create-cluster-with-existing as a
+  recommendation that requires explicit selection. Cluster mutation is always
+  opt-in and final-review confirmed.
 - FIO Spotter's normal MCF catalog is resolved by FIO and is not a radio-scoped
   external launch or folder-selection task.

@@ -181,7 +181,14 @@ def test_settings_instance_discovery_immediately_shows_cached_inventory_then_que
     assistant = object()
     tab._on_software_instance_discovery_requested({"family_key": family, "assistant": assistant})
 
-    assert workspace.discovery_results == [[dict(row) for row in getattr(store, inventory_key)]]
+    assert len(workspace.discovery_results) == 1
+    classified_rows = workspace.discovery_results[0]
+    assert len(classified_rows) == len(getattr(store, inventory_key))
+    assert classified_rows[0]["id"] == getattr(store, inventory_key)[0]["id"]
+    assert classified_rows[0]["name"] == getattr(store, inventory_key)[0]["name"]
+    assert classified_rows[0]["family_key"] == family
+    assert classified_rows[0]["candidate_classification"] == "diagnostic_only"
+    assert classified_rows[0]["candidate_usable"] is False
     assert requested == [
         (
             (section, ()),

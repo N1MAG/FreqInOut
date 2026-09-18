@@ -15,8 +15,9 @@ import re
 import uuid
 from typing import Any, Iterable, Mapping, Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QFormLayout,
@@ -72,7 +73,7 @@ _FAMILY_FIELDS = {
         {"instance_name", "ownership", "host", "port", "secondary_port", "application_path", "secondary_application_path", "flmsg_application_path", "flamp_application_path", "configuration_path", "secondary_configuration_path", "storage_path", "secondary_storage_path", "launch_command", "launch_at_startup", "advanced_tx_requested", "advanced_tx_acknowledged", "notes"}
     ),
     "varac": frozenset(
-        {"instance_name", "ownership", "application_path", "configuration_path", "storage_path", "secondary_storage_path", "outbox_path", "working_directory", "cluster_path", "cluster_id", "cluster_name", "cluster_shared_database", "cluster_instance_number", "cluster_gateway", "cluster_ptt_lock", "launch_command", "launch_at_startup", "notes"}
+        {"instance_name", "ownership", "application_path", "configuration_path", "storage_path", "secondary_storage_path", "outbox_path", "working_directory", "cluster_path", "cluster_id", "cluster_name", "cluster_shared_database", "cluster_instance_number", "existing_standalone_node_id", "existing_standalone_device_profile_id", "existing_standalone_member_number", "cluster_gateway", "cluster_ptt_lock", "launch_command", "launch_at_startup", "notes"}
     ),
 }
 _FAMILY_FIELD_LABELS = {
@@ -84,7 +85,7 @@ _FAMILY_FIELD_LABELS = {
         "port": "JS8Call TCP API port",
         "udp_port": "JS8Call UDP port",
         "application_path": "JS8Call application",
-        "configuration_path": "JS8Call settings file",
+        "configuration_path": "JS8Call profile/configuration folder",
         "storage_path": "JS8Call application-data folder",
         "launch_command": "Custom launch command (advanced)",
     },
@@ -177,6 +178,9 @@ class SoftwareInstanceDraft:
     cluster_name: str = ""
     cluster_shared_database: str = ""
     cluster_instance_number: int = 0
+    existing_standalone_node_id: int = 0
+    existing_standalone_device_profile_id: int = 0
+    existing_standalone_member_number: int = 0
     cluster_gateway: bool = False
     cluster_ptt_lock: bool = False
     notes: str = ""
@@ -309,6 +313,13 @@ class SoftwareInstanceDraft:
             "cluster_name": self.cluster_name,
             "cluster_shared_database": self.cluster_shared_database,
             "cluster_instance_number": int(self.cluster_instance_number or 0),
+            "existing_standalone_node_id": int(self.existing_standalone_node_id or 0),
+            "existing_standalone_device_profile_id": int(
+                self.existing_standalone_device_profile_id or 0
+            ),
+            "existing_standalone_member_number": int(
+                self.existing_standalone_member_number or 0
+            ),
             "cluster_gateway": self.cluster_gateway,
             "cluster_ptt_lock": self.cluster_ptt_lock,
             "resource_claims": resources,
@@ -359,6 +370,13 @@ class SoftwareInstanceDraft:
                     "varac_cluster_path": self.cluster_path,
                     "varac_cluster_name": self.cluster_name,
                     "varac_cluster_shared_database": self.cluster_shared_database,
+                    "varac_existing_standalone_node_id": int(self.existing_standalone_node_id or 0),
+                    "varac_existing_standalone_device_profile_id": int(
+                        self.existing_standalone_device_profile_id or 0
+                    ),
+                    "varac_existing_standalone_member_number": int(
+                        self.existing_standalone_member_number or 0
+                    ),
                 }
             )
         return payload
@@ -460,6 +478,17 @@ def normalize_instance_draft(value: Mapping[str, Any] | SoftwareInstanceDraft) -
             row.get("cluster_shared_database") or row.get("varac_cluster_shared_database")
         ),
         cluster_instance_number=_int(row.get("cluster_instance_number") or row.get("varac_cluster_instance_number")) or 0,
+        existing_standalone_node_id=_int(
+            row.get("existing_standalone_node_id") or row.get("varac_existing_standalone_node_id")
+        ) or 0,
+        existing_standalone_device_profile_id=_int(
+            row.get("existing_standalone_device_profile_id")
+            or row.get("varac_existing_standalone_device_profile_id")
+        ) or 0,
+        existing_standalone_member_number=_int(
+            row.get("existing_standalone_member_number")
+            or row.get("varac_existing_standalone_member_number")
+        ) or 0,
         cluster_gateway=_bool(row.get("cluster_gateway", False)),
         cluster_ptt_lock=_bool(row.get("cluster_ptt_lock", False)),
         notes=_text(row.get("notes")),
@@ -474,6 +503,95 @@ def _endpoint(row: Mapping[str, Any]) -> tuple[str, int]:
     host = _text(row.get("host") or row.get("flrig_host") or row.get("fldigi_host"))
     port = _int(row.get("port") or row.get("flrig_port") or row.get("fldigi_port")) or 0
     return host, port
+
+
+_USABLE_EXISTING_CANDIDATE_CLASSES = frozenset(
+    {"usable", "usable_existing", "complete"}
+)
+_DIAGNOSTIC_ONLY_CANDIDATE_CLASSES = frozenset(
+    {
+        "diagnostic_only",
+        "incomplete",
+        "orphaned",
+        "orphaned_incomplete",
+        "provenance_unknown",
+        "recovery_only",
+        "unlinked",
+        "unusable",
+        "unknown",
+    }
+)
+
+
+def _candidate_classification(row: Mapping[str, Any]) -> str:
+    return _text(
+        row.get("candidate_classification")
+        or row.get("classification")
+        or row.get("candidate_status")
+    ).casefold().replace("-", "_").replace(" ", "_")
+
+
+def _existing_candidate_is_recovery(row: Mapping[str, Any]) -> bool:
+    return _bool(row.get("recovery_only")) or _candidate_classification(row) == "recovery_only"
+
+
+def _existing_candidate_is_usable(row: Mapping[str, Any]) -> bool:
+    """Use core classification only; unknown inventory evidence fails closed.
+
+    The UI must not rediscover or infer usability from enabled flags, paths, or
+    endpoints.  The inventory classifier owns that decision and publishes a
+    usable flag/classification with its immutable snapshot.  Older rows with no
+    such evidence remain visible only as diagnostics until reviewed recovery.
+    """
+
+    if _bool(row.get("diagnostic_only")):
+        return False
+    # A complete, source-evidenced but currently unassigned bundle is offered
+    # only inside this explicit Find/import recovery picker.  It is not a
+    # recommendation and cannot launch until final reviewed assignment.
+    if _existing_candidate_is_recovery(row):
+        return True
+    for key in ("usable_existing", "candidate_usable", "is_usable_candidate"):
+        if key in row:
+            return _bool(row.get(key))
+    classification = _candidate_classification(row)
+    if classification in _DIAGNOSTIC_ONLY_CANDIDATE_CLASSES:
+        return False
+    return classification in _USABLE_EXISTING_CANDIDATE_CLASSES
+
+
+def _diagnostic_candidate_reason(row: Mapping[str, Any]) -> str:
+    """Return core-provided recovery evidence without reconstructing a bundle."""
+
+    for key in (
+        "candidate_reasons",
+        "classification_reasons",
+        "diagnostic_reasons",
+        "completeness_reasons",
+        "candidate_reason",
+        "classification_reason",
+        "diagnostic_reason",
+    ):
+        raw = row.get(key)
+        if isinstance(raw, Mapping):
+            parts = [_text(value) for value in raw.values()]
+        elif isinstance(raw, (list, tuple, set, frozenset)):
+            parts = [_text(value) for value in raw]
+        else:
+            parts = [_text(raw)]
+        visible = [part for part in parts if part]
+        if visible:
+            return "; ".join(visible)
+    classification = _text(
+        row.get("candidate_classification")
+        or row.get("classification")
+        or row.get("candidate_status")
+    ).replace("_", " ")
+    return (
+        f"Core classification: {classification}."
+        if classification
+        else "Core classification is unavailable for this record."
+    )
 
 
 def instance_conflicts(
@@ -701,6 +819,7 @@ class SoftwareInstanceAssistant(QWidget):
         self._inventory_fingerprint = self._inventory_snapshot.fingerprint
         self._source_fingerprint = ""
         self._source_locked = False
+        self._varac_arrangement_metadata: dict[str, int] = {}
         self._selected_source_payload: dict[str, Any] = {}
         self._loading_draft = False
         self._discovery_selected = False
@@ -711,9 +830,18 @@ class SoftwareInstanceAssistant(QWidget):
         self._launch_recipe_resolution_supplied = launch_recipe_resolution is not None
         self._resolving_launch_recipe = False
         self._discovery_results: tuple[Mapping[str, Any], ...] = ()
+        self._recovery_discovery_results: tuple[Mapping[str, Any], ...] = ()
+        self._diagnostic_discovery_results: tuple[Mapping[str, Any], ...] = ()
         self._step = 0
         self._field_widgets: dict[str, QWidget] = {}
         self._field_labels: dict[str, QWidget] = {}
+        # Disclosure and viewport state belong to the family task, not to a
+        # transient refresh.  The host may publish a newer prepared plan while
+        # this editor remains open; rebuilding the visible decision surface or
+        # jumping the operator back to the top would be disruptive.
+        self._details_expanded_by_family: dict[str, bool] = {}
+        self._body_scroll_positions: dict[int, int] = {}
+        self._view_restore_token = 0
         self._build_ui()
         if self._selected_radio_id is not None:
             selected_index = self.radio_combo.findData(self._selected_radio_id)
@@ -795,10 +923,71 @@ class SoftwareInstanceAssistant(QWidget):
             step_grid.setColumnStretch(column, 1)
         root.addLayout(step_grid)
 
+        # Header content above and the action row below intentionally remain
+        # outside this scroll area.  Ordinary setup pages must share this one
+        # vertical owner rather than each creating a nested form scroll area.
+        self.body_scroll = QScrollArea()
+        self.body_scroll.setObjectName("softwareInstanceAssistantBodyScroll")
+        self.body_scroll.setAccessibleName("Software instance setup body")
+        self.body_scroll.setWidgetResizable(True)
+        self.body_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.body_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.body_content = QWidget()
+        self.body_content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        body_layout = QVBoxLayout(self.body_content)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(7)
+
+        self.prepared_summary_group = QGroupBox("Prepared setup")
+        self.prepared_summary_group.setObjectName("softwareInstancePreparedSummary")
+        self.prepared_summary_group.setAccessibleName("Prepared setup summary")
+        prepared_layout = QVBoxLayout(self.prepared_summary_group)
+        prepared_layout.setContentsMargins(8, 8, 8, 8)
+        prepared_layout.setSpacing(4)
+        self.prepared_facts_label = QLabel()
+        self.prepared_facts_label.setObjectName("softwareInstancePreparedFacts")
+        self.prepared_facts_label.setAccessibleName("Prepared setup facts")
+        self.prepared_facts_label.setWordWrap(True)
+        prepared_layout.addWidget(self.prepared_facts_label)
+        self.prepared_why_label = QLabel()
+        self.prepared_why_label.setObjectName("softwareInstancePreparedWhy")
+        self.prepared_why_label.setAccessibleName("Why this setup is proposed")
+        self.prepared_why_label.setWordWrap(True)
+        prepared_layout.addWidget(self.prepared_why_label)
+        self.prepared_impact_label = QLabel()
+        self.prepared_impact_label.setObjectName("softwareInstancePreparedImpact")
+        self.prepared_impact_label.setAccessibleName("Existing configuration impact")
+        self.prepared_impact_label.setWordWrap(True)
+        prepared_layout.addWidget(self.prepared_impact_label)
+        self.prepared_safety_label = QLabel()
+        self.prepared_safety_label.setObjectName("softwareInstancePreparedSafety")
+        self.prepared_safety_label.setAccessibleName("Safety and confirmation status")
+        self.prepared_safety_label.setWordWrap(True)
+        prepared_layout.addWidget(self.prepared_safety_label)
+        self.prepared_details_button = QPushButton("Show details")
+        self.prepared_details_button.setObjectName("softwareInstanceShowDetails")
+        self.prepared_details_button.setCheckable(True)
+        self.prepared_details_button.toggled.connect(self._set_prepared_details_expanded)
+        prepared_layout.addWidget(self.prepared_details_button, 0, Qt.AlignLeft)
+        self.prepared_details_group = QGroupBox()
+        self.prepared_details_group.setObjectName("softwareInstancePreparedDetails")
+        self.prepared_details_group.setAccessibleName("Prepared technical details")
+        details_layout = QVBoxLayout(self.prepared_details_group)
+        details_layout.setContentsMargins(8, 8, 8, 8)
+        self.prepared_details_label = QLabel()
+        self.prepared_details_label.setObjectName("softwareInstancePreparedDetailsText")
+        self.prepared_details_label.setWordWrap(True)
+        self.prepared_details_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        details_layout.addWidget(self.prepared_details_label)
+        prepared_layout.addWidget(self.prepared_details_group)
+        body_layout.addWidget(self.prepared_summary_group)
+
         self.pages = CurrentPageStack()
         self.pages.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self.pages.setAccessibleName("Software instance setup pages")
-        root.addWidget(self.pages, 1)
+        body_layout.addWidget(self.pages)
+        self.body_scroll.setWidget(self.body_content)
+        root.addWidget(self.body_scroll, 1)
         self._build_choose_page()
         self._build_source_page()
         self._build_identity_page()
@@ -808,6 +997,10 @@ class SoftwareInstanceAssistant(QWidget):
         self._build_review_page()
 
         actions = QHBoxLayout()
+        self.action_footer = QWidget()
+        self.action_footer.setObjectName("softwareInstanceActionFooter")
+        self.action_footer.setAccessibleName("Software instance setup actions")
+        self.action_footer.setLayout(actions)
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.setAccessibleName("Cancel adding software instance")
         self.cancel_button.clicked.connect(self.cancelled.emit)
@@ -822,7 +1015,235 @@ class SoftwareInstanceAssistant(QWidget):
         actions.addStretch(1)
         actions.addWidget(self.back_button)
         actions.addWidget(self.next_button)
-        root.addLayout(actions)
+        root.addWidget(self.action_footer)
+
+    def _radio_context_label(self) -> str:
+        """Return the stable radio wording that belongs in prepared facts."""
+
+        if self._unsaved_owner_key:
+            return self._unsaved_radio_label
+        label = self.radio_combo.currentText().strip()
+        return label.split(" — ", 1)[0] if label else "No radio selected"
+
+    def _details_expanded(self) -> bool:
+        return bool(self._details_expanded_by_family.get(self._family_key, False))
+
+    def _set_prepared_details_expanded(self, expanded: bool) -> None:
+        """Toggle the family-scoped technical evidence without moving the task."""
+
+        self._body_scroll_positions[self._step] = self.body_scroll.verticalScrollBar().value()
+        self._details_expanded_by_family[self._family_key] = bool(expanded)
+        self._update_prepared_presentation()
+        self._restore_body_view_state(
+            self._body_scroll_positions.get(
+                self._step,
+                self.body_scroll.verticalScrollBar().value(),
+            ),
+            QApplication.focusWidget(),
+        )
+
+    def _prepared_endpoint_summary(self, draft: SoftwareInstanceDraft) -> str:
+        if draft.family_key == "js8call":
+            endpoint = f"API {draft.host}:{draft.port}" if draft.port else "API not allocated"
+            return endpoint + (f" · UDP {draft.udp_port}" if draft.udp_port else "")
+        if draft.family_key == "fast_light":
+            parts = []
+            if draft.radio_role != "observer":
+                parts.append(f"FLRig {draft.host}:{draft.port}" if draft.port else "FLRig not allocated")
+            parts.append(
+                f"FLDigi {draft.host}:{draft.secondary_port}"
+                if draft.secondary_port
+                else "FLDigi not allocated"
+            )
+            return " · ".join(parts)
+        arrangement = draft.cluster_path.replace("_", " ").title()
+        return f"VarAC {arrangement}"
+
+    def _prepared_why(self, draft: SoftwareInstanceDraft) -> str:
+        resolution = self._launch_recipe_resolution
+        if resolution is not None and resolution.summary:
+            return resolution.summary
+        if draft.source_locked:
+            return (
+                "Imported settings remain source-locked. FIO will not alter their "
+                "identity, endpoints, profiles, data paths, or launch details."
+            )
+        if draft.family_key == "varac":
+            return (
+                "The selected arrangement remains a reviewed intent; FIO does not "
+                "create or join a cluster until the radio transaction is confirmed."
+            )
+        if draft.mode == "managed":
+            return "FIO will allocate a distinct local identity and retain existing configuration as review evidence."
+        return "This source remains operator-managed until a reviewed, supported action is explicitly confirmed."
+
+    def _prepared_existing_impact(self, draft: SoftwareInstanceDraft) -> str:
+        if self._replacement_instance is not None:
+            name = _text(
+                self._replacement_instance.get("name")
+                or self._replacement_instance.get("instance_name")
+            ) or "existing instance"
+            if self._replacement_confirmed:
+                return (
+                    f"Existing impact: {name} will remain recorded; its radio assignment "
+                    "will be replaced only when the final transaction succeeds."
+                )
+            return (
+                f"Existing impact: {name} is assigned to this radio. Confirm replacement "
+                "before applying any new instance."
+            )
+        if self._unsaved_owner_key:
+            return (
+                "Existing impact: This is an unsaved inactive Add Radio draft. "
+                "No existing application configuration changes until Save Radio and Software."
+            )
+        if draft.source_locked:
+            return (
+                "Existing impact: Imported configuration is evidence only and remains "
+                "operator-owned unless a separately supported apply is reviewed."
+            )
+        return "Existing impact: No existing software assignment is changed by this draft."
+
+    def _prepared_technical_lines(self, draft: SoftwareInstanceDraft) -> list[str]:
+        """Read-only evidence deliberately kept out of the normal decision path."""
+
+        lines = [
+            f"Family: {dict(SUPPORTED_INSTANCE_FAMILIES).get(draft.family_key, draft.family_key)}",
+            f"Radio: {self._radio_context_label()}",
+            f"Inventory: generation {draft.inventory_generation} · {draft.inventory_fingerprint or 'No fingerprint'}",
+        ]
+        if draft.source_fingerprint:
+            lines.append(f"Source fingerprint: {draft.source_fingerprint}")
+        paths = (
+            ("Application", draft.application_path),
+            ("Secondary application", draft.secondary_application_path),
+            ("Configuration", draft.configuration_path),
+            ("Secondary configuration", draft.secondary_configuration_path),
+            ("Data", draft.storage_path),
+            ("Secondary data", draft.secondary_storage_path),
+            ("Outbox", draft.outbox_path),
+            ("Working directory", draft.working_directory),
+        )
+        for label, value in paths:
+            if value:
+                lines.append(f"{label}: {value}")
+        if draft.launch_command:
+            lines.append(f"Advanced launch override: {draft.launch_command}")
+        resolution = self._launch_recipe_resolution
+        if resolution is not None:
+            lines.extend(
+                (
+                    f"Recipe status: {resolution.status.replace('_', ' ').title()}",
+                    f"Recipe fingerprint: {resolution.fingerprint or 'No fingerprint'}",
+                    *self._launch_component_lines(resolution),
+                )
+            )
+            if resolution.recovery_action:
+                lines.append(f"Recovery: {resolution.recovery_action}")
+        return lines
+
+    def _update_prepared_presentation(self) -> None:
+        """Keep the compact decision facts visible while details stay optional."""
+
+        # The managed source radio button is initialized while the form is
+        # still being built.  Do not try to materialize a draft until the
+        # shared ownership field (and therefore the full seven-step surface)
+        # exists.
+        if (
+            not hasattr(self, "prepared_summary_group")
+            or "ownership" not in self._field_widgets
+        ):
+            return
+        draft = self.draft()
+        family = dict(SUPPORTED_INSTANCE_FAMILIES).get(draft.family_key, draft.family_key)
+        mode = {
+            "managed": "New FIO-guided instance",
+            "discover": "Imported configuration",
+            "remote": "Manual or remote configuration",
+        }.get(draft.mode, draft.mode.replace("-", " ").title())
+        launch = "Launch with FIO" if draft.launch_at_startup else "Operator starts application"
+        readiness = "Ready"
+        if self._launch_recipe_resolution is not None:
+            readiness = self._launch_recipe_resolution.status.replace("_", " ").title()
+        # Keep ordinary status publication constant-time.  Full conflict
+        # validation still runs at its existing navigation/final-action gates;
+        # the persistent card calls out only immediately known blocking intent.
+        if (
+            (draft.mode == "discover" and not self._discovery_selected)
+            or (self._replacement_instance is not None and not self._replacement_confirmed)
+            or (not self._unsaved_owner_key and not self._selected_radio_id)
+        ):
+            readiness = "Needs attention"
+        self.prepared_facts_label.setText(
+            " · ".join(
+                (
+                    family,
+                    mode,
+                    self._radio_context_label(),
+                    self._prepared_endpoint_summary(draft),
+                    launch,
+                    readiness,
+                )
+            )
+        )
+        self.prepared_why_label.setText(f"Why: {self._prepared_why(draft)}")
+        self.prepared_impact_label.setText(self._prepared_existing_impact(draft))
+        self.prepared_safety_label.setText(
+            "Safety: FIO does not change an existing application, assignment, or "
+            "third-party configuration until you review and explicitly confirm the final action."
+        )
+        radio = self._radio_context_label()
+        expanded = self._details_expanded()
+        blocked = self.prepared_details_button.blockSignals(True)
+        self.prepared_details_button.setChecked(expanded)
+        self.prepared_details_button.blockSignals(blocked)
+        self.prepared_details_button.setText("Hide details" if expanded else "Show details")
+        self.prepared_details_button.setAccessibleName(
+            f"{'Hide' if expanded else 'Show'} {family} details for {radio}"
+        )
+        self.prepared_details_button.setAccessibleDescription(
+            "Show or hide read-only paths, commands, dependencies, fingerprints, and diagnostics."
+        )
+        self.prepared_details_button.setToolTip(
+            "Read-only technical evidence for this family and radio."
+        )
+        self.prepared_details_group.setTitle(f"{family} technical details")
+        self.prepared_details_group.setAccessibleName(f"{family} technical details for {radio}")
+        self.prepared_details_label.setText("\n".join(self._prepared_technical_lines(draft)))
+        self.prepared_details_group.setVisible(expanded)
+
+    def _remember_body_scroll_position(self) -> None:
+        if hasattr(self, "body_scroll"):
+            self._body_scroll_positions[self._step] = (
+                self.body_scroll.verticalScrollBar().value()
+            )
+
+    def _restore_body_view_state(
+        self,
+        scroll_value: int,
+        focus_widget: QWidget | None,
+    ) -> None:
+        """Restore the active page's position after its layout settles once."""
+
+        if not hasattr(self, "body_scroll"):
+            return
+        self._view_restore_token += 1
+        token = self._view_restore_token
+
+        def restore() -> None:
+            if token != self._view_restore_token or not hasattr(self, "body_scroll"):
+                return
+            bar = self.body_scroll.verticalScrollBar()
+            bar.setValue(max(bar.minimum(), min(int(scroll_value), bar.maximum())))
+            if (
+                focus_widget is not None
+                and self.isAncestorOf(focus_widget)
+                and focus_widget.isVisible()
+                and focus_widget.isEnabled()
+            ):
+                focus_widget.setFocus(Qt.OtherFocusReason)
+
+        QTimer.singleShot(0, restore)
 
     def _build_choose_page(self) -> None:
         page = QWidget()
@@ -890,6 +1311,12 @@ class SoftwareInstanceAssistant(QWidget):
         self.discovery_list.setAccessibleName("Discovered software configurations")
         self.discovery_list.itemSelectionChanged.connect(self._import_selected_discovery)
         layout.addWidget(self.discovery_list, 1)
+        self.discovery_diagnostics_label = QLabel()
+        self.discovery_diagnostics_label.setObjectName("softwareInstanceDiscoveryDiagnostics")
+        self.discovery_diagnostics_label.setAccessibleName("Diagnostic-only incomplete software records")
+        self.discovery_diagnostics_label.setWordWrap(True)
+        self.discovery_diagnostics_label.setVisible(False)
+        layout.addWidget(self.discovery_diagnostics_label)
         self.source_lock_banner = QLabel()
         self.source_lock_banner.setObjectName("softwareInstanceSourceLockBanner")
         self.source_lock_banner.setAccessibleName("Imported software identity status")
@@ -913,18 +1340,16 @@ class SoftwareInstanceAssistant(QWidget):
         hint = QLabel(heading)
         hint.setWordWrap(True)
         outer.addWidget(hint)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         form_widget = QWidget()
+        form_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         form = QFormLayout(form_widget)
         form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         form.setRowWrapPolicy(QFormLayout.WrapLongRows)
         self._active_form = form
         for key, label, placeholder in fields:
             self._add_line(key, label, placeholder)
-        scroll.setWidget(form_widget)
-        outer.addWidget(scroll, 1)
+        outer.addWidget(form_widget)
+        outer.addStretch(1)
         self.pages.addWidget(page)
         return form
 
@@ -1184,12 +1609,11 @@ class SoftwareInstanceAssistant(QWidget):
         supported_family = self._family_key in {"js8call", "fast_light"}
         self.launch_recipe_status_label.setVisible(supported_family)
         self.launch_recipe_status_heading.setVisible(supported_family)
-        self.launch_recipe_components_label.setVisible(
-            supported_family and resolution is not None and bool(resolution.components)
-        )
-        self.launch_recipe_components_heading.setVisible(
-            supported_family and resolution is not None and bool(resolution.components)
-        )
+        # Exact commands, roots, dependencies, and readiness clauses are
+        # technical evidence.  The compact recipe status stays on Launch;
+        # the family-scoped disclosure above the page owns the raw detail.
+        self.launch_recipe_components_label.setVisible(False)
+        self.launch_recipe_components_heading.setVisible(False)
         self.launch_recipe_recovery_label.setVisible(
             supported_family and resolution is not None and bool(resolution.recovery_action)
         )
@@ -1251,6 +1675,7 @@ class SoftwareInstanceAssistant(QWidget):
                 widget.setEnabled(visible and not self._source_locked)
             if label is not None:
                 label.setVisible(visible)
+        self._update_prepared_presentation()
 
     def _add_line(self, key: str, label: str, placeholder: str) -> None:
         if key == "variant":
@@ -1263,6 +1688,7 @@ class SoftwareInstanceAssistant(QWidget):
             combo.currentIndexChanged.connect(lambda _index: self._refresh_review_if_needed())
             self._field_widgets[key] = combo
             label_widget = QLabel(label)
+            label_widget.setWordWrap(True)
             self._field_labels[key] = label_widget
             self._active_form.addRow(label_widget, combo)
             return
@@ -1280,6 +1706,7 @@ class SoftwareInstanceAssistant(QWidget):
             combo.currentIndexChanged.connect(lambda _index: self._refresh_review_if_needed())
             self._field_widgets[key] = combo
             label_widget = QLabel(label)
+            label_widget.setWordWrap(True)
             self._field_labels[key] = label_widget
             self._active_form.addRow(label_widget, combo)
             return
@@ -1297,6 +1724,7 @@ class SoftwareInstanceAssistant(QWidget):
             combo.currentTextChanged.connect(lambda _text: self._refresh_review_if_needed())
             self._field_widgets[key] = combo
             label_widget = QLabel(label)
+            label_widget.setWordWrap(True)
             self._field_labels[key] = label_widget
             self._active_form.addRow(label_widget, combo)
             return
@@ -1307,16 +1735,26 @@ class SoftwareInstanceAssistant(QWidget):
         self._field_widgets[key] = edit
         label_widget = QLabel(label)
         label_widget.setAccessibleName(f"Label for {label}")
+        label_widget.setWordWrap(True)
         self._field_labels[key] = label_widget
         self._active_form.addRow(label_widget, edit)
 
     def _build_review_page(self) -> None:
         page = QWidget()
         layout = QVBoxLayout(page)
+        self.review_summary_label = QLabel()
+        self.review_summary_label.setObjectName("softwareInstanceReviewSummary")
+        self.review_summary_label.setAccessibleName("Software instance review summary")
+        self.review_summary_label.setWordWrap(True)
+        layout.addWidget(self.review_summary_label)
         self.review_label = QLabel()
         self.review_label.setWordWrap(True)
         self.review_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.review_label.setAccessibleName("Software instance review")
+        # Retain the detailed review text for copy/review integrations, while
+        # the normal page keeps raw paths and commands behind the shared,
+        # family-scoped disclosure.
+        self.review_label.setVisible(False)
         layout.addWidget(self.review_label)
         self.conflict_label = QLabel()
         self.conflict_label.setWordWrap(True)
@@ -1681,7 +2119,7 @@ class SoftwareInstanceAssistant(QWidget):
         seed.update(
             {
                 "instance_name": (
-                    f"{self._unsaved_radio_label} {family_title}"
+                    self._unsaved_radio_label
                     if self._unsaved_owner_key
                     else f"{current.instance_name or family_title} copy"
                 ),
@@ -1737,12 +2175,19 @@ class SoftwareInstanceAssistant(QWidget):
             self._discovery_selected = False
             self._set_source_locked(False)
         self.discover_button.setVisible(discover)
-        self.discovery_list.setVisible(discover and bool(self._discovery_results))
+        self.discovery_list.setVisible(
+            discover
+            and bool(self._discovery_results or self._diagnostic_discovery_results)
+        )
+        self.discovery_diagnostics_label.setVisible(
+            discover and bool(self._diagnostic_discovery_results)
+        )
         self.discovery_hint.setText(
             "Discovery is explicit. Choose a result to import its values; review remains required."
             if discover else
             "You can change these values later in Software Administration. Nothing is saved on this step."
         )
+        self._update_prepared_presentation()
 
     def _import_selected_discovery(self) -> None:
         item = self.discovery_list.currentItem()
@@ -1771,15 +2216,34 @@ class SoftwareInstanceAssistant(QWidget):
             self._set_draft(imported)
 
     def set_discovery_results(self, results: Iterable[Mapping[str, Any]]) -> None:
-        """Render host-provided results and never scan on its own."""
+        """Render immutable host results; diagnostic rows never become imports."""
 
-        self._discovery_results = tuple(dict(row) for row in results if isinstance(row, Mapping))
+        usable_rows: list[Mapping[str, Any]] = []
+        recovery_rows: list[Mapping[str, Any]] = []
+        diagnostic_rows: list[Mapping[str, Any]] = []
+        for raw_row in results:
+            if not isinstance(raw_row, Mapping):
+                continue
+            row = dict(raw_row)
+            if _existing_candidate_is_usable(row):
+                usable_rows.append(row)
+                if _existing_candidate_is_recovery(row):
+                    recovery_rows.append(row)
+            else:
+                diagnostic_rows.append(row)
+        self._discovery_results = tuple(usable_rows)
+        self._recovery_discovery_results = tuple(recovery_rows)
+        self._diagnostic_discovery_results = tuple(diagnostic_rows)
         self._discovery_selected = bool(self._source_locked)
         self.discovery_list.clear()
         for row in self._discovery_results:
             name = _text(row.get("name") or row.get("instance_name")) or "Unnamed configuration"
             host, port = _endpoint(row)
             detail = f"{name} · {host}:{port}" if host and port else name
+            if _existing_candidate_is_recovery(row):
+                detail = f"Recovery candidate — {detail}"
+            elif _bool(row.get("provenance_unverified")):
+                detail = f"{detail} · Configuration provenance unverified"
             item = QListWidgetItem(detail)
             item.setData(Qt.UserRole, row)
             evidence = [
@@ -1787,8 +2251,44 @@ class SoftwareInstanceAssistant(QWidget):
                 _text(row.get("configuration_path") or row.get("profile_path") or row.get("ini_path")),
                 _text(row.get("storage_path") or row.get("application_data_root") or row.get("db_path")),
             ]
-            item.setToolTip("\n".join(part for part in evidence if part))
+            evidence_lines = [part for part in evidence if part]
+            if _existing_candidate_is_recovery(row):
+                evidence_lines.insert(
+                    0,
+                    "Complete source-evidenced configuration is currently unassigned. Importing it requires final reviewed assignment.",
+                )
+            elif _bool(row.get("provenance_unverified")):
+                evidence_lines.insert(
+                    0,
+                    "Configuration provenance unverified. The durable radio link makes this existing bundle usable, but FIO does not claim native ownership.",
+                )
+            item.setToolTip("\n".join(evidence_lines))
             self.discovery_list.addItem(item)
+        for row in self._diagnostic_discovery_results:
+            name = _text(row.get("name") or row.get("instance_name")) or "Unnamed configuration"
+            item = QListWidgetItem(f"Diagnostic only — {name}")
+            item.setData(Qt.UserRole, None)
+            item.setFlags(item.flags() & ~Qt.ItemIsEnabled & ~Qt.ItemIsSelectable)
+            item.setToolTip(
+                "This incomplete or unlinked record is recovery evidence only. "
+                "It cannot be imported, recommended, assigned, or launched from this workflow.\n\n"
+                + _diagnostic_candidate_reason(row)
+            )
+            self.discovery_list.addItem(item)
+        diagnostic_count = len(self._diagnostic_discovery_results)
+        if diagnostic_count:
+            noun = "record" if diagnostic_count == 1 else "records"
+            self.discovery_diagnostics_label.setText(
+                f"{diagnostic_count} incomplete or unlinked {noun} shown as diagnostic evidence only. "
+                "They cannot be imported, recommended, assigned, or launched from this workflow."
+            )
+            self.discovery_diagnostics_label.setToolTip(
+                "Open the item tooltip to review the core classification evidence. "
+                "Recovery or cleanup requires a separately reviewed maintenance workflow."
+            )
+        else:
+            self.discovery_diagnostics_label.clear()
+            self.discovery_diagnostics_label.setToolTip("")
         self._refresh_source()
 
     def _set_draft(self, draft: SoftwareInstanceDraft) -> None:
@@ -1800,6 +2300,15 @@ class SoftwareInstanceAssistant(QWidget):
         self._inventory_fingerprint = draft.inventory_fingerprint or self._inventory_snapshot.fingerprint
         self._source_fingerprint = draft.source_fingerprint
         self._source_locked = bool(draft.source_locked)
+        self._varac_arrangement_metadata = {
+            "existing_standalone_node_id": int(draft.existing_standalone_node_id or 0),
+            "existing_standalone_device_profile_id": int(
+                draft.existing_standalone_device_profile_id or 0
+            ),
+            "existing_standalone_member_number": int(
+                draft.existing_standalone_member_number or 0
+            ),
+        }
         if self._source_locked:
             self._discovery_selected = True
             if not self._selected_source_payload:
@@ -1842,6 +2351,7 @@ class SoftwareInstanceAssistant(QWidget):
         self._sync_family_fields()
         self._set_source_locked(self._source_locked)
         self._apply_launch_recipe_presentation()
+        self._update_prepared_presentation()
 
     def draft(self) -> SoftwareInstanceDraft:
         def value(key: str) -> str:
@@ -1868,6 +2378,8 @@ class SoftwareInstanceAssistant(QWidget):
 
         radio_id = _int(self.radio_combo.currentData())
         resolution = self._launch_recipe_resolution
+        cluster_path = value("cluster_path") or "standalone"
+        existing_standalone_create = cluster_path == "create_cluster"
         return SoftwareInstanceDraft(
             family_key=self._family_key,
             instance_name=value("instance_name"),
@@ -1908,11 +2420,26 @@ class SoftwareInstanceAssistant(QWidget):
             working_directory=value("working_directory"),
             advanced_tx_requested=checked("advanced_tx_requested"),
             advanced_tx_acknowledged=checked("advanced_tx_acknowledged"),
-            cluster_path=value("cluster_path") or "standalone",
+            cluster_path=cluster_path,
             cluster_id=value("cluster_id"),
             cluster_name=value("cluster_name"),
             cluster_shared_database=value("cluster_shared_database"),
             cluster_instance_number=number("cluster_instance_number"),
+            existing_standalone_node_id=int(
+                self._varac_arrangement_metadata.get("existing_standalone_node_id", 0) or 0
+            ) if existing_standalone_create else 0,
+            existing_standalone_device_profile_id=int(
+                self._varac_arrangement_metadata.get(
+                    "existing_standalone_device_profile_id", 0
+                )
+                or 0
+            ) if existing_standalone_create else 0,
+            existing_standalone_member_number=int(
+                self._varac_arrangement_metadata.get(
+                    "existing_standalone_member_number", 0
+                )
+                or 0
+            ) if existing_standalone_create else 0,
             cluster_gateway=checked("cluster_gateway"),
             cluster_ptt_lock=checked("cluster_ptt_lock"),
             notes=value("notes"),
@@ -2097,6 +2624,17 @@ class SoftwareInstanceAssistant(QWidget):
             else "External configuration: operator action required unless an exact supported writer is qualified"
         )
         self.review_label.setText("\n".join(lines))
+        compact_lines = [
+            family,
+            f"Name: {draft.instance_name or 'Not set'}",
+            f"Radio: {radio}",
+            f"Source: {draft.mode.replace('-', ' ').title()}",
+            f"Endpoint: {self._prepared_endpoint_summary(draft)}",
+            "Review exact paths, commands, dependencies, and diagnostics with Show details.",
+        ]
+        if self._replacement_instance is not None:
+            compact_lines.append(self._prepared_existing_impact(draft))
+        self.review_summary_label.setText("\n".join(compact_lines))
         findings = self.validation()
         if findings:
             self.conflict_label.setText("Review findings:\n" + "\n".join(f"• {item.severity.title()}: {item.title} — {item.detail}" for item in findings))
@@ -2104,7 +2642,17 @@ class SoftwareInstanceAssistant(QWidget):
             self.conflict_label.setText("No name, endpoint, or path conflicts found in the loaded inventory. Confirm before saving.")
 
     def _refresh(self) -> None:
-        if self._step in {5, len(self.STEP_TITLES) - 1}:
+        prior_page = self.pages.currentIndex()
+        focus_widget = QApplication.focusWidget()
+        same_page = prior_page == self._step
+        scroll_value = (
+            self.body_scroll.verticalScrollBar().value()
+            if same_page else self._body_scroll_positions.get(self._step, 0)
+        )
+        # Files is the first page that presents recipe-owned paths. Resolve the
+        # pure prepared recipe before that page is painted so a qualified
+        # managed instance never appears as a blank path-entry task.
+        if self._step in {4, 5, len(self.STEP_TITLES) - 1}:
             self._resolve_launch_recipe()
         self.pages.setCurrentIndex(self._step)
         self.step_label.setText(f"Step {self._step + 1} of {len(self.STEP_TITLES)} · {self.STEP_TITLES[self._step]}")
@@ -2135,6 +2683,8 @@ class SoftwareInstanceAssistant(QWidget):
             self._refresh_source()
         if self._step == last_step:
             self._refresh_review()
+        self._update_prepared_presentation()
+        self._restore_body_view_state(scroll_value, focus_widget if same_page else None)
 
     def _select_step(self, target: int) -> None:
         """Navigate through the visible step strip without skipping gates."""
@@ -2151,6 +2701,7 @@ class SoftwareInstanceAssistant(QWidget):
             return
         if self._step == 2 and index > self._step:
             self._apply_identity_defaults()
+        self._remember_body_scroll_position()
         self._step = index
         self._refresh()
 
@@ -2158,6 +2709,7 @@ class SoftwareInstanceAssistant(QWidget):
         if self._step < len(self.STEP_TITLES) - 1:
             if self._step == 2:
                 self._apply_identity_defaults()
+            self._remember_body_scroll_position()
             self._step += 1
             self._refresh()
             return
@@ -2168,6 +2720,7 @@ class SoftwareInstanceAssistant(QWidget):
 
     def _back(self) -> None:
         if self._step > 0:
+            self._remember_body_scroll_position()
             self._step -= 1
             self._refresh()
 

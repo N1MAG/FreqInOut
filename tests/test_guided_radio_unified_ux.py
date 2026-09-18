@@ -187,6 +187,35 @@ def test_add_radio_keeps_stable_labels_positions_and_keyboard_contract(
     _open_add_radio_dialog(monkeypatch, tmp_path, inspect)
 
 
+def test_add_radio_keeps_steps_and_actions_outside_the_single_body_scroll(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def inspect(dialog: QDialog, _tab: object) -> None:
+        font = dialog.font()
+        font.setPointSize(max(16, font.pointSize()))
+        dialog.setFont(font)
+        dialog.resize(900, 560)
+        _app().processEvents()
+
+        scroll = dialog.findChild(QScrollArea, "guidedRadioSetupBodyScroll")
+        header = dialog.findChild(QGroupBox, "guidedSetupWizard")
+        footer = dialog.findChild(QDialogButtonBox, "guidedRadioSetupActionFooter")
+        assert scroll is not None and header is not None and footer is not None
+        assert len(dialog.findChildren(QScrollArea)) == 1
+        assert not scroll.isAncestorOf(header)
+        assert not scroll.isAncestorOf(footer)
+        assert header.isVisible() and footer.isVisible()
+        assert header.mapTo(dialog, header.rect().bottomRight()).y() < scroll.mapTo(
+            dialog, scroll.rect().topLeft()
+        ).y()
+        assert footer.mapTo(dialog, footer.rect().bottomRight()).y() <= dialog.height() + 1
+        assert scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
+        dialog.reject()
+
+    _open_add_radio_dialog(monkeypatch, tmp_path, inspect)
+
+
 def test_observer_uses_receiver_guard_and_receive_schedule_without_hiding_steps(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -235,9 +264,9 @@ def test_software_cards_present_source_responsibility_completion_and_launch_poli
         "Launch policy",
     ):
         assert operator_concept.casefold() in normalized_source
-    assert "create a distinct instance" in normalized_source
-    assert "use an existing instance" in normalized_source
-    assert "connect manually or remotely" in normalized_source
+    assert "create a new fio-managed instance" in normalized_source
+    assert "use an existing instance unchanged" in normalized_source
+    assert "set up manually or connect remotely" in normalized_source
     assert "required for this radio" in normalized_source
     assert "optional capability" in normalized_source
     assert "launch with fio" in normalized_source
@@ -295,7 +324,10 @@ def test_cancel_contract_keeps_external_writers_out_of_the_guided_dialog() -> No
 def test_software_administration_handoff_is_explicit_and_resumable() -> None:
     source = _dialog_source()
 
-    assert "Continue in Software Administration" in source
+    assert "Prepare selected software automatically" in source
+    assert "Review or correct the prepared plan" in source
+    assert "Show Details / correct" in source
+    assert "setup for {radio_draft_label}" in source
     assert "inactive setup draft" in source
     # Add Radio must reuse the mature instance workflow, not only its terminal
     # field editor.  The shared assistant owns source, atomic identity,

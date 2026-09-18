@@ -1782,15 +1782,15 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
         : source.index("def _apply_runtime_projection_widgets")
     ]
 
-    assert 'configure_auto_btn = QPushButton("Configure Automatically")' in dialog_block
+    assert 'configure_auto_btn = QPushButton("Prepare selected software automatically")' in dialog_block
     assert 'configure_auto_wrap = QFrame()' in dialog_block
     assert 'configure_auto_wrap.setObjectName("guidedConfigureAutomaticallyCard")' in dialog_block
     assert 'configure_auto_btn.setObjectName("guidedConfigureAutomaticallyButton")' in dialog_block
     assert 'configure_auto_btn.setStyleSheet(button_style("primary", theme))' in dialog_block
-    assert "Recommended: let FIO fill blanks, then review highlighted choices." in dialog_block
-    assert "Choose the highlighted app or profile, then continue." in dialog_block
-    assert "FIO filled what it could. Review the paths below, then continue." in dialog_block
-    assert "Fill blank paths, ports, and message-file locations for this radio" in dialog_block
+    assert "Choose software above, then let FIO prepare a complete plan." in dialog_block
+    assert "Needs attention — FIO prepared what it could. Review the highlighted family before continuing." in dialog_block
+    assert "Ready — FIO prepared the selected software plan. Review only the details that need attention." in dialog_block
+    assert "Discover installed software and prepare a radio-specific plan" in dialog_block
     assert "guided_setup_autofill_review(" in dialog_block
     assert "Kept existing:" in guided_setup_source
     assert "Review before Save" in guided_setup_source
@@ -1862,7 +1862,8 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "selected_single = _select_single_detected_choice(combo)" in dialog_block
     assert "if selected_single:" in dialog_block
     assert "_apply_detected_app_choice(app_id)" in dialog_block
-    assert "if _js8_app_selected():" in dialog_block
+    assert "if _js8_app_selected() and existing_source:" in dialog_block
+    assert 'software_source_combos["js8call"].currentData()' in dialog_block
     assert "selected_single = _select_single_detected_choice(js8_profile_choice_combo)" in dialog_block
     assert "_apply_js8_profile_choice()" in dialog_block
     assert "_update_port_prompt_visibility()" in dialog_block
@@ -1900,7 +1901,9 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
         source.index("def _guided_radio_autofill_suggestions")
         : source.index("def _detect_migration_roles")
     ]
-    assert 'sum(1 for profile in js8_file_profiles or () if str(getattr(profile, "directed_path", "") or "").strip()) <= 1' in planner_source
+    assert 'use_existing_js8 = js8_source in {"existing", "discover", "import"}' in planner_source
+    assert 'elif js8_source in {"create", "managed", "new"}:' in planner_source
+    assert 'source_modes=source_modes' in helper_block
     assert "def guided_port_prompt_keys" in planner_source
     assert "return guided_radio_autofill_suggestions(" in helper_block
     assert '"js8call": js8_install_edit' in dialog_block

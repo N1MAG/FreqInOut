@@ -1932,8 +1932,8 @@ def test_guided_add_radio_detected_app_review_keeps_selected_paths_visible() -> 
         : dialog_block.index("if _js8_app_selected() and (js8_profile_edit.text().strip() or js8_directed_edit.text().strip()):")
     ]
     assert "_update_app_choice_visibility()" in post_fill_sync
-    assert "Choose the highlighted app or profile, then continue." in dialog_block
-    assert "FIO filled what it could. Review the paths below, then continue." in dialog_block
+    assert "Needs attention — FIO prepared what it could. Review the highlighted family before continuing." in dialog_block
+    assert "Ready — FIO prepared the selected software plan. Review only the details that need attention." in dialog_block
 
 
 def test_guided_review_computes_app_config_before_file_summary() -> None:

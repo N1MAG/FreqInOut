@@ -70,8 +70,9 @@ def test_add_radio_models_spotter_and_commstat_without_external_install_prompts(
 
         spotter_details = dialog.findChild(QPushButton, "guidedSoftwareDetails_fio_spotter")
         commstat_details = dialog.findChild(QPushButton, "guidedSoftwareDetails_commstat")
-        assert spotter_details is not None and spotter_details.text() == "Review built-in mapping"
-        assert commstat_details is not None and commstat_details.text() == "Review JS8 endpoint binding"
+        assert spotter_details is not None and spotter_details.text() == "Show Details / mapping…"
+        assert commstat_details is not None and commstat_details.text() == "Show Details / JS8 binding…"
+        assert not spotter_details.isEnabled() and not commstat_details.isEnabled()
         return QDialog.Rejected
 
     monkeypatch.setattr(QDialog, "exec", inspect_dialog)

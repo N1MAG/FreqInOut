@@ -586,7 +586,13 @@ def test_assign_existing_is_family_filtered_and_replacement_is_explicit() -> Non
             inventory_by_family={
                 "js8call": (
                     {"id": 10, "name": "Current JS8"},
-                    {"id": 11, "name": "Retained JS8"},
+                    {
+                        "id": 11,
+                        "name": "Retained JS8",
+                        "candidate_classification": "recovery_only",
+                        "recovery_only": True,
+                        "source_fingerprint": "retained-js8-source",
+                    },
                 ),
                 "varac": ({"id": 12, "name": "Retained VarAC"},),
             },
@@ -599,7 +605,7 @@ def test_assign_existing_is_family_filtered_and_replacement_is_explicit() -> Non
         assert assistant is not None
         assert events == [{"family_key": "js8call", "radio_id": 1}]
         assert assistant.discovery_list.count() == 1
-        assert assistant.discovery_list.item(0).text().startswith("Retained JS8")
+        assert assistant.discovery_list.item(0).text().startswith("Recovery candidate — Retained JS8")
         assert assistant.radio_combo.currentData() == 1
         assert assistant.replacement_checkbox.isHidden() is False
         assert assistant.replacement_checkbox.isChecked() is False
