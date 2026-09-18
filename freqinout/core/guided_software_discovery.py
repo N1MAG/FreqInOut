@@ -225,6 +225,7 @@ class GuidedSoftwareDiscoveryCoordinator:
         scanners: Mapping[DiscoveryPhase, PhaseScanner],
         *,
         max_workers: int = 4,
+        phase_timeout_seconds: float = 2.0,
         telemetry_sink: Optional[TelemetrySink] = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -236,11 +237,14 @@ class GuidedSoftwareDiscoveryCoordinator:
         if not all(callable(scanner) for scanner in self._scanners.values()):
             raise GuidedSoftwareDiscoveryError("every discovery scanner must be callable")
         self._executor = ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="fio-guided-discovery")
+        self._phase_timeout_seconds = max(0.05, min(30.0, float(phase_timeout_seconds)))
         self._telemetry_sink = telemetry_sink
         self._monotonic = monotonic
         self._lock = threading.RLock()
         self._phase_cache: dict[Tuple[DiscoveryPhase, str], PhaseDiscoveryResult] = {}
         self._inflight: dict[Tuple[str, int, DiscoveryPhase, str], Future[PhaseDiscoveryResult]] = {}
+        self._inflight_started: dict[Tuple[str, int, DiscoveryPhase, str], float] = {}
+        self._expired_phase_tokens: set[Tuple[str, int, DiscoveryPhase, str]] = set()
         self._current: dict[str, Tuple[int, int, str]] = {}
         self._cancelled: set[Tuple[str, int]] = set()
         self._closed_sessions: set[str] = set()
@@ -298,10 +302,13 @@ class GuidedSoftwareDiscoveryCoordinator:
         if not self.register_request(request):
             return self._cancelled_snapshot(request, started, "stale-before-start")
         phases = required_phases_for(request)
-        futures: dict[Future[PhaseDiscoveryResult], Tuple[DiscoveryPhase, str]] = {}
+        futures: dict[
+            Future[PhaseDiscoveryResult],
+            Tuple[DiscoveryPhase, str, Tuple[str, int, DiscoveryPhase, str], float],
+        ] = {}
         for phase in phases:
-            future, cache_state = self._phase_future(request, phase)
-            futures[future] = (phase, cache_state)
+            future, cache_state, phase_token, started_at = self._phase_future(request, phase)
+            futures[future] = (phase, cache_state, phase_token, started_at)
 
         results: list[PhaseDiscoveryResult] = []
         diagnostics: list[str] = []
@@ -313,7 +320,7 @@ class GuidedSoftwareDiscoveryCoordinator:
                 return self._cancelled_snapshot(request, started, "cancelled-or-stale")
             completed, pending = wait(pending, timeout=0.05, return_when=FIRST_COMPLETED)
             for future in completed:
-                phase, cache_state = futures[future]
+                phase, cache_state, _phase_token, _started_at = futures[future]
                 try:
                     result = future.result()
                 except Exception as exc:
@@ -332,6 +339,32 @@ class GuidedSoftwareDiscoveryCoordinator:
                 )
                 if phase_callback is not None and self.result_is_current(request):
                     phase_callback(result)
+            now = self._monotonic()
+            expired = {
+                future
+                for future in pending
+                if futures[future][1] not in {"reused"}
+                and now - futures[future][3] >= self._phase_timeout_seconds
+            }
+            for future in expired:
+                phase, cache_state, phase_token, started_at = futures[future]
+                pending.remove(future)
+                future.cancel()
+                with self._lock:
+                    self._expired_phase_tokens.add(phase_token)
+                elapsed_ms = max(0, int(round((now - started_at) * 1000.0)))
+                diagnostics.append(
+                    f"{phase.value}: discovery exceeded the {self._phase_timeout_seconds:.2f}s budget; "
+                    "continuing with safe partial evidence"
+                )
+                self._emit(
+                    request,
+                    "phase-finish",
+                    phase=phase,
+                    cache_state=cache_state,
+                    outcome="timeout",
+                    elapsed_ms=elapsed_ms,
+                )
 
         elapsed_ms = max(0, int(round((self._monotonic() - started) * 1000.0)))
         snapshot = self._combine(request, results, diagnostics, elapsed_ms)
@@ -363,27 +396,47 @@ class GuidedSoftwareDiscoveryCoordinator:
         self,
         request: DiscoveryRequest,
         phase: DiscoveryPhase,
-    ) -> Tuple[Future[PhaseDiscoveryResult], str]:
+    ) -> Tuple[
+        Future[PhaseDiscoveryResult],
+        str,
+        Tuple[str, int, DiscoveryPhase, str],
+        float,
+    ]:
         cache_key = (phase, request.scan_input_fingerprint)
         inflight_key = (request.session_key, request.generation, phase, request.scan_input_fingerprint)
         with self._lock:
             if not request.force_refresh and cache_key in self._phase_cache:
                 future: Future[PhaseDiscoveryResult] = Future()
                 future.set_result(self._phase_cache[cache_key])
-                return future, "reused"
+                return future, "reused", inflight_key, self._monotonic()
             active = self._inflight.get(inflight_key)
             if active is not None and not active.done():
-                return active, "coalesced"
+                return (
+                    active,
+                    "coalesced",
+                    inflight_key,
+                    self._inflight_started.get(inflight_key, self._monotonic()),
+                )
             scanner = self._scanners.get(phase)
             if scanner is None:
                 future = Future()
                 future.set_exception(GuidedSoftwareDiscoveryError(f"no scanner registered for {phase.value}"))
-                return future, "missing"
+                return future, "missing", inflight_key, self._monotonic()
             self._emit(request, "phase-start", phase=phase, cache_state="scan")
-            future = self._executor.submit(self._run_phase, request, phase, scanner, cache_key)
+            started_at = self._monotonic()
+            self._expired_phase_tokens.discard(inflight_key)
+            future = self._executor.submit(
+                self._run_phase,
+                request,
+                phase,
+                scanner,
+                cache_key,
+                inflight_key,
+            )
             self._inflight[inflight_key] = future
+            self._inflight_started[inflight_key] = started_at
             future.add_done_callback(lambda _done, key=inflight_key: self._release_inflight(key))
-            return future, "scan"
+            return future, "scan", inflight_key, started_at
 
     def _run_phase(
         self,
@@ -391,6 +444,7 @@ class GuidedSoftwareDiscoveryCoordinator:
         phase: DiscoveryPhase,
         scanner: PhaseScanner,
         cache_key: Tuple[DiscoveryPhase, str],
+        phase_token: Tuple[str, int, DiscoveryPhase, str],
     ) -> PhaseDiscoveryResult:
         started = self._monotonic()
         result = scanner(request, lambda: self._cancelled_or_stale(request, None))
@@ -401,13 +455,19 @@ class GuidedSoftwareDiscoveryCoordinator:
             elapsed_ms=max(0, int(round((self._monotonic() - started) * 1000.0))),
         )
         with self._lock:
-            if self._request_is_current_locked(request) and (request.session_key, request.generation) not in self._cancelled:
+            if (
+                phase_token not in self._expired_phase_tokens
+                and self._request_is_current_locked(request)
+                and (request.session_key, request.generation) not in self._cancelled
+            ):
                 self._phase_cache[cache_key] = result
         return result
 
     def _release_inflight(self, key: Tuple[str, int, DiscoveryPhase, str]) -> None:
         with self._lock:
             self._inflight.pop(key, None)
+            self._inflight_started.pop(key, None)
+            self._expired_phase_tokens.discard(key)
 
     def _cancelled_or_stale(
         self,

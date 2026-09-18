@@ -564,7 +564,7 @@ def test_settings_section_navigation_scrolls_without_horizontal_content_scroll(m
         tab.show()
         app.processEvents()
 
-        assert tab.settings_compact_header.isVisible() is True
+        assert tab.settings_compact_header.isVisible() is False
         assert tab.settings_task_title_label.isVisible() is False
         assert tab.settings_task_hint_label.isVisible() is False
         assert tab.settings_global_tasks_widget.isVisible() is False
@@ -585,7 +585,7 @@ def test_settings_section_navigation_scrolls_without_horizontal_content_scroll(m
         app.processEvents()
 
         assert tab.settings_section_nav_scroll.isVisible() is True
-        assert tab.settings_compact_header.isVisible() is True
+        assert tab.settings_compact_header.isVisible() is False
         assert tab.settings_global_tasks_widget.isVisible() is False
         assert tab.settings_radio_tasks_widget.isVisible() is False
     finally:
@@ -1184,7 +1184,7 @@ def test_radio_profile_dashboard_sections_visual_geometry_and_collapse_defaults(
         assert tab.radio_profile_guided_task_buttons["radio"].text() == "Radio: Select Radio"
         assert tab.radio_profile_guided_task_buttons["advanced"].text() == "Advanced Guard: Select Radio"
         assert "close-frequency protection" in tab.radio_profile_guided_task_buttons["advanced"].toolTip()
-        assert tab.radio_profile_section_group.sizePolicy().verticalPolicy() == QSizePolicy.Expanding
+        assert tab.radio_profile_section_group.sizePolicy().verticalPolicy() == QSizePolicy.Preferred
         assert tab.sections_scroll.widgetResizable() is True
         assert tab.sections_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
         assert tab.sections_stack.minimumWidth() == 0

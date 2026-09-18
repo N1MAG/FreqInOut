@@ -397,10 +397,22 @@ def find_app_candidates(
     for app_id in apps:
         normalized_app = app_id.strip().lower()
         seen_paths = set()
-        scoped_extra_paths = [path for path in extra_paths if _path_name_matches_app(normalized_app, Path(path))]
-        raw_paths = list(search_paths.get(normalized_app, ())) + scoped_extra_paths
+        # A saved exact identity is stronger evidence than a well-known
+        # fallback.  Keep both bounded and shallow: this helper never walks a
+        # directory tree or scans existing application profiles.
+        scoped_extra_paths = [
+            path for path in tuple(extra_paths or ())[:128]
+            if _path_name_matches_app(normalized_app, Path(path))
+        ]
+        saved_keys = {
+            os.path.normcase(os.path.normpath(str(Path(os.path.expandvars(os.path.expanduser(str(path)))))))
+            for path in scoped_extra_paths
+        }
+        raw_paths = scoped_extra_paths + list(tuple(search_paths.get(normalized_app, ()))[:128])
         for raw in _unique_paths(raw_paths):
-            candidate = _candidate_from_path(normalized_app, raw, system=system, source="known_path")
+            raw_key = os.path.normcase(os.path.normpath(str(raw)))
+            source = "saved" if raw_key in saved_keys else "known_path"
+            candidate = _candidate_from_path(normalized_app, raw, system=system, source=source)
             key = os.path.normcase(os.path.normpath(candidate.path))
             if key in seen_paths:
                 continue

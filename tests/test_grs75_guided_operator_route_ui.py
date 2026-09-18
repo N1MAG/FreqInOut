@@ -29,6 +29,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
+    QWidget,
 )
 
 
@@ -282,8 +284,8 @@ def test_prepared_route_enables_only_prepared_review_actions(
         for family in ("js8call", "fast_light"):
             state = dialog.findChild(QLabel, f"guidedSoftwarePreparedState_{family}")
             details = dialog.findChild(QPushButton, f"guidedSoftwareDetails_{family}")
-            assert state is not None and state.text().startswith("Needs attention —")
-            assert details is not None and details.text() == "Configure Details (required)…"
+            assert state is not None and state.text().startswith("Ready to save · launch setup pending —")
+            assert details is not None and details.text() == "Review Launch Setup…"
         assert "fast_light" in getattr(dialog, "_guided_software_instance_drafts", {})
         fast_source = _selected_source(dialog, "fast_light")
         fast_source.setCurrentIndex(fast_source.findData("existing"))
@@ -292,6 +294,57 @@ def test_prepared_route_enables_only_prepared_review_actions(
         dialog.reject()
 
     _open_add_radio_dialog(monkeypatch, tmp_path, inspect)
+
+
+def test_deselecting_varac_purges_its_dialog_draft_and_review_projection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """TriMode removal cannot leak a previous VarAC bundle into Review."""
+
+    def inspect(dialog: QDialog) -> None:
+        _enter_trimode_software_step(dialog)
+        setattr(
+            dialog,
+            "_guided_software_instance_drafts",
+            {
+                "varac": {
+                    "family_key": "varac",
+                    "application_path": "/managed/old/VarAC.exe",
+                    "configuration_path": "/managed/old/VarAC.ini",
+                    "storage_path": "/managed/old/old.db",
+                    "launch_command": "old-varac",
+                }
+            },
+        )
+        varac = _checkbox(dialog, "VarAC")
+        assert varac.isChecked()
+        varac.setChecked(False)
+        _app().processEvents()
+        assert "varac" not in getattr(dialog, "_guided_software_instance_drafts", {})
+        # The current family selection is also what Review reads; old paths
+        # and launch data must not remain merely because a nested editor was
+        # previously opened.
+        for step_id in ("connection", "guard", "schedule", "review"):
+            step = dialog.findChild(QPushButton, f"guidedWizardStep_{step_id}")
+            assert step is not None and step.isEnabled(), step_id
+            step.click()
+            _app().processEvents()
+        review = dialog.findChild(QLabel, "guidedSaveReview")
+        assert review is not None
+        assert "VarAC" not in review.text()
+        assert "old-varac" not in review.text()
+        dialog.reject()
+
+    _open_add_radio_dialog(monkeypatch, tmp_path, inspect)
+
+    # A new dialog owns a new session and begins without the first dialog's
+    # retained VarAC draft.
+    def inspect_new(dialog: QDialog) -> None:
+        assert "varac" not in getattr(dialog, "_guided_software_instance_drafts", {})
+        dialog.reject()
+
+    _open_add_radio_dialog(monkeypatch, tmp_path, inspect_new)
 
 
 def test_zero_entry_managed_fast_js8_route_publishes_drafts_and_leaves_schedule_optional(
@@ -401,6 +454,121 @@ def test_zero_entry_managed_fast_js8_route_publishes_drafts_and_leaves_schedule_
     assert "fio_spotter" not in drafts and "commstat" not in drafts
     assert "guided_frequency_plan_id" not in payload
     assert "guided_open_plan_manager_after_save" not in payload
+
+
+def test_warning_recipe_permits_save_but_explicit_safety_block_does_not(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Version/launch uncertainty is not conflated with an unsafe target."""
+
+    import freqinout.gui.settings_tab as settings_tab_module
+
+    class _ImmediateThread(QObject):
+        started = Signal()
+        finished = Signal()
+
+        def start(self) -> None:
+            self.started.emit()
+
+        def quit(self) -> None:
+            self.finished.emit()
+
+    def publish_unqualified_snapshot(worker: object) -> None:
+        worker.finished.emit(
+            {
+                "guided_discovery_request": getattr(worker, "request"),
+                "install_candidates": (),
+                "fast_results": {},
+                "js8_results": {},
+                "varac_results": {},
+                "js8_file_profiles": (),
+            }
+        )
+
+    monkeypatch.setattr(settings_tab_module._GuidedRadioAutofillWorker, "run", publish_unqualified_snapshot)
+    monkeypatch.setattr(settings_tab_module, "QThread", _ImmediateThread)
+    monkeypatch.setattr(settings_tab_module._GuidedRadioAutofillWorker, "moveToThread", lambda *_args: None)
+
+    def inspect(dialog: QDialog) -> None:
+        name = next(
+            field for field in dialog.findChildren(QLineEdit)
+            if "radio name" in field.placeholderText().casefold()
+        )
+        name.setText("Warning policy radio")
+        setup = dialog.findChild(QComboBox, "guidedSetupType")
+        assert setup is not None
+        setup.setCurrentIndex(setup.findData("fast_light"))
+        _app().processEvents()
+        for step_id in ("model", "software"):
+            step = dialog.findChild(QPushButton, f"guidedWizardStep_{step_id}")
+            assert step is not None and step.isEnabled()
+            step.click()
+        _checkbox(dialog, "JS8Call").setChecked(True)
+        prepare = dialog.findChild(QPushButton, "guidedConfigureAutomaticallyButton")
+        assert prepare is not None
+        prepare.click()
+        assert _wait_until(lambda: prepare.isEnabled())
+        for step_id in ("connection", "guard", "schedule", "review"):
+            step = dialog.findChild(QPushButton, f"guidedWizardStep_{step_id}")
+            assert step is not None and step.isEnabled(), step_id
+            step.click()
+        footer = dialog.findChild(QDialogButtonBox, "guidedRadioSetupActionFooter")
+        assert footer is not None
+        save = footer.button(QDialogButtonBox.Save)
+        assert save is not None and save.isEnabled(), save.toolTip()
+
+        drafts = getattr(dialog, "_guided_software_instance_drafts", {})
+        assert "js8call" in drafts
+        drafts["js8call"]["launch_recipe_status"] = "blocked_for_safety"
+        drafts["js8call"]["launch_recipe"] = {
+            "status": "blocked_for_safety",
+            "recovery_action": "Choose a distinct profile path.",
+        }
+        review = dialog.findChild(QPushButton, "guidedWizardStep_review")
+        assert review is not None
+        review.click()
+        _app().processEvents()
+        assert not save.isEnabled()
+        dialog.reject()
+
+    _open_add_radio_dialog(monkeypatch, tmp_path, inspect)
+
+
+def test_radios_mode_collapses_empty_compact_header_and_top_packs_profile_content(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The Radios workspace must not retain an empty styled header spacer."""
+
+    from freqinout.core.settings_manager import SettingsManager
+    from freqinout.gui.settings_tab import SettingsTab
+
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    SettingsManager()
+    monkeypatch.setattr(SettingsTab, "_maybe_backfill_js8_geo", lambda self: None)
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status", lambda self, force=False: None)
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status_compat", lambda self, force=False: None)
+    tab = SettingsTab()
+    try:
+        tab.resize(1000, 700)
+        tab.show()
+        assert tab.show_settings_context("radios")
+        _app().processEvents()
+        header = tab.findChild(QWidget, "settingsCompactHeaderBar")
+        assert header is not None and not header.isVisible()
+        group = tab.radio_profile_section_group
+        content = tab._section_meta[group]["content"]
+        header_button = tab._section_meta[group]["header_btn"]
+        assert content.isVisible()
+        # The natural-height profile container begins directly below its
+        # section header; it does not expand an elastic blank region first.
+        assert content.geometry().top() <= header_button.geometry().bottom() + 12
+        assert group.sizePolicy().verticalPolicy() != QSizePolicy.Expanding
+    finally:
+        tab.close()
+        tab.deleteLater()
+        _app().processEvents()
 
 
 @pytest.mark.parametrize("size", [(1920, 1080), (1000, 700), (900, 560)])

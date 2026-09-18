@@ -49,12 +49,35 @@ class VarACNativePreparationResult:
 
 
 def native_draft_fingerprint(draft: Mapping[str, Any]) -> str:
-    """Fingerprint operator intent while excluding host-published UI state."""
+    """Fingerprint operator intent while excluding host-generated native facts.
 
+    Managed create/join preparation owns these targets.  Publishing them into
+    the canonical assistant draft must not make the just-prepared plan stale;
+    changing source/topology/policy evidence still changes the fingerprint.
+    """
+
+    generated_fields = {
+        "configuration_path",
+        "storage_path",
+        "secondary_storage_path",
+        "outbox_path",
+        "working_directory",
+        "launch_command",
+        "vara_runtime_path",
+        "vara_ini_path",
+        "port",
+        "secondary_port",
+        "udp_port",
+    }
     clean = {
         str(key): value
         for key, value in dict(draft or {}).items()
-        if str(key) not in {"varac_native_presentation", "varac_native_generation"}
+        if str(key)
+        not in {
+            "varac_native_presentation",
+            "varac_native_generation",
+            *generated_fields,
+        }
     }
     encoded = json.dumps(clean, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -119,6 +142,15 @@ def prepare_varac_native_configuration(
         for member in plan.members
     )
     new_member = plan.members[-1]
+    prepared_application_path = str(intent.get("application_path") or "").strip()
+    if not prepared_application_path and new_member.launch_command:
+        prepared_application_path = str(
+            new_member.launch_command[1]
+            if plan.platform == "linux-wine" and len(new_member.launch_command) > 1
+            else new_member.launch_command[0]
+        )
+    member_root = new_member.target_path.parent
+    vara_values = new_member.changes.get("VARAHF_CONFIG", {})
     presentation = {
         "state": "ready",
         "why": "Exact VarAC 13.2.7 source, paths, ports, runtime copies, and target state are qualified and ready for transactional apply.",
@@ -132,10 +164,20 @@ def prepare_varac_native_configuration(
         "writer_platform": plan.platform,
         "writer_operation": plan.operation,
         "writer_qualified": True,
+        "application_path": prepared_application_path,
         "varac_ini_path": str(new_member.target_path),
+        "configuration_path": str(new_member.target_path),
+        "storage_path": str(plan.shared_db_path),
+        "secondary_storage_path": str(
+            intent.get("secondary_storage_path") or member_root / "incoming"
+        ),
+        "outbox_path": str(intent.get("outbox_path") or member_root / "outbox"),
+        "working_directory": str(new_member.working_directory),
         "vara_runtime_path": str(new_member.vara_target_runtime_folder),
         "vara_ini_path": str(new_member.vara_target_path),
         "launch_command": _display_argv(new_member.launch_command),
+        "port": int(vara_values.get("VarahfMainPort") or 0),
+        "secondary_port": int(vara_values.get("VarahfMainKissPort") or 0),
         "ports_summary": _ports_summary(plan),
         "fingerprints_summary": plan.plan_fingerprint,
         "generation": int(generation),

@@ -7992,3 +7992,128 @@ final tree and passed. Tests used temporary state. No production database,
 native application profile, process, endpoint, radio, commit, remote, or the
 operator's unrelated DOCX/rendered-document changes were modified by this
 slice.
+
+## 2026-09-18 — GRS-9 operator-feedback audit and specification correction
+
+Status: specification exit gate passed; product implementation deliberately
+not started in this slice.
+
+The operator's screenshots and `freqinout (38).log` were reviewed against the
+current Add Radio, Software Administration, native VarAC preparation, discovery,
+review, save-validation, and Radios-layout code. The review confirmed that the
+reported behavior is caused by deterministic state/projection defects rather
+than operator uncertainty:
+
+- VarAC native preparation generated technical facts but never hydrated the
+  retained VarAC instance draft, leaving INI, database, incoming, outbox,
+  working-directory, and command fields blank below a valid technical summary.
+- TriMode selected VarAC, while nested-editor cancellation left the parent's
+  VarAC selection and retained state intact. The later log session scanned only
+  Applications, Fast Light, and JS8 profiles; VarAC in Review was therefore
+  stale UI/session intent, not a newly discovered application.
+- the managed-bundle publication path covered JS8Call and Fast Light only;
+  Review and Save could still consult checkbox/loose-field/legacy-plan state,
+  so no single authoritative selected-family bundle existed;
+- Fast Light and application discovery returned zero candidates quickly, while
+  JS8 profile discovery took 17.319 seconds and also returned zero. Save then
+  lacked qualified managed recipes without displaying the exact missing
+  executable/version evidence as its blocker; and
+- the Radios compact header remained visible after all semantic children were
+  hidden, while expandable layout policy permitted an elastic blank region
+  above the readiness content.
+
+GRS-9 now defines an authoritative draft session and current-generation
+prepared-bundle map; synchronous family-state purge; unambiguous Back versus
+Remove-family semantics; outer-cancel isolation; complete canonical VarAC field
+mapping; zero-entry ownership for all safely derivable paths, files, commands,
+ports, and directories; bounded Linux executable/version discovery; exact
+operator-visible blocker codes; telemetry needed to reconstruct the workflow;
+and objective layout, performance, transaction, and real-widget exit gates.
+The spec explicitly treats an existing VarAC installation as source evidence,
+not a workspace, and requires FIO to derive distinct managed incoming/outbox,
+working-directory, INI/runtime, ports, and launch facts for a qualified new
+member.
+
+Work packages and model ownership:
+
+- Primary `gpt-5.6-sol`, high reasoning: architecture and state-machine review,
+  VarAC/FL/JS8 ownership contract, performance and transaction boundaries,
+  integrated specification, and final review.
+- `gpt-5.6-terra`, high reasoning: read-only UI/state and prepared-bundle audit,
+  including the exact VarAC projection gaps, stale selection semantics, Save
+  predicate, and Radios empty-header cause.
+- `gpt-5.6-luna`, high reasoning: read-only log/timeline and focused code-path
+  audit, including the 17.319-second JS8 zero-result scan, absence of a VarAC
+  scan in the second attempt, and limitations of the existing telemetry.
+
+No product source, database, external application configuration, native file,
+or test fixture changed. The production databases and unrelated DOCX/rendered
+document changes were not modified. Documentation whitespace validation and
+the specification-diff review are the only gates appropriate to this
+specification-only slice; automated product acceptance remains explicitly open
+under GRS-9.
+
+## 2026-09-18 — GRS-9 safe-default guided software implementation
+
+Status: integrated automated exit gate passed; installed-Linux operator
+qualification remains open.
+
+This slice implemented the corrected GRS-9 contract. Guided managed recipes now
+retain complete isolated plans under four explicit outcomes: Ready, Ready with
+warnings, Saved with launch setup pending, and Blocked for safety. Incomplete
+version evidence and missing executables no longer discard a safe radio draft;
+pending recipes persist with launch disabled. Explicit overwrite/reuse,
+identity/path/endpoint/resource collision, unsafe shared mutation, transaction,
+and RF-safety conditions remain blocking.
+
+The canonical VarAC native presentation now hydrates the real assistant draft
+with the application, INI, database, incoming, outbox, working directory, VARA
+runtime/INI, ports, and launch command. Selected-family state is purged
+synchronously on deselection, the nested editor distinguishes Back without
+changes from Remove family, and removed VarAC state no longer contributes to
+Connections, Review, Save validation, or the accepted payload. Radios layout
+now collapses its empty compact header and top-aligns content.
+
+Discovery now prefers reviewed/saved executable identities, bounds known-path
+work, and applies a two-second per-phase budget. Timed-out results are excluded
+from the current snapshot and cache, while safe partial evidence remains usable.
+JS8Call executable-name evidence distinguishes stock, Subspace, and Improved
+families without fabricating an exact version. Exact generated commands, roots,
+endpoints, working directories, confidence, and evidence persist to launch
+items; launch-pending bundles explicitly disable automatic launch.
+
+During primary integration review, one delegated SQL placeholder-order defect
+was found and corrected before release: the new launch-pending flag had been
+bound in the timestamp position. A regression assertion now verifies that the
+bundle timestamp remains an ISO string while pending launch remains disabled.
+The primary also tightened arbitrary JS8 Browse targets so only app-specific
+executable identities qualify for warning-ready launch.
+
+Work packages and model ownership:
+
+- Primary `gpt-5.6-sol`, high reasoning: specification and safety architecture,
+  discovery concurrency/timeout design, canonical VarAC fingerprint and
+  projection integration, review of every delegated diff, SQL and JS8 identity
+  corrections, production-copy audit, final acceptance, and documentation.
+- `gpt-5.6-luna`, high reasoning: bounded recipe/discovery/store implementation
+  and focused recipe/persistence tests.
+- `gpt-5.6-terra`, high reasoning: selected-family UI state, Back/Remove-family
+  behavior, VarAC draft hydration, Radios layout correction, and focused
+  real-widget tests.
+
+Final-tree evidence:
+
+- integrated focused/adjacent acceptance matrix: **396 passed**;
+- immutable production-shaped inventory plus disposable-copy migration checks:
+  included in that matrix and **3 passed** as an independently observed
+  partition;
+- changed Python compilation: passed;
+- `git diff --check`: passed.
+
+The production source at
+`/Users/bill/RadioTools/FIO_DB_prod/current/freqinout.db` retained the same
+size, timestamp, and SHA-256 hash. Tests used temporary state; no production
+database, external application profile, process, endpoint, radio, commit, or
+remote was changed. The operator's unrelated DOCX and rendered-document changes
+remain untouched. The exact supported-applications Linux walkthrough is the
+remaining live qualification and is intentionally not claimed by this entry.

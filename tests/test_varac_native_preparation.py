@@ -95,6 +95,19 @@ def test_prepare_existing_standalone_and_new_member_is_immutable_and_ready(tmp_p
         "Z:\\"
     )
     assert result.plan.members[1].launch_command[2].startswith("Z:\\")
+    member = result.plan.members[1]
+    assert result.presentation["application_path"] == str(
+        Path(node["install_path"]) / "VarAC.exe"
+    )
+    assert result.presentation["configuration_path"] == str(member.target_path)
+    assert result.presentation["storage_path"] == str(result.plan.shared_db_path)
+    assert result.presentation["secondary_storage_path"].endswith("/incoming")
+    assert result.presentation["outbox_path"].endswith("/outbox")
+    assert result.presentation["working_directory"] == str(member.working_directory)
+    assert result.presentation["vara_runtime_path"] == str(member.vara_target_runtime_folder)
+    assert result.presentation["vara_ini_path"] == str(member.vara_target_path)
+    assert result.presentation["port"] == 8310
+    assert result.presentation["secondary_port"] == 8312
     assert not result.plan.members[1].target_path.exists()
 
 
@@ -133,6 +146,19 @@ def test_native_fingerprint_ignores_host_presentation_but_not_operator_intent() 
     first = native_draft_fingerprint(draft)
     draft["varac_native_presentation"] = {"state": "preparing"}
     draft["varac_native_generation"] = 99
+    assert native_draft_fingerprint(draft) == first
+    draft.update(
+        configuration_path="/managed/VarAC.ini",
+        storage_path="/managed/cluster.db",
+        secondary_storage_path="/managed/incoming",
+        outbox_path="/managed/outbox",
+        working_directory="/managed",
+        launch_command="wine VarAC.exe Z:\\managed\\VarAC.ini",
+        vara_runtime_path="/managed/VARA",
+        vara_ini_path="/managed/VARA/VARA.ini",
+        port=8310,
+        secondary_port=8312,
+    )
     assert native_draft_fingerprint(draft) == first
     draft["cluster_instance_number"] = 3
     assert native_draft_fingerprint(draft) != first

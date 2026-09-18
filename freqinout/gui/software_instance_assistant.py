@@ -10,7 +10,7 @@ processes.
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import re
 import uuid
 from typing import Any, Iterable, Mapping, Optional
@@ -153,10 +153,18 @@ class VarACNativePresentation:
     writer_platform: str = ""
     writer_operation: str = ""
     writer_qualified: bool = False
+    application_path: str = ""
     varac_ini_path: str = ""
+    storage_path: str = ""
+    secondary_storage_path: str = ""
+    outbox_path: str = ""
+    working_directory: str = ""
     vara_runtime_path: str = ""
     vara_ini_path: str = ""
     launch_command: str = ""
+    port: int = 0
+    secondary_port: int = 0
+    udp_port: int = 0
     ports_summary: str = ""
     fingerprints_summary: str = ""
     draft_fingerprint: str = ""
@@ -183,10 +191,20 @@ class VarACNativePresentation:
             writer_platform=_text(row.get("writer_platform") or row.get("platform")),
             writer_operation=_text(row.get("writer_operation") or row.get("operation")),
             writer_qualified=_bool(row.get("writer_qualified") or row.get("qualified")),
+            application_path=_text(row.get("application_path") or row.get("varac_install_path")),
             varac_ini_path=_text(row.get("varac_ini_path") or row.get("configuration_path")),
+            storage_path=_text(row.get("storage_path") or row.get("varac_db_path") or row.get("db_path")),
+            secondary_storage_path=_text(
+                row.get("secondary_storage_path") or row.get("varac_incoming_path") or row.get("incoming_path")
+            ),
+            outbox_path=_text(row.get("outbox_path") or row.get("varac_outbox_dir")),
+            working_directory=_text(row.get("working_directory") or row.get("working_dir")),
             vara_runtime_path=_text(row.get("vara_runtime_path") or row.get("vara_runtime")),
             vara_ini_path=_text(row.get("vara_ini_path")),
             launch_command=_text(row.get("launch_command")),
+            port=_int(row.get("port") or row.get("vara_command_port")) or 0,
+            secondary_port=_int(row.get("secondary_port") or row.get("vara_kiss_port")) or 0,
+            udp_port=_int(row.get("udp_port") or row.get("vara_monitor_port")) or 0,
             ports_summary=_text(row.get("ports_summary") or row.get("ports")),
             fingerprints_summary=_text(row.get("fingerprints_summary") or row.get("fingerprints")),
             draft_fingerprint=_text(row.get("draft_fingerprint")),
@@ -207,10 +225,19 @@ class VarACNativePresentation:
             "writer_platform": self.writer_platform,
             "writer_operation": self.writer_operation,
             "writer_qualified": self.writer_qualified,
+            "application_path": self.application_path,
             "varac_ini_path": self.varac_ini_path,
+            "configuration_path": self.varac_ini_path,
+            "storage_path": self.storage_path,
+            "secondary_storage_path": self.secondary_storage_path,
+            "outbox_path": self.outbox_path,
+            "working_directory": self.working_directory,
             "vara_runtime_path": self.vara_runtime_path,
             "vara_ini_path": self.vara_ini_path,
             "launch_command": self.launch_command,
+            "port": self.port,
+            "secondary_port": self.secondary_port,
+            "udp_port": self.udp_port,
             "ports_summary": self.ports_summary,
             "fingerprints_summary": self.fingerprints_summary,
             "draft_fingerprint": self.draft_fingerprint,
@@ -259,6 +286,8 @@ class SoftwareInstanceDraft:
     launch_command: str = ""
     launch_at_startup: bool = False
     working_directory: str = ""
+    vara_runtime_path: str = ""
+    vara_ini_path: str = ""
     advanced_tx_requested: bool = False
     advanced_tx_acknowledged: bool = False
     cluster_path: str = "standalone"
@@ -397,6 +426,8 @@ class SoftwareInstanceDraft:
             "launch_command": self.launch_command,
             "launch_at_startup": self.launch_at_startup,
             "working_directory": self.working_directory,
+            "vara_runtime_path": self.vara_runtime_path,
+            "vara_ini_path": self.vara_ini_path,
             "advanced_tx_requested": self.advanced_tx_requested,
             "advanced_tx_acknowledged": self.advanced_tx_acknowledged,
             "execution_scope": "receive_only" if self.radio_role == "observer" else "standard",
@@ -565,6 +596,8 @@ def normalize_instance_draft(value: Mapping[str, Any] | SoftwareInstanceDraft) -
         launch_command=_text(row.get("launch_command") or row.get("launch_cmd")),
         launch_at_startup=_bool(row.get("launch_at_startup", False)),
         working_directory=_text(row.get("working_directory") or row.get("working_dir")),
+        vara_runtime_path=_text(row.get("vara_runtime_path")),
+        vara_ini_path=_text(row.get("vara_ini_path")),
         advanced_tx_requested=_bool(row.get("advanced_tx_requested", False)),
         advanced_tx_acknowledged=_bool(row.get("advanced_tx_acknowledged", False)),
         cluster_path=_text(row.get("cluster_path") or row.get("varac_cluster_path") or "standalone").lower(),
@@ -902,6 +935,7 @@ class SoftwareInstanceAssistant(QWidget):
 
     completed = Signal(object)
     cancelled = Signal()
+    remove_family_requested = Signal(str)
     discover_requested = Signal(str)
     create_radio_requested = Signal()
     validation_requested = Signal(object)
@@ -966,6 +1000,8 @@ class SoftwareInstanceAssistant(QWidget):
         self._discovery_selected = False
         self._writer_platform = ""
         self._writer_operation = "create"
+        self._vara_runtime_path = ""
+        self._vara_ini_path = ""
         self._managed_root = _text(managed_root)
         self._launch_recipe_resolution: GuidedLaunchRecipeResolution | None = None
         self._launch_recipe_resolution_supplied = launch_recipe_resolution is not None
@@ -1175,9 +1211,26 @@ class SoftwareInstanceAssistant(QWidget):
         self.action_footer.setObjectName("softwareInstanceActionFooter")
         self.action_footer.setAccessibleName("Software instance setup actions")
         self.action_footer.setLayout(actions)
-        self.cancel_button = QPushButton("Cancel")
-        self.cancel_button.setAccessibleName("Cancel adding software instance")
+        self.cancel_button = QPushButton("Back without changes")
+        self.cancel_button.setAccessibleName("Back without changes")
+        self.cancel_button.setToolTip(
+            "Discard edits made in this editor and keep this software family selected for the radio."
+        )
         self.cancel_button.clicked.connect(self.cancelled.emit)
+        self.remove_family_button = QPushButton()
+        self.remove_family_button.setObjectName("softwareInstanceRemoveFamily")
+        family_title = dict(SUPPORTED_INSTANCE_FAMILIES).get(self._family_key, "software")
+        self.remove_family_button.setText(f"Remove {family_title} from this radio")
+        self.remove_family_button.setAccessibleName(
+            f"Remove {family_title} from this radio"
+        )
+        self.remove_family_button.setToolTip(
+            "Remove this family and discard its prepared draft, reservations, and native plan."
+        )
+        self.remove_family_button.setVisible(bool(self._unsaved_owner_key and self._family_key))
+        self.remove_family_button.clicked.connect(
+            lambda: self.remove_family_requested.emit(self._family_key)
+        )
         self.back_button = QPushButton("Back")
         self.back_button.setAccessibleName("Back one software setup step")
         self.back_button.clicked.connect(self._back)
@@ -1186,6 +1239,7 @@ class SoftwareInstanceAssistant(QWidget):
         self.next_button.setDefault(True)
         self.next_button.clicked.connect(self._next)
         actions.addWidget(self.cancel_button)
+        actions.addWidget(self.remove_family_button)
         actions.addStretch(1)
         actions.addWidget(self.back_button)
         actions.addWidget(self.next_button)
@@ -1294,9 +1348,45 @@ class SoftwareInstanceAssistant(QWidget):
         disclosure state, focus, and scroll position.
         """
 
-        self._varac_native_presentation = VarACNativePresentation.from_mapping(
-            presentation
-        )
+        native = VarACNativePresentation.from_mapping(presentation)
+        # A qualified native result is the prepared bundle, not merely a
+        # technical summary.  Hydrate the same draft that Files, Review, and
+        # the completed payload read before they can render it.  Keeping this
+        # here (rather than in a page-specific presenter) also makes a late
+        # worker publication harmless: it updates one current family draft.
+        if self._family_key == "varac" and native.state.replace("_", " ").strip().lower() == "ready":
+            current = self.draft().payload()
+            prepared_values = {
+                "application_path": native.application_path,
+                "configuration_path": native.varac_ini_path,
+                "storage_path": native.storage_path,
+                "secondary_storage_path": native.secondary_storage_path,
+                "outbox_path": native.outbox_path,
+                "working_directory": native.working_directory,
+                "launch_command": native.launch_command,
+                "port": native.port,
+                "secondary_port": native.secondary_port,
+                "udp_port": native.udp_port,
+            }
+            current.update(
+                {
+                    key: value
+                    for key, value in prepared_values.items()
+                    if value not in {"", 0, None}
+                }
+            )
+            current["vara_runtime_path"] = native.vara_runtime_path
+            current["vara_ini_path"] = native.vara_ini_path
+            self._set_draft(normalize_instance_draft(current))
+            # The worker fingerprint names the pre-hydration intent.  The
+            # presentation must name the now-authoritative hydrated bundle so
+            # validation and host apply do not mistake generated facts for an
+            # operator edit.
+            native = replace(
+                native,
+                draft_fingerprint=native_draft_fingerprint(self.draft().payload()),
+            )
+        self._varac_native_presentation = native
         self._refresh_email_gateway_sender_choices()
         self._update_prepared_presentation()
         self._refresh_review_if_needed()
@@ -2696,6 +2786,8 @@ class SoftwareInstanceAssistant(QWidget):
                 self._selected_source_payload = dict(values)
         self._writer_platform = draft.writer_platform
         self._writer_operation = draft.writer_operation or "create"
+        self._vara_runtime_path = draft.vara_runtime_path
+        self._vara_ini_path = draft.vara_ini_path
         if draft.launch_recipe and not self._launch_recipe_resolution_supplied:
             self._launch_recipe_resolution = recipe_resolution_from_mapping(draft.launch_recipe)
         elif not draft.launch_recipe and not self._launch_recipe_resolution_supplied:
@@ -2813,6 +2905,8 @@ class SoftwareInstanceAssistant(QWidget):
             launch_command=value("launch_command"),
             launch_at_startup=checked("launch_at_startup"),
             working_directory=value("working_directory"),
+            vara_runtime_path=value("vara_runtime_path") or self._vara_runtime_path,
+            vara_ini_path=value("vara_ini_path") or self._vara_ini_path,
             advanced_tx_requested=checked("advanced_tx_requested"),
             advanced_tx_acknowledged=checked("advanced_tx_acknowledged"),
             cluster_path=cluster_path,

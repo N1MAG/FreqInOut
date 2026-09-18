@@ -56,6 +56,28 @@ def _scope(draft: Mapping[str, Any]) -> str:
     return "receive_only" if _text(draft.get("radio_role")).casefold() == "observer" else "standard"
 
 
+def _js8_variant_hint(draft: Mapping[str, Any], executable: str) -> str:
+    """Use explicit identity first, then only an app-specific executable name.
+
+    A JS8 executable name is enough to select the reviewed launch-argument
+    family, but never enough to invent an exact version.  An arbitrary Browse
+    target therefore remains launch-pending instead of being treated as safe
+    merely because the version field is blank.
+    """
+
+    explicit = _text(draft.get("variant"))
+    if explicit:
+        return explicit
+    basename = ntpath.basename(executable.replace("/", "\\")).casefold()
+    if "js8call" not in basename:
+        return ""
+    if "subspace" in basename:
+        return "js8call_subspace_4_1"
+    if "improved" in basename:
+        return "js8call_improved_3_0_3"
+    return "js8call_2_2"
+
+
 def canonical_js8_version(variant: object, version: object) -> str:
     """Return the exact writer/recipe version represented by discovered evidence."""
 
@@ -84,6 +106,11 @@ class GuidedLaunchComponent:
     execution_scope: str = "standard"
     launch_at_startup: bool = False
     operator_starts: bool = False
+    # Retain discovery provenance beside the generated launch facts so audit
+    # and first-launch reconciliation do not have to reconstruct it.  These
+    # fields are last to preserve positional construction compatibility.
+    evidence: Mapping[str, Any] = field(default_factory=dict)
+    confidence: str = "verified"
 
     @property
     def effective_command(self) -> tuple[str, ...]:
@@ -108,6 +135,8 @@ class GuidedLaunchComponent:
             "data_roots": list(self.data_roots),
             "endpoints": [dict(item) for item in self.endpoints],
             "readiness": dict(self.readiness),
+            "evidence": dict(self.evidence),
+            "confidence": self.confidence,
             "execution_scope": self.execution_scope,
             "launch_at_startup": self.launch_at_startup,
             "operator_starts": self.operator_starts,
@@ -122,6 +151,9 @@ class GuidedLaunchRecipeResolution:
     raw_override_allowed: bool = False
     recovery_action: str = ""
     summary: str = ""
+    confidence: str = "verified"
+    evidence: Mapping[str, Any] = field(default_factory=dict)
+    blocker_code: str = ""
     fingerprint: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -132,6 +164,9 @@ class GuidedLaunchRecipeResolution:
             "raw_override_allowed": self.raw_override_allowed,
             "recovery_action": self.recovery_action,
             "summary": self.summary,
+            "confidence": self.confidence,
+            "evidence": dict(self.evidence),
+            "blocker_code": self.blocker_code,
         }
         object.__setattr__(
             self,
@@ -143,7 +178,33 @@ class GuidedLaunchRecipeResolution:
 
     @property
     def qualified(self) -> bool:
-        return self.status == "qualified_managed"
+        # Legacy callers use ``qualified`` as the signal that generated paths
+        # may replace editable fields.  Warning and launch-pending plans are
+        # complete isolated plans and therefore remain persistable.
+        return self.status in {"qualified_managed", "ready_with_warnings", "launch_pending"}
+
+    @property
+    def persistable(self) -> bool:
+        return self.qualified
+
+    @property
+    def launch_ready(self) -> bool:
+        return self.status in {"qualified_managed", "ready_with_warnings"}
+
+    @property
+    def blocked_for_safety(self) -> bool:
+        return self.status == "blocked_for_safety"
+
+    @property
+    def outcome(self) -> str:
+        """GRS-9 operator-facing outcome while retaining legacy ``status``."""
+
+        return {
+            "qualified_managed": "Ready",
+            "ready_with_warnings": "Ready with warnings",
+            "launch_pending": "Saved; launch setup pending",
+            "blocked_for_safety": "Blocked for safety",
+        }.get(self.status, self.status.replace("_", " ").title())
 
     def to_mapping(self) -> dict[str, Any]:
         return {
@@ -153,6 +214,10 @@ class GuidedLaunchRecipeResolution:
             "raw_override_allowed": self.raw_override_allowed,
             "recovery_action": self.recovery_action,
             "summary": self.summary,
+            "confidence": self.confidence,
+            "evidence": dict(self.evidence),
+            "blocker_code": self.blocker_code,
+            "outcome": self.outcome,
             "fingerprint": self.fingerprint,
         }
 
@@ -171,6 +236,8 @@ def recipe_resolution_from_mapping(value: Mapping[str, Any]) -> GuidedLaunchReci
             data_roots=tuple(_text(part) for part in item.get("data_roots", ()) if _text(part)),
             endpoints=tuple(dict(endpoint) for endpoint in item.get("endpoints", ()) if isinstance(endpoint, Mapping)),
             readiness=dict(item.get("readiness") or {}),
+            evidence=dict(item.get("evidence") or {}),
+            confidence=_text(item.get("confidence")) or "verified",
             execution_scope=_text(item.get("execution_scope")) or "standard",
             launch_at_startup=bool(item.get("launch_at_startup", False)),
             operator_starts=bool(item.get("operator_starts", False)),
@@ -185,6 +252,9 @@ def recipe_resolution_from_mapping(value: Mapping[str, Any]) -> GuidedLaunchReci
         raw_override_allowed=bool(value.get("raw_override_allowed", False)),
         recovery_action=_text(value.get("recovery_action")),
         summary=_text(value.get("summary")),
+        confidence=_text(value.get("confidence")) or "verified",
+        evidence=dict(value.get("evidence") or {}),
+        blocker_code=_text(value.get("blocker_code")),
     )
 
 
@@ -198,6 +268,111 @@ def _unsupported(family: str, detail: str) -> GuidedLaunchRecipeResolution:
     )
 
 
+def _safety_block(family: str, detail: str, *, code: str = "resource_collision") -> GuidedLaunchRecipeResolution:
+    """Return the only resolution class that is allowed to block Save."""
+
+    return GuidedLaunchRecipeResolution(
+        family_key=family,
+        status="blocked_for_safety",
+        raw_override_allowed=False,
+        recovery_action=detail,
+        summary="FIO cannot safely create this isolated launch plan until the collision is resolved.",
+        confidence="blocked",
+        blocker_code=code,
+    )
+
+
+def _truth(value: object) -> bool:
+    if isinstance(value, str):
+        return value.strip().casefold() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _safe_port(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _collision_detail(draft: Mapping[str, Any], instance_key: str) -> tuple[str, str] | None:
+    """Read explicit inventory safety findings without inferring reuse.
+
+    Existing-profile discovery is evidence, not a reason to block a distinct
+    profile.  Only an explicit collision/reuse/overwrite finding supplied by
+    inventory or the reviewed draft is considered destructive risk.
+    """
+
+    for key, code, message in (
+        ("safety_blocked", "safety_blocked", "The reviewed launch plan is marked unsafe."),
+        ("overwrite_existing", "existing_profile_overwrite", "The requested launch would overwrite an existing profile."),
+        ("reuse_existing_profile", "existing_profile_reuse", "The requested launch would reuse an existing profile; choose a distinct managed instance."),
+        ("existing_profile_reuse", "existing_profile_reuse", "The requested launch would reuse an existing profile; choose a distinct managed instance."),
+        ("path_collision", "path_collision", "A managed configuration path collides with another instance."),
+        ("endpoint_collision", "endpoint_collision", "A launch endpoint is already claimed by another instance."),
+        ("resource_collision", "resource_collision", "A managed launch resource is already claimed by another instance."),
+        ("collision", "resource_collision", "A managed launch resource is already claimed by another instance."),
+    ):
+        if _truth(draft.get(key)):
+            return code, message
+    source_mode = _text(draft.get("source_mode") or draft.get("instance_source_mode") or draft.get("ownership_mode"))
+    if source_mode.casefold() in {"use_existing_instance", "existing", "reuse_existing"}:
+        return "existing_profile_reuse", "The requested launch would reuse an existing profile; choose a distinct managed instance."
+    for key, code, message in (
+        ("collisions", "resource_collision", "A managed launch resource is already claimed by another instance."),
+        ("resource_collisions", "resource_collision", "A managed launch resource is already claimed by another instance."),
+        ("path_collisions", "path_collision", "A managed configuration path collides with another instance."),
+        ("endpoint_collisions", "endpoint_collision", "A launch endpoint is already claimed by another instance."),
+        ("inventory_conflicts", "resource_collision", "A managed launch resource is already claimed by another instance."),
+        ("resource_claim_conflicts", "resource_collision", "A managed launch resource is already claimed by another instance."),
+        ("conflicts", "resource_collision", "A managed launch resource is already claimed by another instance."),
+    ):
+        value = draft.get(key)
+        if isinstance(value, (str, bytes)):
+            if value.strip():
+                return code, message
+        elif value:
+            return code, message
+    requested_keys = draft.get("existing_instance_keys")
+    if requested_keys and instance_key and instance_key in {str(item).strip() for item in requested_keys}:
+        return "instance_key_collision", "FIO could not allocate a distinct managed instance identity."
+    return None
+
+
+def _version_evidence(draft: Mapping[str, Any], *, variant: str, version: str) -> dict[str, Any]:
+    exact = bool(canonical_js8_version(variant, version))
+    source = _text(
+        draft.get("version_evidence_source")
+        or draft.get("version_source")
+        or ("saved_identity" if draft.get("saved_version_evidence") else "")
+    )
+    return {
+        "variant": variant,
+        "version": version,
+        "source": source or ("reviewed_identity" if exact else "unverified"),
+        "confidence": "verified" if exact else "unverified",
+        "exact": exact,
+    }
+
+
+def _executable_evidence(draft: Mapping[str, Any], key: str, executable: str) -> dict[str, Any]:
+    raw = draft.get(f"{key}_evidence") or draft.get("executable_evidence")
+    evidence = dict(raw) if isinstance(raw, Mapping) else {}
+    evidence.setdefault("path", executable)
+    evidence.setdefault(
+        "source",
+        _text(draft.get(f"{key}_source") or draft.get("application_source"))
+        or ("reviewed_identity" if executable else "missing"),
+    )
+    evidence.setdefault(
+        "confidence",
+        _text(draft.get(f"{key}_confidence") or draft.get("application_confidence"))
+        or ("verified" if executable else "missing"),
+    )
+    evidence["exists"] = bool(executable)
+    return evidence
+
+
 def resolve_js8_managed_recipe(
     draft: Mapping[str, Any],
     *,
@@ -206,24 +381,40 @@ def resolve_js8_managed_recipe(
     storage_home: Path | None = None,
 ) -> GuidedLaunchRecipeResolution:
     executable = _text(draft.get("application_path"))
-    variant = normalize_variant_family(draft.get("variant"), draft.get("version"))
+    variant_hint = _js8_variant_hint(draft, executable)
+    variant = normalize_variant_family(variant_hint, draft.get("version"))
     version = _text(draft.get("version"))
     qualified_version = canonical_js8_version(variant, version)
-    if not executable:
-        return _unsupported("js8call", "Choose the exact JS8Call executable, then resolve the managed recipe again.")
-    if not qualified_version:
-        return _unsupported(
-            "js8call",
-            "Verify a supported stock 2.2.0, Improved 3.0.3, or Subspace 4.1.x version, or use Advanced operator-managed launch.",
-        )
     instance_key = _text(draft.get("draft_instance_key") or draft.get("instance_key"))
     if not instance_key:
-        return _unsupported("js8call", "Return to Identity so FIO can allocate a stable instance key.")
+        return _safety_block(
+            "js8call",
+            "FIO could not allocate a distinct JS8Call identity. Return to Identity and prepare again.",
+            code="missing_distinct_identity",
+        )
     if not _text(managed_root):
-        return _unsupported(
+        return _safety_block(
             "js8call",
             "FIO's managed-instance root is unavailable. Return to Settings and reopen this setup before continuing.",
+            code="missing_managed_root",
         )
+    collision = _collision_detail(draft, instance_key)
+    if collision is not None:
+        code, detail = collision
+        return _safety_block("js8call", detail, code=code)
+    # A known family with incomplete version evidence is safe to launch with a
+    # warning.  A genuinely unknown family is still safe to save in its own
+    # generated roots, but launch remains pending until the operator confirms
+    # that it supports the reviewed --rig-name identity contract.
+    normalized_variant_hint = variant_hint.casefold().replace("-", "_").replace(" ", "_")
+    known_variant_hint = normalized_variant_hint in {
+        "js8call_2_2", "stock", "js8call", "legacy",
+        "js8call_improved", "js8call_improved_3_0_3",
+        "js8call_subspace", "js8call_subspace_4_1",
+    }
+    unknown_variant = bool(
+        executable and (variant not in _KNOWN_JS8_VERSIONS or not known_variant_hint)
+    )
     radio_name = _text(draft.get("owner_label") or draft.get("instance_name") or "Radio")
     rig_name = stable_managed_rig_name(system_key=instance_key, name=radio_name)
     root = _join(_text(managed_root), instance_key, "js8call")
@@ -238,16 +429,54 @@ def resolve_js8_managed_recipe(
         )[0]
     )
     host = _text(draft.get("host")) or "127.0.0.1"
-    tcp_port = int(draft.get("port") or 0)
-    udp_port = int(draft.get("udp_port") or 0)
+    tcp_port = _safe_port(draft.get("port"))
+    udp_port = _safe_port(draft.get("udp_port"))
     if not tcp_port or not udp_port:
-        return _unsupported("js8call", "Return to Connections so FIO can allocate both JS8Call TCP and UDP endpoints.")
+        return _safety_block(
+            "js8call",
+            "FIO could not allocate distinct JS8Call TCP and UDP endpoints. Return to Connections and prepare again.",
+            code="missing_distinct_endpoint",
+        )
+    version_evidence = _version_evidence(draft, variant=variant, version=version)
+    executable_evidence = _executable_evidence(draft, "js8call", executable)
+    confidence = (
+        "verified"
+        if executable and qualified_version
+        else "pending"
+        if not executable or unknown_variant
+        else "warning"
+    )
+    status = (
+        "qualified_managed"
+        if confidence == "verified"
+        else "ready_with_warnings"
+        if confidence == "warning"
+        else "launch_pending"
+    )
+    if not executable:
+        recovery = "Browse for the JS8Call executable to enable launch; this isolated profile can still be saved."
+        summary = f"JS8Call profile {rig_name} prepared; launch setup is pending the executable."
+    elif unknown_variant:
+        recovery = (
+            f"Confirm that {executable} supports FIO's distinct --rig-name launch contract, "
+            "then enable launch. The isolated profile can still be saved."
+        )
+        summary = f"JS8Call profile {rig_name} prepared; launch is pending variant confirmation."
+    elif not qualified_version:
+        recovery = (
+            f"JS8Call executable found at {executable}; verify its exact supported version after first launch."
+        )
+        summary = f"JS8Call profile {rig_name} prepared with unverified version evidence; review before launch."
+    else:
+        recovery = ""
+        summary = f"Launch {variant} {qualified_version} as {rig_name} on {host}:{tcp_port}."
     component = GuidedLaunchComponent(
         component_key="js8call",
         label="JS8Call",
         executable=executable,
         arguments=("--rig-name", rig_name),
         profile_selector=rig_name,
+        working_directory=root,
         configuration_roots=(profile_root,),
         data_roots=(data_root, save_root, forms_root),
         endpoints=(
@@ -255,14 +484,20 @@ def resolve_js8_managed_recipe(
             {"name": "JS8Call UDP", "protocol": "udp", "host": host, "port": udp_port},
         ),
         readiness={"kind": "js8_api", "host": host, "port": tcp_port, "require_api": True},
+        evidence={"executable": executable_evidence, "version": version_evidence, "profile": {"source": "generated", "confidence": "isolated", "root": profile_root}},
+        confidence=confidence,
         execution_scope=_scope(draft),
-        launch_at_startup=bool(draft.get("launch_at_startup", False)),
+        launch_at_startup=bool(draft.get("launch_at_startup", False)) and status != "launch_pending",
+        operator_starts=status == "launch_pending",
     )
     return GuidedLaunchRecipeResolution(
         family_key="js8call",
-        status="qualified_managed",
+        status=status,
         components=(component,),
-        summary=f"Launch {variant} {qualified_version} as {rig_name} on {host}:{tcp_port}.",
+        recovery_action=recovery,
+        summary=summary,
+        confidence=confidence,
+        evidence={"executable": executable_evidence, "version": version_evidence, "profile_root": profile_root, "data_root": data_root},
     )
 
 
@@ -274,30 +509,53 @@ def resolve_fast_light_managed_recipe(
     observer = _scope(draft) == "receive_only"
     flrig = _text(draft.get("application_path"))
     fldigi = _text(draft.get("secondary_application_path"))
-    if not fldigi or (not observer and not flrig):
-        return _unsupported(
-            "fast_light",
-            "Choose the exact FLDigi executable and, for a transceiver, FLRig; then resolve the managed recipe again.",
-        )
     instance_key = _text(draft.get("draft_instance_key") or draft.get("instance_key"))
     if not instance_key:
-        return _unsupported("fast_light", "Return to Identity so FIO can allocate a stable Fast Light key.")
+        return _safety_block(
+            "fast_light",
+            "FIO could not allocate a distinct Fast Light identity. Return to Identity and prepare again.",
+            code="missing_distinct_identity",
+        )
     if not _text(managed_root):
-        return _unsupported(
+        return _safety_block(
             "fast_light",
             "FIO's managed-instance root is unavailable. Return to Settings and reopen this setup before continuing.",
+            code="missing_managed_root",
         )
+    collision = _collision_detail(draft, instance_key)
+    if collision is not None:
+        code, detail = collision
+        return _safety_block("fast_light", detail, code=code)
     root = _join(_text(managed_root), instance_key, "fast-light")
     flrig_profile = _join(root, "flrig")
     fldigi_profile = _join(root, "fldigi")
     logs = _join(fldigi_profile, "logs")
     checkins = _join(fldigi_profile, "checkins")
     host = _text(draft.get("host")) or "127.0.0.1"
-    flrig_port = int(draft.get("port") or 0)
-    fldigi_port = int(draft.get("secondary_port") or 0)
+    flrig_port = _safe_port(draft.get("port"))
+    fldigi_port = _safe_port(draft.get("secondary_port"))
     if not fldigi_port or (not observer and not flrig_port):
-        return _unsupported("fast_light", "Return to Connections so FIO can allocate the Fast Light endpoints.")
+        return _safety_block(
+            "fast_light",
+            "FIO could not allocate distinct Fast Light endpoints. Return to Connections and prepare again.",
+            code="missing_distinct_endpoint",
+        )
     startup = bool(draft.get("launch_at_startup", False))
+    flrig_evidence = _executable_evidence(draft, "flrig", flrig)
+    fldigi_evidence = _executable_evidence(draft, "fldigi", fldigi)
+    missing_required = not fldigi or (not observer and not flrig)
+    confidence = "pending" if missing_required else "verified"
+    status = "launch_pending" if missing_required else "qualified_managed"
+    missing_labels = []
+    if not fldigi:
+        missing_labels.append("FLDigi")
+    if not observer and not flrig:
+        missing_labels.append("FLRig")
+    recovery = (
+        "Browse for " + " and ".join(missing_labels) + " to enable launch; this isolated Fast Light profile can still be saved."
+        if missing_labels
+        else ""
+    )
     components: list[GuidedLaunchComponent] = []
     if not observer:
         components.append(
@@ -306,11 +564,15 @@ def resolve_fast_light_managed_recipe(
                 label="FLRig",
                 executable=flrig,
                 arguments=("--config-dir", flrig_profile),
+                working_directory=flrig_profile,
                 profile_selector=flrig_profile,
                 configuration_roots=(flrig_profile,),
                 endpoints=({"name": "FLRig XML-RPC", "protocol": "tcp", "host": host, "port": flrig_port},),
                 readiness={"kind": "xmlrpc", "host": host, "port": flrig_port, "require_service": True},
-                launch_at_startup=startup,
+                evidence={"executable": flrig_evidence, "profile": {"source": "generated", "confidence": "isolated", "root": flrig_profile}},
+                confidence="pending" if not flrig else "verified",
+                launch_at_startup=startup and not missing_required,
+                operator_starts=missing_required,
             )
         )
     fldigi_arguments = (
@@ -324,14 +586,18 @@ def resolve_fast_light_managed_recipe(
             label="FLDigi",
             executable=fldigi,
             arguments=fldigi_arguments,
+            working_directory=fldigi_profile,
             dependencies=() if observer else ("flrig",),
             profile_selector=fldigi_profile,
             configuration_roots=(fldigi_profile,),
             data_roots=(logs, checkins),
             endpoints=({"name": "FLDigi XML-RPC", "protocol": "tcp", "host": host, "port": fldigi_port},),
             readiness={"kind": "xmlrpc", "host": host, "port": fldigi_port, "require_service": True},
+            evidence={"executable": fldigi_evidence, "profile": {"source": "generated", "confidence": "isolated", "root": fldigi_profile}, "logs": logs, "checkins": checkins},
+            confidence="pending" if not fldigi else "verified",
             execution_scope="receive_only" if observer else "standard",
-            launch_at_startup=startup,
+            launch_at_startup=startup and not missing_required,
+            operator_starts=missing_required,
         )
     )
     for key, label, path in (
@@ -351,13 +617,27 @@ def resolve_fast_light_managed_recipe(
             )
     return GuidedLaunchRecipeResolution(
         family_key="fast_light",
-        status="qualified_managed",
+        status=status,
         components=tuple(components),
+        recovery_action=recovery,
         summary=(
-            f"Launch FLDigi receive-only on {host}:{fldigi_port}."
+            f"Fast Light receive-only profile prepared on {host}:{fldigi_port}; launch setup is pending."
+            if observer and missing_required
+            else f"Fast Light transceiver profile prepared; launch setup is pending {', '.join(missing_labels)}."
+            if missing_required
+            else f"Launch FLDigi receive-only on {host}:{fldigi_port}."
             if observer
             else f"Launch FLRig on {host}:{flrig_port}, then FLDigi on {host}:{fldigi_port}."
         ),
+        confidence=confidence,
+        evidence={
+            "flrig_executable": flrig_evidence,
+            "fldigi_executable": fldigi_evidence,
+            "flrig_root": flrig_profile,
+            "fldigi_root": fldigi_profile,
+            "logs_root": logs,
+            "checkins_root": checkins,
+        },
     )
 
 
@@ -396,15 +676,31 @@ def resolve_guided_launch_recipe(
 
 
 def recipe_draft_updates(resolution: GuidedLaunchRecipeResolution) -> dict[str, Any]:
-    """Project one qualified resolution into the existing draft/store schema."""
+    """Project one complete resolution into the draft/store schema.
+
+    The legacy ``launch_command`` remains empty for FIO-managed recipes so
+    older launch adapters do not mistake it for a custom override.  The exact
+    command, working directory, roots, endpoints, and evidence are retained
+    in the canonical recipe and in explicit draft fields for audit and
+    reconciliation.
+    """
 
     value = resolution.to_mapping()
     updates: dict[str, Any] = {
         "launch_recipe": value,
         "launch_recipe_status": resolution.status,
         "launch_recipe_fingerprint": resolution.fingerprint,
+        "launch_recipe_confidence": resolution.confidence,
+        "launch_recipe_evidence": dict(resolution.evidence),
+        "launch_recipe_blocker_code": resolution.blocker_code,
+        "launch_ready": resolution.launch_ready,
+        "launch_setup_pending": resolution.status == "launch_pending",
+        "launch_components": [component.to_mapping() for component in resolution.components],
+        "launch_component_recipes": {
+            component.component_key: component.to_mapping() for component in resolution.components
+        },
     }
-    if not resolution.qualified:
+    if not resolution.persistable:
         return updates
     by_key = {component.component_key: component for component in resolution.components}
     if resolution.family_key == "js8call":
@@ -416,6 +712,12 @@ def recipe_draft_updates(resolution: GuidedLaunchRecipeResolution) -> dict[str, 
             storage_path=component.data_roots[0],
             port=int(endpoints["tcp"]["port"]),
             udp_port=int(endpoints["udp"]["port"]),
+            working_directory=component.working_directory,
+            launch_arguments=list(component.arguments),
+            effective_launch_command=component.effective_command_text,
+            launch_working_directory=component.working_directory,
+            launch_endpoints=[dict(item) for item in component.endpoints],
+            launch_evidence=dict(component.evidence),
             launch_command="",
         )
     elif resolution.family_key == "fast_light":
@@ -425,6 +727,12 @@ def recipe_draft_updates(resolution: GuidedLaunchRecipeResolution) -> dict[str, 
             storage_path=fldigi.data_roots[0],
             secondary_storage_path=fldigi.data_roots[1],
             secondary_port=int(fldigi.endpoints[0]["port"]),
+            working_directory=fldigi.working_directory,
+            launch_arguments=list(fldigi.arguments),
+            effective_launch_command=fldigi.effective_command_text,
+            launch_working_directory=fldigi.working_directory,
+            launch_endpoints=[dict(item) for item in fldigi.endpoints],
+            launch_evidence=dict(fldigi.evidence),
             launch_command="",
         )
         flrig = by_key.get("flrig")
@@ -432,6 +740,10 @@ def recipe_draft_updates(resolution: GuidedLaunchRecipeResolution) -> dict[str, 
             updates.update(
                 configuration_path=flrig.configuration_roots[0],
                 port=int(flrig.endpoints[0]["port"]),
+                launch_component_working_directories={
+                    key: component.working_directory
+                    for key, component in by_key.items()
+                },
             )
     return updates
 

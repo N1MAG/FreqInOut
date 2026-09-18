@@ -152,7 +152,7 @@ def test_qualified_fast_light_review_preserves_component_order_and_dependencies(
         app.processEvents()
 
 
-def test_unsupported_managed_recipe_retains_advanced_recovery_override() -> None:
+def test_unknown_managed_variant_keeps_isolated_profile_with_launch_pending() -> None:
     app = _app()
     assistant = SoftwareInstanceAssistant(
         "js8call",
@@ -174,17 +174,17 @@ def test_unsupported_managed_recipe_retains_advanced_recovery_override() -> None
     )
     try:
         _show_step(assistant, 5)
-        assert assistant.draft().launch_recipe_status == "unsupported"
-        assert assistant._field_widgets["launch_command"].isHidden() is False
-        assert assistant._field_widgets["launch_command"].isEnabled() is True
-        assert assistant._field_widgets["configuration_path"].isHidden() is False
-        assert assistant._field_widgets["configuration_path"].isEnabled() is True
-        assert assistant._field_widgets["storage_path"].isHidden() is False
-        assert assistant._field_widgets["storage_path"].isEnabled() is True
-        assert "Verify a supported" in assistant.launch_recipe_recovery_label.text()
+        draft = assistant.draft()
+        assert draft.launch_recipe_status == "launch_pending"
+        assert draft.configuration_path.endswith("/draft-js8call-future/js8call")
+        assert draft.storage_path
+        assert assistant._field_widgets["launch_command"].isHidden() is True
+        assert assistant._field_widgets["configuration_path"].isHidden() is True
+        assert assistant._field_widgets["storage_path"].isHidden() is True
+        assert "--rig-name" in assistant.launch_recipe_recovery_label.text()
         _show_step(assistant, 6)
-        assert "Advanced launch override: /apps/future-js8 --operator-reviewed" in assistant.review_label.text()
-        assert "Recovery: Verify a supported" in assistant.review_label.text()
+        assert "Launch Pending" in assistant.review_label.text()
+        assert "Recovery: Confirm that /apps/future-js8" in assistant.review_label.text()
     finally:
         assistant.deleteLater()
         app.processEvents()

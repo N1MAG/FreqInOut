@@ -8235,6 +8235,14 @@ class MultiRadioStore:
         observer_profile = _is_observer_device_class(profile)
         observer_js8 = family_key == "js8call" and observer_profile
         observer_fast_light = family_key == "fast_light" and observer_profile
+        raw_evidence = manifest.get("evidence", {})
+        if not isinstance(raw_evidence, Mapping):
+            raw_evidence = {}
+        raw_recipe = raw_evidence.get("launch_recipe", {})
+        if not isinstance(raw_recipe, Mapping):
+            raw_recipe = {}
+        recipe_status = str(raw_recipe.get("status", "") or "").strip()
+        launch_pending = recipe_status == "launch_pending"
         conn.execute(
             """
             INSERT INTO radio_launch_bundles
@@ -8242,12 +8250,18 @@ class MultiRadioStore:
             VALUES (?, 1, ?, 0, ?)
             ON CONFLICT(radio_profile_id) DO UPDATE SET
                 launch_enabled=CASE
+                    WHEN ?=1 THEN 0
                     WHEN excluded.launch_enabled=1 THEN 1
                     ELSE radio_launch_bundles.launch_enabled
                 END,
                 updated_utc=excluded.updated_utc
             """,
-            (int(radio_profile_id), 1 if launch_at_startup else 0, now_iso),
+            (
+                int(radio_profile_id),
+                1 if launch_at_startup and not launch_pending else 0,
+                now_iso,
+                1 if launch_pending else 0,
+            ),
         )
         manifest_key = str(manifest.get("instance_key", "") or "")
         command = str(manifest.get("launch_command", "") or "")
@@ -8256,16 +8270,15 @@ class MultiRadioStore:
             for item in manifest.get("resource_claims", ()) or ()
             if isinstance(item, Mapping)
         }
-        raw_evidence = manifest.get("evidence", {})
-        if not isinstance(raw_evidence, Mapping):
-            raw_evidence = {}
-        raw_recipe = raw_evidence.get("launch_recipe", {})
-        if not isinstance(raw_recipe, Mapping):
-            raw_recipe = {}
         raw_components = raw_recipe.get("components", ())
+        # Warning-ready and launch-pending recipes are complete isolated
+        # bundles too.  Persist their component facts so Launch Control and
+        # first-launch reconciliation retain the reviewed roots/arguments;
+        # the pending status itself keeps launch disabled until recovery.
         qualified_components = (
             tuple(item for item in raw_components if isinstance(item, Mapping))
-            if str(raw_recipe.get("status", "") or "").strip() == "qualified_managed"
+            if recipe_status
+            in {"qualified_managed", "ready_with_warnings", "launch_pending"}
             else ()
         )
         if qualified_components and family_key in {"js8call", "fast_light"}:
@@ -8289,8 +8302,24 @@ class MultiRadioStore:
                         "launch_arguments": [
                             str(value) for value in component.get("arguments", ()) or ()
                         ],
+                        "effective_command": [
+                            str(value) for value in component.get("effective_command", ()) or ()
+                        ],
+                        "effective_command_text": str(component.get("effective_command_text", "") or ""),
                         "working_directory": str(component.get("working_directory", "") or "").strip(),
                         "profile_selector": str(component.get("profile_selector", "") or "").strip(),
+                        "configuration_roots": [
+                            str(value) for value in component.get("configuration_roots", ()) or ()
+                        ],
+                        "data_roots": [
+                            str(value) for value in component.get("data_roots", ()) or ()
+                        ],
+                        "endpoints": [
+                            dict(value) for value in component.get("endpoints", ()) or ()
+                            if isinstance(value, Mapping)
+                        ],
+                        "evidence": dict(component.get("evidence") or {}),
+                        "confidence": str(component.get("confidence", "") or ""),
                         "execution_scope": scope,
                         "operator_starts": bool(component.get("operator_starts", False)),
                     }

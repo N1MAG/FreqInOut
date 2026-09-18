@@ -4560,9 +4560,10 @@ class SettingsTab(QWidget):
             layout.addWidget(value_label, row, 1)
 
         device_group = QGroupBox("Radio Profiles")
-        device_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        device_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         device_layout = QVBoxLayout()
         device_layout.setSpacing(6)
+        device_layout.setAlignment(Qt.AlignTop)
         device_group.setLayout(device_layout)
 
         self.radio_profile_guided_task_key = "review"
@@ -5344,10 +5345,17 @@ class SettingsTab(QWidget):
 
         device_container = QWidget()
         device_container.setLayout(device_layout)
-        device_group = self._make_collapsible_group("Radio Profile", device_container, checked=True, fit_content=False)
+        device_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        device_group = self._make_collapsible_group(
+            "Radio Profile",
+            device_container,
+            checked=True,
+            fit_content=True,
+            fit_content_in_stack=True,
+        )
         self._register_collapsible_group(device_group, self._summary_device_profiles)
         self._set_section_health_key(device_group, "radio_profiles")
-        device_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        device_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.radio_profile_section_group = device_group
         self._add_settings_section(device_group, scope="radio")
 
@@ -11539,7 +11547,25 @@ class SettingsTab(QWidget):
         radio_mode = scope == "radio"
         software_mode = scope == "software"
         if hasattr(self, "settings_compact_header"):
-            self.settings_compact_header.setVisible(not software_mode)
+            # The compact frame is a semantic task header, not a spacer.  In
+            # Radios mode every child may be hidden; leave neither its styled
+            # border nor its fixed margins behind in that case.
+            header_children = (
+                "settings_task_title_label",
+                "settings_task_hint_label",
+                "settings_global_tasks_label",
+                "settings_global_tasks_widget",
+                "settings_radio_tasks_label",
+                "settings_radio_tasks_widget",
+            )
+            has_visible_header_child = any(
+                getattr(self, name, None) is not None
+                and getattr(self, name).isVisible()
+                for name in header_children
+            )
+            self.settings_compact_header.setVisible(
+                not software_mode and has_visible_header_child
+            )
         if hasattr(self, "configured_radios_group"):
             self.configured_radios_group.setVisible(radio_mode)
         if hasattr(self, "settings_section_nav_scroll"):
@@ -11563,6 +11589,25 @@ class SettingsTab(QWidget):
                 "Select the radio, then choose the setting area to review or finish."
                 if radio_mode
                 else "These settings apply to the whole FIO station."
+            )
+        if hasattr(self, "settings_compact_header"):
+            # Re-evaluate after scope visibility has been applied.  The
+            # initial calculation above may have observed children from the
+            # previous Settings page during a stack transition.
+            self.settings_compact_header.setVisible(
+                not software_mode
+                and any(
+                    getattr(self, name, None) is not None
+                    and getattr(self, name).isVisible()
+                    for name in (
+                        "settings_task_title_label",
+                        "settings_task_hint_label",
+                        "settings_global_tasks_label",
+                        "settings_global_tasks_widget",
+                        "settings_radio_tasks_label",
+                        "settings_radio_tasks_widget",
+                    )
+                )
             )
 
     def _apply_settings_nav_scope_visibility(self) -> None:
@@ -27078,10 +27123,12 @@ class SettingsTab(QWidget):
                     if isinstance(getattr(dlg, "_guided_software_instance_drafts", {}), Mapping)
                     else {}
                 )
+                managed_recipe_status = str(
+                    managed_draft.get("launch_recipe_status") or ""
+                ).strip().lower()
                 managed_recipe_ready = (
                     str(managed_draft.get("mode") or "").strip().lower() == "managed"
-                    and str(managed_draft.get("launch_recipe_status") or "").strip()
-                    == "qualified_managed"
+                    and managed_recipe_status == "qualified_managed"
                 )
                 if not selected:
                     state_label.setText("")
@@ -27100,11 +27147,30 @@ class SettingsTab(QWidget):
                         recovery = str(
                             recipe.get("recovery_action") if isinstance(recipe, Mapping) else ""
                         ).strip()
-                        software_detail_buttons[family_key].setText("Configure Details (required)…")
-                        state_label.setText(
-                            "Needs attention — "
-                            + (recovery or "FIO could not qualify a complete managed recipe; configure details are required.")
-                        )
+                        if managed_recipe_status == "ready_with_warnings":
+                            software_detail_buttons[family_key].setText("Review Details (optional)…")
+                            state_label.setText(
+                                "Ready with warnings — "
+                                + (recovery or "FIO prepared an isolated launch plan; verify the noted assumption after launch.")
+                            )
+                        elif managed_recipe_status == "launch_pending":
+                            software_detail_buttons[family_key].setText("Review Launch Setup…")
+                            state_label.setText(
+                                "Ready to save · launch setup pending — "
+                                + (recovery or "Choose the application executable before enabling launch.")
+                            )
+                        elif managed_recipe_status == "blocked_for_safety":
+                            software_detail_buttons[family_key].setText("Resolve Safety Issue…")
+                            state_label.setText(
+                                "Blocked for safety — "
+                                + (recovery or "Resolve the existing configuration or resource collision before saving.")
+                            )
+                        else:
+                            software_detail_buttons[family_key].setText("Review Details…")
+                            state_label.setText(
+                                "Needs attention — "
+                                + (recovery or "FIO could not prepare a safe isolated plan. Review the details and prepare again.")
+                            )
                     else:
                         state_label.setText(
                             "Ready — review or correct only the details that need attention."
@@ -27279,8 +27345,51 @@ class SettingsTab(QWidget):
             if launch_idx >= 0:
                 launch_combo.setCurrentIndex(launch_idx)
 
+        def _purge_deselected_guided_software() -> None:
+            """Synchronously remove every non-current family from this dialog.
+
+            The dialog-local map is the only Add Radio draft authority.  Do
+            not let a dismissed nested editor, a previous preset, or a native
+            VarAC session survive after its checkbox no longer selects it.
+            """
+
+            retained_raw = getattr(dlg, "_guided_software_instance_drafts", {})
+            if not isinstance(retained_raw, Mapping):
+                return
+            selected = {
+                family
+                for family in ("js8call", "fast_light", "varac")
+                if _guided_software_family_selected(family)
+            }
+            retained: Dict[str, Any] = {}
+            for family, value in retained_raw.items():
+                family_key = str(family).strip().lower()
+                if family_key in selected:
+                    retained[family_key] = dict(value) if isinstance(value, Mapping) else value
+                    continue
+                if family_key == "varac" and isinstance(value, Mapping):
+                    session = value.get("_varac_native_external_session")
+                    if isinstance(session, VarACNativeExternalSession):
+                        self._rollback_varac_native_session(session)
+                    # Worker preparation is non-mutating, but retaining it
+                    # would permit a later publisher to target stale intent.
+                    try:
+                        self._varac_native_preparations.pop(
+                            native_draft_fingerprint(dict(value)), None
+                        )
+                    except Exception:
+                        log.debug("Could not discard stale VarAC preparation.", exc_info=True)
+            setattr(dlg, "_guided_software_instance_drafts", retained)
+            auto_families = tuple(
+                family
+                for family in getattr(dlg, "_guided_auto_prepared_draft_families", ())
+                if str(family).strip().lower() in selected
+            )
+            setattr(dlg, "_guided_auto_prepared_draft_families", auto_families)
+
         def _invalidate_prepared_software_plan() -> None:
             nonlocal software_plan_prepared, prepared_software_families, prepared_software_context
+            _purge_deselected_guided_software()
             retained_raw = getattr(dlg, "_guided_software_instance_drafts", {})
             auto_families = {
                 str(family)
@@ -27323,6 +27432,8 @@ class SettingsTab(QWidget):
                 "path_js8spotter": js8spotter_launch_edit.text().strip(),
                 "varac_path": varac_install_edit.text().strip(),
                 "varac_ini_path": varac_ini_edit.text().strip(),
+                "varac_db_path": varac_db_edit.text().strip(),
+                "varac_incoming_path": varac_incoming_edit.text().strip(),
                 "varac_launch_cmd": varac_launch_cmd_edit.text().strip(),
                 "varac_outbox_dir": varac_outbox_edit.text().strip(),
                 "varac_bbs_dir": varac_bbs_edit.text().strip(),
@@ -27353,6 +27464,8 @@ class SettingsTab(QWidget):
                 "path_js8spotter": js8spotter_launch_edit,
                 "varac_path": varac_install_edit,
                 "varac_ini_path": varac_ini_edit,
+                "varac_db_path": varac_db_edit,
+                "varac_incoming_path": varac_incoming_edit,
                 "varac_launch_cmd": varac_launch_cmd_edit,
                 "varac_outbox_dir": varac_outbox_edit,
                 "varac_bbs_dir": varac_bbs_edit,
@@ -27659,6 +27772,18 @@ class SettingsTab(QWidget):
 
                 assistant.completed.connect(_complete_instance)
                 assistant.cancelled.connect(editor_dialog.reject)
+                def _remove_family_from_radio(removed_family: str) -> None:
+                    if str(removed_family or "").strip().lower() == "varac":
+                        use_varac_chk.setChecked(False)
+                    elif str(removed_family or "").strip().lower() == "js8call":
+                        use_js8call_chk.setChecked(False)
+                    elif str(removed_family or "").strip().lower() == "fast_light":
+                        for checkbox in (use_flrig_chk, use_fldigi_chk, use_flmsg_chk, use_flamp_chk):
+                            checkbox.setChecked(False)
+                    _purge_deselected_guided_software()
+                    editor_dialog.reject()
+
+                assistant.remove_family_requested.connect(_remove_family_from_radio)
                 assistant.discover_requested.connect(
                     lambda _family: assistant.set_operation_status(
                         "Use Configure Automatically in Add Radio to refresh installed software, "
@@ -27719,6 +27844,10 @@ class SettingsTab(QWidget):
                     applied.update(
                         varac_path=str(completed_payload.get("application_path") or ""),
                         varac_ini_path=str(completed_payload.get("configuration_path") or ""),
+                        varac_db_path=str(completed_payload.get("storage_path") or ""),
+                        varac_incoming_path=str(
+                            completed_payload.get("secondary_storage_path") or ""
+                        ),
                         varac_launch_cmd=str(completed_payload.get("launch_command") or ""),
                         varac_outbox_dir=str(completed_payload.get("outbox_path") or ""),
                     )
@@ -28310,14 +28439,14 @@ class SettingsTab(QWidget):
             for app_id, combo in app_choice_combos.items():
                 if observer_mode and app_id != "js8call":
                     continue
-                target_edit = app_choice_targets.get(app_id)
-                target_missing = target_edit is not None and not target_edit.text().strip()
                 if not _app_choice_app_selected(app_id):
                     continue
                 if combo.count() > 2 and combo.currentIndex() <= 0:
                     return True
-                if app_autoconfigure_attempted and combo.count() <= 1 and target_missing:
-                    return True
+                # No discovered executable is launch-readiness evidence, not
+                # a collision or overwrite risk.  A create-new route keeps
+                # its isolated plan as "launch setup pending" and may be
+                # saved; only multiple detected candidates require a choice.
             return bool(
                 _js8_app_selected()
                 and str(
@@ -28622,7 +28751,13 @@ class SettingsTab(QWidget):
             _update_dialog_visibility()
 
         def _mark_custom_mix_from_software_edit() -> None:
+            # Checkbox signals fire after the family selection has changed.
+            # Purge first even while a preset is applying, otherwise its
+            # deselected family can survive because the preset guard returns
+            # before ordinary invalidation runs.
+            _purge_deselected_guided_software()
             if applying_setup_type_choice:
+                _update_software_responsibility_cards()
                 return
             _invalidate_prepared_software_plan()
             if str(device_class_combo.currentData() or "").strip().lower() == "observer":
@@ -29741,7 +29876,25 @@ class SettingsTab(QWidget):
                     continue
                 draft = retained.get(family)
                 if isinstance(draft, Mapping):
-                    source = str(software_source_combos[family].currentData() or "").strip().lower()
+                    # Confidence and launch readiness are not safety blocks.
+                    # Save the isolated FIO identity as Ready with warnings or
+                    # launch setup pending; reserve a disabled Save for an
+                    # explicit no-damage boundary reported by preparation.
+                    safety_status = str(
+                        draft.get("safety_status")
+                        or draft.get("save_status")
+                        or draft.get("validation_status")
+                        or ""
+                    ).strip().lower().replace("-", "_").replace(" ", "_")
+                    if bool(draft.get("safety_blocked")) or safety_status in {
+                        "blocked",
+                        "blocked_for_safety",
+                        "safety_blocked",
+                    }:
+                        return False
+                    source = str(
+                        software_source_combos[family].currentData() or ""
+                    ).strip().lower()
                     management = str(
                         software_management_combos[family].currentData() or ""
                     ).strip().lower()
@@ -29749,8 +29902,8 @@ class SettingsTab(QWidget):
                         family in {"js8call", "fast_light"}
                         and source == "create"
                         and management == "fio_identity_launch"
-                        and str(draft.get("launch_recipe_status") or "").strip()
-                        != "qualified_managed"
+                        and str(draft.get("launch_recipe_status") or "").strip().lower()
+                        not in {"qualified_managed", "ready_with_warnings", "launch_pending"}
                     ):
                         return False
                     continue
@@ -30239,7 +30392,11 @@ class SettingsTab(QWidget):
                 else [
                     f"Frequency control: {frequency_line}",
                     "PTT/transmit remain subject to the selected FIO Behavior, RF Guard, and final preflight.",
-                    "VarAC remains application-owned for QSY and scheduled transmit when selected.",
+                    *(
+                        ["VarAC remains application-owned for QSY and scheduled transmit when selected."]
+                        if _guided_software_family_selected("varac")
+                        else []
+                    ),
                 ]
             )
             review_html = [
@@ -31109,11 +31266,13 @@ class SettingsTab(QWidget):
             )
 
         def _on_varac_state_changed(_state: int) -> None:
+            _purge_deselected_guided_software()
             if not applying_setup_type_choice:
                 lane = str(setup_type_combo.currentData() or "").strip()
                 if lane and lane != "custom":
                     _set_combo_data(setup_type_combo, "custom")
                     return
+            _invalidate_prepared_software_plan()
             if use_varac_chk.isChecked():
                 fast_or_js8_selected = any(
                 checkbox.isChecked()
@@ -32719,6 +32878,10 @@ class SettingsTab(QWidget):
                 or self._publisher_varac_draft_fingerprint(publisher) != fingerprint
             ):
                 return
+            # Native preparation owns the complete generated projection.  The
+            # canonical fingerprint excludes those generated fields, so
+            # hydrating the assistant cannot invalidate the plan that produced
+            # them and every host consumes the same presentation mapping.
             self._varac_native_preparations[fingerprint] = result
             self._publish_varac_native_presentation(publisher, result.presentation)
 

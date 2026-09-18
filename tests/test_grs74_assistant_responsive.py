@@ -278,6 +278,60 @@ def test_varac_native_card_keeps_one_scroll_owner_and_reachable_footer(
         _restore_theme(app, prior_font)
 
 
+def test_native_varac_publication_hydrates_the_canonical_draft_before_review() -> None:
+    """Files, Review, and the host payload must share native prepared facts."""
+
+    assistant = SoftwareInstanceAssistant(
+        "varac",
+        unsaved_owner_key="guided-varac-bridge",
+        unsaved_radio_label="Bridge Radio",
+        initial_draft={
+            "mode": "managed",
+            "cluster_path": "create_cluster",
+            "cluster_instance_number": 2,
+        },
+    )
+    try:
+        assistant.set_varac_native_presentation(
+            {
+                "state": "ready",
+                "writer_qualified": True,
+                "application_path": "/opt/VarAC/VarAC.exe",
+                "configuration_path": "/managed/bridge/VarAC.ini",
+                "storage_path": "/managed/cluster/shared.db",
+                "secondary_storage_path": "/managed/bridge/incoming",
+                "outbox_path": "/managed/bridge/outbox",
+                "working_directory": "/managed/bridge",
+                "launch_command": "wine /opt/VarAC/VarAC.exe Z:\\managed\\bridge\\VarAC.ini",
+                "vara_runtime_path": "/managed/bridge/VARA",
+                "vara_ini_path": "/managed/bridge/VARA/VARA.ini",
+                "port": 8310,
+                "secondary_port": 8312,
+            }
+        )
+        draft = assistant.draft().payload()
+        expected = {
+            "application_path": "/opt/VarAC/VarAC.exe",
+            "configuration_path": "/managed/bridge/VarAC.ini",
+            "storage_path": "/managed/cluster/shared.db",
+            "secondary_storage_path": "/managed/bridge/incoming",
+            "outbox_path": "/managed/bridge/outbox",
+            "working_directory": "/managed/bridge",
+            "vara_runtime_path": "/managed/bridge/VARA",
+            "vara_ini_path": "/managed/bridge/VARA/VARA.ini",
+        }
+        assert {key: draft[key] for key in expected} == expected
+        assert draft["launch_command"].startswith("wine /opt/VarAC/VarAC.exe")
+        assert draft["port"] == 8310 and draft["secondary_port"] == 8312
+        worker_draft = assistant.varac_native_worker_payload()["draft"]
+        assert {key: worker_draft[key] for key in expected} == expected
+        assert worker_draft["launch_command"] == draft["launch_command"]
+    finally:
+        assistant.close()
+        assistant.deleteLater()
+        _app().processEvents()
+
+
 def test_details_state_survives_resize_theme_refresh_and_async_publication() -> None:
     """A refresh must not silently collapse an operator's open details."""
 

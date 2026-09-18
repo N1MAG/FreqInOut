@@ -2,12 +2,13 @@
 
 Status: authoritative product and implementation specification; policy approved
 2026-09-16. GRS-0 through GRS-5, GRS-6.1 through GRS-6.5, and GRS-7.1 through
-GRS-7.5 passed their automated implementation gates on 2026-09-17. The
-operator-assisted live release qualification remains **open and blocked** under
-GRS-7.5. No
-existing application configuration may be replaced, relinked, cloned, cleaned
-up, or reused through this flow until the exact operation is explicitly chosen
-and its gate passes.
+GRS-7.5 passed their automated implementation gates on 2026-09-17. Linux
+operator testing reopened the GRS-8 implementation gate. GRS-9 is the corrected
+controlling specification for selected-family state and complete prepared-
+bundle projection; its implementation has not started. Operator-assisted live
+release qualification remains **open and blocked**. No existing application
+configuration may be replaced, relinked, cloned, cleaned up, or reused through
+this flow until the exact operation is explicitly chosen and its gate passes.
 
 Governing delivery contract: `project_delivery_rules.md`
 
@@ -2207,6 +2208,411 @@ measure the unchanged-state projection rate, identify the authoritative
 database/config invalidation inputs, and prove that a bounded cache cannot hide
 assignment, plan, manual-control, or source-backed-plan changes. Until that
 gate passes, no claim is made that all sustained CPU causes are resolved.
+
+### GRS-9 — Selected-Family Isolation And Complete Prepared-Bundle Projection
+
+Status: specification corrected and implementation integrated 2026-09-18;
+automated acceptance passed, with the installed-Linux operator route remaining
+the final live qualification gate.
+
+This section is the controlling contract for the next implementation pass. It
+closes defects that the broader prepare-first and zero-entry requirements did
+not state with enough observable precision. Where an earlier section permits a
+second loose-field, legacy-plan, or assistant-local representation of a guided
+software plan, this section supersedes it: one current-generation prepared
+bundle map is authoritative from Prepare through final Save. Where an earlier
+section blocks Save solely because discovery or version evidence is incomplete,
+this section also supersedes it: uncertainty produces a warning and preserves a
+safe editable plan; only credible harm blocks the operation.
+
+#### Accuracy, Guidance, And The No-Damage Boundary
+
+FIO aims for the most accurate configuration it can derive, but it does not
+confuse confidence with safety. A minor uncertainty in an application version,
+optional folder, profile convention, or post-launch readback is not a reason to
+prevent the operator from creating a new isolated instance. FIO chooses a
+reasonable safe default, identifies the assumption in plain language, allows
+the operator to review or change it, and records enough evidence to verify the
+result after launch.
+
+Every prepared family has one of four outcomes:
+
+| Outcome | Save behavior | Launch behavior |
+| --- | --- | --- |
+| `Ready` | enabled | enabled from the reviewed recipe |
+| `Ready with warnings` | enabled | enabled when the command and isolated targets are safe; verify after launch |
+| `Saved; launch setup pending` | enabled | disabled only until the one missing executable or required command value is supplied |
+| `Blocked for safety` | blocked | disabled |
+
+`Blocked for safety` is reserved for a credible risk of damage or an invalid
+radio-safety state, including an unapproved overwrite or reuse of existing
+configuration, a target/path/database identity collision that FIO cannot make
+unique, an unreviewed mutation of shared VarAC cluster data, an endpoint claim
+that cannot be made distinct, a transaction that cannot be rolled back, or a
+receive-only radio receiving transmit/PTT authority. Missing optional metadata,
+an unverified but plausible version, an application that is not running, a
+folder the operator can change later, incomplete native readback, or absence of
+an existing profile produces a warning rather than a Save block.
+
+Saving the FIO identity and plan is distinct from readiness to launch. If FIO
+cannot yet form a safe executable command, it saves the isolated configuration
+as `launch setup pending` and names the one remaining action. It does not force
+the operator to abandon the radio or re-enter unrelated configuration.
+
+#### Reproduced Defects And Root Causes
+
+The supplied Linux log and screenshots establish four separate defects:
+
+1. VarAC native preparation derives an INI, VARA runtime, launch command,
+   ports, and a working root, but publishes those facts only to a technical
+   presentation. The actual VarAC instance draft is not hydrated with the
+   generated INI, database, incoming, outbox, working-directory, and launch
+   fields. Software Administration can therefore display a technically valid
+   plan above blank editable fields for the same instance.
+2. TriMode selects VarAC. Closing or cancelling the nested VarAC editor does
+   not change the parent selection and does not purge its retained draft or
+   reservations. A later review can therefore contain VarAC even when the
+   operator believes the current plan is Fast Light plus JS8Call only. The log
+   for the reported second attempt scanned Applications, Fast Light, and JS8
+   profiles but no VarAC phase, confirming that VarAC in Review was UI state,
+   not fresh discovery evidence.
+3. Fast Light and JS8Call discovery returned zero candidates. JS8 profile
+   discovery required 17.319 seconds and still returned zero. Managed-recipe
+   qualification then failed, Save remained unavailable, and the visible
+   review did not identify the exact missing executable/version evidence as the
+   blocking condition.
+4. Radios mode leaves a styled compact-header frame visible after hiding all
+   of its children, and its content area may consume surplus vertical height
+   above the readiness panel. The result is an empty outlined bar and a large
+   blank region instead of top-aligned radio content.
+
+The earlier worker-thread `SettingsManager` exception remains governed by
+GRS-8. It is a real implementation defect, but the supplied second-attempt log
+contains no final Save attempt and must not be misrepresented as the cause of
+that attempt's disabled or unreachable Save state.
+
+#### Operator Decisions Versus FIO-Owned Work
+
+The operator decides intent. FIO performs every safe deterministic technical
+action. A supported guided route asks the operator only to:
+
+- select the software families assigned to the radio;
+- select `Use existing unchanged` or `Create a distinct managed instance` when
+  both choices are genuinely available;
+- for VarAC, select `Standalone`, `Create cluster`, or `Join cluster`, and
+  choose among multiple valid source nodes or clusters only when FIO cannot
+  safely select a sole candidate;
+- choose whether eligible applications launch with FIO;
+- choose explicit email-gateway, cluster PTT-lock, RF/transmit, and other
+  safety policy where applicable; and
+- accept the final human-readable plan.
+
+For a qualified recipe, FIO owns and derives all of the following without a
+workspace, folder, port, profile, command, or configuration question:
+
+- installed executable identity, supported variant, and version evidence;
+- stable instance and radio ownership keys;
+- collision-free ports and other resource claims;
+- managed roots, working directories, profile/configuration files,
+  application-data roots, logs, message files, check-in/incoming folders, and
+  outbox folders;
+- radio/profile/rig selectors and inter-component bindings;
+- exact launch commands, arguments, dependencies, and startup order;
+- FIO Spotter's built-in binding and the station-shared CommStat binding; and
+- qualified native-file creation, directory creation, backup, semantic
+  readback, rollback, and recovery at the final Save boundary.
+
+Generated values appear as read-only facts in the normal route so the operator
+can learn what FIO will do. `Show technical details` may expose the complete
+projection. The operator can choose a meaningful instance name and optionally
+Browse for a base folder; FIO appends the stable, sanitized instance name and
+derives its configuration, incoming, outgoing, log, and application-data
+children. Advanced editing can change an individual derived value without
+discarding the rest of the prepared bundle. A sole detected value is selected
+automatically; two or more materially different valid candidates produce one
+bounded choice. FIO must never ask for a generic `workspace` when the selected
+source and stable radio identity determine the target.
+
+FIO records both intended and effective configuration after the fact: the
+source and confidence of every discovered or generated value, the exact launch
+command and working directory, the paths and endpoints reviewed at Save, the
+last successful launch/readiness evidence, and any differences observed after
+the application creates or normalizes its own files. A mismatch produces a
+guided reconcile choice; it never silently adopts or overwrites another
+instance.
+
+#### One Authoritative Draft Session
+
+Each Add Radio dialog owns one non-durable `draft_session_id`, a monotonically
+increasing `preparation_generation`, and an authoritative `selected_families`
+set. Every prepared family bundle, native presentation, resource reservation,
+and discovery result carries all three values plus an intent fingerprint. No
+data from another dialog, an earlier generation, a prior preset, or a cancelled
+editor may participate in Connections, Review, the Save predicate, or the
+commit payload.
+
+Prepare atomically replaces the prepared-bundle map for exactly the current
+selected-family set. It does not merge new results into an unbounded retained
+map. Deselecting a family immediately and synchronously removes that family's:
+
+- prepared bundle and assistant draft;
+- native preparation/presentation and worker publication target;
+- endpoint, port, file, cluster-member, and launch reservations;
+- Connections and Review rows;
+- Save predicates and pending apply actions; and
+- final transaction payload.
+
+Changing a preset, source, management policy, launch policy, radio name/role,
+or VarAC arrangement increments the generation and invalidates every dependent
+bundle. TriMode explicitly selects Fast Light, JS8Call, and VarAC. Removing
+VarAC changes the setup summary to a custom Fast Light + JS8Call selection and
+must remove VarAC everywhere immediately.
+
+The nested editor must not use an ambiguous `Cancel` label. Its two meanings
+are separate actions:
+
+- `Back without changes` discards edits made in that editor but keeps the
+  family selected and returns to the Software step, where any unmet requirement
+  remains plainly visible; and
+- `Remove <family> from this radio` deselects the family and performs the full
+  purge above.
+
+Cancelling the outer Add Radio dialog destroys the complete draft session,
+cancels or generation-fences every worker result, releases all reservations,
+and compensates any preview/native operation. Opening Add Radio again starts
+with a new empty session. It may read durable station inventory but may not
+reuse any selection, prepared draft, presentation, or reservation from the
+cancelled session.
+
+Connections, family cards, Review, Save validation, and persistence all read
+the same immutable current-generation prepared-bundle map. Review may not
+reconstruct a second plan from checkboxes, loose form fields, preset defaults,
+or the legacy external-application planner. An unprepared selected family is a
+single `Needs attention` item with one direct recovery action; it is never
+shown as though it has a prepared native action.
+
+#### Canonical VarAC Bundle
+
+An existing VarAC installation is source evidence, not a workspace. FIO first
+discovers the executable, its supported version, native configuration, and the
+existing node's INI, database, incoming, outbox, working directory, VARA
+runtime, and effective launch identity. `Use existing unchanged` presents
+those discovered values as source-locked read-only facts. It asks the operator
+only to resolve a genuine ambiguity or one specifically missing value.
+
+`Create a distinct managed instance` reuses only the qualified application
+installation and immutable source evidence. FIO creates a new node identity
+and derives node-local targets below the stable managed-instance root. It never
+reuses another node's INI, incoming, outbox, working directory, ports, or launch
+identity. For a first cluster created from an existing standalone node, the
+reviewed standalone database becomes the cluster-shared database; the new
+member receives its own managed INI, VARA runtime, incoming folder, outbox
+folder, working directory, ports, and launch command. Joining an existing
+cluster uses that cluster's reviewed shared database and still creates distinct
+node-local resources. Standalone never silently becomes cluster mode.
+
+The canonical prepared VarAC bundle contains at least:
+
+| Prepared fact | Canonical draft field |
+| --- | --- |
+| qualified VarAC installation/launcher | `application_path` |
+| effective or generated VarAC INI | `configuration_path` |
+| node-local or cluster-shared VarAC database | `storage_path` |
+| distinct incoming folder | `secondary_storage_path` |
+| distinct outbox folder | `outbox_path` |
+| exact node working directory | `working_directory` |
+| VARA runtime and VARA INI | native component records |
+| exact VarAC/VARA commands and order | launch recipe/component records |
+| command, KISS, and VARA ports | resource claims/endpoints |
+| cluster ID, member number, gateway and PTT policy | topology/policy records |
+
+Native preparation, the family card, Software Administration, Connections,
+Review, persistence, and Launch Control must render this same bundle; no view
+may maintain a partial translation. Publication of a qualified native result
+must hydrate the bundle before the Files or Review page can render. A generated
+technical summary above blank editable fields is a failing state.
+
+For an exact qualified native writer, the normal route has no required editable
+VarAC path fields and the operator does not need to enter incoming, outbox,
+database, INI, or working-directory values. The normal path editor presents one
+optional base folder plus the meaningful instance name and previews the derived
+children. If the installed VarAC version or source cannot be qualified, FIO
+preserves all safely derived draft facts and distinguishes two cases: a new
+isolated node with no existing-data mutation is saved with a warning or with
+launch setup pending; a requested shared-database or cluster mutation that
+cannot be written and rolled back safely is blocked for safety. Neither case
+falls back to a generic empty Files form.
+
+#### Fast Light And JS8Call Qualification
+
+Creating a distinct Fast Light or JS8Call instance reuses a qualified
+application executable, not an existing instance profile. Searching existing
+profiles is optional evidence and may not delay or block creation of a new
+managed profile. FIO checks, in order, reviewed durable inventory, saved exact
+executable identities, platform application/package metadata, and bounded
+well-known/PATH candidates such as `/usr/bin`. Version evidence comes from a
+reviewed saved identity or a qualified non-interactive app-specific metadata
+probe with a hard timeout; FIO must not require a version token to appear in
+the executable path and must not launch an unqualified GUI binary merely to ask
+for its version.
+
+When a plausible executable is found, FIO generates the complete distinct
+profile and launch bundle even when no existing profile candidate exists or
+exact version evidence is unavailable. JS8Call, FLRig, and FLDigi receive
+unique profile/configuration roots at launch; those roots, their arguments, and
+the exact effective command are stored by FIO for later launch, readiness,
+audit, and reconciliation. Fast Light and JS8Call review must consume those
+retained bundles, not a generic native-profile action reconstructed from loose
+fields.
+
+Qualification confidence changes the status, not the isolation contract. An
+unverified version produces `Ready with warnings` when the executable and
+distinct launch arguments are otherwise safe. A missing executable produces
+`Saved; launch setup pending` and a Browse action. The family card and Review
+state the precise concern, for example `JS8Call Subspace was found at
+/usr/bin/js8call-subspace; FIO prepared a distinct profile, but the exact
+version will be verified after first launch`. A disabled button or `0
+candidates` telemetry is not an operator-facing explanation.
+
+After first launch, FIO performs bounded readiness and filesystem reconciliation
+against the saved intent. If the application created or normalized a different
+profile location, FIO reports the difference and offers `Use the observed
+location` or `Keep the reviewed location and correct launch`. It does not
+silently relink the instance and does not touch an existing profile.
+
+#### Responsiveness, Telemetry, And Layout
+
+Prepare returns event-loop control and shows per-family progress within 100 ms.
+All filesystem, package, profile, and version discovery runs on bounded workers.
+Durable inventory and well-known executable lookup are the fast path. Existing-
+profile discovery is lazy for create-new routes and may not hold the result
+until a recursive scan finishes. Each discovery phase has a two-second soft
+budget, publishes useful partial results when available, and offers a bounded
+recovery action rather than continuing an unbounded search. The 12-17 second
+zero-result JS8 scan is an acceptance failure even though it runs off the GUI
+thread.
+
+Telemetry for each draft session records preset changes, family selection and
+removal, preparation generation, editor outcome, discovered executable and
+version-evidence source, bounded phase duration, current Save-enabled state,
+and exact blocker codes. Paths containing operator data use the existing
+redaction policy. Logs must make it possible to distinguish `Back without
+changes`, `Remove family`, outer-dialog Cancel, Review, and Save without
+inferring clicks from screenshots.
+
+In Radios mode, a header or frame with no visible semantic child collapses to
+zero height and draws no border. Radio Profile content is top-aligned directly
+below its title; expanding containers or spacers may not insert an elastic
+blank region before the readiness dashboard. The normal and Large Text layouts
+retain one body scroll owner and a reachable action/footer area.
+
+#### GRS-9 Exit Gate
+
+The next implementation slice passes only when all of the following are proven
+against the final integrated tree:
+
+1. With an isolated copy of the production database, selecting TriMode and
+   preparing a supported first VarAC cluster from the sole existing standalone
+   node yields nonblank read-only application, INI, database, incoming, outbox,
+   working-directory, VARA, port, and command facts. No workspace or raw-path
+   question appears and final Save is reachable.
+2. A qualified `Use existing unchanged` VarAC route discovers and displays all
+   effective source-locked facts without creating files. A managed create/join
+   route derives distinct node-local facts and the correct shared database.
+3. `Back without changes` retains a selected VarAC family and shows its exact
+   status. `Remove VarAC from this radio` immediately removes every VarAC card,
+   connection, review line, native action, reservation, Save predicate, and
+   payload value.
+4. After starting TriMode, removing VarAC, and preparing Fast Light + JS8Call,
+   Review and the accepted dialog payload contain no VarAC text, field, action,
+   cluster record, or filesystem target. Cancelling the entire first Add Radio
+   attempt and opening a second Fast Light + JS8Call attempt has the same clean
+   result.
+5. On Linux, plausible Fast Light and JS8Call executables in `/usr/bin` prepare
+   complete new managed profiles without reusing an existing profile and
+   without opening Software Administration. Exact ports, files, commands, and
+   dependencies appear in the canonical review bundle and Save is enabled.
+   Missing exact version evidence produces `Ready with warnings`, not a block.
+6. Zero existing JS8 profile candidates is a valid create-new condition. A
+   missing executable, ambiguous executable, unverified version, unsupported
+   writer, or collision each produces a different visible concern and one
+   bounded recovery action. Only an unresolved destructive collision,
+   unapproved existing-data mutation, unsafe shared-cluster change, invalid RF
+   authority, or non-rollbackable transaction blocks Save.
+7. Prepare remains interactive, progress appears within 100 ms, no discovery
+   phase exceeds its bounded contract, and a recursive profile scan cannot
+   delay a new-profile plan by 12-17 seconds. Generation-fenced late results
+   cannot repopulate a removed family.
+8. Final Save exercises the accepted dialog payload, creates every reviewed
+   FIO-owned directory/file, verifies native readback, and persists exactly the
+   current selected families. Injected failure and outer Cancel preserve the
+   prior database and filesystem byte-for-byte and leave no reservation.
+9. Real-widget tests prove that family cards, Connections, Review, Save
+   validation, native apply, persistence, and Launch Control all receive the
+   same canonical bundle identity and fingerprint; no parallel legacy plan is
+   invoked for a guided selected family.
+10. Normal/Large Text at 1920x1080, 1280x720, 1000x700, and 900x560 shows no
+    empty outlined compact header, no elastic blank region above Radio Setup,
+    no page-level horizontal overflow, and reachable primary actions.
+11. The exact user-visible route is run once with supported installed Linux
+    applications after automated tests pass. The result records selected
+    families, detected versions, generated roots and ports, launch/readiness,
+    and confirms that no existing profile or production database was changed
+    unexpectedly.
+12. Warning-policy tests prove that unverified version evidence, missing
+    optional folders, absent existing profiles, and incomplete post-launch
+    readback permit Save with the correct status. Safety-policy tests prove that
+    overwrite, shared-database mutation without a qualified transaction,
+    unresolvable identity/resource collision, non-rollbackable apply, and
+    receive-only transmit authority remain blocked.
+
+The automated gate must inspect rendered fields, prepared-bundle contents,
+accepted transaction payload, created files, persisted identities, and launch
+plan. Tests that assert only button existence, button enabled state, or helper
+return values do not satisfy this gate.
+
+#### GRS-9 Implementation Evidence — 2026-09-18
+
+The integrated implementation now enforces the no-damage boundary and the
+single prepared-plan projection described above:
+
+- managed JS8Call and Fast Light recipes preserve generated profile roots,
+  endpoints, working directories, commands, confidence, and discovery evidence
+  for `Ready`, `Ready with warnings`, and `Saved; launch setup pending` states;
+  launch-pending bundles persist with automatic launch disabled;
+- stock JS8Call, JS8Call Subspace, and JS8Call Improved executable names select
+  the reviewed launch-argument family without inventing a version. A plausible
+  installed executable with no exact version is warning-ready; an arbitrary
+  Browse target remains launch-pending;
+- only explicit overwrite/reuse, identity/path/endpoint/resource collision,
+  missing distinct identity or endpoints, unsafe shared mutation, transaction,
+  or RF-authority conditions use `Blocked for safety` and disable Save;
+- VarAC native preparation publishes application, INI, database, incoming,
+  outbox, working-directory, VARA runtime/INI, ports, and launch command into
+  the authoritative assistant draft before Files or Review renders;
+- deselecting a family synchronously purges its retained assistant/native state,
+  while the nested editor exposes distinct `Back without changes` and
+  `Remove <family> from this radio` actions;
+- selected-family Review text and Save validation consume the retained recipe
+  state, so removed VarAC content cannot survive into a Fast Light + JS8Call
+  payload;
+- executable discovery prioritizes saved exact identities, keeps well-known
+  lookup bounded, applies a two-second per-phase budget, publishes safe partial
+  evidence, and generation-fences late results; and
+- the empty Radios header collapses and Radio Profile content uses a top-aligned,
+  content-sized layout.
+
+The final-tree automated matrix passed **396 tests** across recipe resolution,
+warning/safety policy, discovery budgets, real-widget guided routes, VarAC
+native preparation and transactions, manifest/store persistence, launch
+identity, receiver scope, and layout behavior. Python compilation and
+`git diff --check` passed. Three production-shaped checks used immutable reads
+and a disposable copy of
+`/Users/bill/RadioTools/FIO_DB_prod/current/freqinout.db`; source size,
+timestamp, and hash were unchanged. No production database or native
+application profile was written. The remaining GRS-9 item is the explicit
+operator run with the supported applications installed on Linux; it is not
+represented as completed by automated macOS tests.
 
 ## Approved Product Decisions
 
