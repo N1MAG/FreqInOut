@@ -7841,3 +7841,67 @@ Save, Cancel, and recovery/fault routes with live JS8Call variants, Fast Light,
 VarAC, receiver/radio control, and the required macOS/Linux/Windows platforms.
 This build is ready for that testing; it is not yet a completed release
 qualification.
+
+## 2026-09-17 — Native VarAC cluster configuration (VNC-1 through VNC-5)
+
+Status: automated implementation exit gate passed; disposable live Windows and
+Linux/Wine VarAC 13.2.7 qualification remains open.
+
+FIO now prepares and transactionally writes the exact qualified native VarAC
+cluster projection for creating the first two-member cluster from an existing
+standalone node or joining an existing native-managed cluster. The slice adds
+distinct bounded VARA runtime clones and ports, Windows-visible path projection
+for Linux/Wine, explicit email-gateway sender ownership independent of the
+legacy gateway field, one effective cluster-shared database, complete plan and
+readback fingerprints, additive persistence and apply journal, split
+filesystem/FIO commit, immediate Cancel/stale compensation, crash recovery,
+launch blocking, and generation-fenced worker/UI publication. VarAC 15.0.18 is
+still not qualified for native writing.
+
+Primary integration review corrected four issues before this gate: unexpected
+runtime exceptions now enter the same exact rollback path as I/O failures; an
+outer Add/Edit Radio Cancel or failed adjacent-family apply immediately rolls
+back an already-applied native session; legacy node-local database uniqueness
+no longer rejects the required shared database for reviewed native cluster
+members; and Linux/Wine native INI/launch values use `C:`/`Z:` paths while FIO
+retains host paths. The primary also expanded the plan fingerprint to include
+all reviewed policy, controlled values, launch identity, pre-write state, and
+the complete bounded runtime snapshot.
+
+Work packages and model ownership:
+
+- Primary `gpt-5.6-sol`, high reasoning: VNC-1 specification and architecture;
+  VNC-3 migration, transaction, recovery, concurrency, shared-database and
+  path semantics; delegated-diff review; final corrections and integration.
+- `gpt-5.6-terra`, high reasoning: VNC-2 bounded parser/writer/runtime-clone
+  mechanics and VNC-4 guided UI/progressive-disclosure implementation. Every
+  delegated diff was reviewed and corrected by the primary before integration.
+- `gpt-5.6-luna`, high reasoning: VNC-5 deterministic acceptance extensions
+  for cross-platform preparation, rollback, recovery, generation fencing,
+  gateway separation, and launch blocking. The primary reviewed the test diff
+  and added split-transaction, cancellation, fingerprint, shared-database, and
+  Wine-path cases discovered during integration.
+
+Automated acceptance evidence:
+
+- native writer/preparation/transaction/integration/topology: **49 passed**;
+- focused assistant/workspace/responsive/geometry/disclosure: **33 passed**,
+  40 intentionally deselected by the focused expression;
+- multi-radio store, manifest, launch identity, JS8Call, receiver launch: **140
+  passed**;
+- Add Radio transaction/operator route/VarAC arrangement/unified UX/performance
+  boundaries: **40 passed**;
+- adjacent guided VarAC, schema/guard/transfer, operator sync, VarAC BBS,
+  Settings adapter, launch recipes, and native-writer launch: **82 passed**;
+- changed Python compilation and `git diff --check`: passed;
+- additive migration/read-only safety was exercised against an isolated copy of
+  `/Users/bill/RadioTools/FIO_DB_prod/current/freqinout.db`; the source file was
+  hash/stat checked and not modified.
+
+One earlier broad combined Qt batch was stopped after entering the repository's
+known long-running aggregate behavior. It did not identify a slice failure;
+the deterministic focused UI and adjacent partitions above were rerun from the
+final tree and passed. Tests used temporary state. No production database,
+native application profile, process, endpoint, radio, commit, remote, or the
+operator's unrelated DOCX/rendered-document changes were modified by this
+slice.

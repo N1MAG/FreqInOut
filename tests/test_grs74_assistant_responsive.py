@@ -27,7 +27,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from freqinout.gui.software_instance_assistant import SoftwareInstanceAssistant
+from freqinout.gui.software_instance_assistant import (
+    SoftwareInstanceAssistant,
+    VarACNativePresentation,
+)
 from freqinout.gui.theme import apply_app_theme, get_theme
 
 
@@ -220,6 +223,54 @@ def test_assistant_has_one_vertical_body_scroll_owner_and_reachable_footer(
             rect = child.geometry()
             assert rect.left() >= 0
             assert rect.right() <= assistant.width() + 1
+    finally:
+        assistant.close()
+        assistant.deleteLater()
+        app.processEvents()
+        _restore_theme(app, prior_font)
+
+
+@pytest.mark.parametrize("size", [(1920, 1080), (1000, 700), (900, 560)])
+@pytest.mark.parametrize("scale", [1.0, 1.25])
+@pytest.mark.parametrize("theme_name", ["light", "dark"])
+def test_varac_native_card_keeps_one_scroll_owner_and_reachable_footer(
+    size: tuple[int, int], scale: float, theme_name: str
+) -> None:
+    """The native plan card stays compact at every required VNC-4 geometry."""
+
+    app = _app()
+    prior_font = QFont(app.font())
+    apply_app_theme(app, get_theme(theme_name), ui_text_scale=scale)
+    assistant = SoftwareInstanceAssistant(
+        "varac",
+        unsaved_owner_key="guided-varac-native",
+        unsaved_radio_label="New Radio",
+        initial_draft={"cluster_path": "create_cluster", "cluster_instance_number": 2},
+        varac_native_presentation=VarACNativePresentation(
+            state="ready",
+            arrangement="create_cluster",
+            affected_radios=("Existing Radio", "New Radio"),
+            shared_database_summary="Proposed shared database",
+            member_numbers_summary="Existing 1 · New 2",
+            ptt_lock_summary="On",
+            email_gateway_sender_summary="New Radio",
+            writer_version="13.2.7",
+            writer_qualified=True,
+        ),
+    )
+    try:
+        assistant.resize(*size)
+        assistant.show()
+        app.processEvents()
+        assert assistant.varac_native_group.isVisible()
+        assert "Email gateway sender" in assistant.varac_native_summary_label.text()
+        assert "gateway handler" not in assistant.varac_native_summary_label.text().lower()
+        assert assistant.body_scroll.horizontalScrollBar().maximum() == 0
+        assert assistant.body_scroll.verticalScrollBarPolicy() != Qt.ScrollBarAlwaysOff
+        for button in (assistant.cancel_button, assistant.back_button, assistant.next_button):
+            bottom_right = button.mapTo(assistant, button.rect().bottomRight())
+            assert bottom_right.x() <= assistant.width() + 1
+            assert bottom_right.y() <= assistant.height() + 1
     finally:
         assistant.close()
         assistant.deleteLater()

@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication, QComboBox, QLineEdit
 from freqinout.gui.software_instance_assistant import (
     SoftwareInstanceAssistant,
     SoftwareInstanceDraft,
+    VarACNativePresentation,
     instance_conflicts,
     normalize_instance_draft,
 )
@@ -215,6 +216,136 @@ def test_family_fields_are_scoped_and_draft_round_trips_every_field() -> None:
         assert draft.payload()["cluster_instance_number"] == 2
     finally:
         assistant.deleteLater()
+
+
+def test_varac_native_presentation_is_cache_only_and_exposes_worker_seams() -> None:
+    _app()
+    assistant = SoftwareInstanceAssistant(
+        "varac",
+        unsaved_owner_key="varac-native-draft",
+        unsaved_radio_label="New Radio",
+        initial_draft={
+            "cluster_path": "create_cluster",
+            "cluster_instance_number": 2,
+            "existing_standalone_node_id": 7,
+            "cluster_gateway": True,
+        },
+        varac_native_presentation=VarACNativePresentation(
+            state="ready",
+            arrangement="create_cluster",
+            affected_radios=("Existing Radio", "New Radio"),
+            shared_database_summary="Proposed shared database",
+            member_numbers_summary="Existing 1 · New 2",
+            ptt_lock_summary="On",
+            email_gateway_sender_summary="New Radio",
+            writer_version="13.2.7",
+            writer_platform="linux-wine",
+            writer_operation="convert-standalone",
+            writer_qualified=True,
+            varac_ini_path="/managed/new/VarAC.ini",
+            vara_runtime_path="/managed/new/VARA",
+            vara_ini_path="/managed/new/VARA/VARA.ini",
+            ports_summary="Command 8310 · data 8311 · KISS 8312",
+            fingerprints_summary="plan abc · source def",
+        ),
+    )
+    try:
+        assert "Ready" in assistant.varac_native_status_label.text()
+        assert "13.2.7 writer qualified" in assistant.varac_native_status_label.text()
+        visible = assistant.varac_native_summary_label.text()
+        assert "Shared VarAC database" in visible
+        assert "PTT lock: On" in visible
+        assert "Email gateway sender: No email gateway" in visible
+        assert "gateway handler" not in visible.lower()
+        assert "/managed/new/VarAC.ini" not in visible
+        sender = assistant.email_gateway_sender_combo
+        assert sender.findData("none") >= 0
+        assert sender.findData("existing_member") >= 0
+        assert sender.findData("new_member") >= 0
+        sender.setCurrentIndex(sender.findData("existing_member"))
+        assert assistant.draft().email_gateway_sender_choice == "existing_member"
+        assert assistant.draft().email_gateway_sender_member_id == "7"
+        sender.setCurrentIndex(sender.findData("new_member"))
+        assert assistant.draft().email_gateway_sender_choice == "new_member"
+        assert assistant.draft().email_gateway_sender_member_id
+        assert "Email gateway sender: New member" in assistant.varac_native_summary_label.text()
+        # The compatibility-only legacy bit survives exactly as evidence; it
+        # does not select or alter the new explicit sender choice.
+        assert assistant.draft().cluster_gateway is True
+        assert not assistant.prepared_details_group.isVisible()
+        assistant.prepared_details_button.click()
+        assert "/managed/new/VarAC.ini" in assistant.prepared_details_label.text()
+        assert "/managed/new/VARA/VARA.ini" in assistant.prepared_details_label.text()
+
+        assistant.set_varac_native_presentation({"state": "stop_varac_required"})
+        assert assistant.varac_native_prepare_button.text() == "Retry after closing VarAC"
+        assert assistant.varac_native_prepare_button.isEnabled()
+        assistant.set_varac_native_presentation(
+            {"state": "ready", "writer_version": "15.0.18", "writer_qualified": False}
+        )
+        assert "Manual setup required" in assistant.varac_native_status_label.text()
+
+        prepared: list[object] = []
+        applied: list[object] = []
+        assistant.varac_native_prepare_requested.connect(prepared.append)
+        assistant.varac_native_apply_requested.connect(applied.append)
+        assistant.set_varac_native_presentation({"state": "needs_attention"})
+        assistant.varac_native_prepare_button.click()
+        assistant.request_varac_native_apply()
+        assert prepared and prepared[0]["draft"]["family_key"] == "varac"
+        assert prepared[0]["native_presentation"]["state"] == "needs_attention"
+        assert applied and applied[0] == prepared[0]
+    finally:
+        assistant.deleteLater()
+        _app().processEvents()
+
+
+def test_native_managed_varac_cluster_final_review_emits_apply_with_prepared_snapshot() -> None:
+    _app()
+    assistant = SoftwareInstanceAssistant(
+        "varac",
+        unsaved_owner_key="varac-native-review",
+        unsaved_radio_label="New Radio",
+        initial_draft={
+            "instance_name": "New Radio",
+            "application_path": "/apps/VarAC.exe",
+            "working_directory": "/managed/new",
+            "cluster_path": "create_cluster",
+            "cluster_id": "VARAC-NEW",
+            "cluster_name": "New cluster",
+            "cluster_instance_number": 2,
+            "existing_standalone_node_id": 7,
+        },
+        varac_native_presentation={
+            "state": "ready",
+            "generation": 9,
+            "writer_version": "13.2.7",
+            "writer_qualified": True,
+        },
+    )
+    try:
+        assistant.email_gateway_sender_combo.setCurrentIndex(
+            assistant.email_gateway_sender_combo.findData("new_member")
+        )
+        assistant._step = len(assistant.STEP_TITLES) - 1
+        assistant._refresh()
+        assert assistant.next_button.text() == "Review & Save"
+        assert assistant.next_button.isEnabled()
+        assert "cluster_launch_required" not in {item.code for item in assistant.validation()}
+        completed = []
+        apply_requests = []
+        assistant.completed.connect(completed.append)
+        assistant.varac_native_apply_requested.connect(apply_requests.append)
+        assistant._next()
+        assert not completed
+        assert len(apply_requests) == 1
+        payload = apply_requests[0]
+        assert payload["draft"]["email_gateway_sender_choice"] == "new_member"
+        assert payload["draft"]["varac_native_generation"] == 9
+        assert payload["native_presentation"]["writer_qualified"] is True
+    finally:
+        assistant.deleteLater()
+        _app().processEvents()
 
 
 def test_new_local_setup_is_default_and_fast_light_endpoints_must_be_distinct() -> None:

@@ -21,6 +21,7 @@ Related technical contracts:
 
 - `settings_configuration_assistant_spec.md`
 - `multi_instance_software_administration_spec.md`
+- `varac_native_cluster_configuration_spec.md`
 - `sdr_receiver_control_spec.md`
 - `multi_endpoint_scheduler_concurrency_spec.md`
 - `sop_schedule_plan_spec.md`
@@ -739,27 +740,32 @@ no qualified VarAC writer or launch recipe exists, it says **Manual VarAC
 configuration required** and gives one precise next action; blank technical
 fields are not presented as if the operator should know how to complete them.
 
-Membership records cluster ID, unique positive instance number, shared database
-where applicable, counter refresh, gateway handler, and PTT-lock policy. For
+Membership records cluster ID, unique positive instance number, effective shared
+database, counter refresh, email-gateway sender, and PTT-lock policy. For
 create-cluster using an existing standalone node, final Review names that node,
 the new node, both proposed memberships and instance numbers, gateway choice,
 PTT policy, node-local resources, and cluster-shared resources. One transaction
 creates the new node and cluster, adds both memberships, updates the explicitly
 reviewed existing-node relationship, saves the new radio link and launch plan,
-and enables the reviewed gateway. Cancel, Back, repreparation, stale evidence,
+and enables the reviewed email-gateway sender when that service is selected.
+Cancel, Back, repreparation, stale evidence,
 or any failure leaves the existing standalone node unchanged and creates no
 cluster or membership. Standalone VarAC never implies cluster mode.
 
-The cluster record owns normalized cluster ID, shared database, counter refresh,
-gateway selection, and PTT-lock policy. Membership owns the cluster reference,
+The cluster record owns normalized cluster ID, effective shared database,
+counter refresh, email-gateway sender selection, and PTT-lock policy. Membership owns the cluster reference,
 radio/node reference, enabled state, and a positive instance number unique among
 enabled members of that cluster. Public cluster IDs are unique
-case-insensitively after normalization. A shared cluster database is an explicit
-non-exclusive resource owned by one cluster identity; it is never substituted
-for a node-local VarAC database.
+case-insensitively after normalization. A native-managed cluster database is a
+required non-exclusive resource owned by one cluster identity; every managed
+member's effective VarAC database reference resolves to that cluster resource.
+Standalone and operator-managed nodes retain their node-local database behavior.
+The detailed native ownership and recovery contract is defined in
+`varac_native_cluster_configuration_spec.md`.
 
 Creating the first node completes cluster creation, adds and enables the node
-membership, and only then permits that enabled member to be selected as gateway,
+membership, and only then permits that enabled member to be selected as the
+email-gateway sender,
 all within the same reviewed transaction.
 
 Review separates node-local from cluster-shared resources. Duplicate node

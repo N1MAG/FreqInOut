@@ -61,6 +61,11 @@ from PySide6.QtWidgets import (
     QTabWidget,
 )
 
+# Native apply/recovery owns a durable filesystem transaction and must always
+# use a real Qt thread.  Keep its thread type isolated from the lightweight
+# discovery-thread test seam used by the much older Add Radio scanner tests.
+_VarACNativeQThread = QThread
+
 from freqinout.core.logger import log, set_log_level, get_log_level, _get_log_file
 from freqinout.core.perf_metrics import emit_span, span as perf_span
 from freqinout.core.checkins_db import ensure_operator_checkins_schema, get_all_operators as get_shared_operators
@@ -171,6 +176,19 @@ from freqinout.core.guided_app_config_plan import (
     apply_guided_external_app_config_plan,
     build_guided_external_app_config_plan,
     rollback_guided_external_app_config_apply,
+)
+from freqinout.core.varac_native_preparation import (
+    VarACNativePreparationResult,
+    native_draft_fingerprint,
+    prepare_varac_native_configuration,
+)
+from freqinout.core.varac_native_transaction import (
+    VarACNativeExternalSession,
+    begin_varac_native_external_apply,
+    complete_varac_native_external_session,
+    mark_varac_native_fio_committed,
+    recover_unfinished_varac_native_applies,
+    rollback_varac_native_external_session,
 )
 from freqinout.core.guided_launch_recipes import canonical_js8_version
 from freqinout.core.guided_setup import (
@@ -987,6 +1005,112 @@ class _GuidedNativeConfigWorker(QObject):
             self.failed.emit(str(exc) or exc.__class__.__name__)
 
 
+class _VarACNativePrepareWorker(QObject):
+    """Prepare one native VarAC plan using bounded worker-owned I/O."""
+
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        *,
+        draft: Mapping[str, Any],
+        db_path: Path,
+        managed_root: Path,
+        generation: int,
+    ) -> None:
+        super().__init__()
+        self.draft = dict(draft)
+        self.db_path = Path(db_path)
+        self.managed_root = Path(managed_root)
+        self.generation = int(generation)
+
+    def run(self) -> None:
+        try:
+            store = MultiRadioStore(self.db_path)
+            status = SoftwareStatusService({})
+            running = bool(
+                status.program_is_running("VarAC")
+                or status.program_is_running("VARA")
+            )
+            self.finished.emit(
+                prepare_varac_native_configuration(
+                    self.draft,
+                    varac_nodes=store.list_varac_nodes(),
+                    device_profiles=store.list_device_profiles(),
+                    varac_clusters=store.list_varac_clusters(),
+                    varac_members=store.list_varac_cluster_members(),
+                    managed_root=self.managed_root,
+                    generation=self.generation,
+                    process_running=running,
+                )
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc) or exc.__class__.__name__)
+
+
+class _VarACNativeApplyWorker(QObject):
+    """Run apply/finalize/rollback/recovery away from the GUI thread."""
+
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        *,
+        action: str,
+        db_path: Path,
+        preparation: VarACNativePreparationResult | None = None,
+        session: VarACNativeExternalSession | None = None,
+        backup_root: Path | None = None,
+    ) -> None:
+        super().__init__()
+        self.action = str(action)
+        self.db_path = Path(db_path)
+        self.preparation = preparation
+        self.session = session
+        self.backup_root = Path(backup_root) if backup_root is not None else None
+
+    def run(self) -> None:
+        try:
+            store = MultiRadioStore(self.db_path)
+            if self.action == "apply":
+                if self.preparation is None or not self.preparation.ready or self.preparation.plan is None:
+                    raise ValueError("A current prepared native VarAC plan is required.")
+                if self.backup_root is None:
+                    raise ValueError("A native VarAC backup location is required.")
+                status = SoftwareStatusService({})
+                running = bool(
+                    status.program_is_running("VarAC")
+                    or status.program_is_running("VARA")
+                )
+                self.finished.emit(
+                    begin_varac_native_external_apply(
+                        store=store,
+                        plan=self.preparation.plan,
+                        backup_root=self.backup_root,
+                        running_checker=(lambda _member: running),
+                    )
+                )
+                return
+            if self.action == "complete":
+                if self.session is None:
+                    raise ValueError("A native VarAC session is required for completion.")
+                self.finished.emit(complete_varac_native_external_session(store, self.session))
+                return
+            if self.action == "rollback":
+                if self.session is None:
+                    raise ValueError("A native VarAC session is required for rollback.")
+                self.finished.emit(rollback_varac_native_external_session(store, self.session))
+                return
+            if self.action == "recover":
+                self.finished.emit(recover_unfinished_varac_native_applies(store))
+                return
+            raise ValueError(f"Unsupported native VarAC worker action: {self.action}")
+        except Exception as exc:
+            self.failed.emit(str(exc) or exc.__class__.__name__)
+
+
 class _MultiRigAutoconfigPreviewWorker(QObject):
     """Build the legacy Multi-Rig preview outside Qt's GUI thread."""
 
@@ -1184,6 +1308,11 @@ class SettingsTab(QWidget):
     # must never open an endpoint or perform a probe in the Qt event handler.
     receiver_control_test_requested = Signal(dict)
     receiver_control_test_completed = Signal(dict)
+    # Native VarAC preparation/application is deliberately host-worker owned.
+    # These cache-only payload relays let the integration layer provide that
+    # worker without letting Settings rendering or typing inspect native files.
+    varac_native_prepare_requested = Signal(object)
+    varac_native_apply_requested = Signal(object)
     # Python object ids are pointer-width values and may exceed Qt's 32-bit
     # ``int`` signal type on 64-bit platforms.
     _guided_radio_autofill_finished = Signal(object, object)
@@ -1284,6 +1413,11 @@ class SettingsTab(QWidget):
         self._software_autofill_shutdown = False
         self._guided_radio_autofill_jobs: Dict[int, Tuple[QThread, _GuidedRadioAutofillWorker]] = {}
         self._guided_native_config_jobs: Dict[int, Tuple[QThread, _GuidedNativeConfigWorker]] = {}
+        self._varac_native_jobs: Dict[int, Tuple[QThread, QObject]] = {}
+        self._varac_native_generation = 0
+        self._varac_native_preparations: Dict[str, VarACNativePreparationResult] = {}
+        self._varac_native_recovery_started = False
+        QTimer.singleShot(0, self._start_varac_native_recovery)
         self._guided_radio_autofill_callbacks: Dict[int, Tuple[Any, Any]] = {}
         self._guided_radio_autofill_finished.connect(self._on_guided_radio_autofill_finished)
         self._guided_radio_autofill_failed.connect(self._on_guided_radio_autofill_failed)
@@ -6546,6 +6680,18 @@ class SettingsTab(QWidget):
         self.software_administration_workspace.instance_discovery_requested.connect(
             self._on_software_instance_discovery_requested
         )
+        self.software_administration_workspace.varac_native_prepare_requested.connect(
+            lambda payload: self._on_varac_native_prepare_requested(
+                payload,
+                publisher=self.software_administration_workspace,
+            )
+        )
+        self.software_administration_workspace.varac_native_apply_requested.connect(
+            lambda payload: self._on_varac_native_apply_requested(
+                payload,
+                publisher=self.software_administration_workspace,
+            )
+        )
         software_administration_group = self._make_collapsible_group(
             "Software Administration",
             self.software_administration_workspace,
@@ -10499,6 +10645,9 @@ class SettingsTab(QWidget):
         native_result = payload.pop("_guided_native_apply_result", None)
         if not isinstance(native_result, GuidedAppConfigApplyResult):
             native_result = None
+        varac_session = payload.get("_varac_native_external_session")
+        if not isinstance(varac_session, VarACNativeExternalSession):
+            varac_session = None
         family = str(payload.get("family_key") or "").strip().lower()
         try:
             radio_id = int(payload.get("radio_id") or 0)
@@ -10615,9 +10764,16 @@ class SettingsTab(QWidget):
                 "install_path": application_path,
                 "ini_path": configuration_path,
                 "db_path": storage_path,
+                "vara_runtime_path": str(payload.get("vara_runtime_path") or "").strip(),
+                "vara_ini_path": str(payload.get("vara_ini_path") or "").strip(),
                 "incoming_path": str(payload.get("secondary_storage_path") or "").strip(),
                 "outbox_path": str(payload.get("outbox_path") or "").strip(),
                 "launch_cmd": launch_command,
+                "native_management_state": str(payload.get("native_management_state") or "operator").strip(),
+                "native_writer_key": str(payload.get("native_writer_key") or "").strip(),
+                "desired_fingerprint": str(payload.get("desired_fingerprint") or "").strip(),
+                "observed_fingerprint": str(payload.get("observed_fingerprint") or "").strip(),
+                "native_verification_summary": str(payload.get("native_verification_summary") or "").strip(),
             }
 
         # A discovered row is source-locked. Import its complete durable
@@ -10787,53 +10943,100 @@ class SettingsTab(QWidget):
                 "shared_db_path": str(payload.get("cluster_shared_database") or "").strip(),
                 "ptt_lock_enabled": bool(payload.get("cluster_ptt_lock", False)),
                 "gateway_for_new_cluster": bool(payload.get("cluster_gateway", False)),
+                "email_gateway_sender_choice": str(
+                    payload.get("email_gateway_sender_choice") or "none"
+                ).strip(),
+                "native_management_state": str(
+                    payload.get("native_management_state") or "operator"
+                ).strip(),
+                "native_writer_key": str(payload.get("native_writer_key") or "").strip(),
+                "desired_fingerprint": str(payload.get("desired_fingerprint") or "").strip(),
+                "observed_fingerprint": str(payload.get("observed_fingerprint") or "").strip(),
+                "native_verification_summary": str(
+                    payload.get("native_verification_summary") or ""
+                ).strip(),
+                "existing_standalone_node_id": int(
+                    payload.get("existing_standalone_node_id") or 0
+                ) or None,
+                "existing_standalone_instance_number": int(
+                    payload.get("existing_standalone_member_number") or 0
+                ) or None,
             }
             cluster_instance_number = int(payload.get("cluster_instance_number") or 0) or None
 
         try:
-            if observer_mode and family == "js8call":
-                result = self.multi_radio_store.adopt_observer_js8_instance(
-                    radio_profile_id=radio_id,
-                    application_values=app_values,
-                    manifest_values=manifest_values,
-                    replace_existing=replace_existing,
-                    expected_current_instance_id=current_id,
-                    launch_at_startup=bool(payload.get("launch_at_startup", False)),
-                )
-            elif observer_mode and family == "fast_light":
-                result = self.multi_radio_store.adopt_observer_fast_light_instance(
-                    radio_profile_id=radio_id,
-                    application_values=app_values,
-                    manifest_values=manifest_values,
-                    replace_existing=replace_existing,
-                    expected_current_instance_id=current_id,
-                    launch_at_startup=bool(payload.get("launch_at_startup", False)),
-                )
-            else:
-                result = self.multi_radio_store.adopt_software_instance(
-                    family_key=family,
-                    radio_profile_id=radio_id,
-                    application_values=app_values,
-                    manifest_values=manifest_values,
-                    replace_existing=replace_existing,
-                    expected_current_instance_id=current_id,
-                    launch_at_startup=bool(payload.get("launch_at_startup", False)),
-                    varac_cluster_db_id=cluster_db_id,
-                    varac_cluster_instance_number=cluster_instance_number,
-                    varac_create_cluster_values=create_cluster_values,
-                )
+            with self.multi_radio_store.guided_save_transaction() as transaction:
+                if observer_mode and family == "js8call":
+                    result = self.multi_radio_store.adopt_observer_js8_instance(
+                        radio_profile_id=radio_id,
+                        application_values=app_values,
+                        manifest_values=manifest_values,
+                        replace_existing=replace_existing,
+                        expected_current_instance_id=current_id,
+                        launch_at_startup=bool(payload.get("launch_at_startup", False)),
+                    )
+                elif observer_mode and family == "fast_light":
+                    result = self.multi_radio_store.adopt_observer_fast_light_instance(
+                        radio_profile_id=radio_id,
+                        application_values=app_values,
+                        manifest_values=manifest_values,
+                        replace_existing=replace_existing,
+                        expected_current_instance_id=current_id,
+                        launch_at_startup=bool(payload.get("launch_at_startup", False)),
+                    )
+                else:
+                    result = self.multi_radio_store.adopt_software_instance(
+                        family_key=family,
+                        radio_profile_id=radio_id,
+                        application_values=app_values,
+                        manifest_values=manifest_values,
+                        replace_existing=replace_existing,
+                        expected_current_instance_id=current_id,
+                        launch_at_startup=bool(payload.get("launch_at_startup", False)),
+                        varac_cluster_db_id=cluster_db_id,
+                        varac_cluster_instance_number=cluster_instance_number,
+                        varac_create_cluster_values=create_cluster_values,
+                    )
+                if family == "varac" and varac_session is not None and len(varac_session.plan.members) > 1:
+                    existing_member = varac_session.plan.members[0]
+                    existing_node_id = int(payload.get("existing_standalone_node_id") or 0)
+                    if existing_node_id > 0:
+                        self.multi_radio_store.save_varac_node(
+                            {
+                                "id": existing_node_id,
+                                "db_path": varac_session.plan.shared_db_path,
+                                "ini_path": str(existing_member.target_path),
+                                "vara_runtime_path": str(existing_member.vara_target_runtime_folder),
+                                "vara_ini_path": str(existing_member.vara_target_path),
+                                "launch_cmd": " ".join(existing_member.launch_command),
+                                "native_management_state": "managed",
+                                "native_writer_key": str(payload.get("native_writer_key") or ""),
+                                "desired_fingerprint": varac_session.plan.plan_fingerprint,
+                                "observed_fingerprint": str(varac_session.observed.get("observed_fingerprint") or ""),
+                                "native_verification_summary": "Native VarAC and distinct VARA runtime applied and read back.",
+                            }
+                        )
+                if varac_session is not None:
+                    mark_varac_native_fio_committed(self.multi_radio_store, varac_session)
+                transaction.complete()
         except (ValueError, KeyError) as exc:
             self._rollback_guided_native_config(native_result)
+            if varac_session is not None:
+                self._rollback_varac_native_session(varac_session)
             workspace.complete_instance_add(success=False, message=str(exc))
             return
         except Exception:
             log.exception("Failed saving reviewed %s instance.", family)
             self._rollback_guided_native_config(native_result)
+            if varac_session is not None:
+                self._rollback_varac_native_session(varac_session)
             workspace.complete_instance_add(
                 success=False,
                 message="The instance was not saved. Existing settings were left unchanged.",
             )
             return
+        if varac_session is not None:
+            self._complete_varac_native_session(varac_session)
         saved_radio = result.get("radio") if isinstance(result, Mapping) else None
         if isinstance(saved_radio, Mapping):
             self._replace_cached_device_profile(saved_radio)
@@ -13174,6 +13377,19 @@ class SettingsTab(QWidget):
                         lambda ident=job_id: _release_detached_software_autofill_job(ident)
                     )
             self._guided_native_config_jobs.pop(job_id, None)
+        for job_id, (native_thread, native_worker) in tuple(
+            getattr(self, "_varac_native_jobs", {}).items()
+        ):
+            if native_thread.isRunning():
+                native_thread.requestInterruption()
+                native_thread.quit()
+                if not native_thread.wait(1200):
+                    native_thread.setParent(None)
+                    _DETACHED_SOFTWARE_AUTOFILL_JOBS[job_id] = (native_thread, native_worker)
+                    native_thread.finished.connect(
+                        lambda ident=job_id: _release_detached_software_autofill_job(ident)
+                    )
+            self._varac_native_jobs.pop(job_id, None)
         timer = getattr(self, "_mesh_ble_scan_timer", None)
         if isinstance(timer, QTimer):
             timer.stop()
@@ -27178,6 +27394,21 @@ class SettingsTab(QWidget):
                     parent=editor_dialog,
                 )
                 assistant.set_discovery_results(inventory_snapshot.rows_for(family))
+                # The Add Radio host forwards only a cache-only payload.  The
+                # primary integration layer owns the bounded native-plan/apply
+                # worker and republishes its result through the assistant.
+                assistant.varac_native_prepare_requested.connect(
+                    lambda payload, target=assistant: self._on_varac_native_prepare_requested(
+                        payload,
+                        publisher=target,
+                    )
+                )
+                assistant.varac_native_apply_requested.connect(
+                    lambda payload, target=assistant: self._on_varac_native_apply_requested(
+                        payload,
+                        publisher=target,
+                    )
+                )
                 editor_layout.addWidget(assistant, 1)
                 completed_payload: Dict[str, Any] = {}
 
@@ -31067,6 +31298,29 @@ class SettingsTab(QWidget):
                 self.receiver_control_test_completed.disconnect(_on_receiver_control_test_completed)
             except (RuntimeError, TypeError):
                 pass
+        retained_at_close = getattr(dlg, "_guided_software_instance_drafts", {})
+        retained_session = self._varac_native_session_from_guided_profile(
+            {"guided_software_instance_drafts": retained_at_close}
+            if isinstance(retained_at_close, Mapping)
+            else {}
+        )
+        accepted_session = (
+            self._varac_native_session_from_guided_profile(out)
+            if dialog_result == QDialog.Accepted
+            else None
+        )
+        if (
+            retained_session is not None
+            and (
+                accepted_session is None
+                or accepted_session.journal_id != retained_session.journal_id
+            )
+        ):
+            # Native files may already have been applied by the nested VarAC
+            # assistant.  Closing Add/Edit Radio or removing that reviewed
+            # draft must compensate immediately rather than waiting for the
+            # startup recovery scan.
+            self._rollback_varac_native_session(retained_session)
         if dialog_result != QDialog.Accepted:
             return None
         return out
@@ -31492,6 +31746,9 @@ class SettingsTab(QWidget):
             if not isinstance(raw, Mapping):
                 continue
             draft = dict(raw)
+            varac_session = draft.get("_varac_native_external_session")
+            if not isinstance(varac_session, VarACNativeExternalSession):
+                varac_session = None
             instance_name = str(draft.get("instance_name") or f"{device_profile.get('name', 'Radio')} {family}").strip()
             imported_id = int(draft.get("imported_id") or 0) or None
             imported_system_key = str(draft.get("imported_system_key") or "").strip()
@@ -31579,9 +31836,16 @@ class SettingsTab(QWidget):
                     "install_path": str(draft.get("application_path") or "").strip(),
                     "ini_path": str(draft.get("configuration_path") or "").strip(),
                     "db_path": str(draft.get("storage_path") or "").strip(),
+                    "vara_runtime_path": str(draft.get("vara_runtime_path") or "").strip(),
+                    "vara_ini_path": str(draft.get("vara_ini_path") or "").strip(),
                     "incoming_path": str(draft.get("secondary_storage_path") or "").strip(),
                     "outbox_path": str(draft.get("outbox_path") or "").strip(),
                     "launch_cmd": str(draft.get("launch_command") or "").strip(),
+                    "native_management_state": str(draft.get("native_management_state") or "operator").strip(),
+                    "native_writer_key": str(draft.get("native_writer_key") or "").strip(),
+                    "desired_fingerprint": str(draft.get("desired_fingerprint") or "").strip(),
+                    "observed_fingerprint": str(draft.get("observed_fingerprint") or "").strip(),
+                    "native_verification_summary": str(draft.get("native_verification_summary") or "").strip(),
                 }
 
             evidence = {
@@ -31702,6 +31966,18 @@ class SettingsTab(QWidget):
                     "shared_db_path": str(draft.get("cluster_shared_database") or "").strip(),
                     "ptt_lock_enabled": bool(draft.get("cluster_ptt_lock", False)),
                     "gateway_for_new_cluster": bool(draft.get("cluster_gateway", False)),
+                    "email_gateway_sender_choice": str(
+                        draft.get("email_gateway_sender_choice") or "none"
+                    ).strip(),
+                    "native_management_state": str(
+                        draft.get("native_management_state") or "operator"
+                    ).strip(),
+                    "native_writer_key": str(draft.get("native_writer_key") or "").strip(),
+                    "desired_fingerprint": str(draft.get("desired_fingerprint") or "").strip(),
+                    "observed_fingerprint": str(draft.get("observed_fingerprint") or "").strip(),
+                    "native_verification_summary": str(
+                        draft.get("native_verification_summary") or ""
+                    ).strip(),
                     "existing_standalone_node_id": existing_standalone_node_id,
                     "existing_standalone_instance_number": int(
                         draft.get("existing_standalone_member_number")
@@ -31744,6 +32020,27 @@ class SettingsTab(QWidget):
                         ),
                         **kwargs,
                     )
+                    if family == "varac" and varac_session is not None and len(varac_session.plan.members) > 1:
+                        existing_member = varac_session.plan.members[0]
+                        existing_node_id = int(draft.get("existing_standalone_node_id") or 0)
+                        if existing_node_id > 0:
+                            self.multi_radio_store.save_varac_node(
+                                {
+                                    "id": existing_node_id,
+                                    "db_path": varac_session.plan.shared_db_path,
+                                    "ini_path": str(existing_member.target_path),
+                                    "vara_runtime_path": str(existing_member.vara_target_runtime_folder),
+                                    "vara_ini_path": str(existing_member.vara_target_path),
+                                    "launch_cmd": " ".join(existing_member.launch_command),
+                                    "native_management_state": "managed",
+                                    "native_writer_key": str(draft.get("native_writer_key") or ""),
+                                    "desired_fingerprint": varac_session.plan.plan_fingerprint,
+                                    "observed_fingerprint": str(
+                                        varac_session.observed.get("observed_fingerprint") or ""
+                                    ),
+                                    "native_verification_summary": "Native VarAC and distinct VARA runtime applied and read back.",
+                                }
+                            )
             except (ValueError, KeyError) as exc:
                 recovery = guided_recovery_presentation(needs_attention_app=instance_name)
                 QMessageBox.warning(
@@ -31982,6 +32279,263 @@ class SettingsTab(QWidget):
         thread.started.connect(worker.run)
         thread.start()
 
+    def _start_varac_native_job(
+        self,
+        worker: QObject,
+        *,
+        on_finished: Any,
+        on_failed: Any,
+    ) -> None:
+        jobs = getattr(self, "_varac_native_jobs", None)
+        if not isinstance(jobs, dict):
+            jobs = {}
+            self._varac_native_jobs = jobs
+        thread = _VarACNativeQThread(self)
+        worker.moveToThread(thread)
+        job_id = id(thread)
+        jobs[job_id] = (thread, worker)
+
+        def _release() -> None:
+            jobs.pop(job_id, None)
+
+        worker.finished.connect(on_finished)
+        worker.failed.connect(on_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(_release)
+        thread.finished.connect(thread.deleteLater)
+        thread.started.connect(worker.run)
+        thread.start()
+
+    def _start_varac_native_recovery(self) -> None:
+        """Resolve only journaled unfinished applies on a bounded startup worker."""
+
+        if bool(getattr(self, "_varac_native_recovery_started", False)):
+            return
+        self._varac_native_recovery_started = True
+        self._start_varac_native_job(
+            _VarACNativeApplyWorker(
+                action="recover",
+                db_path=self.multi_radio_store.db_path,
+            ),
+            on_finished=lambda rows: log.info(
+                "Native VarAC startup recovery resolved %d journal row(s).",
+                len(rows) if isinstance(rows, tuple) else 0,
+            ),
+            on_failed=lambda detail: log.error(
+                "Native VarAC startup recovery needs operator attention: %s",
+                detail,
+            ),
+        )
+
+    @staticmethod
+    def _publish_varac_native_presentation(publisher: object, presentation: Mapping[str, Any]) -> bool:
+        setter = getattr(publisher, "set_varac_native_presentation", None)
+        if not callable(setter):
+            return False
+        try:
+            result = setter(dict(presentation))
+        except RuntimeError:
+            return False
+        return result is not False
+
+    @staticmethod
+    def _publisher_varac_draft_fingerprint(publisher: object) -> str:
+        if isinstance(publisher, SoftwareInstanceAssistant):
+            try:
+                return native_draft_fingerprint(publisher.draft().payload())
+            except RuntimeError:
+                return ""
+        getter = getattr(publisher, "varac_native_draft_payload", None)
+        if callable(getter):
+            try:
+                payload = getter()
+            except RuntimeError:
+                return ""
+            if isinstance(payload, Mapping):
+                return native_draft_fingerprint(payload)
+        return ""
+
+    def _on_varac_native_prepare_requested(
+        self,
+        raw_payload: object,
+        *,
+        publisher: object,
+    ) -> None:
+        if not isinstance(raw_payload, Mapping) or not isinstance(raw_payload.get("draft"), Mapping):
+            return
+        draft = dict(raw_payload["draft"])
+        fingerprint = native_draft_fingerprint(draft)
+        self._varac_native_generation = int(getattr(self, "_varac_native_generation", 0)) + 1
+        generation = self._varac_native_generation
+        self._publish_varac_native_presentation(
+            publisher,
+            {
+                "state": "preparing",
+                "why": "FIO is checking the exact VarAC version, source files, distinct VARA runtimes, ports, and target state in the background.",
+                "arrangement": str(draft.get("cluster_path") or ""),
+                "generation": generation,
+            },
+        )
+        self.varac_native_prepare_requested.emit(raw_payload)
+        worker = _VarACNativePrepareWorker(
+            draft=draft,
+            db_path=self.multi_radio_store.db_path,
+            managed_root=Path(get_config_dir()) / "managed-instances",
+            generation=generation,
+        )
+
+        def _ready(result: object) -> None:
+            if not isinstance(result, VarACNativePreparationResult):
+                return
+            if (
+                result.generation != generation
+                or result.draft_fingerprint != fingerprint
+                or self._publisher_varac_draft_fingerprint(publisher) != fingerprint
+            ):
+                return
+            self._varac_native_preparations[fingerprint] = result
+            self._publish_varac_native_presentation(publisher, result.presentation)
+
+        def _failed(detail: str) -> None:
+            if self._publisher_varac_draft_fingerprint(publisher) != fingerprint:
+                return
+            self._publish_varac_native_presentation(
+                publisher,
+                {
+                    "state": "needs attention",
+                    "why": f"FIO could not prepare the native VarAC plan: {detail}",
+                    "generation": generation,
+                },
+            )
+
+        self._start_varac_native_job(worker, on_finished=_ready, on_failed=_failed)
+
+    def _on_varac_native_apply_requested(
+        self,
+        raw_payload: object,
+        *,
+        publisher: object,
+    ) -> None:
+        if not isinstance(raw_payload, Mapping) or not isinstance(raw_payload.get("draft"), Mapping):
+            return
+        draft = dict(raw_payload["draft"])
+        fingerprint = native_draft_fingerprint(draft)
+        prepared = self._varac_native_preparations.get(fingerprint)
+        presentation = raw_payload.get("native_presentation")
+        reviewed_generation = int(
+            presentation.get("generation", 0) if isinstance(presentation, Mapping) else 0
+        )
+        if (
+            prepared is None
+            or not prepared.ready
+            or prepared.generation != reviewed_generation
+            or self._publisher_varac_draft_fingerprint(publisher) != fingerprint
+        ):
+            self._publish_varac_native_presentation(
+                publisher,
+                {
+                    "state": "needs attention",
+                    "why": "The prepared VarAC plan is stale. Prepare VarAC again before Review & Save.",
+                    "generation": reviewed_generation,
+                },
+            )
+            return
+        self.varac_native_apply_requested.emit(raw_payload)
+        self._publish_varac_native_presentation(
+            publisher,
+            {**dict(prepared.presentation), "state": "preparing", "why": "FIO is backing up, applying, and reading back the reviewed native configuration."},
+        )
+        worker = _VarACNativeApplyWorker(
+            action="apply",
+            db_path=self.multi_radio_store.db_path,
+            preparation=prepared,
+            backup_root=Path(get_config_dir()) / "backups" / "varac-native",
+        )
+
+        def _applied(result: object) -> None:
+            if not isinstance(result, VarACNativeExternalSession) or not result.ok:
+                state = "recovery required" if isinstance(result, VarACNativeExternalSession) and result.needs_recovery else "needs attention"
+                detail = result.error if isinstance(result, VarACNativeExternalSession) else "Native apply returned no verified session."
+                self._publish_varac_native_presentation(
+                    publisher,
+                    {**dict(prepared.presentation), "state": state, "why": detail},
+                )
+                return
+            if self._publisher_varac_draft_fingerprint(publisher) != fingerprint:
+                self._rollback_varac_native_session(result)
+                return
+            member = result.plan.members[-1]
+            completed = dict(draft)
+            completed.update(
+                {
+                    "_varac_native_external_session": result,
+                    "configuration_path": str(member.target_path),
+                    "storage_path": result.plan.shared_db_path,
+                    "cluster_shared_database": result.plan.shared_db_path,
+                    "working_directory": member.working_directory,
+                    "launch_command": " ".join(member.launch_command),
+                    "vara_runtime_path": str(member.vara_target_runtime_folder),
+                    "vara_ini_path": str(member.vara_target_path),
+                    "native_management_state": "managed",
+                    "native_writer_key": ":".join(("varac", result.plan.version, result.plan.platform, result.plan.operation)),
+                    "desired_fingerprint": result.plan.plan_fingerprint,
+                    "observed_fingerprint": str(result.observed.get("observed_fingerprint") or ""),
+                    "native_verification_summary": "Native VarAC and distinct VARA runtime applied and read back.",
+                    "native_configuration_status": "native_applied_readback_verified",
+                }
+            )
+            completer = getattr(publisher, "complete_varac_native_apply", None)
+            accepted = False
+            if callable(completer):
+                try:
+                    accepted = bool(completer(completed))
+                except RuntimeError:
+                    accepted = False
+            elif isinstance(publisher, SoftwareInstanceAssistant):
+                try:
+                    publisher.completed.emit(completed)
+                    accepted = True
+                except RuntimeError:
+                    accepted = False
+            if not accepted:
+                self._rollback_varac_native_session(result)
+
+        def _failed(detail: str) -> None:
+            self._publish_varac_native_presentation(
+                publisher,
+                {**dict(prepared.presentation), "state": "needs attention", "why": f"Native VarAC apply failed: {detail}"},
+            )
+
+        self._start_varac_native_job(worker, on_finished=_applied, on_failed=_failed)
+
+    def _complete_varac_native_session(self, session: VarACNativeExternalSession) -> None:
+        self._start_varac_native_job(
+            _VarACNativeApplyWorker(
+                action="complete",
+                db_path=self.multi_radio_store.db_path,
+                session=session,
+            ),
+            on_finished=lambda _result: None,
+            on_failed=lambda detail: log.error(
+                "Native VarAC apply committed; journal completion will be recovered at startup: %s",
+                detail,
+            ),
+        )
+
+    def _rollback_varac_native_session(self, session: VarACNativeExternalSession) -> None:
+        self._start_varac_native_job(
+            _VarACNativeApplyWorker(
+                action="rollback",
+                db_path=self.multi_radio_store.db_path,
+                session=session,
+            ),
+            on_finished=lambda _result: None,
+            on_failed=lambda detail: log.error("Native VarAC rollback requires operator attention: %s", detail),
+        )
+
     def _rollback_guided_native_config(
         self,
         applied: GuidedAppConfigApplyResult | None,
@@ -32060,7 +32614,10 @@ class SettingsTab(QWidget):
             return
         if not created:
             return
+        varac_session = self._varac_native_session_from_guided_profile(created)
         if not self._guided_radio_review_is_current(created):
+            if varac_session is not None:
+                self._rollback_varac_native_session(varac_session)
             retry_step = self._present_guided_stale_review_recovery(
                 "The saved software inventory no longer matches the reviewed generation."
             )
@@ -32073,6 +32630,8 @@ class SettingsTab(QWidget):
 
             def _native_ready(result: object) -> None:
                 if not isinstance(result, GuidedAppConfigApplyResult) or not result.ok:
+                    if varac_session is not None:
+                        self._rollback_varac_native_session(varac_session)
                     QMessageBox.warning(
                         self,
                         "App Configuration",
@@ -32082,18 +32641,36 @@ class SettingsTab(QWidget):
                     return
                 self._complete_add_device_profile(payload, native_result=result)
 
-            self._start_guided_native_config_job(
-                plan=native_plan,
-                on_finished=_native_ready,
-                on_failed=lambda detail: QMessageBox.warning(
+            def _native_failed(detail: str) -> None:
+                if varac_session is not None:
+                    self._rollback_varac_native_session(varac_session)
+                QMessageBox.warning(
                     self,
                     "App Configuration",
                     "FIO could not prepare the reviewed application configuration. "
                     f"The radio was not saved. {detail}",
-                ),
+                )
+
+            self._start_guided_native_config_job(
+                plan=native_plan,
+                on_finished=_native_ready,
+                on_failed=_native_failed,
             )
             return
         self._complete_add_device_profile(created)
+
+    @staticmethod
+    def _varac_native_session_from_guided_profile(
+        payload: Mapping[str, Any],
+    ) -> VarACNativeExternalSession | None:
+        drafts = payload.get("guided_software_instance_drafts")
+        if not isinstance(drafts, Mapping):
+            return None
+        varac = drafts.get("varac")
+        if not isinstance(varac, Mapping):
+            return None
+        session = varac.get("_varac_native_external_session")
+        return session if isinstance(session, VarACNativeExternalSession) else None
 
     def _complete_add_device_profile(
         self,
@@ -32101,8 +32678,11 @@ class SettingsTab(QWidget):
         *,
         native_result: GuidedAppConfigApplyResult | None = None,
     ) -> None:
+        varac_session = self._varac_native_session_from_guided_profile(created)
         if not self._guided_radio_review_is_current(created):
             self._rollback_guided_native_config(native_result)
+            if varac_session is not None:
+                self._rollback_varac_native_session(varac_session)
             retry_step = self._present_guided_stale_review_recovery(
                 "Software availability changed while the reviewed configuration was being prepared."
             )
@@ -32117,6 +32697,11 @@ class SettingsTab(QWidget):
                     native_result=native_result,
                 )
                 if succeeded:
+                    if varac_session is not None:
+                        mark_varac_native_fio_committed(
+                            self.multi_radio_store,
+                            varac_session,
+                        )
                     transaction.complete()
         except Exception:
             succeeded = False
@@ -32129,6 +32714,10 @@ class SettingsTab(QWidget):
             )
         if not succeeded:
             self._refresh_multi_radio_tables()
+            if varac_session is not None:
+                self._rollback_varac_native_session(varac_session)
+        elif varac_session is not None:
+            self._complete_varac_native_session(varac_session)
 
     def _complete_add_device_profile_in_transaction(
         self,
@@ -32272,7 +32861,10 @@ class SettingsTab(QWidget):
         )
         if not updated:
             return
+        varac_session = self._varac_native_session_from_guided_profile(updated)
         if not self._guided_radio_review_is_current(updated):
+            if varac_session is not None:
+                self._rollback_varac_native_session(varac_session)
             retry_step = self._present_guided_stale_review_recovery(
                 "The saved software inventory no longer matches the reviewed generation."
             )
@@ -32289,6 +32881,8 @@ class SettingsTab(QWidget):
 
             def _native_ready(result: object) -> None:
                 if not isinstance(result, GuidedAppConfigApplyResult) or not result.ok:
+                    if varac_session is not None:
+                        self._rollback_varac_native_session(varac_session)
                     QMessageBox.warning(
                         self,
                         "App Configuration",
@@ -32298,15 +32892,20 @@ class SettingsTab(QWidget):
                     return
                 self._complete_edit_device_profile(existing, payload, native_result=result)
 
-            self._start_guided_native_config_job(
-                plan=native_plan,
-                on_finished=_native_ready,
-                on_failed=lambda detail: QMessageBox.warning(
+            def _native_failed(detail: str) -> None:
+                if varac_session is not None:
+                    self._rollback_varac_native_session(varac_session)
+                QMessageBox.warning(
                     self,
                     "App Configuration",
                     "FIO could not prepare the reviewed application configuration. "
                     f"The radio changes were not saved. {detail}",
-                ),
+                )
+
+            self._start_guided_native_config_job(
+                plan=native_plan,
+                on_finished=_native_ready,
+                on_failed=_native_failed,
             )
             return
         self._complete_edit_device_profile(existing, updated)
@@ -32318,8 +32917,11 @@ class SettingsTab(QWidget):
         *,
         native_result: GuidedAppConfigApplyResult | None = None,
     ) -> None:
+        varac_session = self._varac_native_session_from_guided_profile(updated)
         if not self._guided_radio_review_is_current(updated):
             self._rollback_guided_native_config(native_result)
+            if varac_session is not None:
+                self._rollback_varac_native_session(varac_session)
             retry_step = self._present_guided_stale_review_recovery(
                 "Software availability changed while the reviewed configuration was being prepared."
             )
@@ -32339,6 +32941,11 @@ class SettingsTab(QWidget):
                     native_result=native_result,
                 )
                 if succeeded:
+                    if varac_session is not None:
+                        mark_varac_native_fio_committed(
+                            self.multi_radio_store,
+                            varac_session,
+                        )
                     transaction.complete()
         except Exception:
             succeeded = False
@@ -32351,6 +32958,10 @@ class SettingsTab(QWidget):
             )
         if not succeeded:
             self._refresh_multi_radio_tables()
+            if varac_session is not None:
+                self._rollback_varac_native_session(varac_session)
+        elif varac_session is not None:
+            self._complete_varac_native_session(varac_session)
 
     def _complete_edit_device_profile_in_transaction(
         self,

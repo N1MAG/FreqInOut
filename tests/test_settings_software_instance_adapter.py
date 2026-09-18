@@ -42,6 +42,19 @@ class _Store:
         self.fast_rows = [{"id": 12, "name": "Saved Fast", "flrig_port": 12345}]
         self.varac_rows = [{"id": 13, "name": "Saved VarAC", "ini_path": "/saved/VarAC.ini"}]
 
+    class _Transaction:
+        def __enter__(self):
+            return self
+
+        def complete(self) -> None:
+            return None
+
+        def __exit__(self, _exc_type, _exc, _tb) -> bool:
+            return False
+
+    def guided_save_transaction(self):
+        return self._Transaction()
+
     def list_js8_instances(self):
         return list(self.js8_rows)
 

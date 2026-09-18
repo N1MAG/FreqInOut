@@ -185,6 +185,41 @@ def test_selection_is_cache_only_and_no_min_width_or_horizontal_scroll():
         widget.deleteLater()
 
 
+def test_varac_native_worker_seam_relays_cached_payload_and_publication() -> None:
+    snapshot = build_software_administration_snapshot(
+        [{"id": 7, "name": "New Radio", "enabled": 1, "use_varac": 1}],
+        varac_nodes=(),
+    )
+    widget = _workspace(snapshot)
+    try:
+        widget.set_instance_context(
+            radios=({"id": 7, "name": "New Radio", "device_class": "tx_rx"},),
+            inventory_by_family={"varac": ()},
+        )
+        widget.select_context("varac", 7)
+        widget._open_instance_assistant()
+        assistant = widget._instance_assistant
+        assert assistant is not None
+        arrangement = assistant._field_widgets["cluster_path"]
+        arrangement.setCurrentIndex(arrangement.findData("create_cluster"))
+        prepared = []
+        applied = []
+        widget.varac_native_prepare_requested.connect(prepared.append)
+        widget.varac_native_apply_requested.connect(applied.append)
+        assert widget.set_varac_native_presentation(
+            {"state": "ready", "writer_version": "13.2.7", "writer_qualified": True}
+        )
+        assert "13.2.7 writer qualified" in assistant.varac_native_status_label.text()
+        assistant.set_varac_native_presentation({"state": "needs_attention"})
+        assistant.varac_native_prepare_button.click()
+        assert prepared and prepared[0]["draft"]["family_key"] == "varac"
+        assert widget.request_varac_native_apply()
+        assert applied and applied[0]["native_presentation"]["state"] == "needs_attention"
+    finally:
+        widget.deleteLater()
+        _app().processEvents()
+
+
 def test_navigation_controls_have_accessible_names():
     widget = _workspace(_snapshot())
     try:

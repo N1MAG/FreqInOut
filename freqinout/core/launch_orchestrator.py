@@ -289,6 +289,30 @@ class LaunchOrchestrator(QObject):
         bundle_override: Optional[Mapping[str, Any]] = None,
     ) -> LaunchPlan:
         profiles = self.multi_radio_store.list_runtime_active_device_profiles()
+        blockers = self.multi_radio_store.varac_native_launch_blockers()
+        if blockers:
+            blocked_targets = {
+                str(target or "").strip()
+                for blocker in blockers
+                for target in blocker.get("targets", ())
+                if str(target or "").strip()
+            }
+            affected = [
+                str(profile.get("name", profile.get("id", "VarAC")) or "VarAC")
+                for profile in profiles
+                if blocked_targets.intersection(
+                    {
+                        str(profile.get("varac_ini_path", "") or "").strip(),
+                        str(profile.get("varac_vara_ini_path", "") or "").strip(),
+                    }
+                )
+            ]
+            if affected:
+                raise ValueError(
+                    "VarAC launch is blocked pending native configuration recovery for: "
+                    + ", ".join(sorted(set(affected), key=str.casefold))
+                    + ". Open Station Health before retrying."
+                )
         bundles = {
             int(profile["id"]): self.get_radio_launch_bundle(int(profile["id"]))
             for profile in profiles

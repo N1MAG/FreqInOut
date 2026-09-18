@@ -49,6 +49,7 @@ from freqinout.core.guided_launch_recipes import (
     recipe_resolution_from_mapping,
     resolve_guided_launch_recipe,
 )
+from freqinout.core.varac_native_preparation import native_draft_fingerprint
 from freqinout.gui.current_page_stack import CurrentPageStack
 from freqinout.gui.theme import active_app_theme, button_height_for_font, button_style, label_style
 
@@ -73,7 +74,7 @@ _FAMILY_FIELDS = {
         {"instance_name", "ownership", "host", "port", "secondary_port", "application_path", "secondary_application_path", "flmsg_application_path", "flamp_application_path", "configuration_path", "secondary_configuration_path", "storage_path", "secondary_storage_path", "launch_command", "launch_at_startup", "advanced_tx_requested", "advanced_tx_acknowledged", "notes"}
     ),
     "varac": frozenset(
-        {"instance_name", "ownership", "application_path", "configuration_path", "storage_path", "secondary_storage_path", "outbox_path", "working_directory", "cluster_path", "cluster_id", "cluster_name", "cluster_shared_database", "cluster_instance_number", "existing_standalone_node_id", "existing_standalone_device_profile_id", "existing_standalone_member_number", "cluster_gateway", "cluster_ptt_lock", "launch_command", "launch_at_startup", "notes"}
+        {"instance_name", "ownership", "application_path", "configuration_path", "storage_path", "secondary_storage_path", "outbox_path", "working_directory", "cluster_path", "cluster_id", "cluster_name", "cluster_shared_database", "cluster_instance_number", "existing_standalone_node_id", "existing_standalone_device_profile_id", "existing_standalone_member_number", "email_gateway_sender_choice", "cluster_gateway", "cluster_ptt_lock", "launch_command", "launch_at_startup", "notes"}
     ),
 }
 _FAMILY_FIELD_LABELS = {
@@ -131,6 +132,93 @@ class InstanceConflict:
 
 
 @dataclass(frozen=True)
+class VarACNativePresentation:
+    """Immutable, UI-safe projection of a prepared native VarAC plan.
+
+    The Settings host owns discovery, process checks, the native writer, and
+    persistence.  This small projection deliberately contains only already
+    prepared facts that the widget can render without performing I/O.  A host
+    may replace it as a worker publishes a newer generation.
+    """
+
+    state: str = "not_prepared"
+    why: str = "Choose an arrangement, then prepare VarAC before reviewing native details."
+    arrangement: str = ""
+    affected_radios: tuple[str, ...] = ()
+    shared_database_summary: str = "Not proposed"
+    member_numbers_summary: str = "Not proposed"
+    ptt_lock_summary: str = "Not proposed"
+    email_gateway_sender_summary: str = "No email gateway"
+    writer_version: str = ""
+    writer_platform: str = ""
+    writer_operation: str = ""
+    writer_qualified: bool = False
+    varac_ini_path: str = ""
+    vara_runtime_path: str = ""
+    vara_ini_path: str = ""
+    launch_command: str = ""
+    ports_summary: str = ""
+    fingerprints_summary: str = ""
+    draft_fingerprint: str = ""
+    generation: int = 0
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any] | "VarACNativePresentation" | None) -> "VarACNativePresentation":
+        if isinstance(value, cls):
+            return value
+        row = dict(value or {})
+        radios = row.get("affected_radios") or row.get("radios") or ()
+        if isinstance(radios, str):
+            radios = (radios,)
+        return cls(
+            state=_text(row.get("state") or row.get("status") or "not_prepared").lower(),
+            why=_text(row.get("why") or row.get("summary") or cls.why),
+            arrangement=_text(row.get("arrangement") or row.get("cluster_path")),
+            affected_radios=tuple(_text(item) for item in radios if _text(item)),
+            shared_database_summary=_text(row.get("shared_database_summary") or row.get("shared_database") or "Not proposed"),
+            member_numbers_summary=_text(row.get("member_numbers_summary") or row.get("member_numbers") or "Not proposed"),
+            ptt_lock_summary=_text(row.get("ptt_lock_summary") or row.get("ptt_lock") or "Not proposed"),
+            email_gateway_sender_summary=_text(row.get("email_gateway_sender_summary") or row.get("email_gateway_sender") or "No email gateway"),
+            writer_version=_text(row.get("writer_version") or row.get("version")),
+            writer_platform=_text(row.get("writer_platform") or row.get("platform")),
+            writer_operation=_text(row.get("writer_operation") or row.get("operation")),
+            writer_qualified=_bool(row.get("writer_qualified") or row.get("qualified")),
+            varac_ini_path=_text(row.get("varac_ini_path") or row.get("configuration_path")),
+            vara_runtime_path=_text(row.get("vara_runtime_path") or row.get("vara_runtime")),
+            vara_ini_path=_text(row.get("vara_ini_path")),
+            launch_command=_text(row.get("launch_command")),
+            ports_summary=_text(row.get("ports_summary") or row.get("ports")),
+            fingerprints_summary=_text(row.get("fingerprints_summary") or row.get("fingerprints")),
+            draft_fingerprint=_text(row.get("draft_fingerprint")),
+            generation=_int(row.get("generation")) or 0,
+        )
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "state": self.state,
+            "why": self.why,
+            "arrangement": self.arrangement,
+            "affected_radios": self.affected_radios,
+            "shared_database_summary": self.shared_database_summary,
+            "member_numbers_summary": self.member_numbers_summary,
+            "ptt_lock_summary": self.ptt_lock_summary,
+            "email_gateway_sender_summary": self.email_gateway_sender_summary,
+            "writer_version": self.writer_version,
+            "writer_platform": self.writer_platform,
+            "writer_operation": self.writer_operation,
+            "writer_qualified": self.writer_qualified,
+            "varac_ini_path": self.varac_ini_path,
+            "vara_runtime_path": self.vara_runtime_path,
+            "vara_ini_path": self.vara_ini_path,
+            "launch_command": self.launch_command,
+            "ports_summary": self.ports_summary,
+            "fingerprints_summary": self.fingerprints_summary,
+            "draft_fingerprint": self.draft_fingerprint,
+            "generation": self.generation,
+        }
+
+
+@dataclass(frozen=True)
 class SoftwareInstanceDraft:
     """Stable UI-to-host payload for one new or imported instance."""
 
@@ -181,6 +269,10 @@ class SoftwareInstanceDraft:
     existing_standalone_node_id: int = 0
     existing_standalone_device_profile_id: int = 0
     existing_standalone_member_number: int = 0
+    # New native-cluster intent.  Do not derive this from legacy
+    # ``cluster_gateway`` compatibility evidence.
+    email_gateway_sender_choice: str = "none"
+    email_gateway_sender_member_id: str = ""
     cluster_gateway: bool = False
     cluster_ptt_lock: bool = False
     notes: str = ""
@@ -320,6 +412,8 @@ class SoftwareInstanceDraft:
             "existing_standalone_member_number": int(
                 self.existing_standalone_member_number or 0
             ),
+            "email_gateway_sender_choice": self.email_gateway_sender_choice,
+            "email_gateway_sender_member_id": self.email_gateway_sender_member_id,
             "cluster_gateway": self.cluster_gateway,
             "cluster_ptt_lock": self.cluster_ptt_lock,
             "resource_claims": resources,
@@ -377,6 +471,8 @@ class SoftwareInstanceDraft:
                     "varac_existing_standalone_member_number": int(
                         self.existing_standalone_member_number or 0
                     ),
+                    "varac_email_gateway_sender_choice": self.email_gateway_sender_choice,
+                    "varac_email_gateway_sender_member_id": self.email_gateway_sender_member_id,
                 }
             )
         return payload
@@ -489,6 +585,15 @@ def normalize_instance_draft(value: Mapping[str, Any] | SoftwareInstanceDraft) -
             row.get("existing_standalone_member_number")
             or row.get("varac_existing_standalone_member_number")
         ) or 0,
+        email_gateway_sender_choice=_text(
+            row.get("email_gateway_sender_choice")
+            or row.get("varac_email_gateway_sender_choice")
+            or "none"
+        ).lower(),
+        email_gateway_sender_member_id=_text(
+            row.get("email_gateway_sender_member_id")
+            or row.get("varac_email_gateway_sender_member_id")
+        ),
         cluster_gateway=_bool(row.get("cluster_gateway", False)),
         cluster_ptt_lock=_bool(row.get("cluster_ptt_lock", False)),
         notes=_text(row.get("notes")),
@@ -696,9 +801,39 @@ def instance_conflicts(
             conflicts.append(InstanceConflict("cluster_required", "error", "Choose an existing cluster", "Select the cluster this VarAC node should join."))
         if current.cluster_path == "create_cluster" and not (current.cluster_name or current.cluster_id):
             conflicts.append(InstanceConflict("cluster_name_required", "error", "Name the new cluster", "Enter a distinct cluster name or ID."))
+        if current.cluster_path == "create_cluster":
+            if current.email_gateway_sender_choice not in {
+                "none",
+                "existing_member",
+                "new_member",
+            }:
+                conflicts.append(
+                    InstanceConflict(
+                        "email_gateway_sender_required",
+                        "error",
+                        "Choose the email gateway sender",
+                        "Choose No email gateway, the existing member, or the new member.",
+                    )
+                )
+            elif (
+                current.email_gateway_sender_choice == "existing_member"
+                and not current.existing_standalone_node_id
+            ):
+                conflicts.append(
+                    InstanceConflict(
+                        "email_gateway_existing_member_unavailable",
+                        "error",
+                        "Existing email gateway sender is unavailable",
+                        "Choose the new member or No email gateway for this new cluster.",
+                    )
+                )
         if current.cluster_path != "standalone" and not current.cluster_instance_number:
             conflicts.append(InstanceConflict("cluster_instance_required", "error", "Cluster instance number is required", "Choose a positive instance number for this VarAC node."))
-        if current.cluster_path != "standalone" and not current.launch_command:
+        if (
+            current.cluster_path != "standalone"
+            and current.mode != "managed"
+            and not current.launch_command
+        ):
             conflicts.append(InstanceConflict("cluster_launch_required", "error", "Cluster launch command is required", "Use an instance-specific VarAC launch command so FIO cannot start the default node by mistake."))
         if current.cluster_path == "standalone" and (current.cluster_id or current.cluster_instance_number):
             conflicts.append(InstanceConflict("standalone_cluster_fields", "error", "Standalone VarAC has cluster fields", "Clear cluster identity and instance number or choose a cluster setup path."))
@@ -770,6 +905,10 @@ class SoftwareInstanceAssistant(QWidget):
     discover_requested = Signal(str)
     create_radio_requested = Signal()
     validation_requested = Signal(object)
+    # Host-owned worker seams.  The assistant emits the immutable prepared
+    # presentation plus the current draft and never starts native I/O itself.
+    varac_native_prepare_requested = Signal(object)
+    varac_native_apply_requested = Signal(object)
     STEP_TITLES = ("Purpose", "Find or create", "Identity", "Connections", "Files", "Launch", "Review")
 
     def __init__(
@@ -786,6 +925,7 @@ class SoftwareInstanceAssistant(QWidget):
         radio_role: str = "tx_rx",
         initial_draft: Mapping[str, Any] | SoftwareInstanceDraft | None = None,
         launch_recipe_resolution: GuidedLaunchRecipeResolution | Mapping[str, Any] | None = None,
+        varac_native_presentation: VarACNativePresentation | Mapping[str, Any] | None = None,
         managed_root: str = "",
         parent: Optional[QWidget] = None,
     ) -> None:
@@ -820,6 +960,7 @@ class SoftwareInstanceAssistant(QWidget):
         self._source_fingerprint = ""
         self._source_locked = False
         self._varac_arrangement_metadata: dict[str, int] = {}
+        self._legacy_cluster_gateway = False
         self._selected_source_payload: dict[str, Any] = {}
         self._loading_draft = False
         self._discovery_selected = False
@@ -828,6 +969,9 @@ class SoftwareInstanceAssistant(QWidget):
         self._managed_root = _text(managed_root)
         self._launch_recipe_resolution: GuidedLaunchRecipeResolution | None = None
         self._launch_recipe_resolution_supplied = launch_recipe_resolution is not None
+        self._varac_native_presentation = VarACNativePresentation.from_mapping(
+            varac_native_presentation
+        )
         self._resolving_launch_recipe = False
         self._discovery_results: tuple[Mapping[str, Any], ...] = ()
         self._recovery_discovery_results: tuple[Mapping[str, Any], ...] = ()
@@ -964,6 +1108,36 @@ class SoftwareInstanceAssistant(QWidget):
         self.prepared_safety_label.setAccessibleName("Safety and confirmation status")
         self.prepared_safety_label.setWordWrap(True)
         prepared_layout.addWidget(self.prepared_safety_label)
+        self.varac_native_group = QGroupBox("Native VarAC cluster")
+        self.varac_native_group.setObjectName("softwareInstanceVaracNativePresentation")
+        self.varac_native_group.setAccessibleName("Native VarAC cluster preparation")
+        native_layout = QVBoxLayout(self.varac_native_group)
+        native_layout.setContentsMargins(8, 8, 8, 8)
+        native_layout.setSpacing(3)
+        self.varac_native_status_label = QLabel()
+        self.varac_native_status_label.setObjectName("softwareInstanceVaracNativeStatus")
+        self.varac_native_status_label.setAccessibleName("Native VarAC preparation status")
+        self.varac_native_status_label.setWordWrap(True)
+        native_layout.addWidget(self.varac_native_status_label)
+        self.varac_native_summary_label = QLabel()
+        self.varac_native_summary_label.setObjectName("softwareInstanceVaracNativeSummary")
+        self.varac_native_summary_label.setAccessibleName("Native VarAC cluster summary")
+        self.varac_native_summary_label.setWordWrap(True)
+        native_layout.addWidget(self.varac_native_summary_label)
+        self.varac_native_why_label = QLabel()
+        self.varac_native_why_label.setObjectName("softwareInstanceVaracNativeWhy")
+        self.varac_native_why_label.setAccessibleName("Why native VarAC preparation is available")
+        self.varac_native_why_label.setWordWrap(True)
+        native_layout.addWidget(self.varac_native_why_label)
+        self.varac_native_prepare_button = QPushButton("Prepare VarAC")
+        self.varac_native_prepare_button.setObjectName("softwareInstancePrepareVarac")
+        self.varac_native_prepare_button.setAccessibleName("Prepare native VarAC cluster configuration")
+        self.varac_native_prepare_button.setToolTip(
+            "Ask the Settings host to prepare a reviewed native VarAC plan in its worker."
+        )
+        self.varac_native_prepare_button.clicked.connect(self._request_varac_native_prepare)
+        native_layout.addWidget(self.varac_native_prepare_button, 0, Qt.AlignLeft)
+        prepared_layout.addWidget(self.varac_native_group)
         self.prepared_details_button = QPushButton("Show details")
         self.prepared_details_button.setObjectName("softwareInstanceShowDetails")
         self.prepared_details_button.setCheckable(True)
@@ -1104,6 +1278,191 @@ class SoftwareInstanceAssistant(QWidget):
             )
         return "Existing impact: No existing software assignment is changed by this draft."
 
+    def varac_native_presentation(self) -> VarACNativePresentation:
+        """Return the current cached native-plan presentation for a host worker."""
+
+        return self._varac_native_presentation
+
+    def set_varac_native_presentation(
+        self,
+        presentation: VarACNativePresentation | Mapping[str, Any] | None,
+    ) -> None:
+        """Publish an already-prepared native-plan result without doing I/O.
+
+        Settings should call this only from its generation-fenced worker result
+        callback.  Publication intentionally preserves the current draft,
+        disclosure state, focus, and scroll position.
+        """
+
+        self._varac_native_presentation = VarACNativePresentation.from_mapping(
+            presentation
+        )
+        self._refresh_email_gateway_sender_choices()
+        self._update_prepared_presentation()
+        self._refresh_review_if_needed()
+
+    def varac_native_worker_payload(self) -> dict[str, Any]:
+        """Return the cache-only payload for host-owned Prepare or final Apply."""
+
+        draft_payload = self.draft().payload()
+        native_payload = self._varac_native_presentation.payload()
+        draft_payload["varac_native_presentation"] = native_payload
+        draft_payload["varac_native_generation"] = int(native_payload["generation"] or 0)
+        return {
+            "draft": draft_payload,
+            "native_presentation": native_payload,
+        }
+
+    def _native_varac_apply_required(self, draft: SoftwareInstanceDraft) -> bool:
+        return (
+            draft.family_key == "varac"
+            and draft.mode == "managed"
+            and draft.cluster_path in {"create_cluster", "join_cluster"}
+        )
+
+    def request_varac_native_apply(self) -> None:
+        """Let the final-review host request native apply in its own worker."""
+
+        if self._family_key == "varac":
+            self.varac_native_apply_requested.emit(self.varac_native_worker_payload())
+
+    def _request_varac_native_prepare(self) -> None:
+        if self._family_key == "varac":
+            self.varac_native_prepare_requested.emit(self.varac_native_worker_payload())
+
+    def _update_varac_native_presentation(self, draft: SoftwareInstanceDraft) -> None:
+        """Render a concise native cluster card from cached host facts only."""
+
+        group = self.varac_native_group
+        visible = self._native_varac_apply_required(draft)
+        group.setVisible(visible)
+        if not visible:
+            return
+        native = self._varac_native_presentation
+        state = native.state.replace("_", " ").strip().lower()
+        if (
+            native.draft_fingerprint
+            and native.draft_fingerprint != native_draft_fingerprint(draft.payload())
+        ):
+            state = "needs attention"
+        # A version may be detected without being safe to write.  Do not turn
+        # that evidence into a native-managed Ready claim.
+        if state == "ready" and native.writer_version and not native.writer_qualified:
+            state = "manual setup required"
+        state_copy = {
+            "not prepared": "Prepare VarAC",
+            "preparing": "Preparing VarAC…",
+            "stop required": "Stop VarAC to continue",
+            "stop varac required": "Stop VarAC to continue",
+            "stop varac": "Stop VarAC to continue",
+            "needs attention": "Needs attention",
+            "ready": "Ready",
+            "manual setup required": "Manual setup required",
+            "recovery required": "Recovery required",
+        }.get(state, native.state.replace("_", " ").title() or "Prepare VarAC")
+        arrangement = native.arrangement or draft.cluster_path.replace("_", " ")
+        radios = ", ".join(native.affected_radios) or self._radio_context_label()
+        writer = ""
+        if native.writer_version:
+            qualification = "qualified" if native.writer_qualified else "not qualified"
+            writer = f"VarAC {native.writer_version} writer {qualification}"
+            if native.writer_platform:
+                writer += f" · {native.writer_platform}"
+        elif draft.mode == "managed":
+            writer = "Native writer status pending preparation"
+        else:
+            writer = "Operator-managed native configuration"
+        shared_database = native.shared_database_summary
+        if draft.cluster_path == "standalone" and shared_database == "Not proposed":
+            shared_database = "Not used for standalone"
+        email_sender = native.email_gateway_sender_summary
+        if draft.cluster_path == "create_cluster":
+            email_sender = {
+                "none": "No email gateway",
+                "existing_member": "Existing member",
+                "new_member": "New member",
+            }.get(draft.email_gateway_sender_choice, "Choose a sender")
+        self.varac_native_status_label.setText(f"{state_copy} — {writer}")
+        self.varac_native_summary_label.setText(
+            " · ".join(
+                (
+                    f"Arrangement: {arrangement.title() or 'Not selected'}",
+                    f"Radios: {radios}",
+                    f"Shared VarAC database: {shared_database}",
+                    f"Members: {native.member_numbers_summary}",
+                    f"PTT lock: {native.ptt_lock_summary}",
+                    f"Email gateway sender: {email_sender}",
+                )
+            )
+        )
+        self.varac_native_why_label.setText(f"Why: {native.why}")
+        button_text = "Prepare VarAC"
+        enabled = state in {
+            "not prepared",
+            "needs attention",
+            "stop required",
+            "stop varac required",
+            "stop varac",
+        }
+        if state == "preparing":
+            button_text = "Preparing VarAC…"
+        elif state in {"stop required", "stop varac required", "stop varac"}:
+            button_text = "Retry after closing VarAC"
+        elif state == "ready":
+            button_text = "Ready for Review & Save"
+        elif state == "manual setup required":
+            button_text = "Manual setup required"
+        elif state == "recovery required":
+            button_text = "Recovery required"
+        self.varac_native_prepare_button.setText(button_text)
+        self.varac_native_prepare_button.setEnabled(enabled)
+        self.varac_native_prepare_button.setVisible(state not in {"manual setup required", "recovery required"})
+
+    def _varac_native_technical_lines(self) -> list[str]:
+        native = self._varac_native_presentation
+        if not native.varac_ini_path and not native.vara_runtime_path and not native.vara_ini_path:
+            return []
+        lines = ["Native VarAC / VARA details"]
+        if native.varac_ini_path:
+            lines.append(f"VarAC INI: {native.varac_ini_path}")
+        if native.vara_runtime_path:
+            lines.append(f"VARA runtime: {native.vara_runtime_path}")
+        if native.vara_ini_path:
+            lines.append(f"VARA INI: {native.vara_ini_path}")
+        if native.launch_command:
+            lines.append(f"Native launch command: {native.launch_command}")
+        if native.ports_summary:
+            lines.append(f"VARA ports: {native.ports_summary}")
+        if native.fingerprints_summary:
+            lines.append(f"Fingerprints: {native.fingerprints_summary}")
+        return lines
+
+    def _refresh_email_gateway_sender_choices(self) -> None:
+        """Populate explicit new-cluster sender intent from already-cached facts."""
+
+        combo = getattr(self, "email_gateway_sender_combo", None)
+        if not isinstance(combo, QComboBox):
+            return
+        prior_choice = str(combo.currentData() or "none")
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem("No email gateway", "none")
+            existing_id = int(
+                self._varac_arrangement_metadata.get("existing_standalone_node_id", 0)
+                or 0
+            )
+            native_radios = self._varac_native_presentation.affected_radios
+            if existing_id:
+                existing_label = native_radios[0] if native_radios else "existing member"
+                combo.addItem(f"Existing member — {existing_label}", "existing_member")
+            new_label = self._radio_context_label()
+            combo.addItem(f"New member — {new_label}", "new_member")
+            index = combo.findData(prior_choice)
+            combo.setCurrentIndex(index if index >= 0 else 0)
+        finally:
+            combo.blockSignals(False)
+
     def _prepared_technical_lines(self, draft: SoftwareInstanceDraft) -> list[str]:
         """Read-only evidence deliberately kept out of the normal decision path."""
 
@@ -1140,6 +1499,8 @@ class SoftwareInstanceAssistant(QWidget):
             )
             if resolution.recovery_action:
                 lines.append(f"Recovery: {resolution.recovery_action}")
+        if draft.family_key == "varac":
+            lines.extend(self._varac_native_technical_lines())
         return lines
 
     def _update_prepared_presentation(self) -> None:
@@ -1192,6 +1553,7 @@ class SoftwareInstanceAssistant(QWidget):
             "Safety: FIO does not change an existing application, assignment, or "
             "third-party configuration until you review and explicitly confirm the final action."
         )
+        self._update_varac_native_presentation(draft)
         radio = self._radio_context_label()
         expanded = self._details_expanded()
         blocked = self.prepared_details_button.blockSignals(True)
@@ -1417,8 +1779,24 @@ class SoftwareInstanceAssistant(QWidget):
         self.varac_cluster_why_label.setAccessibleName("Why VarAC defaults to standalone")
         self.varac_cluster_why_label.setWordWrap(True)
         self._active_form.addRow("Why", self.varac_cluster_why_label)
+        self.email_gateway_sender_combo = QComboBox()
+        self.email_gateway_sender_combo.setObjectName("softwareInstanceEmailGatewaySender")
+        self.email_gateway_sender_combo.setAccessibleName("Email gateway sender")
+        self.email_gateway_sender_combo.setToolTip(
+            "Choose no sender when VarAC email relay is off, or explicitly select one cluster member."
+        )
+        self.email_gateway_sender_combo.currentIndexChanged.connect(
+            lambda _index: (
+                self._update_prepared_presentation(),
+                self._refresh_review_if_needed(),
+            )
+        )
+        self._field_widgets["email_gateway_sender_choice"] = self.email_gateway_sender_combo
+        email_sender_label = QLabel("Email gateway sender")
+        email_sender_label.setWordWrap(True)
+        self._field_labels["email_gateway_sender_choice"] = email_sender_label
+        self._active_form.addRow(email_sender_label, self.email_gateway_sender_combo)
         for key, text in (
-            ("cluster_gateway", "Use this node as the new cluster gateway"),
             ("cluster_ptt_lock", "Enable cluster PTT lock"),
         ):
             checkbox = QCheckBox(text)
@@ -2052,6 +2430,7 @@ class SoftwareInstanceAssistant(QWidget):
             if isinstance(cluster_path_widget, QComboBox)
             else "standalone"
         )
+        self._refresh_email_gateway_sender_choices()
         for key, widget in self._field_widgets.items():
             shown = key in visible
             if self._family_key == "fast_light" and observer_mode and key in {
@@ -2063,9 +2442,9 @@ class SoftwareInstanceAssistant(QWidget):
             }:
                 shown = False
             if self._family_key == "varac":
-                if key in {"cluster_id", "cluster_name", "cluster_shared_database", "cluster_instance_number", "cluster_gateway", "cluster_ptt_lock"}:
+                if key in {"cluster_id", "cluster_name", "cluster_shared_database", "cluster_instance_number", "email_gateway_sender_choice", "cluster_ptt_lock"}:
                     shown = cluster_path != "standalone"
-                if key in {"cluster_name", "cluster_shared_database", "cluster_gateway", "cluster_ptt_lock"}:
+                if key in {"cluster_name", "cluster_shared_database", "email_gateway_sender_choice", "cluster_ptt_lock"}:
                     shown = cluster_path == "create_cluster"
             widget.setVisible(shown)
             label = self._field_labels.get(key)
@@ -2309,6 +2688,8 @@ class SoftwareInstanceAssistant(QWidget):
                 draft.existing_standalone_member_number or 0
             ),
         }
+        self._legacy_cluster_gateway = bool(draft.cluster_gateway)
+        self._refresh_email_gateway_sender_choices()
         if self._source_locked:
             self._discovery_selected = True
             if not self._selected_source_payload:
@@ -2380,6 +2761,20 @@ class SoftwareInstanceAssistant(QWidget):
         resolution = self._launch_recipe_resolution
         cluster_path = value("cluster_path") or "standalone"
         existing_standalone_create = cluster_path == "create_cluster"
+        email_sender_choice = (
+            value("email_gateway_sender_choice")
+            if existing_standalone_create
+            else "none"
+        ) or "none"
+        if email_sender_choice == "existing_member":
+            email_sender_member_id = str(
+                self._varac_arrangement_metadata.get("existing_standalone_node_id", 0)
+                or ""
+            )
+        elif email_sender_choice == "new_member":
+            email_sender_member_id = self._draft_instance_key or self._assistant_draft_owner_key
+        else:
+            email_sender_member_id = ""
         return SoftwareInstanceDraft(
             family_key=self._family_key,
             instance_name=value("instance_name"),
@@ -2440,7 +2835,11 @@ class SoftwareInstanceAssistant(QWidget):
                 )
                 or 0
             ) if existing_standalone_create else 0,
-            cluster_gateway=checked("cluster_gateway"),
+            email_gateway_sender_choice=email_sender_choice,
+            email_gateway_sender_member_id=email_sender_member_id,
+            # Preserve legacy compatibility evidence exactly; the new native
+            # sender choice is independent and never infers this field.
+            cluster_gateway=self._legacy_cluster_gateway,
             cluster_ptt_lock=checked("cluster_ptt_lock"),
             notes=value("notes"),
             imported_id=self._imported_id,
@@ -2463,6 +2862,31 @@ class SoftwareInstanceAssistant(QWidget):
     def validation(self) -> tuple[InstanceConflict, ...]:
         draft = self.draft()
         findings = list(instance_conflicts(draft, self._existing_instances))
+        if self._native_varac_apply_required(draft):
+            native = self._varac_native_presentation
+            native_state = native.state.replace("_", " ").strip().lower()
+            native_is_current = (
+                not native.draft_fingerprint
+                or native.draft_fingerprint == native_draft_fingerprint(draft.payload())
+            )
+            if native_state != "ready" or not native_is_current:
+                findings.append(
+                    InstanceConflict(
+                        "varac_native_prepare_required",
+                        "error",
+                        "Prepare VarAC before Review & Save",
+                        "Native VarAC configuration must be prepared and ready before FIO can review the final apply plan.",
+                    )
+                )
+            if not native.writer_qualified:
+                findings.append(
+                    InstanceConflict(
+                        "varac_native_writer_unqualified",
+                        "error",
+                        "Manual VarAC configuration required",
+                        "The detected VarAC writer is not exactly qualified. Review the operator action instead of applying native configuration.",
+                    )
+                )
         if draft.mode == "discover" and not self._discovery_selected:
             findings.append(
                 InstanceConflict(
@@ -2593,6 +3017,12 @@ class SoftwareInstanceAssistant(QWidget):
                     f"Cluster path: {draft.cluster_path.replace('_', ' ').title()}",
                     f"Cluster: {draft.cluster_id or draft.cluster_name or 'Not assigned'}"
                     + (f" · instance {draft.cluster_instance_number}" if draft.cluster_instance_number else ""),
+                    "Email gateway sender: "
+                    + {
+                        "none": "No email gateway",
+                        "existing_member": "Existing member",
+                        "new_member": "New member",
+                    }.get(draft.email_gateway_sender_choice, "Needs attention"),
                 )
             )
         if draft.family_key in {"js8call", "fast_light"} and resolution is not None:
@@ -2658,7 +3088,12 @@ class SoftwareInstanceAssistant(QWidget):
         self.step_label.setText(f"Step {self._step + 1} of {len(self.STEP_TITLES)} · {self.STEP_TITLES[self._step]}")
         self.back_button.setEnabled(self._step > 0)
         last_step = len(self.STEP_TITLES) - 1
-        final_action = "Apply to radio draft" if self._unsaved_owner_key else "Add instance"
+        draft = self.draft()
+        final_action = (
+            "Review & Save"
+            if self._native_varac_apply_required(draft)
+            else "Apply to radio draft" if self._unsaved_owner_key else "Add instance"
+        )
         self.next_button.setText(final_action if self._step == last_step else "Next")
         blocked_for_radio = not self._selected_radio_id and not self._unsaved_owner_key
         blocked_for_replacement = self._replacement_instance is not None and not self._replacement_confirmed
@@ -2714,9 +3149,17 @@ class SoftwareInstanceAssistant(QWidget):
             self._refresh()
             return
         draft = self.draft()
-        self.validation_requested.emit(draft.payload())
+        payload = draft.payload()
+        native_apply_required = self._native_varac_apply_required(draft)
+        if native_apply_required:
+            native_worker_payload = self.varac_native_worker_payload()
+            payload = dict(native_worker_payload["draft"])
+        self.validation_requested.emit(payload)
         if not any(item.severity == "error" for item in self.validation()):
-            self.completed.emit(draft.payload())
+            if native_apply_required:
+                self.varac_native_apply_requested.emit(native_worker_payload)
+            else:
+                self.completed.emit(payload)
 
     def _back(self) -> None:
         if self._step > 0:
@@ -2730,6 +3173,7 @@ __all__ = [
     "SUPPORTED_INSTANCE_FAMILIES",
     "SoftwareInstanceAssistant",
     "SoftwareInstanceDraft",
+    "VarACNativePresentation",
     "instance_conflicts",
     "normalize_instance_draft",
 ]

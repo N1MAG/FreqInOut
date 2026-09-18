@@ -104,8 +104,10 @@ remains operator-configured and explicitly reviewed.
 Each VarAC radio uses a distinct node record with its own installation/launcher,
 INI, database/runtime paths, inbox/outbox paths, and launch identity. Cluster
 membership is a separate, persisted relationship that supplies cluster ID,
-instance number, shared database where applicable, counter refresh, gateway
-handler, and PTT-lock policy.
+instance number, the effective native shared database, counter refresh, email
+gateway sender, and PTT-lock policy. Native writes, backup/readback/recovery,
+and compatibility handling are governed by
+`varac_native_cluster_configuration_spec.md`.
 
 FIO presents **VarAC arrangement** before node, Files, connection, or cluster
 detail. It does not imply that ordinary single-instance VarAC requires cluster

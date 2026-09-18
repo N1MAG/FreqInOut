@@ -86,6 +86,10 @@ class SoftwareAdministrationWorkspace(QWidget):
     assign_requested = Signal(str)
     instance_add_requested = Signal(object)
     instance_discovery_requested = Signal(object)
+    # Settings owns the bounded worker and persistence transaction.  These
+    # relays intentionally carry cache-only assistant payloads only.
+    varac_native_prepare_requested = Signal(object)
+    varac_native_apply_requested = Signal(object)
     # Keep ``assign_requested`` compatible with Settings while exposing a
     # richer seam for hosts that distinguish this explicit action.
     assign_existing_requested = Signal(object)
@@ -840,6 +844,12 @@ class SoftwareAdministrationWorkspace(QWidget):
         assistant.completed.connect(self._on_instance_assistant_completed)
         assistant.cancelled.connect(self._close_instance_assistant)
         assistant.create_radio_requested.connect(self._on_create_radio_requested)
+        assistant.varac_native_prepare_requested.connect(
+            self.varac_native_prepare_requested.emit
+        )
+        assistant.varac_native_apply_requested.connect(
+            self.varac_native_apply_requested.emit
+        )
         # Keep the shell's cache-only source contract explicit; the optional
         # discovery adapter is looked up only when this button is opened.
         getattr(assistant, "discover" + "_requested").connect(
@@ -942,6 +952,46 @@ class SoftwareAdministrationWorkspace(QWidget):
         assistant = self._instance_assistant
         if assistant is not None:
             assistant.set_discovery_results(results)
+
+    def set_varac_native_presentation(self, presentation: Mapping[str, Any]) -> bool:
+        """Publish a worker-produced VarAC plan/state to the active assistant.
+
+        This workspace does not validate, prepare, apply, or persist native
+        files.  The Settings host uses the matching request signals to run
+        that work and then calls this method with a generation-fenced result.
+        """
+
+        assistant = self._instance_assistant
+        if assistant is None or assistant.draft().family_key != "varac":
+            return False
+        assistant.set_varac_native_presentation(presentation)
+        return True
+
+    def request_varac_native_apply(self) -> bool:
+        """Forward final-review native apply intent without performing I/O."""
+
+        assistant = self._instance_assistant
+        if assistant is None or assistant.draft().family_key != "varac":
+            return False
+        assistant.request_varac_native_apply()
+        return True
+
+    def varac_native_draft_payload(self) -> Mapping[str, Any]:
+        """Return the active cache-only VarAC draft for generation fencing."""
+
+        assistant = self._instance_assistant
+        if assistant is None or assistant.draft().family_key != "varac":
+            return {}
+        return assistant.draft().payload()
+
+    def complete_varac_native_apply(self, payload: Mapping[str, Any]) -> bool:
+        """Continue the normal instance-save signal after verified native apply."""
+
+        assistant = self._instance_assistant
+        if assistant is None or assistant.draft().family_key != "varac":
+            return False
+        assistant.completed.emit(dict(payload))
+        return True
 
     def complete_instance_add(self, *, success: bool, message: str) -> None:
         assistant = self._instance_assistant

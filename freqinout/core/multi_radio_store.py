@@ -95,6 +95,21 @@ GATEWAY_EXCLUSIVE_POLICY_PRIORITY = 70
 PROFILE_SWAP_POLICY_TYPE = "profile_swap"
 PROFILE_SWAP_POLICY_PRIORITY = 40
 SUPPORTED_PROFILE_SWAP_MODES = frozenset({"use_target_profile", "carry_primary_profile"})
+SUPPORTED_VARAC_NATIVE_MANAGEMENT_STATES = frozenset(
+    {"operator", "prepared", "managed", "recovery_required"}
+)
+SUPPORTED_VARAC_NATIVE_JOURNAL_STATES = frozenset(
+    {
+        "pending",
+        "backup_ready",
+        "promoting",
+        "external_applied",
+        "fio_committed",
+        "complete",
+        "rolled_back",
+        "recovery_required",
+    }
+)
 
 MIRRORED_LEGACY_KEYS = frozenset(
     {
@@ -676,8 +691,16 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             install_path TEXT,
             db_path TEXT,
             ini_path TEXT,
+            vara_runtime_path TEXT,
+            vara_ini_path TEXT,
             launch_cmd TEXT,
             incoming_path TEXT,
+            native_management_state TEXT NOT NULL DEFAULT 'operator',
+            native_writer_key TEXT,
+            desired_fingerprint TEXT,
+            observed_fingerprint TEXT,
+            last_native_verified_utc TEXT,
+            native_verification_summary TEXT,
             created_utc TEXT NOT NULL,
             updated_utc TEXT NOT NULL
         )
@@ -689,8 +712,16 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             "install_path": "TEXT",
             "db_path": "TEXT",
             "ini_path": "TEXT",
+            "vara_runtime_path": "TEXT",
+            "vara_ini_path": "TEXT",
             "launch_cmd": "TEXT",
             "incoming_path": "TEXT",
+            "native_management_state": "TEXT NOT NULL DEFAULT 'operator'",
+            "native_writer_key": "TEXT",
+            "desired_fingerprint": "TEXT",
+            "observed_fingerprint": "TEXT",
+            "last_native_verified_utc": "TEXT",
+            "native_verification_summary": "TEXT",
             "created_utc": "TEXT NOT NULL",
             "updated_utc": "TEXT NOT NULL",
         },
@@ -1002,6 +1033,14 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             counters_refresh_sec INTEGER NOT NULL DEFAULT 30,
             ptt_lock_enabled INTEGER NOT NULL DEFAULT 0,
             gateway_handler_device_id INTEGER,
+            email_gateway_sender_device_id INTEGER,
+            native_management_state TEXT NOT NULL DEFAULT 'operator',
+            native_writer_key TEXT,
+            desired_fingerprint TEXT,
+            observed_fingerprint TEXT,
+            resource_claims_json TEXT NOT NULL DEFAULT '[]',
+            last_native_verified_utc TEXT,
+            native_verification_summary TEXT,
             created_utc TEXT NOT NULL,
             updated_utc TEXT NOT NULL
         )
@@ -1013,6 +1052,14 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             "counters_refresh_sec": "INTEGER NOT NULL DEFAULT 30",
             "ptt_lock_enabled": "INTEGER NOT NULL DEFAULT 0",
             "gateway_handler_device_id": "INTEGER",
+            "email_gateway_sender_device_id": "INTEGER",
+            "native_management_state": "TEXT NOT NULL DEFAULT 'operator'",
+            "native_writer_key": "TEXT",
+            "desired_fingerprint": "TEXT",
+            "observed_fingerprint": "TEXT",
+            "resource_claims_json": "TEXT NOT NULL DEFAULT '[]'",
+            "last_native_verified_utc": "TEXT",
+            "native_verification_summary": "TEXT",
             "created_utc": "TEXT NOT NULL",
             "updated_utc": "TEXT NOT NULL",
         },
@@ -1042,6 +1089,43 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
         },
         "indexes": (
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_varac_cluster_members_instance ON varac_cluster_members(cluster_id, instance_number)",
+        ),
+    },
+    "varac_native_apply_journal": {
+        "ddl": """
+        CREATE TABLE IF NOT EXISTS varac_native_apply_journal (
+            id TEXT PRIMARY KEY,
+            plan_fingerprint TEXT NOT NULL,
+            state TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            writer_key TEXT NOT NULL,
+            targets_json TEXT NOT NULL DEFAULT '[]',
+            desired_json TEXT NOT NULL DEFAULT '{}',
+            observed_json TEXT NOT NULL DEFAULT '{}',
+            backup_manifest_json TEXT NOT NULL DEFAULT '{}',
+            error TEXT,
+            created_utc TEXT NOT NULL,
+            updated_utc TEXT NOT NULL,
+            completed_utc TEXT
+        )
+        """,
+        "columns": {
+            "plan_fingerprint": "TEXT NOT NULL DEFAULT ''",
+            "state": "TEXT NOT NULL DEFAULT 'pending'",
+            "operation": "TEXT NOT NULL DEFAULT ''",
+            "writer_key": "TEXT NOT NULL DEFAULT ''",
+            "targets_json": "TEXT NOT NULL DEFAULT '[]'",
+            "desired_json": "TEXT NOT NULL DEFAULT '{}'",
+            "observed_json": "TEXT NOT NULL DEFAULT '{}'",
+            "backup_manifest_json": "TEXT NOT NULL DEFAULT '{}'",
+            "error": "TEXT",
+            "created_utc": "TEXT NOT NULL DEFAULT ''",
+            "updated_utc": "TEXT NOT NULL DEFAULT ''",
+            "completed_utc": "TEXT",
+        },
+        "indexes": (
+            "CREATE INDEX IF NOT EXISTS idx_varac_native_journal_state ON varac_native_apply_journal(state)",
+            "CREATE INDEX IF NOT EXISTS idx_varac_native_journal_fingerprint ON varac_native_apply_journal(plan_fingerprint)",
         ),
     },
     "radio_launch_bundles": {
@@ -2344,12 +2428,15 @@ def _list_varac_clusters_conn(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
             c.*,
             COUNT(m.device_profile_id) AS member_count,
             COALESCE(SUM(CASE WHEN m.enabled=1 THEN 1 ELSE 0 END), 0) AS enabled_member_count,
-            g.name AS gateway_handler_name
+            g.name AS gateway_handler_name,
+            eg.name AS email_gateway_sender_name
           FROM varac_clusters c
           LEFT JOIN varac_cluster_members m
             ON m.cluster_id = c.id
           LEFT JOIN device_profiles g
             ON g.id = c.gateway_handler_device_id
+          LEFT JOIN device_profiles eg
+            ON eg.id = c.email_gateway_sender_device_id
       GROUP BY c.id
       ORDER BY LOWER(c.name) ASC, c.id ASC
         """
@@ -2386,6 +2473,14 @@ def _list_varac_clusters_conn(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
             else None
         )
         data["gateway_handler_name"] = _coerce_text(data.get("gateway_handler_name", ""), "")
+        data["email_gateway_sender_device_id"] = (
+            int(data.get("email_gateway_sender_device_id", 0) or 0)
+            if data.get("email_gateway_sender_device_id") not in (None, "")
+            else None
+        )
+        data["email_gateway_sender_name"] = _coerce_text(
+            data.get("email_gateway_sender_name", ""), ""
+        )
         data["member_device_ids"] = [int(dict(member).get("device_profile_id", 0) or 0) for member in enabled_members]
         data["member_names"] = [
             _coerce_text(dict(member).get("device_name", ""), "")
@@ -2396,6 +2491,15 @@ def _list_varac_clusters_conn(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
             data.get("gateway_handler_device_id") in data["member_device_ids"]
             if data.get("gateway_handler_device_id") is not None
             else False
+        )
+        data["email_gateway_sender_ready"] = (
+            data.get("email_gateway_sender_device_id") in data["member_device_ids"]
+            if data.get("email_gateway_sender_device_id") is not None
+            else False
+        )
+        data["legacy_gateway_evidence_requires_review"] = (
+            data.get("gateway_handler_device_id") is not None
+            and data.get("email_gateway_sender_device_id") is None
         )
         clusters.append(data)
     return clusters
@@ -2432,6 +2536,7 @@ def _list_varac_cluster_members_conn(
             c.counters_refresh_sec,
             c.ptt_lock_enabled,
             c.gateway_handler_device_id,
+            c.email_gateway_sender_device_id,
             d.name AS device_name,
             d.device_class,
             d.enabled AS device_enabled,
@@ -2460,6 +2565,16 @@ def _list_varac_cluster_members_conn(
         data["device_class"] = _coerce_text(data.get("device_class", "tx_rx"), "tx_rx").lower() or "tx_rx"
         data["gateway_handler_device_id"] = gateway_id
         data["is_gateway_handler"] = gateway_id is not None and int(data.get("device_profile_id", 0) or 0) == gateway_id
+        email_sender_id = (
+            int(data.get("email_gateway_sender_device_id", 0) or 0)
+            if data.get("email_gateway_sender_device_id") not in (None, "")
+            else None
+        )
+        data["email_gateway_sender_device_id"] = email_sender_id
+        data["is_email_gateway_sender"] = (
+            email_sender_id is not None
+            and int(data.get("device_profile_id", 0) or 0) == email_sender_id
+        )
         members.append(data)
     return members
 
@@ -3165,13 +3280,40 @@ def _save_fast_light_config_conn(conn: sqlite3.Connection, values: Mapping[str, 
 
 
 def _save_varac_node_conn(conn: sqlite3.Connection, values: Mapping[str, Any]) -> Dict[str, Any]:
+    payload = dict(values or {})
+    existing = (
+        _record_by_id(conn, "varac_nodes", int(payload["id"]))
+        if _coerce_optional_int(payload.get("id")) is not None
+        else None
+    )
+    native_state = _coerce_text(
+        payload.get("native_management_state", (existing or {}).get("native_management_state", "operator")),
+        "operator",
+    ).lower()
+    if native_state not in SUPPORTED_VARAC_NATIVE_MANAGEMENT_STATES:
+        raise ValueError("Unsupported VarAC native management state.")
+    payload["native_management_state"] = native_state
     return _save_simple_record(
         conn,
         "varac_nodes",
-        values,
+        payload,
         default_system_key=DEFAULT_VARAC_NODE_SYSTEM_KEY,
         default_name=DEFAULT_VARAC_NODE_NAME,
-        fields=("install_path", "db_path", "ini_path", "launch_cmd", "incoming_path"),
+        fields=(
+            "install_path",
+            "db_path",
+            "ini_path",
+            "vara_runtime_path",
+            "vara_ini_path",
+            "launch_cmd",
+            "incoming_path",
+            "native_management_state",
+            "native_writer_key",
+            "desired_fingerprint",
+            "observed_fingerprint",
+            "last_native_verified_utc",
+            "native_verification_summary",
+        ),
     )
 
 
@@ -3179,6 +3321,8 @@ def _validate_software_application_claims_conn(
     conn: sqlite3.Connection,
     family_key: str,
     values: Mapping[str, Any],
+    *,
+    allowed_varac_shared_db_path: str = "",
 ) -> None:
     """Reject collisions in legacy application rows that predate manifests."""
 
@@ -3242,6 +3386,16 @@ def _validate_software_application_claims_conn(
             path = _coerce_text(value, "")
             if not path:
                 continue
+            if column == "db_path" and allowed_varac_shared_db_path:
+                if normalize_varac_path(path, label) == normalize_varac_path(
+                    allowed_varac_shared_db_path,
+                    "VarAC shared database path",
+                ):
+                    # Native cluster members intentionally share one effective
+                    # database.  The caller separately proves that it belongs
+                    # to this selected/new cluster, so legacy node uniqueness
+                    # must not reject the reviewed cluster contract.
+                    continue
             row = conn.execute(
                 f"SELECT name FROM varac_nodes WHERE {column}=? AND (? IS NULL OR id<>?) LIMIT 1",
                 (path, record_id, record_id),
@@ -4287,6 +4441,28 @@ def _resolve_device_profile_links_conn(conn: sqlite3.Connection, profile: Mappin
                 data["varac_db_path"] = _coerce_text(varac_row.get("db_path", ""), "")
             if not _coerce_text(data.get("varac_ini_path", ""), ""):
                 data["varac_ini_path"] = _coerce_text(varac_row.get("ini_path", ""), "")
+            data["varac_vara_runtime_path"] = _coerce_text(
+                varac_row.get("vara_runtime_path", ""), ""
+            )
+            data["varac_vara_ini_path"] = _coerce_text(varac_row.get("vara_ini_path", ""), "")
+            data["varac_native_management_state"] = _coerce_text(
+                varac_row.get("native_management_state", "operator"), "operator"
+            )
+            data["varac_native_writer_key"] = _coerce_text(
+                varac_row.get("native_writer_key", ""), ""
+            )
+            data["varac_native_desired_fingerprint"] = _coerce_text(
+                varac_row.get("desired_fingerprint", ""), ""
+            )
+            data["varac_native_observed_fingerprint"] = _coerce_text(
+                varac_row.get("observed_fingerprint", ""), ""
+            )
+            data["varac_last_native_verified_utc"] = _coerce_text(
+                varac_row.get("last_native_verified_utc", ""), ""
+            )
+            data["varac_native_verification_summary"] = _coerce_text(
+                varac_row.get("native_verification_summary", ""), ""
+            )
             if not _coerce_text(data.get("launch_cmd", ""), ""):
                 data["launch_cmd"] = _coerce_text(varac_row.get("launch_cmd", ""), "")
             if not _coerce_text(data.get("varac_incoming_path", ""), ""):
@@ -7415,6 +7591,20 @@ class MultiRadioStore:
                     create_cluster_values.get("gateway_existing_standalone", False),
                     False,
                 )
+                email_gateway_sender_choice = _coerce_text(
+                    create_cluster_values.get("email_gateway_sender_choice", "none"),
+                    "none",
+                ).lower()
+                if email_gateway_sender_choice not in {"none", "existing_member", "new_member"}:
+                    raise ValueError(
+                        "Choose No email gateway, existing member, or new member for the native VarAC cluster."
+                    )
+                create_cluster_native_state = _coerce_text(
+                    create_cluster_values.get("native_management_state", "operator"),
+                    "operator",
+                ).lower()
+                if create_cluster_native_state not in SUPPORTED_VARAC_NATIVE_MANAGEMENT_STATES:
+                    raise ValueError("Unsupported VarAC native management state.")
                 if gateway_for_new_cluster and gateway_existing_standalone:
                     raise ValueError("Choose exactly one VarAC cluster gateway policy.")
                 if gateway_existing_standalone and existing_standalone_node_id is None:
@@ -7456,7 +7646,27 @@ class MultiRadioStore:
                 ):
                     raise ValueError("The radio's software assignment changed. Refresh and review it before replacing it.")
                 app_values = dict(application_values or {})
-                _validate_software_application_claims_conn(conn, family, app_values)
+                allowed_varac_shared_db_path = ""
+                if (
+                    family == "varac"
+                    and str(app_values.get("native_management_state") or "operator").strip().lower()
+                    == "managed"
+                ):
+                    if create_cluster_values:
+                        allowed_varac_shared_db_path = _coerce_text(
+                            create_cluster_values.get("shared_db_path", ""), ""
+                        )
+                    elif cluster_db_id_value is not None:
+                        selected_cluster = _varac_cluster_by_id(conn, int(cluster_db_id_value)) or {}
+                        allowed_varac_shared_db_path = _coerce_text(
+                            selected_cluster.get("shared_db_path", ""), ""
+                        )
+                _validate_software_application_claims_conn(
+                    conn,
+                    family,
+                    app_values,
+                    allowed_varac_shared_db_path=allowed_varac_shared_db_path,
+                )
                 if family == "js8call":
                     saved_app = _save_js8_instance_conn(conn, app_values)
                     link_column = "js8_instance_id"
@@ -7521,19 +7731,39 @@ class MultiRadioStore:
                         if duplicate_cluster is not None:
                             raise ValueError(f"VarAC cluster ID {public_cluster_id} is already in use.")
                         shared_db_path = _coerce_text(create_cluster_values.get("shared_db_path", ""), "")
-                        node_local_paths = {
-                            normalize_varac_path(
-                                _coerce_text(app_values.get(key, ""), ""),
-                                f"VarAC {key}",
-                            )
-                            for key in ("ini_path", "db_path", "incoming_path", "outbox_path")
-                            if _coerce_text(app_values.get(key, ""), "")
-                        }
                         normalized_shared_db = (
                             normalize_varac_path(shared_db_path, "VarAC shared database path")
                             if shared_db_path
                             else ""
                         )
+                        new_node_db = _coerce_text(app_values.get("db_path", ""), "")
+                        normalized_new_node_db = (
+                            normalize_varac_path(new_node_db, "VarAC db_path")
+                            if new_node_db
+                            else ""
+                        )
+                        if create_cluster_native_state == "managed":
+                            if not normalized_shared_db:
+                                raise ValueError(
+                                    "A native-managed VarAC cluster requires one effective shared database."
+                                )
+                            if normalized_new_node_db != normalized_shared_db:
+                                raise ValueError(
+                                    "A native-managed VarAC member must use the cluster's effective shared database."
+                                )
+                        node_local_paths = {
+                            normalize_varac_path(
+                                _coerce_text(app_values.get(key, ""), ""),
+                                f"VarAC {key}",
+                            )
+                            for key in (
+                                "ini_path",
+                                *(("db_path",) if create_cluster_native_state != "managed" else ()),
+                                "incoming_path",
+                                "outbox_path",
+                            )
+                            if _coerce_text(app_values.get(key, ""), "")
+                        }
                         if normalized_shared_db and normalized_shared_db in node_local_paths:
                             raise ValueError(
                                 "A VarAC cluster shared database cannot replace a node-local INI, database, incoming, or outbox path."
@@ -7553,9 +7783,14 @@ class MultiRadioStore:
                             existing_node_paths = {
                                 normalize_varac_path(str(value), "VarAC node-local path")
                                 for row in conn.execute(
-                                    "SELECT ini_path, db_path, incoming_path FROM varac_nodes"
+                                    "SELECT id, ini_path, db_path, incoming_path FROM varac_nodes"
                                 ).fetchall()
-                                for value in row
+                                if int(row[0] or 0)
+                                not in {
+                                    int(existing_standalone_node_id or 0),
+                                    int(saved_app.get("id") or 0),
+                                }
+                                for value in row[1:]
                                 if str(value or "").strip()
                             }
                             existing_node_paths.update(
@@ -7573,8 +7808,12 @@ class MultiRadioStore:
                             """
                             INSERT INTO varac_clusters (
                                 name, cluster_id, shared_db_path, counters_refresh_sec,
-                                ptt_lock_enabled, gateway_handler_device_id, created_utc, updated_utc
-                            ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
+                                ptt_lock_enabled, gateway_handler_device_id,
+                                email_gateway_sender_device_id, native_management_state,
+                                native_writer_key, desired_fingerprint, observed_fingerprint,
+                                resource_claims_json, native_verification_summary,
+                                created_utc, updated_utc
+                            ) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 cluster_name,
@@ -7582,6 +7821,21 @@ class MultiRadioStore:
                                 shared_db_path or None,
                                 max(5, min(600, _coerce_int(create_cluster_values.get("counters_refresh_sec", 30), 30))),
                                 _coerce_bool_int(create_cluster_values.get("ptt_lock_enabled", 0), False),
+                                create_cluster_native_state,
+                                _coerce_text(create_cluster_values.get("native_writer_key", ""), "") or None,
+                                _coerce_text(create_cluster_values.get("desired_fingerprint", ""), "") or None,
+                                _coerce_text(create_cluster_values.get("observed_fingerprint", ""), "") or None,
+                                json.dumps(
+                                    ([{
+                                        "kind": "database",
+                                        "path": shared_db_path,
+                                        "owner_type": "varac_cluster",
+                                        "owner_id": public_cluster_id,
+                                        "exclusive": False,
+                                    }] if shared_db_path else []),
+                                    sort_keys=True,
+                                ),
+                                _coerce_text(create_cluster_values.get("native_verification_summary", ""), "") or None,
                                 now_iso,
                                 now_iso,
                             ),
@@ -7661,6 +7915,19 @@ class MultiRadioStore:
                         raise KeyError(f"Unknown VarAC cluster id: {cluster_db_id_value}")
                     if observer_profile:
                         raise ValueError("Observer / SDR device profiles cannot participate in VarAC clusters.")
+                    if str(saved_app.get("native_management_state") or "operator").strip().lower() == "managed":
+                        member_db = normalize_varac_path(
+                            str(saved_app.get("db_path") or ""),
+                            "VarAC member database path",
+                        )
+                        cluster_db = normalize_varac_path(
+                            str(cluster.get("shared_db_path") or ""),
+                            "VarAC shared database path",
+                        )
+                        if not cluster_db or member_db != cluster_db:
+                            raise ValueError(
+                                "A native-managed VarAC member must use the cluster's effective shared database."
+                            )
                     instance_number = _coerce_int(varac_cluster_instance_number, 0)
                     if instance_number <= 0:
                         raise ValueError("VarAC cluster instance number must be a positive integer.")
@@ -7746,6 +8013,20 @@ class MultiRadioStore:
                     elif gateway_existing_standalone:
                         conn.execute(
                             "UPDATE varac_clusters SET gateway_handler_device_id=?, updated_utc=? WHERE id=?",
+                            (int(existing_standalone_device_id), now_iso, int(cluster_db_id_value)),
+                        )
+                    if email_gateway_sender_choice == "new_member":
+                        conn.execute(
+                            "UPDATE varac_clusters SET email_gateway_sender_device_id=?, updated_utc=? WHERE id=?",
+                            (radio_id, now_iso, int(cluster_db_id_value)),
+                        )
+                    elif email_gateway_sender_choice == "existing_member":
+                        if existing_standalone_device_id is None:
+                            raise ValueError(
+                                "The existing email gateway sender is unavailable for this cluster."
+                            )
+                        conn.execute(
+                            "UPDATE varac_clusters SET email_gateway_sender_device_id=?, updated_utc=? WHERE id=?",
                             (int(existing_standalone_device_id), now_iso, int(cluster_db_id_value)),
                         )
                     _sync_varac_cluster_member_enabled_flags_conn(conn)
@@ -8329,21 +8610,75 @@ class MultiRadioStore:
             gateway_handler_device_id = _coerce_optional_int(
                 payload.get("gateway_handler_device_id", (existing or {}).get("gateway_handler_device_id"))
             )
+            email_gateway_sender_device_id = _coerce_optional_int(
+                payload.get(
+                    "email_gateway_sender_device_id",
+                    (existing or {}).get("email_gateway_sender_device_id"),
+                )
+            )
+            native_management_state = _coerce_text(
+                payload.get(
+                    "native_management_state",
+                    (existing or {}).get("native_management_state", "operator"),
+                ),
+                "operator",
+            ).lower()
+            if native_management_state not in SUPPORTED_VARAC_NATIVE_MANAGEMENT_STATES:
+                raise ValueError("Unsupported VarAC native management state.")
+            native_writer_key = _coerce_text(
+                payload.get("native_writer_key", (existing or {}).get("native_writer_key", "")), ""
+            )
+            desired_fingerprint = _coerce_text(
+                payload.get("desired_fingerprint", (existing or {}).get("desired_fingerprint", "")), ""
+            )
+            observed_fingerprint = _coerce_text(
+                payload.get("observed_fingerprint", (existing or {}).get("observed_fingerprint", "")), ""
+            )
+            resource_claims_json = _coerce_json_list_text(
+                payload.get(
+                    "resource_claims_json",
+                    (existing or {}).get("resource_claims_json", "[]"),
+                )
+            )
+            last_native_verified_utc = _coerce_text(
+                payload.get("last_native_verified_utc", (existing or {}).get("last_native_verified_utc", "")), ""
+            )
+            native_verification_summary = _coerce_text(
+                payload.get(
+                    "native_verification_summary",
+                    (existing or {}).get("native_verification_summary", ""),
+                ),
+                "",
+            )
             if requested_id is None and gateway_handler_device_id is not None:
                 raise ValueError("Assign cluster members before selecting a VarAC gateway handler.")
+            if requested_id is None and email_gateway_sender_device_id is not None:
+                raise ValueError("Assign cluster members before selecting a VarAC email gateway sender.")
 
             row_id = int(requested_id) if requested_id is not None else 0
             if gateway_handler_device_id is not None and row_id > 0:
                 membership = _varac_cluster_membership_row(conn, row_id, int(gateway_handler_device_id))
                 if membership is None or int(membership.get("enabled", 1) or 0) != 1:
                     raise ValueError("The VarAC gateway handler must be an enabled member of this cluster.")
+            if email_gateway_sender_device_id is not None and row_id > 0:
+                membership = _varac_cluster_membership_row(
+                    conn, row_id, int(email_gateway_sender_device_id)
+                )
+                if membership is None or int(membership.get("enabled", 1) or 0) != 1:
+                    raise ValueError(
+                        "The VarAC email gateway sender must be an enabled member of this cluster."
+                    )
 
             if existing:
                 conn.execute(
                     """
                     UPDATE varac_clusters
                        SET name=?, cluster_id=?, shared_db_path=?, counters_refresh_sec=?,
-                           ptt_lock_enabled=?, gateway_handler_device_id=?, updated_utc=?
+                           ptt_lock_enabled=?, gateway_handler_device_id=?,
+                           email_gateway_sender_device_id=?, native_management_state=?,
+                           native_writer_key=?, desired_fingerprint=?, observed_fingerprint=?,
+                           resource_claims_json=?, last_native_verified_utc=?,
+                           native_verification_summary=?, updated_utc=?
                      WHERE id=?
                     """,
                     (
@@ -8353,6 +8688,14 @@ class MultiRadioStore:
                         counters_refresh_sec,
                         ptt_lock_enabled,
                         gateway_handler_device_id,
+                        email_gateway_sender_device_id,
+                        native_management_state,
+                        native_writer_key or None,
+                        desired_fingerprint or None,
+                        observed_fingerprint or None,
+                        resource_claims_json,
+                        last_native_verified_utc or None,
+                        native_verification_summary or None,
                         now_iso,
                         int(requested_id),
                     ),
@@ -8363,8 +8706,12 @@ class MultiRadioStore:
                     """
                     INSERT INTO varac_clusters (
                         name, cluster_id, shared_db_path, counters_refresh_sec,
-                        ptt_lock_enabled, gateway_handler_device_id, created_utc, updated_utc
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ptt_lock_enabled, gateway_handler_device_id,
+                        email_gateway_sender_device_id, native_management_state,
+                        native_writer_key, desired_fingerprint, observed_fingerprint,
+                        resource_claims_json, last_native_verified_utc, native_verification_summary,
+                        created_utc, updated_utc
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         name,
@@ -8373,6 +8720,14 @@ class MultiRadioStore:
                         counters_refresh_sec,
                         ptt_lock_enabled,
                         None,
+                        None,
+                        native_management_state,
+                        native_writer_key or None,
+                        desired_fingerprint or None,
+                        observed_fingerprint or None,
+                        resource_claims_json,
+                        last_native_verified_utc or None,
+                        native_verification_summary or None,
                         now_iso,
                         now_iso,
                     ),
@@ -8421,6 +8776,11 @@ class MultiRadioStore:
                 if cluster.get("gateway_handler_device_id") not in (None, "")
                 else 0
             )
+            email_sender_id = (
+                int(cluster.get("email_gateway_sender_device_id", 0) or 0)
+                if cluster.get("email_gateway_sender_device_id") not in (None, "")
+                else 0
+            )
             existing = _varac_cluster_membership_row(conn, int(cluster_id), int(device_profile_id))
             if enabled_value == 1:
                 other_membership = _varac_enabled_membership_for_device(
@@ -8440,6 +8800,10 @@ class MultiRadioStore:
                     )
             if existing is not None and enabled_value != 1 and gateway_id == int(device_profile_id):
                 raise ValueError("Clear or reassign the VarAC gateway handler before disabling this membership.")
+            if existing is not None and enabled_value != 1 and email_sender_id == int(device_profile_id):
+                raise ValueError(
+                    "Clear or reassign the VarAC email gateway sender before disabling this membership."
+                )
 
             duplicate = conn.execute(
                 """
@@ -8518,8 +8882,17 @@ class MultiRadioStore:
                 if cluster.get("gateway_handler_device_id") not in (None, "")
                 else 0
             )
+            email_sender_id = (
+                int(cluster.get("email_gateway_sender_device_id", 0) or 0)
+                if cluster.get("email_gateway_sender_device_id") not in (None, "")
+                else 0
+            )
             if gateway_id == int(device_profile_id):
                 raise ValueError("Clear or reassign the VarAC gateway handler before removing this membership.")
+            if email_sender_id == int(device_profile_id):
+                raise ValueError(
+                    "Clear or reassign the VarAC email gateway sender before removing this membership."
+                )
             conn.execute(
                 "DELETE FROM varac_cluster_members WHERE cluster_id=? AND device_profile_id=?",
                 (int(cluster_id), int(device_profile_id)),
@@ -8551,6 +8924,205 @@ class MultiRadioStore:
             cluster_row = next((row for row in _list_varac_clusters_conn(conn) if int(row.get("id", 0) or 0) == int(cluster_id)), None)
             return dict(cluster_row or {})
 
+    def set_varac_cluster_email_gateway_sender(
+        self,
+        cluster_id: int,
+        email_gateway_sender_device_id: Optional[int],
+    ) -> Dict[str, Any]:
+        """Set the native email-relay sender without reinterpreting legacy gateway data."""
+
+        with self._connect() as conn:
+            ensure_multi_radio_settings_schema(conn)
+            cluster = _varac_cluster_by_id(conn, int(cluster_id))
+            if not cluster:
+                raise KeyError(f"Unknown VarAC cluster id: {cluster_id}")
+            sender_value = _coerce_optional_int(email_gateway_sender_device_id)
+            if sender_value is not None:
+                membership = _varac_cluster_membership_row(conn, int(cluster_id), int(sender_value))
+                if membership is None or int(membership.get("enabled", 1) or 0) != 1:
+                    raise ValueError(
+                        "The VarAC email gateway sender must be an enabled member of this cluster."
+                    )
+            conn.execute(
+                "UPDATE varac_clusters SET email_gateway_sender_device_id=?, updated_utc=? WHERE id=?",
+                (sender_value, _utc_now_iso(), int(cluster_id)),
+            )
+            conn.commit()
+            cluster_row = next(
+                (
+                    row
+                    for row in _list_varac_clusters_conn(conn)
+                    if int(row.get("id", 0) or 0) == int(cluster_id)
+                ),
+                None,
+            )
+            return dict(cluster_row or {})
+
+    def begin_varac_native_apply_journal(
+        self,
+        *,
+        journal_id: str,
+        plan_fingerprint: str,
+        operation: str,
+        writer_key: str,
+        targets: Any,
+        desired: Any,
+    ) -> Dict[str, Any]:
+        """Durably record intent before any third-party VarAC file is touched."""
+
+        entry_id = _coerce_text(journal_id, "")
+        fingerprint = _coerce_text(plan_fingerprint, "")
+        writer = _coerce_text(writer_key, "")
+        if not entry_id or not fingerprint or not writer:
+            raise ValueError("Native VarAC apply journal identity is incomplete.")
+        now_iso = _utc_now_iso()
+        with self._open_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO varac_native_apply_journal (
+                    id, plan_fingerprint, state, operation, writer_key,
+                    targets_json, desired_json, observed_json,
+                    backup_manifest_json, error, created_utc, updated_utc, completed_utc
+                ) VALUES (?, ?, 'pending', ?, ?, ?, ?, '{}', '{}', NULL, ?, ?, NULL)
+                """,
+                (
+                    entry_id,
+                    fingerprint,
+                    _coerce_text(operation, ""),
+                    writer,
+                    json.dumps(targets if isinstance(targets, (list, tuple)) else [], sort_keys=True),
+                    json.dumps(desired if isinstance(desired, Mapping) else {}, sort_keys=True),
+                    now_iso,
+                    now_iso,
+                ),
+            )
+            conn.commit()
+            return self._get_varac_native_apply_journal_conn(conn, entry_id) or {}
+
+    def update_varac_native_apply_journal(
+        self,
+        journal_id: str,
+        *,
+        state: str,
+        expected_states: Iterable[str],
+        observed: Any = None,
+        backup_manifest: Any = None,
+        error: str = "",
+        durable: bool = True,
+    ) -> Dict[str, Any]:
+        """Compare-and-set one journal state, optionally in the guided transaction."""
+
+        entry_id = _coerce_text(journal_id, "")
+        next_state = _coerce_text(state, "").lower()
+        expected = {_coerce_text(item, "").lower() for item in expected_states if _coerce_text(item, "")}
+        if next_state not in SUPPORTED_VARAC_NATIVE_JOURNAL_STATES:
+            raise ValueError("Unsupported VarAC native journal state.")
+        if not expected:
+            raise ValueError("A VarAC native journal transition requires an expected state.")
+        connection = self._open_connection() if durable else self._connect()
+        with connection as conn:
+            current = self._get_varac_native_apply_journal_conn(conn, entry_id)
+            if current is None:
+                raise KeyError(f"Unknown VarAC native apply journal: {entry_id}")
+            current_state = _coerce_text(current.get("state", ""), "").lower()
+            if current_state not in expected:
+                raise ValueError(
+                    f"Stale VarAC native journal transition: expected {sorted(expected)}, found {current_state or 'unknown'}."
+                )
+            allowed = {
+                "pending": {"backup_ready", "rolled_back", "recovery_required"},
+                "backup_ready": {"promoting", "rolled_back", "recovery_required"},
+                "promoting": {"external_applied", "rolled_back", "recovery_required"},
+                "external_applied": {"fio_committed", "rolled_back", "recovery_required"},
+                "fio_committed": {"complete", "recovery_required"},
+                "recovery_required": {"rolled_back", "complete"},
+                "complete": set(),
+                "rolled_back": set(),
+            }
+            if next_state != current_state and next_state not in allowed.get(current_state, set()):
+                raise ValueError(
+                    f"Invalid VarAC native journal transition: {current_state} -> {next_state}."
+                )
+            now_iso = _utc_now_iso()
+            observed_json = current.get("observed_json", "{}")
+            backup_json = current.get("backup_manifest_json", "{}")
+            if isinstance(observed, Mapping):
+                observed_json = json.dumps(dict(observed), sort_keys=True)
+            if isinstance(backup_manifest, Mapping):
+                backup_json = json.dumps(dict(backup_manifest), sort_keys=True)
+            completed_utc = now_iso if next_state in {"complete", "rolled_back"} else None
+            conn.execute(
+                """
+                UPDATE varac_native_apply_journal
+                   SET state=?, observed_json=?, backup_manifest_json=?, error=?,
+                       updated_utc=?, completed_utc=?
+                 WHERE id=? AND state=?
+                """,
+                (
+                    next_state,
+                    observed_json,
+                    backup_json,
+                    _coerce_text(error, "") or None,
+                    now_iso,
+                    completed_utc,
+                    entry_id,
+                    current_state,
+                ),
+            )
+            if conn.execute("SELECT changes()").fetchone()[0] != 1:
+                raise ValueError("VarAC native journal state changed concurrently.")
+            conn.commit()
+            return self._get_varac_native_apply_journal_conn(conn, entry_id) or {}
+
+    def get_varac_native_apply_journal(self, journal_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect_readonly() as conn:
+            return self._get_varac_native_apply_journal_conn(conn, _coerce_text(journal_id, ""))
+
+    def list_unfinished_varac_native_applies(self) -> List[Dict[str, Any]]:
+        with self._connect_readonly() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM varac_native_apply_journal
+                 WHERE state NOT IN ('complete', 'rolled_back')
+              ORDER BY created_utc ASC, id ASC
+                """
+            ).fetchall()
+            return [self._decode_varac_native_journal_row(dict(row)) for row in rows]
+
+    def varac_native_launch_blockers(self) -> List[Dict[str, Any]]:
+        """Return recovery work that must block affected managed VarAC launches."""
+
+        return self.list_unfinished_varac_native_applies()
+
+    @staticmethod
+    def _decode_varac_native_journal_row(row: Mapping[str, Any]) -> Dict[str, Any]:
+        data = dict(row)
+        for column, key, default in (
+            ("targets_json", "targets", []),
+            ("desired_json", "desired", {}),
+            ("observed_json", "observed", {}),
+            ("backup_manifest_json", "backup_manifest", {}),
+        ):
+            try:
+                data[key] = json.loads(str(data.get(column, "") or ""))
+            except Exception:
+                data[key] = default
+        return data
+
+    @classmethod
+    def _get_varac_native_apply_journal_conn(
+        cls,
+        conn: sqlite3.Connection,
+        journal_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        row = conn.execute(
+            "SELECT * FROM varac_native_apply_journal WHERE id=?",
+            (str(journal_id),),
+        ).fetchone()
+        if row is None:
+            return None
+        return cls._decode_varac_native_journal_row(dict(row))
+
     def save_device_profile(self, values: Mapping[str, Any]) -> Dict[str, Any]:
         with self._connect() as conn:
             return self._save_device_profile_conn(conn, values)
@@ -8564,6 +9136,10 @@ class MultiRadioStore:
                 raise ValueError("Cannot delete an active radio. Stop using it first.")
             conn.execute(
                 "UPDATE varac_clusters SET gateway_handler_device_id=NULL WHERE gateway_handler_device_id=?",
+                (int(device_profile_id),),
+            )
+            conn.execute(
+                "UPDATE varac_clusters SET email_gateway_sender_device_id=NULL WHERE email_gateway_sender_device_id=?",
                 (int(device_profile_id),),
             )
             conn.execute("DELETE FROM operating_profile_assignments WHERE device_profile_id=?", (int(device_profile_id),))

@@ -245,6 +245,87 @@ def test_create_cluster_with_existing_standalone_commits_both_members_and_gatewa
     assert store.get_varac_node(old_node["id"])["name"] == old_node["name"]
 
 
+def test_native_cluster_reuses_standalone_db_and_selects_email_sender_without_legacy_gateway(tmp_path):
+    store = MultiRadioStore(tmp_path / "varac-native-email.db")
+    old_radio, old_node = _save_standalone(store, "radio-old", "varac-old")
+    new_radio = store.save_device_profile({"system_key": "radio-new", "name": "Radio New"})
+    app_values, manifest_values = _new_varac_values("varac-new")
+    app_values.update(
+        db_path=old_node["db_path"],
+        native_management_state="managed",
+        native_writer_key="varac:13.2.7:linux-wine:convert-standalone",
+        desired_fingerprint="desired",
+        observed_fingerprint="observed",
+    )
+    store.adopt_software_instance(
+        family_key="varac",
+        radio_profile_id=new_radio["id"],
+        application_values=app_values,
+        manifest_values=manifest_values,
+        varac_create_cluster_values={
+            "name": "Native Cluster",
+            "cluster_id": "native",
+            "shared_db_path": old_node["db_path"],
+            "ptt_lock_enabled": True,
+            "existing_standalone_node_id": old_node["id"],
+            "existing_standalone_instance_number": 1,
+            "email_gateway_sender_choice": "existing_member",
+            "native_management_state": "managed",
+            "native_writer_key": "varac:13.2.7:linux-wine:convert-standalone",
+            "desired_fingerprint": "desired",
+            "observed_fingerprint": "observed",
+        },
+        varac_cluster_instance_number=2,
+    )
+    cluster = store.list_varac_clusters()[0]
+    assert cluster["shared_db_path"] == old_node["db_path"]
+    assert cluster["email_gateway_sender_device_id"] == old_radio["id"]
+    assert cluster["gateway_handler_device_id"] is None
+    assert cluster["native_management_state"] == "managed"
+    assert '"exclusive": false' in cluster["resource_claims_json"]
+    new_node = next(
+        row for row in store.list_varac_nodes() if int(row["id"]) != int(old_node["id"])
+    )
+    assert new_node["db_path"] == cluster["shared_db_path"]
+
+
+def test_native_managed_join_uses_the_existing_cluster_shared_database(tmp_path):
+    store = MultiRadioStore(tmp_path / "varac-native-join.db")
+    old_radio, old_node = _save_standalone(store, "radio-old", "varac-old")
+    cluster = store.save_varac_cluster(
+        {
+            "name": "Native Cluster",
+            "cluster_id": "native",
+            "shared_db_path": old_node["db_path"],
+            "native_management_state": "managed",
+        }
+    )
+    store.set_varac_cluster_member(cluster["id"], old_radio["id"], instance_number=1)
+    new_radio = store.save_device_profile({"system_key": "radio-new", "name": "Radio New"})
+    app_values, manifest_values = _new_varac_values("varac-new")
+    app_values.update(
+        db_path=cluster["shared_db_path"],
+        native_management_state="managed",
+        native_writer_key="varac:13.2.7:linux-wine:create-member",
+    )
+
+    result = store.adopt_software_instance(
+        family_key="varac",
+        radio_profile_id=new_radio["id"],
+        application_values=app_values,
+        manifest_values=manifest_values,
+        varac_cluster_db_id=cluster["id"],
+        varac_cluster_instance_number=2,
+    )
+
+    assert result["application"]["db_path"] == cluster["shared_db_path"]
+    members = store.list_varac_cluster_members(cluster_id=cluster["id"])
+    assert {(row["device_profile_id"], row["instance_number"]) for row in members} == {
+        (old_radio["id"], 1),
+        (new_radio["id"], 2),
+    }
+
+
 def test_existing_standalone_cluster_failure_rolls_back_every_new_row(monkeypatch, tmp_path):
     store = MultiRadioStore(tmp_path / "varac-existing-failure.db")
     old_radio, old_node = _save_standalone(store, "radio-old", "varac-old")
