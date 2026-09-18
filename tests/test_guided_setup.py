@@ -1476,7 +1476,7 @@ def test_guided_setup_schedule_decision_is_single_source_for_wizard_copy() -> No
         open_plan_manager=False,
         selected_schedule_choice=SCHEDULE_NONE,
     )
-    assert no_schedule.status == "review"
+    assert no_schedule.status == "complete_later"
     assert no_schedule.review_text == "No Frequency Plan assigned during setup."
 
     monitor_only = guided_setup_schedule_decision(

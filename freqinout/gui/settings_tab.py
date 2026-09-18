@@ -190,7 +190,11 @@ from freqinout.core.varac_native_transaction import (
     recover_unfinished_varac_native_applies,
     rollback_varac_native_external_session,
 )
-from freqinout.core.guided_launch_recipes import canonical_js8_version
+from freqinout.core.guided_launch_recipes import (
+    canonical_js8_version,
+    recipe_draft_updates,
+    resolve_guided_launch_recipe,
+)
 from freqinout.core.guided_setup import (
     CONTROL_FLRIG,
     LANE_FAST_LIGHT,
@@ -1318,6 +1322,12 @@ class SettingsTab(QWidget):
     _guided_radio_autofill_finished = Signal(object, object)
     _guided_radio_autofill_failed = Signal(object, str)
     _guided_radio_autofill_released = Signal(object)
+    _guided_native_config_finished = Signal(object, object)
+    _guided_native_config_failed = Signal(object, str)
+    _guided_native_config_released = Signal(object)
+    _varac_native_job_finished = Signal(object, object)
+    _varac_native_job_failed = Signal(object, str)
+    _varac_native_job_released = Signal(object)
     _multi_rig_preview_finished = Signal(object, object)
     _multi_rig_preview_failed = Signal(object, str)
     _multi_rig_preview_released = Signal(object)
@@ -1413,7 +1423,9 @@ class SettingsTab(QWidget):
         self._software_autofill_shutdown = False
         self._guided_radio_autofill_jobs: Dict[int, Tuple[QThread, _GuidedRadioAutofillWorker]] = {}
         self._guided_native_config_jobs: Dict[int, Tuple[QThread, _GuidedNativeConfigWorker]] = {}
+        self._guided_native_config_callbacks: Dict[int, Tuple[Any, Any]] = {}
         self._varac_native_jobs: Dict[int, Tuple[QThread, QObject]] = {}
+        self._varac_native_job_callbacks: Dict[int, Tuple[Any, Any]] = {}
         self._varac_native_generation = 0
         self._varac_native_preparations: Dict[str, VarACNativePreparationResult] = {}
         self._varac_native_recovery_started = False
@@ -1422,6 +1434,12 @@ class SettingsTab(QWidget):
         self._guided_radio_autofill_finished.connect(self._on_guided_radio_autofill_finished)
         self._guided_radio_autofill_failed.connect(self._on_guided_radio_autofill_failed)
         self._guided_radio_autofill_released.connect(self._on_guided_radio_autofill_released)
+        self._guided_native_config_finished.connect(self._on_guided_native_config_finished)
+        self._guided_native_config_failed.connect(self._on_guided_native_config_failed)
+        self._guided_native_config_released.connect(self._on_guided_native_config_released)
+        self._varac_native_job_finished.connect(self._on_varac_native_job_finished)
+        self._varac_native_job_failed.connect(self._on_varac_native_job_failed)
+        self._varac_native_job_released.connect(self._on_varac_native_job_released)
         self._multi_rig_preview_thread: QThread | None = None
         self._multi_rig_preview_worker: _MultiRigAutoconfigPreviewWorker | None = None
         self._multi_rig_preview_callbacks: Dict[int, Tuple[Any, Any]] = {}
@@ -13377,6 +13395,7 @@ class SettingsTab(QWidget):
                         lambda ident=job_id: _release_detached_software_autofill_job(ident)
                     )
             self._guided_native_config_jobs.pop(job_id, None)
+        self._guided_native_config_callbacks.clear()
         for job_id, (native_thread, native_worker) in tuple(
             getattr(self, "_varac_native_jobs", {}).items()
         ):
@@ -13390,6 +13409,7 @@ class SettingsTab(QWidget):
                         lambda ident=job_id: _release_detached_software_autofill_job(ident)
                     )
             self._varac_native_jobs.pop(job_id, None)
+        self._varac_native_job_callbacks.clear()
         timer = getattr(self, "_mesh_ble_scan_timer", None)
         if isinstance(timer, QTimer):
             timer.stop()
@@ -13435,6 +13455,44 @@ class SettingsTab(QWidget):
 
         self._guided_radio_autofill_jobs.pop(int(job_id), None)
         self._guided_radio_autofill_callbacks.pop(int(job_id), None)
+
+    def _on_guided_native_config_finished(self, job_id: int, payload: object) -> None:
+        """Continue a guided native save only after returning to the GUI thread."""
+
+        callbacks = self._guided_native_config_callbacks.pop(int(job_id), None)
+        if callbacks is not None:
+            callbacks[0](payload)
+
+    def _on_guided_native_config_failed(self, job_id: int, detail: str) -> None:
+        """Report a guided native save failure from the GUI thread."""
+
+        callbacks = self._guided_native_config_callbacks.pop(int(job_id), None)
+        if callbacks is not None:
+            callbacks[1](detail)
+
+    def _on_guided_native_config_released(self, job_id: int) -> None:
+        """Release worker ownership after its QThread has stopped."""
+
+        self._guided_native_config_jobs.pop(int(job_id), None)
+
+    def _on_varac_native_job_finished(self, job_id: int, payload: object) -> None:
+        """Continue VarAC preparation/application on the GUI thread."""
+
+        callbacks = self._varac_native_job_callbacks.pop(int(job_id), None)
+        if callbacks is not None:
+            callbacks[0](payload)
+
+    def _on_varac_native_job_failed(self, job_id: int, detail: str) -> None:
+        """Report VarAC worker failure from the GUI thread."""
+
+        callbacks = self._varac_native_job_callbacks.pop(int(job_id), None)
+        if callbacks is not None:
+            callbacks[1](detail)
+
+    def _on_varac_native_job_released(self, job_id: int) -> None:
+        """Release VarAC worker ownership after its QThread has stopped."""
+
+        self._varac_native_jobs.pop(int(job_id), None)
 
     def _on_multi_rig_preview_finished(self, job_id: int, payload: object) -> None:
         callbacks = self._multi_rig_preview_callbacks.get(int(job_id))
@@ -26968,9 +27026,18 @@ class SettingsTab(QWidget):
                 for family_key in software_responsibility_cards
                 if _guided_software_family_selected(family_key)
             )
-            return selected + (
+            policies = tuple(
+                f"{family_key}:{str(software_source_combos[family_key].currentData() or '').strip().lower()}"
+                f":{str(software_management_combos[family_key].currentData() or '').strip().lower()}"
+                f":{str(software_launch_policy_combos[family_key].currentData() or '').strip().lower()}"
+                for family_key in sorted(software_responsibility_cards)
+                if _guided_software_family_selected(family_key)
+            )
+            return selected + policies + (
+                f"name:{name_edit.text().strip()}",
                 f"role:{str(device_class_combo.currentData() or '').strip().lower()}",
                 f"setup:{str(setup_type_combo.currentData() or '').strip().lower()}",
+                f"backend:{str(backend_combo.currentData() or '').strip().lower()}",
             )
 
         def _update_software_responsibility_cards() -> None:
@@ -27006,12 +27073,42 @@ class SettingsTab(QWidget):
                     widget.setVisible(prepared)
                 software_detail_buttons[family_key].setEnabled(prepared)
                 state_label = software_prepared_state_labels[family_key]
+                managed_draft = (
+                    dict(getattr(dlg, "_guided_software_instance_drafts", {}).get(family_key) or {})
+                    if isinstance(getattr(dlg, "_guided_software_instance_drafts", {}), Mapping)
+                    else {}
+                )
+                managed_recipe_ready = (
+                    str(managed_draft.get("mode") or "").strip().lower() == "managed"
+                    and str(managed_draft.get("launch_recipe_status") or "").strip()
+                    == "qualified_managed"
+                )
                 if not selected:
                     state_label.setText("")
                 elif prepared:
-                    state_label.setText(
-                        "Ready — review or correct only the details that need attention."
-                    )
+                    if family_key in {"js8call", "fast_light"} and managed_recipe_ready:
+                        software_detail_buttons[family_key].setText("Review Details (optional)…")
+                        software_detail_buttons[family_key].setToolTip(
+                            "FIO has prepared this complete managed instance. Review its exact identity, files, "
+                            "connections, and launch recipe if you want to learn or make a correction."
+                        )
+                        state_label.setText(
+                            "Ready — FIO prepared the complete managed instance. Review Details is optional."
+                        )
+                    elif family_key in {"js8call", "fast_light"}:
+                        recipe = managed_draft.get("launch_recipe")
+                        recovery = str(
+                            recipe.get("recovery_action") if isinstance(recipe, Mapping) else ""
+                        ).strip()
+                        software_detail_buttons[family_key].setText("Configure Details (required)…")
+                        state_label.setText(
+                            "Needs attention — "
+                            + (recovery or "FIO could not qualify a complete managed recipe; configure details are required.")
+                        )
+                    else:
+                        state_label.setText(
+                            "Ready — review or correct only the details that need attention."
+                        )
                 elif family_key == "varac":
                     selected_arrangement = _selected_varac_arrangement()
                     if bool(varac_arrangement_presentation.get("needs_attention")):
@@ -27029,6 +27126,136 @@ class SettingsTab(QWidget):
                 else:
                     state_label.setText("Needs attention — choose a source, then prepare this software.")
             software_responsibility_group.setVisible(selected_count > 0)
+
+        def _known_js8_recipe_evidence(path: str) -> Tuple[str, str]:
+            """Return only an exact supported JS8 version represented by discovery evidence."""
+
+            path_text = str(path or "").strip()
+            path_key = os.path.normcase(os.path.normpath(os.path.expanduser(path_text)))
+            for row in guided_saved_instance_rows.get("js8call", ()):
+                if not isinstance(row, Mapping):
+                    continue
+                known_path = str(
+                    row.get("install_path")
+                    or row.get("application_path")
+                    or row.get("js8_application_path")
+                    or ""
+                ).strip()
+                known_key = os.path.normcase(os.path.normpath(os.path.expanduser(known_path)))
+                if not path_key or path_key != known_key:
+                    continue
+                variant = str(
+                    row.get("variant_family")
+                    or row.get("js8_variant_family")
+                    or row.get("variant")
+                    or ""
+                ).strip()
+                version = str(
+                    row.get("variant_version")
+                    or row.get("js8_variant_version")
+                    or row.get("version")
+                    or ""
+                ).strip()
+                exact = canonical_js8_version(variant, version)
+                if exact:
+                    return variant, exact
+            normalized = path_text.replace("_", ".").replace("-", ".").lower()
+            if "improved" in normalized and "3.0.3" in normalized:
+                return "js8call_improved_3_0_3", "3.0.3"
+            if "subspace" in normalized and "4.1.0.478" in normalized:
+                return "js8call_subspace_4_1", "4.1.0.478"
+            if "2.2.0" in normalized:
+                return "js8call_2_2", "2.2.0"
+            return "", ""
+
+        def _publish_prepared_managed_instance_drafts() -> Tuple[str, ...]:
+            """Retain FIO-owned managed recipes without opening the technical editor."""
+
+            retained_raw = getattr(dlg, "_guided_software_instance_drafts", {})
+            retained = {
+                str(family): dict(value)
+                for family, value in retained_raw.items()
+                if isinstance(retained_raw, Mapping) and isinstance(value, Mapping)
+            } if isinstance(retained_raw, Mapping) else {}
+            radio_label = name_edit.text().strip() or "Unsaved radio"
+            radio_role = str(device_class_combo.currentData() or "tx_rx").strip().lower()
+            needs_attention: List[str] = []
+            auto_prepared_families: List[str] = []
+            for family in ("js8call", "fast_light"):
+                if not _guided_software_family_selected(family):
+                    continue
+                source = str(software_source_combos[family].currentData() or "").strip().lower()
+                management = str(software_management_combos[family].currentData() or "").strip().lower()
+                if source != "create" or management != "fio_identity_launch":
+                    continue
+                prior = dict(retained.get(family) or {})
+                state = _guided_software_editor_state()
+                source_evidence: Dict[str, Any] = dict(prior)
+                if family == "js8call":
+                    if not source_evidence.get("application_path"):
+                        source_evidence["application_path"] = str(state.get("path_js8call") or "")
+                    if not source_evidence.get("variant") or not source_evidence.get("version"):
+                        variant, version = _known_js8_recipe_evidence(
+                            str(source_evidence.get("application_path") or "")
+                        )
+                        if not source_evidence.get("variant"):
+                            source_evidence["variant"] = variant
+                        if not source_evidence.get("version"):
+                            source_evidence["version"] = version
+                else:
+                    if not source_evidence.get("application_path"):
+                        source_evidence["application_path"] = (
+                            "" if radio_role == "observer" else str(state.get("path_flrig") or "")
+                        )
+                    if not source_evidence.get("secondary_application_path"):
+                        source_evidence["secondary_application_path"] = str(state.get("path_fldigi") or "")
+                    if not source_evidence.get("flmsg_application_path"):
+                        source_evidence["flmsg_application_path"] = str(state.get("path_flmsg") or "")
+                    if not source_evidence.get("flamp_application_path"):
+                        source_evidence["flamp_application_path"] = str(state.get("path_flamp") or "")
+                snapshot = _refresh_guided_instance_inventory(retained)
+                draft = distinct_draft_seed(
+                    family,
+                    owner_draft_key=guided_discovery_session_key,
+                    snapshot=snapshot,
+                    source=source_evidence,
+                )
+                draft.update(
+                    instance_name=radio_label,
+                    owner_label=radio_label,
+                    radio_role=radio_role,
+                    launch_at_startup=(
+                        str(software_launch_policy_combos[family].currentData() or "").strip().lower()
+                        == "fio"
+                    ),
+                )
+                if family == "fast_light" and radio_role == "observer":
+                    draft.update(application_path="", port=0)
+                resolution = resolve_guided_launch_recipe(
+                    draft,
+                    managed_root=str(Path(get_config_dir()) / "managed-instances"),
+                )
+                draft.update(recipe_draft_updates(resolution))
+                retained[family] = draft
+                auto_prepared_families.append(family)
+                if not resolution.qualified:
+                    needs_attention.append(f"{software_family_titles[family]}: {resolution.recovery_action}")
+                    continue
+                # These endpoints belong to the managed recipe.  Keep the
+                # Connections review truthful without asking the operator to
+                # copy FIO's allocated ports into a separate form.
+                if family == "js8call":
+                    js8_host_edit.setText(str(draft.get("host") or "127.0.0.1"))
+                    js8_port_edit.setText(str(draft.get("port") or ""))
+                else:
+                    fldigi_host_edit.setText(str(draft.get("host") or "127.0.0.1"))
+                    fldigi_port_edit.setText(str(draft.get("secondary_port") or ""))
+                    if radio_role != "observer":
+                        flrig_port_edit.setText(str(draft.get("port") or ""))
+            setattr(dlg, "_guided_software_instance_drafts", retained)
+            setattr(dlg, "_guided_auto_prepared_draft_families", tuple(auto_prepared_families))
+            _update_commstat_binding_summary()
+            return tuple(needs_attention)
 
         def _sync_software_policy_from_source(family_key: str) -> None:
             source_combo = software_source_combos.get(family_key)
@@ -27054,6 +27281,19 @@ class SettingsTab(QWidget):
 
         def _invalidate_prepared_software_plan() -> None:
             nonlocal software_plan_prepared, prepared_software_families, prepared_software_context
+            retained_raw = getattr(dlg, "_guided_software_instance_drafts", {})
+            auto_families = {
+                str(family)
+                for family in getattr(dlg, "_guided_auto_prepared_draft_families", ())
+            }
+            if isinstance(retained_raw, Mapping) and auto_families:
+                retained = {
+                    str(family): dict(value)
+                    for family, value in retained_raw.items()
+                    if isinstance(value, Mapping) and str(family) not in auto_families
+                }
+                setattr(dlg, "_guided_software_instance_drafts", retained)
+                setattr(dlg, "_guided_auto_prepared_draft_families", ())
             if not software_plan_prepared:
                 return
             software_plan_prepared = False
@@ -27434,16 +27674,23 @@ class SettingsTab(QWidget):
                     "discover": "existing",
                     "remote": "manual",
                 }
+                source_signal_blocker = QSignalBlocker(software_source_combos[family])
+                management_signal_blocker = QSignalBlocker(software_management_combos[family])
+                launch_signal_blocker = QSignalBlocker(software_launch_policy_combos[family])
                 source_index = software_source_combos[family].findData(
                     mode_to_source.get(str(completed_payload.get("mode") or ""), "create")
                 )
                 if source_index >= 0:
                     software_source_combos[family].setCurrentIndex(source_index)
+                _sync_software_policy_from_source(family)
                 launch_index = software_launch_policy_combos[family].findData(
                     "fio" if bool(completed_payload.get("launch_at_startup")) else "operator"
                 )
                 if launch_index >= 0:
                     software_launch_policy_combos[family].setCurrentIndex(launch_index)
+                del source_signal_blocker
+                del management_signal_blocker
+                del launch_signal_blocker
                 applied = _guided_software_editor_state()
                 if family == "js8call":
                     applied.update(
@@ -28343,6 +28590,7 @@ class SettingsTab(QWidget):
 
         def _apply_setup_type_choice() -> None:
             nonlocal applying_setup_type_choice, guided_wizard_max_index_seen
+            _invalidate_prepared_software_plan()
             lane = str(setup_type_combo.currentData() or "").strip()
             if not lane or lane == "custom":
                 _update_dialog_visibility()
@@ -28376,6 +28624,7 @@ class SettingsTab(QWidget):
         def _mark_custom_mix_from_software_edit() -> None:
             if applying_setup_type_choice:
                 return
+            _invalidate_prepared_software_plan()
             if str(device_class_combo.currentData() or "").strip().lower() == "observer":
                 # Companion receive software does not turn an observer into a
                 # custom transmit-capable lane.
@@ -28464,6 +28713,7 @@ class SettingsTab(QWidget):
             display_name_user_edited = True
 
         name_edit.textEdited.connect(_mark_radio_name_user_edited)
+        name_edit.textChanged.connect(lambda _text: _invalidate_prepared_software_plan())
 
         def _draft_radio_profile() -> Dict[str, Any]:
             model_choice = _current_radio_model_payload()
@@ -28649,6 +28899,8 @@ class SettingsTab(QWidget):
             status_key = str(status or "ready").strip().lower()
             if status_key == "backup":
                 return "Backup"
+            if status_key == "complete_later":
+                return "Complete later"
             if status_key == "review":
                 return "Review"
             if status_key == "needs_input":
@@ -28681,6 +28933,7 @@ class SettingsTab(QWidget):
             muted_color = theme.get("text_muted", text_color)
             status_colors = {
                 "ready": theme.get("success", "#2E7D32"),
+                "complete_later": theme.get("info", theme.get("accent", "#1565C0")),
                 "review": theme.get("warning", "#C99700"),
                 "backup": theme.get("warning", "#C99700"),
                 "needs_input": theme.get("info", theme.get("accent", "#1565C0")),
@@ -28732,6 +28985,7 @@ class SettingsTab(QWidget):
             muted_color = theme.get("text_muted", text_color)
             status_colors = {
                 "ready": theme.get("success", "#2E7D32"),
+                "complete_later": theme.get("info", theme.get("accent", "#1565C0")),
                 "review": theme.get("warning", "#C99700"),
                 "backup": theme.get("warning", "#C99700"),
                 "needs_input": theme.get("info", theme.get("accent", "#1565C0")),
@@ -29263,8 +29517,19 @@ class SettingsTab(QWidget):
                     schedule_path_combo.setItemData(schedule_path_combo.count() - 1, detail, Qt.ToolTipRole)
             else:
                 if not preferred:
-                    recommended = next((choice.choice_id for choice in choices if bool(choice.recommended)), "")
-                    preferred = recommended or (choices[0].choice_id if choices else "")
+                    # A new radio is safe to save without a schedule.  Keep
+                    # any explicit/existing choice intact, but do not send a
+                    # first-time setup to Plan Builder merely because one is
+                    # recommended.
+                    is_new_radio = int((profile_seed or {}).get("id", 0) or 0) <= 0
+                    if is_new_radio and any(
+                        str(choice.choice_id or "").strip() == SCHEDULE_NONE
+                        for choice in choices
+                    ):
+                        preferred = SCHEDULE_NONE
+                    else:
+                        recommended = next((choice.choice_id for choice in choices if bool(choice.recommended)), "")
+                        preferred = recommended or (choices[0].choice_id if choices else "")
                 for choice in choices:
                     label = str(choice.label or "").strip() or str(choice.choice_id or "").strip()
                     schedule_path_combo.addItem(label, str(choice.choice_id or ""))
@@ -29446,11 +29711,21 @@ class SettingsTab(QWidget):
                 return False
             if guided_wizard_max_index_seen < _guided_wizard_index("review"):
                 return False
+            if not name_edit.text().strip():
+                return False
             if not str(setup_type_combo.currentData() or "").strip():
                 return False
             if _selected_guided_operating_model_id() <= 0:
                 return False
             if _detected_app_choice_needs_operator_selection():
+                return False
+            if any(
+                _guided_software_family_selected(family)
+                for family in ("js8call", "fast_light", "varac")
+            ) and (
+                not software_plan_prepared
+                or _guided_software_plan_context() != prepared_software_context
+            ):
                 return False
             retained = getattr(dlg, "_guided_software_instance_drafts", {})
             retained = retained if isinstance(retained, Mapping) else {}
@@ -29462,9 +29737,22 @@ class SettingsTab(QWidget):
             for family, link_column in assignment_columns.items():
                 if not _guided_software_family_selected(family):
                     continue
-                if isinstance(retained.get(family), Mapping):
-                    continue
                 if int((profile_seed or {}).get(link_column, 0) or 0) > 0:
+                    continue
+                draft = retained.get(family)
+                if isinstance(draft, Mapping):
+                    source = str(software_source_combos[family].currentData() or "").strip().lower()
+                    management = str(
+                        software_management_combos[family].currentData() or ""
+                    ).strip().lower()
+                    if (
+                        family in {"js8call", "fast_light"}
+                        and source == "create"
+                        and management == "fio_identity_launch"
+                        and str(draft.get("launch_recipe_status") or "").strip()
+                        != "qualified_managed"
+                    ):
+                        return False
                     continue
                 return False
             return True
@@ -29483,6 +29771,16 @@ class SettingsTab(QWidget):
                 save_button.setToolTip("Walk through the guided setup and review before saving.")
             elif _detected_app_choice_needs_operator_selection():
                 save_button.setToolTip("Choose the highlighted detected app/profile before saving.")
+            elif any(
+                _guided_software_family_selected(family)
+                for family in ("js8call", "fast_light", "varac")
+            ) and (
+                not software_plan_prepared
+                or _guided_software_plan_context() != prepared_software_context
+            ):
+                save_button.setToolTip(
+                    "Prepare the current software choices before saving; earlier managed drafts are no longer current."
+                )
             else:
                 save_button.setToolTip(
                     "Complete each selected JS8Call, Fast Light, or VarAC instance with its Configure details action before saving."
@@ -30221,7 +30519,6 @@ class SettingsTab(QWidget):
                 for family_key in software_responsibility_cards
                 if _guided_software_family_selected(family_key)
             )
-            prepared_software_context = _guided_software_plan_context()
             _update_detected_app_choices(install_candidates)
             _update_js8_profile_choices(js8_file_profiles)
             suggestions, review_items = self._guided_radio_autofill_suggestions(
@@ -30295,16 +30592,21 @@ class SettingsTab(QWidget):
             _update_app_choice_visibility()
             if _js8_app_selected() and (js8_profile_edit.text().strip() or js8_directed_edit.text().strip()):
                 _update_js8_profile_choices(js8_file_profiles)
+            managed_recipe_attention = _publish_prepared_managed_instance_drafts()
+            prepared_software_context = _guided_software_plan_context()
             review = guided_setup_autofill_review(
                 filled=filled,
                 preserved=preserved,
                 detection_notes=review_items,
                 radio_apps_base_used=bool(radio_apps_base_edit.text().strip()),
             )
-            if _detected_app_choice_needs_operator_selection():
-                configure_auto_status.setText(
+            if _detected_app_choice_needs_operator_selection() or managed_recipe_attention:
+                attention_status = (
                     "Needs attention — FIO prepared what it could. Review the highlighted family before continuing."
                 )
+                if managed_recipe_attention:
+                    attention_status = f"{attention_status} {managed_recipe_attention[0]}"
+                configure_auto_status.setText(attention_status)
             else:
                 configure_auto_status.setText(
                     "Ready — FIO prepared the selected software plan. Review only the details that need attention."
@@ -30859,6 +31161,7 @@ class SettingsTab(QWidget):
             # A role change is a compatibility boundary. Re-select that role's
             # preferred model instead of carrying an observer's receive-only
             # choice into a newly transmit-capable draft (or vice versa).
+            _invalidate_prepared_software_plan()
             _refresh_guided_operating_model_choices(
                 preserve_current=False,
                 preserve_existing=False,
@@ -30876,7 +31179,9 @@ class SettingsTab(QWidget):
             btn.clicked.connect(lambda _checked=False, sid=step_id: _set_guided_wizard_step(sid))
         guided_wizard_back_btn.clicked.connect(lambda _checked=False: _move_guided_wizard(-1))
         guided_wizard_next_btn.clicked.connect(lambda _checked=False: _move_guided_wizard(1))
-        backend_combo.currentIndexChanged.connect(_update_dialog_visibility)
+        backend_combo.currentIndexChanged.connect(
+            lambda _index: (_invalidate_prepared_software_plan(), _update_dialog_visibility())
+        )
         device_class_combo.currentIndexChanged.connect(_on_guided_device_class_changed)
         operating_model_combo.currentIndexChanged.connect(_on_guided_operating_model_changed)
         use_flrig_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
@@ -30908,7 +31213,10 @@ class SettingsTab(QWidget):
                 lambda _index: _update_dialog_visibility()
             )
             software_management_combos[family_key].currentIndexChanged.connect(
-                lambda _index: _update_dialog_visibility()
+                lambda _index: (_invalidate_prepared_software_plan(), _update_dialog_visibility())
+            )
+            software_launch_policy_combos[family_key].currentIndexChanged.connect(
+                lambda _index: _invalidate_prepared_software_plan()
             )
         _sync_setup_type_from_current_fields()
         _update_radio_model_hint()
@@ -32264,17 +32572,25 @@ class SettingsTab(QWidget):
         worker.moveToThread(thread)
         job_id = id(thread)
         jobs[job_id] = (thread, worker)
+        self._guided_native_config_callbacks[job_id] = (on_finished, on_failed)
 
-        def _release() -> None:
-            jobs.pop(job_id, None)
-
-        worker.finished.connect(on_finished)
-        worker.failed.connect(on_failed)
+        # Worker results must cross a SettingsTab-owned queued signal before
+        # any continuation can touch widgets, SettingsManager, or GUI-created
+        # stores. Connecting these closures directly to the worker executes
+        # them in the worker thread and can crash the final guided save.
+        worker.finished.connect(
+            lambda payload, ident=job_id: self._guided_native_config_finished.emit(ident, payload)
+        )
+        worker.failed.connect(
+            lambda detail, ident=job_id: self._guided_native_config_failed.emit(ident, detail)
+        )
         worker.finished.connect(thread.quit)
         worker.failed.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         worker.failed.connect(worker.deleteLater)
-        thread.finished.connect(_release)
+        thread.finished.connect(
+            lambda ident=job_id: self._guided_native_config_released.emit(ident)
+        )
         thread.finished.connect(thread.deleteLater)
         thread.started.connect(worker.run)
         thread.start()
@@ -32294,17 +32610,24 @@ class SettingsTab(QWidget):
         worker.moveToThread(thread)
         job_id = id(thread)
         jobs[job_id] = (thread, worker)
+        self._varac_native_job_callbacks[job_id] = (on_finished, on_failed)
 
-        def _release() -> None:
-            jobs.pop(job_id, None)
-
-        worker.finished.connect(on_finished)
-        worker.failed.connect(on_failed)
+        # VarAC callbacks update presenters, caches, and save transactions.
+        # Relay them through this GUI-owned object for the same reason as the
+        # guided native configuration path above.
+        worker.finished.connect(
+            lambda payload, ident=job_id: self._varac_native_job_finished.emit(ident, payload)
+        )
+        worker.failed.connect(
+            lambda detail, ident=job_id: self._varac_native_job_failed.emit(ident, detail)
+        )
         worker.finished.connect(thread.quit)
         worker.failed.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         worker.failed.connect(worker.deleteLater)
-        thread.finished.connect(_release)
+        thread.finished.connect(
+            lambda ident=job_id: self._varac_native_job_released.emit(ident)
+        )
         thread.finished.connect(thread.deleteLater)
         thread.started.connect(worker.run)
         thread.start()

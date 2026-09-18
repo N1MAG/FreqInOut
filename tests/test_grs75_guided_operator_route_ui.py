@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QLabel,
+    QLineEdit,
     QPushButton,
     QScrollArea,
 )
@@ -48,7 +49,7 @@ def _open_add_radio_dialog(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     inspect_dialog: Callable[[QDialog], None],
-) -> None:
+) -> object:
     from freqinout.core.settings_manager import SettingsManager
     from freqinout.gui.settings_tab import SettingsTab
 
@@ -72,7 +73,7 @@ def _open_add_radio_dialog(
 
     monkeypatch.setattr(QDialog, "exec", fake_exec)
     try:
-        assert tab._open_device_profile_dialog(existing=None) is None
+        return tab._open_device_profile_dialog(existing=None)
     finally:
         tab.deleteLater()
         _app().processEvents()
@@ -278,9 +279,128 @@ def test_prepared_route_enables_only_prepared_review_actions(
             assert state is not None and details is not None
             assert state.isVisible()
             assert details.isVisible() and details.isEnabled()
+        for family in ("js8call", "fast_light"):
+            state = dialog.findChild(QLabel, f"guidedSoftwarePreparedState_{family}")
+            details = dialog.findChild(QPushButton, f"guidedSoftwareDetails_{family}")
+            assert state is not None and state.text().startswith("Needs attention —")
+            assert details is not None and details.text() == "Configure Details (required)…"
+        assert "fast_light" in getattr(dialog, "_guided_software_instance_drafts", {})
+        fast_source = _selected_source(dialog, "fast_light")
+        fast_source.setCurrentIndex(fast_source.findData("existing"))
+        _app().processEvents()
+        assert "fast_light" not in getattr(dialog, "_guided_software_instance_drafts", {})
         dialog.reject()
 
     _open_add_radio_dialog(monkeypatch, tmp_path, inspect)
+
+
+def test_zero_entry_managed_fast_js8_route_publishes_drafts_and_leaves_schedule_optional(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Qualified discovery is sufficient; Configure Details is an optional review."""
+
+    import freqinout.gui.settings_tab as settings_tab_module
+    from freqinout.core.config_autodiscovery import AppCandidate
+    from freqinout.core.guided_setup import SCHEDULE_NONE
+
+    class _ImmediateThread(QObject):
+        started = Signal()
+        finished = Signal()
+
+        def start(self) -> None:
+            self.started.emit()
+
+        def quit(self) -> None:
+            self.finished.emit()
+
+    def publish_qualified_snapshot(worker: object) -> None:
+        request = getattr(worker, "request")
+        worker.finished.emit(
+            {
+                "guided_discovery_request": request,
+                "install_candidates": (
+                    AppCandidate("flrig", "FLRig", "/apps/FLRig", "test", "verified", True, True, "file"),
+                    AppCandidate("fldigi", "FLDigi", "/apps/FLDigi", "test", "verified", True, True, "file"),
+                    AppCandidate("flmsg", "FLMsg", "/apps/FLMsg", "test", "verified", True, True, "file"),
+                    AppCandidate("flamp", "FLAmp", "/apps/FLAmp", "test", "verified", True, True, "file"),
+                    # Exact version evidence permits the managed JS8 recipe;
+                    # an unversioned candidate must remain Needs Attention.
+                    AppCandidate("js8call", "JS8Call", "/apps/JS8Call-2.2.0", "test", "verified", True, True, "file"),
+                ),
+                "fast_results": {},
+                "js8_results": {},
+                "varac_results": {},
+                "js8_file_profiles": (),
+            }
+        )
+
+    monkeypatch.setattr(settings_tab_module._GuidedRadioAutofillWorker, "run", publish_qualified_snapshot)
+    monkeypatch.setattr(settings_tab_module, "QThread", _ImmediateThread)
+    monkeypatch.setattr(
+        settings_tab_module._GuidedRadioAutofillWorker,
+        "moveToThread",
+        lambda _worker, _thread: None,
+    )
+
+    def inspect(dialog: QDialog) -> None:
+        radio_name = next(
+            field
+            for field in dialog.findChildren(QLineEdit)
+            if "radio name" in field.placeholderText().casefold()
+        )
+        radio_name.setText("Zero Entry Test")
+        setup = dialog.findChild(QComboBox, "guidedSetupType")
+        assert setup is not None
+        setup.setCurrentIndex(setup.findData("fast_light"))
+        _app().processEvents()
+        for step_id in ("model", "software"):
+            step = dialog.findChild(QPushButton, f"guidedWizardStep_{step_id}")
+            assert step is not None and step.isEnabled()
+            step.click()
+            _app().processEvents()
+        for text in ("JS8Call", "FIO Spotter", "CommStat"):
+            _checkbox(dialog, text).setChecked(True)
+        _app().processEvents()
+
+        prepare = dialog.findChild(QPushButton, "guidedConfigureAutomaticallyButton")
+        assert prepare is not None
+        prepare.click()
+        assert _wait_until(lambda: prepare.isEnabled()), "managed preparation did not complete"
+
+        drafts = getattr(dialog, "_guided_software_instance_drafts", {})
+        assert set(drafts) >= {"js8call", "fast_light"}
+        assert drafts["js8call"]["launch_recipe_status"] == "qualified_managed"
+        assert drafts["fast_light"]["launch_recipe_status"] == "qualified_managed"
+        assert "fio_spotter" not in drafts
+        assert "commstat" not in drafts
+        assert dialog.findChild(QPushButton, "guidedSoftwareDetails_js8call").text() == "Review Details (optional)…"
+        assert dialog.findChild(QPushButton, "guidedSoftwareDetails_fast_light").text() == "Review Details (optional)…"
+
+        schedule_path = dialog.findChild(QComboBox, "guidedSchedulePathCombo")
+        assert schedule_path is not None and schedule_path.currentData() == SCHEDULE_NONE
+        for step_id in ("connection", "guard", "schedule", "review"):
+            step = dialog.findChild(QPushButton, f"guidedWizardStep_{step_id}")
+            assert step is not None and step.isEnabled(), step_id
+            step.click()
+            _app().processEvents()
+        schedule_state = dialog.findChild(QLabel, "guidedSetupStepStatus_schedule")
+        assert schedule_state is not None and schedule_state.text() == "Complete later"
+        footer = dialog.findChild(QDialogButtonBox, "guidedRadioSetupActionFooter")
+        assert footer is not None
+        save = footer.button(QDialogButtonBox.Save)
+        assert save is not None and save.isEnabled(), save.toolTip()
+        save.click()
+        assert _wait_until(lambda: dialog.result() == QDialog.Accepted)
+
+    payload = _open_add_radio_dialog(monkeypatch, tmp_path, inspect)
+    assert isinstance(payload, dict)
+    drafts = payload["guided_software_instance_drafts"]
+    assert drafts["js8call"]["launch_recipe_status"] == "qualified_managed"
+    assert drafts["fast_light"]["launch_recipe_status"] == "qualified_managed"
+    assert "fio_spotter" not in drafts and "commstat" not in drafts
+    assert "guided_frequency_plan_id" not in payload
+    assert "guided_open_plan_manager_after_save" not in payload
 
 
 @pytest.mark.parametrize("size", [(1920, 1080), (1000, 700), (900, 560)])

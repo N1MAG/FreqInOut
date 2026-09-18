@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import os
 import re
+import threading
+import time
 from pathlib import Path
 from typing import Callable
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -188,3 +190,115 @@ def test_stale_review_recovery_states_nothing_changed_and_routes_to_software(
     assert route == "software"
     assert "Nothing was changed" in str(captured["text"])
     assert "Review & Save" in str(captured["detail"])
+
+
+def test_native_save_continuation_returns_to_gui_thread_before_settings_access(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Regress the worker-thread continuation that crashed final Add Radio save."""
+
+    import freqinout.gui.settings_tab as settings_module
+    from freqinout.core.settings_manager import SettingsManager
+    from freqinout.gui.settings_tab import SettingsTab
+
+    class FakeNativeWorker(QObject):
+        finished = Signal(object)
+        failed = Signal(str)
+
+        def __init__(self, *, plan=None, applied=None) -> None:
+            super().__init__()
+
+        def run(self) -> None:
+            self.finished.emit({"worker_thread": threading.get_ident()})
+
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    SettingsManager()
+    monkeypatch.setattr(settings_module, "_GuidedNativeConfigWorker", FakeNativeWorker)
+    monkeypatch.setattr(SettingsTab, "_start_varac_native_recovery", lambda self: None)
+    monkeypatch.setattr(SettingsTab, "_maybe_backfill_js8_geo", lambda self: None)
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status", lambda self, force=False: None)
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status_compat", lambda self, force=False: None)
+
+    gui_thread = threading.get_ident()
+    result: dict[str, object] = {}
+    tab = SettingsTab()
+    try:
+        def finished(payload: object) -> None:
+            result["callback_thread"] = threading.get_ident()
+            result["worker_thread"] = dict(payload)["worker_thread"]
+            # This exact access raised sqlite3.ProgrammingError in the crash
+            # report when the continuation was invoked on the worker thread.
+            result["settings"] = tab.settings.all()
+
+        tab._start_guided_native_config_job(
+            plan=object(),
+            on_finished=finished,
+            on_failed=lambda detail: result.update(error=detail),
+        )
+        deadline = time.monotonic() + 3.0
+        while "callback_thread" not in result and "error" not in result and time.monotonic() < deadline:
+            _app().processEvents()
+
+        assert "error" not in result
+        assert result.get("callback_thread") == gui_thread
+        assert result.get("worker_thread") != gui_thread
+        assert isinstance(result.get("settings"), dict)
+    finally:
+        tab.shutdown()
+        tab.deleteLater()
+        _app().processEvents()
+
+
+def test_native_save_failure_returns_to_gui_thread_before_reporting(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Failure continuations must not show UI or read settings from the worker."""
+
+    import freqinout.gui.settings_tab as settings_module
+    from freqinout.core.settings_manager import SettingsManager
+    from freqinout.gui.settings_tab import SettingsTab
+
+    class FailingNativeWorker(QObject):
+        finished = Signal(object)
+        failed = Signal(str)
+
+        def __init__(self, *, plan=None, applied=None) -> None:
+            super().__init__()
+
+        def run(self) -> None:
+            self.failed.emit(f"worker:{threading.get_ident()}")
+
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    SettingsManager()
+    monkeypatch.setattr(settings_module, "_GuidedNativeConfigWorker", FailingNativeWorker)
+    monkeypatch.setattr(SettingsTab, "_start_varac_native_recovery", lambda self: None)
+    monkeypatch.setattr(SettingsTab, "_maybe_backfill_js8_geo", lambda self: None)
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status", lambda self, force=False: None)
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status_compat", lambda self, force=False: None)
+
+    gui_thread = threading.get_ident()
+    result: dict[str, object] = {}
+    tab = SettingsTab()
+    try:
+        def failed(detail: str) -> None:
+            result["callback_thread"] = threading.get_ident()
+            result["worker_thread"] = int(detail.split(":", 1)[1])
+            result["settings"] = tab.settings.all()
+
+        tab._start_guided_native_config_job(
+            plan=object(),
+            on_finished=lambda payload: result.update(unexpected=payload),
+            on_failed=failed,
+        )
+        deadline = time.monotonic() + 3.0
+        while "callback_thread" not in result and time.monotonic() < deadline:
+            _app().processEvents()
+
+        assert "unexpected" not in result
+        assert result.get("callback_thread") == gui_thread
+        assert result.get("worker_thread") != gui_thread
+        assert isinstance(result.get("settings"), dict)
+    finally:
+        tab.shutdown()
+        tab.deleteLater()
+        _app().processEvents()

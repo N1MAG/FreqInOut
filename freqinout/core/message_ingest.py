@@ -227,6 +227,10 @@ class MessageIngestor:
         self._expect_dispatch_client_factory = expect_dispatch_client_factory
         self._expect_auto_reply_enabled_override = expect_auto_reply_enabled
         self._projection_trigger_tables_ready: set[str] = set()
+        # Settings is a stable worker snapshot for one ingest run. Discovering
+        # MCF forms is filesystem work, so resolve the enabled status-form set
+        # once per ingestor instead of once per traffic row/backfill upsert.
+        self._mapped_status_form_ids_cache: frozenset[str] | None = None
 
     def _ensure_projection_triggers_once(
         self, conn: sqlite3.Connection, table_name: str
@@ -1705,6 +1709,9 @@ class MessageIngestor:
         return classify_spotter_status(form_id, response_code)
 
     def _mapped_status_form_ids(self) -> set[str]:
+        cached = getattr(self, "_mapped_status_form_ids_cache", None)
+        if cached is not None:
+            return set(cached)
         try:
             raw = self.settings.get(MAPPER_SETTINGS_KEY, [])
         except Exception:
@@ -1714,9 +1721,9 @@ class MessageIngestor:
             for code in forms_enabled_for(self.settings, flag="status")
             if code.startswith("F!") and code[2:] in SPOTTER_STATUS_FORMS
         }
-        if isinstance(raw, list) and raw:
-            return mapped
-        return mapped or set(SPOTTER_STATUS_FORMS)
+        resolved = mapped if isinstance(raw, list) and raw else (mapped or set(SPOTTER_STATUS_FORMS))
+        self._mapped_status_form_ids_cache = frozenset(resolved)
+        return set(resolved)
 
     def _form_codes_for_flag(self, flag: str) -> set[str] | None:
         return form_codes_enabled_for(self.settings, flag=flag)
@@ -1733,9 +1740,15 @@ class MessageIngestor:
         utc_str: str,
         ingested_ts: float,
         status_source: str = "",
+        mapped_status_form_ids: set[str] | None = None,
     ) -> None:
         fid = (form_id or "").strip()
-        if fid not in self._mapped_status_form_ids():
+        enabled_forms = (
+            mapped_status_form_ids
+            if mapped_status_form_ids is not None
+            else self._mapped_status_form_ids()
+        )
+        if fid not in enabled_forms:
             return
         call = (from_call or "").strip().upper()
         if not call:
@@ -1787,6 +1800,7 @@ class MessageIngestor:
             forms = sorted(self._mapped_status_form_ids())
             if not forms:
                 return
+            enabled_forms = set(forms)
             signature = "v2:" + ",".join(forms)
             if str(getattr(self, "_spotter_status_backfill_signature", "") or "") == signature:
                 return
@@ -1825,6 +1839,7 @@ class MessageIngestor:
                     utc_str=str(utc_str or ""),
                     ingested_ts=float(ingested_ts or 0.0),
                     status_source=f"F!{str(form_id or parsed_form_id or '').strip()}",
+                    mapped_status_form_ids=enabled_forms,
                 )
             self._spotter_status_backfill_signature = signature
         except Exception as e:

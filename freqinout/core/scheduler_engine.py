@@ -499,6 +499,12 @@ class SchedulerEngine(QObject):
         self._endpoint_profile_signatures: Dict[int, str] = {}
         self._endpoint_config_epochs: Dict[str, int] = {}
         self._endpoint_config_revision: int = 0
+        # Runtime reconstruction is an exceptional compatibility path. Keep a
+        # short, revision-fenced per-radio result so a missing runtime cannot
+        # turn every scheduler lookup into another SQLite read/client build.
+        self._profile_control_context_cache: Dict[int, Tuple[int, float, tuple]] = {}
+        self._profile_control_context_cache_ttl_s: float = 5.0
+        self._runtime_fallback_warning_ts: Dict[int, float] = {}
         self._startup_probe_not_before: Dict[str, float] = {}
         self._startup_probe_jitter_enabled: bool = False
         self._startup_probe_jitter_until: float = 0.0
@@ -879,10 +885,18 @@ class SchedulerEngine(QObject):
             log.debug("SchedulerEngine: failed resolving runtime for radio %s: %s", radio_id, exc)
             runtime = None
         if runtime is None:
-            log.warning(
-                "SchedulerEngine: no runtime found for targeted radio %s; trying profile-backed control client.",
-                radio_id,
-            )
+            warning_ts = getattr(self, "_runtime_fallback_warning_ts", None)
+            if not isinstance(warning_ts, dict):
+                warning_ts = {}
+                self._runtime_fallback_warning_ts = warning_ts
+            now_monotonic = time.monotonic()
+            last_warning = warning_ts.get(int(radio_id))
+            if last_warning is None or now_monotonic - float(last_warning) >= 30.0:
+                log.warning(
+                    "SchedulerEngine: no runtime found for targeted radio %s; trying profile-backed control client.",
+                    radio_id,
+                )
+                warning_ts[int(radio_id)] = now_monotonic
             return self._control_context_from_device_profile(radio_id)
 
         runtime_settings = getattr(runtime, "settings_proxy", None) or self.settings
@@ -907,6 +921,35 @@ class SchedulerEngine(QObject):
         endpoint. If that cannot be done, the caller receives no client and the
         command is skipped instead of being sent to another radio.
         """
+        cache = getattr(self, "_profile_control_context_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._profile_control_context_cache = cache
+        revision = int(getattr(self, "_endpoint_config_revision", 0) or 0)
+        now_monotonic = time.monotonic()
+        cached = cache.get(int(radio_id))
+        if isinstance(cached, tuple) and len(cached) == 3:
+            cached_revision, expires_monotonic, cached_context = cached
+            if (
+                int(cached_revision) == revision
+                and float(expires_monotonic) > now_monotonic
+                and isinstance(cached_context, tuple)
+                and len(cached_context) == 5
+            ):
+                return cached_context
+            cache.pop(int(radio_id), None)
+
+        def _remember(context):
+            ttl_s = max(
+                0.1,
+                float(
+                    getattr(self, "_profile_control_context_cache_ttl_s", 5.0)
+                    or 5.0
+                ),
+            )
+            cache[int(radio_id)] = (revision, now_monotonic + ttl_s, context)
+            return context
+
         settings_proxy: object = self.settings
         profile: Optional[Mapping[str, Any]] = None
         try:
@@ -921,7 +964,7 @@ class SchedulerEngine(QObject):
                 "SchedulerEngine: no configured profile found for targeted radio %s; refusing fallback control client.",
                 radio_id,
             )
-            return None, None, None, settings_proxy, radio_id
+            return _remember((None, None, None, settings_proxy, radio_id))
 
         settings_proxy = DeviceSettingsProxy(profile, self.settings)
         backend = str(profile.get("control_backend", "") or "").strip().lower()
@@ -950,13 +993,13 @@ class SchedulerEngine(QObject):
                 )
         else:
             if self._target_may_use_singleton_control_client(radio_id):
-                return self.rig, self.js8, self.varac, self.settings, radio_id
+                return _remember((self.rig, self.js8, self.varac, self.settings, radio_id))
             log.warning(
                 "SchedulerEngine: targeted radio %s uses unsupported control backend %r; no command will be sent.",
                 radio_id,
                 backend or "manual",
             )
-        return rig_client, js8_client, None, settings_proxy, radio_id
+        return _remember((rig_client, js8_client, None, settings_proxy, radio_id))
 
     def _target_may_use_singleton_control_client(self, radio_id: int) -> bool:
         """
@@ -1134,6 +1177,8 @@ class SchedulerEngine(QObject):
             self._endpoint_profile_signatures = {}
             self._endpoint_config_epochs = {}
             self._endpoint_config_revision = 0
+            self._profile_control_context_cache = {}
+            self._runtime_fallback_warning_ts = {}
             self._startup_probe_not_before = {}
             self._startup_probe_jitter_enabled = False
             self._startup_probe_jitter_until = 0.0
@@ -1553,6 +1598,9 @@ class SchedulerEngine(QObject):
             self._startup_probe_not_before.pop(canonical, None)
         for profile_id in changed_profiles:
             self._receiver_desired_by_profile.pop(int(profile_id), None)
+            cache = getattr(self, "_profile_control_context_cache", None)
+            if isinstance(cache, dict):
+                cache.pop(int(profile_id), None)
         for endpoint_key in set(new_keys.values()):
             if endpoint_key in affected_keys or endpoint_key.canonical not in self._endpoint_config_epochs:
                 self._endpoint_config_epochs[endpoint_key.canonical] = revision
@@ -2812,7 +2860,10 @@ class SchedulerEngine(QObject):
                 }
                 try:
                     def _poll_varac_status() -> Dict[str, object]:
-                        varac = VarACStatusClient()
+                        # Reuse the worker-owned SettingsManager. Constructing
+                        # another one here repeats schema/usage discovery on
+                        # every background status refresh.
+                        varac = VarACStatusClient(settings=settings)
                         return {
                             "varac_status": varac.get_status(include_db_transfer=True),
                             "source": "scheduler_background_varac",

@@ -757,6 +757,94 @@ def test_scheduler_control_context_builds_target_client_from_store_when_runtime_
     assert rig is not scheduler.rig
 
 
+def test_profile_fallback_context_is_cached_per_radio_and_revision(monkeypatch) -> None:
+    import freqinout.core.scheduler_engine as scheduler_mod
+    from freqinout.core.scheduler_engine import SchedulerEngine
+
+    calls = {"store": 0, "client": 0}
+
+    class FakeStore:
+        def __init__(self, _path) -> None:
+            pass
+
+        def get_device_profile(self, device_profile_id: int):
+            calls["store"] += 1
+            return {
+                "id": int(device_profile_id),
+                "control_backend": "flrig",
+                "flrig_host": "127.0.0.1",
+                "flrig_port": 12340 + int(device_profile_id),
+            }
+
+    def fake_client_from_settings(settings):
+        calls["client"] += 1
+        return SimpleNamespace(port=int(settings.get("flrig_port")))
+
+    monkeypatch.setattr(scheduler_mod, "MultiRadioStore", FakeStore)
+    monkeypatch.setattr(scheduler_mod, "rig_control_client_from_settings", fake_client_from_settings)
+
+    scheduler = SchedulerEngine.__new__(SchedulerEngine)
+    scheduler.settings = SimpleNamespace(get=lambda _key, default=None: default)
+    scheduler.rig = None
+    scheduler.js8 = None
+    scheduler.varac = None
+    scheduler._endpoint_config_revision = 7
+    scheduler._profile_control_context_cache_ttl_s = 60.0
+
+    first = SchedulerEngine._control_context_from_device_profile(scheduler, 8)
+    second = SchedulerEngine._control_context_from_device_profile(scheduler, 8)
+    other_radio = SchedulerEngine._control_context_from_device_profile(scheduler, 9)
+
+    assert second is first
+    assert first[0].port == 12348
+    assert other_radio[0].port == 12349
+    assert calls == {"store": 2, "client": 2}
+
+    scheduler._endpoint_config_revision = 8
+    refreshed = SchedulerEngine._control_context_from_device_profile(scheduler, 8)
+
+    assert refreshed is not first
+    assert calls == {"store": 3, "client": 3}
+
+
+def test_missing_runtime_warning_is_throttled_per_radio(monkeypatch, caplog) -> None:
+    import freqinout.core.scheduler_engine as scheduler_mod
+    from freqinout.core.scheduler_engine import SchedulerEngine
+
+    class FakeManager:
+        def get_runtime_for_device(self, _device_profile_id: int):
+            return None
+
+    scheduler = SchedulerEngine.__new__(SchedulerEngine)
+    scheduler.rig = None
+    scheduler.js8 = None
+    scheduler.varac = None
+    scheduler.settings = SimpleNamespace(get=lambda _key, default=None: default)
+    scheduler.station_runtime_manager = FakeManager()
+    scheduler._entry_manual_control_radio_id = lambda _entry: 8
+    scheduler._control_context_from_device_profile = lambda radio_id: (
+        None,
+        None,
+        None,
+        scheduler.settings,
+        radio_id,
+    )
+    monotonic_values = iter((100.0, 101.0, 131.0))
+    monkeypatch.setattr(scheduler_mod.time, "monotonic", lambda: next(monotonic_values))
+
+    with caplog.at_level("WARNING"):
+        SchedulerEngine._control_context_for_entry(scheduler, {})
+        SchedulerEngine._control_context_for_entry(scheduler, {})
+        SchedulerEngine._control_context_for_entry(scheduler, {})
+
+    warnings = [
+        record
+        for record in caplog.records
+        if "no runtime found for targeted radio 8" in record.getMessage()
+    ]
+    assert len(warnings) == 2
+
+
 def test_scheduler_queue_control_action_dispatches_to_target_rig_client() -> None:
     from freqinout.core.scheduler_engine import SchedulerEngine
 

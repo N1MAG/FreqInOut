@@ -56,10 +56,14 @@ class _Rig:
 
 
 class _Settings:
+    def __init__(self) -> None:
+        self._values: Dict[str, object] = {"control_via": "FLRig"}
+
     def get(self, key: str, default: object = None) -> object:
-        if key == "control_via":
-            return "FLRig"
-        return default
+        return self._values.get(key, default)
+
+    def set(self, key: str, value: object) -> None:
+        self._values[key] = value
 
 
 class _JS8:
@@ -86,6 +90,13 @@ def _engine(monkeypatch, tmp_path) -> SchedulerEngine:
     if QCoreApplication.instance() is None:
         QCoreApplication([])
     engine = SchedulerEngine(poll_interval_ms=60_000)
+    # This file intentionally executes queued continuations inline on worker
+    # threads. Use its thread-neutral settings fake so endpoint-continuation
+    # behavior is tested without violating the production GUI-dispatch
+    # contract or sharing the real SettingsManager across threads.
+    owned_settings = engine.settings
+    engine.settings = _Settings()
+    owned_settings.close()
     engine._queue_scheduler_thread_call = lambda callback: callback()
     engine._record_scheduler_health_issue = lambda *_args, **_kwargs: None
     engine._clear_scheduler_health_issue = lambda *_args, **_kwargs: None

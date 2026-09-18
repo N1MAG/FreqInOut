@@ -739,6 +739,9 @@ def test_status_refresh_applies_js8_shadow_comparison_on_scheduler_thread(monkey
             pass
 
     class _FakeVarACStatusClient:
+        def __init__(self, settings=None):
+            self.settings = settings
+
         def get_status(self, include_db_transfer: bool = True):
             return {"busy": False, "waiting_for_frequency": False, "reason": None}
 

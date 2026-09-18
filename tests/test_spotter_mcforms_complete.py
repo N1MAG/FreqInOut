@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -258,6 +259,65 @@ def test_native_js8_msg_recovers_destination_without_api_to_field(tmp_path: Path
     assert parsed is not None
     assert parsed["to_call"] == "N0CALL"
     assert "checking... still operational" in parsed["raw_form"]
+
+
+def test_status_form_discovery_is_cached_once_per_ingest_run(monkeypatch) -> None:
+    import freqinout.core.message_ingest as message_ingest_module
+
+    calls: list[int] = []
+    monkeypatch.setattr(
+        message_ingest_module,
+        "forms_enabled_for",
+        lambda _settings, flag="": calls.append(1) or {"F!701C"},
+    )
+    ingestor = MessageIngestor({"spotter_form_mappings": []})
+
+    assert ingestor._mapped_status_form_ids() == {"701C"}
+    assert ingestor._mapped_status_form_ids() == {"701C"}
+    assert calls == [1]
+
+
+def test_status_upsert_accepts_precomputed_form_set_without_rediscovery(monkeypatch) -> None:
+    ingestor = MessageIngestor({})
+    monkeypatch.setattr(
+        ingestor,
+        "_mapped_status_form_ids",
+        lambda: pytest.fail("precomputed backfill forms must prevent per-row discovery"),
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE spotter_station_status (
+            from_call TEXT PRIMARY KEY,
+            form_id TEXT NOT NULL,
+            status_key TEXT NOT NULL,
+            status_label TEXT NOT NULL,
+            response_code TEXT,
+            updated_utc_ts REAL NOT NULL DEFAULT 0,
+            updated_utc_str TEXT,
+            raw_text TEXT,
+            updated_ingested_ts REAL,
+            status_source TEXT,
+            status_source_detail TEXT
+        )
+        """
+    )
+    ingestor._upsert_spotter_station_status(
+        conn.cursor(),
+        from_call="K1ABC",
+        form_id="701C",
+        response_code="2",
+        raw_form="F!701C 2",
+        utc_ts=1.0,
+        utc_str="2026-09-18 00:00:00",
+        ingested_ts=2.0,
+        mapped_status_form_ids={"701C"},
+    )
+
+    assert conn.execute(
+        "SELECT status_key FROM spotter_station_status WHERE from_call='K1ABC'"
+    ).fetchone() == ("yellow",)
+    conn.close()
 
 
 def test_magnet_status_forms_use_conservative_shared_summary() -> None:

@@ -43,6 +43,7 @@ def test_status_refresh_invokes_js8_shadow_comparison_for_offset_only_branch(mon
     import freqinout.core.scheduler_engine as scheduler_module
 
     shadow_calls: list[dict[str, object]] = []
+    varac_settings: list[object] = []
 
     class _ImmediateFuture:
         def __init__(self, value):
@@ -78,6 +79,10 @@ def test_status_refresh_invokes_js8_shadow_comparison_for_offset_only_branch(mon
             pass
 
     class _FakeVarACStatusClient:
+        def __init__(self, settings=None):
+            self.settings = settings
+            varac_settings.append(settings)
+
         def get_status(self, include_db_transfer: bool = True):
             return {"busy": False, "waiting_for_frequency": False, "reason": None}
 
@@ -112,6 +117,8 @@ def test_status_refresh_invokes_js8_shadow_comparison_for_offset_only_branch(mon
         engine._maybe_refresh_external_status_snapshot(force=True)
 
         assert shadow_calls == [{"offset_hz": 1950}]
+        assert len(varac_settings) == 1
+        assert isinstance(varac_settings[0], DummySettings)
         assert engine._last_js8_shadow_comparison == {"connected": True, "mode": "api_basic", "version": "3.0.2"}
     finally:
         _shutdown_engine(engine)
@@ -189,6 +196,9 @@ def test_status_refresh_invokes_js8_shadow_comparison(monkeypatch):
             pass
 
     class _FakeVarACStatusClient:
+        def __init__(self, settings=None):
+            self.settings = settings
+
         def get_status(self, include_db_transfer: bool = True):
             return {"busy": False, "waiting_for_frequency": False, "reason": None}
 
@@ -271,6 +281,9 @@ def test_status_refresh_reuses_coordinated_js8_and_varac_snapshots(monkeypatch):
             pass
 
     class _FakeVarACStatusClient:
+        def __init__(self, settings=None):
+            self.settings = settings
+
         def get_status(self, include_db_transfer: bool = True):
             calls["varac"] += 1
             return {"busy": False, "waiting_for_frequency": False, "reason": None}

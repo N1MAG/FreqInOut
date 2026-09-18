@@ -911,9 +911,9 @@ def guided_setup_schedule_decision(
             review_text="No FIO-controlled schedule or QSY controls will be saved for this radio.",
         )
     if schedule_choice == SCHEDULE_NONE:
-        text = "No Frequency Plan will be assigned now. This radio can be assigned later."
+        text = "No Frequency Plan will be assigned now. This radio is ready; a plan can be assigned later."
         return GuidedScheduleDecision(
-            status="review",
+            status="complete_later",
             step_detail=text,
             status_text=text,
             review_text="No Frequency Plan assigned during setup.",

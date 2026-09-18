@@ -115,6 +115,24 @@ an instance always selects one atomic identity bundle.
     Save. It says it will create or verify native application configuration only
     when an exact platform/version-qualified writer satisfies the Native
     Configuration Writer Contract.
+13. **FIO is the configuration steward.** For every supported and qualified
+    application, FIO generates the optimal complete configuration it can prove
+    safe: stable identity, collision-free endpoints, managed directories,
+    application files, launch command, working directory, dependencies,
+    readiness, and radio/service bindings. The operator chooses operational
+    intent and reviews the result; the operator is not made to understand or
+    reconstruct application-specific conventions that FIO already knows.
+14. **Preparation completes the in-memory bundle.** Preparation remains
+    non-mutating with respect to the filesystem, third-party applications, and
+    durable FIO data, but it must update the generation-fenced radio draft with
+    every FIO-owned derived value. “No external writes before Save” never means
+    “leave the draft incomplete.” Only operator-owned decisions survive a
+    reprepare unchanged; stale generated values are replaced atomically by the
+    current prepared generation.
+15. **Administration is exception handling.** A qualified prepared bundle does
+    not require a trip to Software Administration or a generic Files form.
+    Administration opens only for a genuine ambiguity, unsupported recipe,
+    explicit import/manual mode, or an operator-requested Advanced review.
 
 ## Terminology And Durable Identity
 
@@ -2006,6 +2024,189 @@ Save, Cancel, and recovery/fault behavior with live JS8Call variants, Fast Light
 VarAC, receiver/radio control, and the required macOS/Linux/Windows platforms.
 Until that evidence is recorded, this work is ready for testing but not a
 completed release qualification.
+
+### GRS-8 — Zero-Entry Managed Bundle And Thread-Safe Save Remediation
+
+Status: automated remediation gate passed 2026-09-18; operator-assisted Linux
+launch/save qualification remains open. The 2026-09-18 Linux operator route
+reopened the automated Add Radio and final-Save gate.
+
+Observable reproduction:
+
+`Settings -> Radios -> Add Radio -> Transceiver -> Fast Light + JS8Call + FIO
+Spotter + CommStat -> Prepare selected software automatically -> Connections ->
+Safety -> Assign schedule later -> Review & Save`
+
+The reported build populated ports and other loose controls, then required the
+operator to open a technical software assistant because preparation had not
+created the complete in-memory JS8Call and Fast Light bundles required by Save.
+The Schedule card also reported `Needed` even though schedule selection was not
+the Save predicate. During final Save, a native-configuration worker invoked a
+plain Python completion callback on its worker thread; that callback entered the
+FIO save transaction, refreshed Qt widgets, and used the GUI-owned
+`SettingsManager`. The thread-affinity guard raised and the cross-thread Qt
+error path destabilized the application. The transaction reported rollback;
+no successful Save claim is made.
+
+#### Field And Action Ownership
+
+For a qualified new managed JS8Call or Fast Light instance, Prepare must publish
+one complete immutable draft containing the stable key, exact executable and
+variant/version evidence, native/profile/configuration roots, application-data,
+message/log/check-in roots, TCP/UDP endpoints, rig/profile selectors, component
+launch commands, working directories, dependencies, startup policy, manifest,
+resource claims, native-writer state, and recovery guidance. The generated
+draft is the same atomic bundle used by Connections, Review, external planning,
+persistence, Launch Control, and Health.
+
+Built-in FIO Spotter contributes its station catalog and a binding to the
+selected radio-owned JS8 transport. It creates no external application,
+launcher, or per-radio forms-folder question. CommStat contributes one binding
+from the station-shared CommStat identity to that exact JS8 endpoint; it creates
+no duplicate process, executable, profile, or launch item.
+
+The operator normally decides only:
+
+- which software and source intent to use;
+- whether FIO launches each eligible managed application;
+- role/capability and explicit transmit/safety policy;
+- assign a schedule now versus later; and
+- whether to accept the readable reviewed plan.
+
+Generated technical values are visible as read-only learning evidence in
+Review and `Show details`. They become editable only through an explicit
+Advanced override after FIO reports that the qualified recipe cannot complete
+the requested result. A missing or ambiguous executable asks the operator to
+choose among bounded candidates or Browse; it does not expose unrelated raw
+configuration fields.
+
+Preparation creates no directories or files. Final Save is the one commit
+boundary. It creates all reviewed FIO-owned directories and qualified native
+files, uses temporary targets and backups where required, verifies semantic
+readback, saves the complete FIO transaction, and restores exact external state
+if the FIO transaction fails. An unsupported native writer does not erase the
+safe FIO-owned bundle: Save retains it inactive or verification-pending and
+states the one exact operator action.
+
+Schedule is independent from software preparation. `Assign later / no
+schedule` is the safe default and a completed state unless the selected FIO
+Behavior explicitly requires a plan. A missing optional plan may be a visible
+follow-up but may not masquerade as the reason a software draft or radio cannot
+be saved.
+
+#### Concurrency And Completion Contract
+
+Workers own bounded discovery, parsing, hashing, backup, external file writes,
+and readback. Their success/failure publications cross an explicit queued
+QObject boundary into a GUI-affinity receiver. Plain worker-thread callbacks may
+not invoke a SettingsTab method that accesses Qt, `SettingsManager`, a
+GUI-created store/connection, dialogs, table refresh, or navigation.
+
+The GUI thread owns only cache publication, visible progress, confirmation,
+and bounded presentation. Durable database work that can exceed the UI budget
+uses a worker-owned store/connection and returns an immutable result; final UI
+publication remains queued and generation-fenced. No error or rollback route
+may show a `QMessageBox`, refresh a widget, or reuse the GUI-owned
+`SettingsManager` from a worker thread.
+
+#### GRS-8 Exit Gate
+
+The slice passes only when all of the following are proven:
+
+1. The exact observable route completes without opening Software
+   Administration, Configure Details, a generic Files page, or any raw
+   path/port/command/profile editor.
+2. Prepare publishes complete qualified JS8Call and Fast Light drafts into the
+   radio draft. Review and Save require no manually entered technical value.
+3. JS8Call receives distinct profile/application-data/message roots, rig
+   selector, TCP/UDP claims, launch identity, and qualified native-plan state.
+   Fast Light receives distinct FLRig/FLDigi roots, endpoints, logs/check-in
+   paths, component commands, dependencies, and receive-safe defaults.
+4. FIO Spotter creates no external instance. Exactly one station CommStat
+   identity remains, with one new binding to the prepared JS8 endpoint.
+5. `Assign later / no schedule` is the initial safe completed schedule state;
+   only a behavior that explicitly requires scheduling blocks Save.
+6. Before Save, generated filesystem targets do not exist. After successful
+   Save, every reviewed safe directory/file exists, qualified native state reads
+   back, the FIO transaction contains no orphan or hybrid identity, and the
+   launch plan is executable from its reviewed working directories.
+7. Native-worker success and failure callbacks are observed on the GUI thread.
+   A focused test fails if a SettingsTab transaction, SettingsManager access,
+   Qt refresh, dialog, or navigation runs on a worker thread.
+8. Injected discovery, external-write, readback, database, activation,
+   schedule, and callback failures leave byte-for-byte external and row-for-row
+   FIO prior state, publish one bounded recovery result, and keep the event loop
+   responsive.
+9. Add Radio and Software Administration share the same prepared-bundle core;
+   one path cannot require configuration that the other path derives.
+10. The real-widget route passes Normal/Large Text, Light/Dark, 1920x1080,
+    1000x700, and 900x560 checks with one body scroll owner, stable navigation,
+    reachable primary action, no swipe/vanish reflow, and no page-level
+    horizontal overflow.
+11. The attached CPU-hotspot evidence is reviewed separately from the crash.
+    Repeated scheduler fallback and form-discovery work receives its own bounded
+    performance finding/test and is not represented as fixed merely because the
+    Save crash is corrected.
+
+Automated success does not close the Linux external gate. The operator must
+relaunch the current deployed worktree, confirm its active configuration root,
+repeat the exact route with installed applications, and verify launch/readiness
+without changing an existing application's identity unexpectedly.
+
+Implementation evidence: Prepare now publishes complete qualified managed
+JS8Call and Fast Light drafts without opening the technical assistant; built-in
+FIO Spotter and station-shared CommStat do not create external per-radio
+instances; a new radio defaults to `Assign later`; stale name, role, backend,
+source, management, launch, setup, or software changes invalidate the prepared
+context; and final Save rechecks that same context. Existing reviewed JS8Call
+variant/version evidence is reused only when the selected executable identity
+matches; otherwise qualification remains fail-closed and exposes one bounded
+Needs Attention action.
+
+Native guided and VarAC worker success/failure results now cross SettingsTab-
+owned queued signals before any callback may access Qt, SettingsManager, or a
+GUI-created store. Real event-loop tests reproduce success and failure from a
+worker thread and access SettingsManager only after the continuation reaches
+the GUI thread. The exact Fast Light + JS8Call + FIO Spotter + CommStat route
+now reaches an accepted dialog payload with complete drafts and no schedule or
+Plan Builder handoff. The attached sustained-CPU evidence remains a separately
+tracked performance gate and is not closed by this remediation.
+
+#### GRS-8.1 Ingest Hotspot Remediation And Remaining Projection Gate
+
+The supplied CPU sample separately captured a message-ingest backfill in which
+each status row called the dynamic Spotter form resolver again. That resolver
+walks the forms directory, so one backfill could perform the same filesystem
+discovery once per record even though the effective mapping cannot change
+inside one ingest run. This is not useful freshness; it is repeated work inside
+one immutable ingest decision.
+
+One `MessageIngestor` now resolves and caches the effective mapped status-form
+IDs once per ingest run. The backfill passes that precomputed set into each
+status upsert. A later ingest run receives a new ingestor and therefore a fresh
+discovery boundary, preserving changes made between runs while eliminating
+same-run directory rescans. Focused tests prove both one-resolution behavior
+and that an explicitly precomputed set performs no discovery.
+
+The same trace showed the scheduler's missing-runtime compatibility path
+reopening the profile store and rebuilding a radio control client for repeated
+lookups of the same radio. That path now has a short per-radio cache fenced by
+the endpoint-configuration revision; changed profile/endpoint identities evict
+their entry, different radios never share an entry, and negative results expire
+quickly. The repeated missing-runtime warning is bounded to one per radio per
+30 seconds. This preserves the fail-safe rule: no valid target context still
+means no command. Background VarAC status now receives the worker-owned
+`SettingsManager` instead of constructing a second settings/schema stack inside
+the same poll.
+
+The CPU evidence also records frequent schedule-projection work. That work is
+already outside the Qt thread, but its refresh/invalidation policy is a separate
+scheduler architecture decision. It must not be changed opportunistically in
+the Add Radio crash slice. Before release, a dedicated performance gate must
+measure the unchanged-state projection rate, identify the authoritative
+database/config invalidation inputs, and prove that a bounded cache cannot hide
+assignment, plan, manual-control, or source-backed-plan changes. Until that
+gate passes, no claim is made that all sustained CPU causes are resolved.
 
 ## Approved Product Decisions
 

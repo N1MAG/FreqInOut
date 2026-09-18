@@ -7842,6 +7842,93 @@ VarAC, receiver/radio control, and the required macOS/Linux/Windows platforms.
 This build is ready for that testing; it is not yet a completed release
 qualification.
 
+## 2026-09-18 — GRS-8 zero-entry managed bundle and thread-safe Save remediation
+
+Status: automated remediation gate passed; live Linux installed-application
+Save/launch qualification and the separate sustained-CPU gate remain open.
+
+The supplied log proved that final Guided Add Radio Save resumed directly on a
+native-configuration worker thread. That continuation entered the radio
+transaction, refreshed Qt state, and called the GUI-owned SettingsManager,
+which raised its thread-affinity guard and destabilized the error path. Guided
+native and VarAC worker results now cross SettingsTab-owned queued signals, and
+both success and failure continuations are proven on the GUI thread before
+settings or presentation access.
+
+Prepare now constructs and retains complete qualified managed JS8Call and Fast
+Light drafts using the common distinct identity and launch-recipe core. A
+qualified preparation makes technical Details optional; an unsupported or
+ambiguous recipe remains fail-closed with one bounded corrective action. FIO
+Spotter remains built in, CommStat remains one station-shared process with a
+per-radio JS8 endpoint binding, and neither creates an external per-radio
+instance. New radios default to `Assign later`, which is a completed optional
+schedule state. The final Save predicate rechecks current preparation context,
+qualified recipe status, radio name, and retained identity; software, source,
+management, launch, setup, role, backend, or name changes cannot reuse a stale
+auto-prepared draft.
+
+Primary integration review added two corrections after delegated work: exact
+existing JS8Call variant/version evidence is reused only when its reviewed
+executable identity matches the selected binary, and programmatic return from
+the optional technical assistant is signal-blocked so policy synchronization
+cannot invalidate the just-reviewed draft. The acceptance route was also
+strengthened from “Save button enabled” to a real accepted dialog payload,
+which found and corrected a missing radio-name gate.
+
+Work packages and model ownership:
+
+- Primary `gpt-5.6-sol`, high reasoning: crash architecture, queued completion
+  boundary, transaction and stale-context review, delegated-diff integration,
+  exact accepted-payload test, specification, and final regression gate.
+- `gpt-5.6-terra`, high reasoning: bounded Prepare publication, optional versus
+  required detail presentation, safe schedule default, stale auto-draft
+  invalidation, and focused UI tests. The primary reviewed and corrected the
+  complete diff.
+- `gpt-5.6-luna`, high reasoning: independent log/crash-path and acceptance-gap
+  audit. It identified the missing Prepare-to-retained-draft assertion and the
+  stale-draft risk; no files were changed by this package.
+
+Acceptance evidence from the final tree: guided setup/operator/unified UX and
+native Save partitions **120 passed**; family/store/identity/guard/inventory/
+recipe/persistence/adapter partition **153 passed, 8 skipped**; adjacent guided
+UI partitions **25 passed**, **13 passed**, **29 passed**, and **8 passed**.
+Changed Python compilation and `git diff --check` pass. One broad Qt aggregate
+was stopped and rerun in deterministic partitions; the responsive-layout file
+completed independently in about 30 seconds. Tests used temporary state. No
+production database, native profile, external application, endpoint, radio,
+commit, remote, or unrelated DOCX/rendered-document change was modified.
+
+The attached hotspot was also treated as a separate bounded performance work
+package. It showed dynamic Spotter form discovery repeated once per backfilled
+status row. The primary changed the ingestor to resolve mapped status-form IDs
+once per ingest run and pass the immutable set through each upsert. Two focused
+regressions prove one discovery per run and zero rediscovery when a precomputed
+set is supplied. The independent Luna audit also identified repeated
+profile-backed control-context construction when a radio runtime is absent and
+duplicate SettingsManager/schema initialization inside each background VarAC
+poll. The primary added a short per-radio, endpoint-revision-fenced fallback
+cache with bounded warning publication and passed the existing worker-owned
+settings snapshot into VarAC status. Per-radio isolation and revision
+invalidation have focused coverage.
+
+The combined final guided-save, ingest, scheduler-routing, and background-status
+gate is **199 passed, 2 skipped**; adjacent endpoint lifecycle/isolation/fault
+coverage is **78 passed**. Changed Python compilation and `git diff --check`
+pass. The hotspot's
+frequent schedule projection remains an explicit follow-up gate because its
+safe correction requires authoritative invalidation evidence across schedules,
+assignments, manual-control state, and source-backed plans; it was not folded
+into the crash remediation without that proof.
+
+Performance package ownership:
+
+- Primary `gpt-5.6-sol`, high reasoning: bounded ingestion cache, per-radio
+  fallback-context architecture/invalidation, VarAC settings reuse,
+  integration review, tests, and documentation.
+- `gpt-5.6-luna`, high reasoning: read-only log/hotspot and scheduler-path
+  audit, prioritization, and regression recommendations. No files were changed
+  by this delegated package.
+
 ## 2026-09-17 — Native VarAC cluster configuration (VNC-1 through VNC-5)
 
 Status: automated implementation exit gate passed; disposable live Windows and
