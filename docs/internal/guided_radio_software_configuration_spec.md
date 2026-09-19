@@ -3132,3 +3132,89 @@ candidates: the initial ambiguity disables Next; selecting one candidate
 persists that exact path, starts one replacement preparation, publishes the
 same path in the retained JS8 draft, and enables Next. Assistant reflow/resize
 coverage must also retain visible active content and footer controls.
+
+## GRS-12 — Atomic VarAC Preparation In The Full Software Combination
+
+### Production Reproduction And Scope
+
+The binding route is `Settings > Radios > Add Radio > Software`: select
+TriMode, FIO Spotter, CommStat, and the Fast Light/JS8Call bundle; select VarAC
+and explicitly choose **Create VarAC cluster**. Production showed all detected
+applications while VarAC remained internally unprepared, leaving `Next:
+Connections` disabled with a generic reason. Repeated attempts also produced
+brief UI stalls.
+
+General Add Radio discovery and native VarAC planning are separate background
+operations. Completion of the general discovery pass is not completion of the
+selected VarAC family's native plan. The UI must represent that distinction as
+one authoritative state per selected family, rather than exposing an
+inconsistent page-level Ready status and a card-level unexplained block.
+
+### Authoritative Family State And Navigation
+
+Each selected family has exactly one current state: Preparing, Ready, Ready
+with warning, Launch pending, Needs choice, or Blocked. The Software setup
+status and its `Next` policy derive from those same states:
+
+- while a native VarAC plan is pending, VarAC says **Preparing**, Software is
+  not Ready, and Next is disabled;
+- a qualified bundle is **Ready** and enables Next;
+- `apply_requires_stopped_process=True` is **Ready with warning**, still
+  enables Next, and clearly tells the operator to close VarAC and VARA before
+  final Save;
+- a non-ready native result is **Blocked**. Its exact native `why` is retained
+  in the dialog draft and displayed on both the VarAC card and setup status;
+  Next remains disabled.
+
+This severity model does not weaken the no-damage boundary. Read-only native
+planning is permitted while VarAC or VARA is running. The final Save transaction
+is the only external apply boundary and remains responsible for requiring the
+applications to be stopped, journaling, backup, transactionality, readback,
+rollback, and durable FIO commit.
+
+### Native Bundle, Discovery, And Selection Contract
+
+For a managed VarAC family, Connection, Review, and launch rendering consume
+only the already-qualified native bundle. They must never invoke legacy,
+synchronous VarAC filesystem discovery. Detected application candidates are
+published as one batched discovery result, once per current generation; they
+must not trigger per-control rescans or GUI-thread scans while the operator
+navigates.
+
+Every selected-software combination uses the same state machine. The compact
+matrix includes JS8Call only, Fast Light only, JS8Call + FIO Spotter + CommStat,
+full TriMode without VarAC, and full TriMode with Create VarAC cluster. Valid
+warning and launch-pending states do not block Next. Explicit safety failures,
+missing required choices, and non-ready native plans remain visible blockers.
+
+Deselecting VarAC immediately removes its draft and native-pending navigation
+gate for the remaining prepared families. A late result from that removed or
+otherwise stale generation must be ignored: it may not restore VarAC data,
+change a card state, or disable Next.
+
+### GRS-12 Acceptance And Exit Evidence
+
+The automated implementation gate requires real-dialog coverage of every
+matrix case above, delayed native preparation, qualified ready, qualified
+ready-with-stop-before-final-Save warning, exact blocked-native reason,
+stale-result rejection after deselection, and a failing legacy-discovery seam
+to prove render/navigation stays bundle-only. `git diff --check` and the
+applicable guided-radio/native preparation suites must also pass.
+
+Implementation ownership and final automated evidence:
+
+- primary `gpt-5.6-sol`, high reasoning: production-evidence review,
+  architecture, native-plan lifecycle and freshness, transactional safety,
+  delegated-diff review, integration corrections, and final gate;
+- `gpt-5.6-terra`, medium reasoning: bounded real-dialog selection matrix,
+  native-state regressions, and specification/work-log update;
+- `gpt-5.6-luna`, medium reasoning: bounded production performance audit and
+  hotspot call-chain analysis.
+
+The exact GRS-12 focused suite passed **30 tests**. The broader guided-radio,
+native preparation/writer/transaction, inventory, launch, and production-shaped
+suite passed **180 tests**, and the Software Administration layout/assistant
+suite passed **77 tests**. Changed Python compilation and `git diff --check`
+pass. No schema or migration is introduced. Live Linux operator qualification,
+including the reported full TriMode/Create-VarAC-cluster route, remains an
+external release gate.

@@ -8350,3 +8350,58 @@ Evidence:
 - changed Python compilation: passed;
 - no schema, migration, native writer, external application file, production
   database, process, endpoint, radio, commit, or remote was changed.
+
+## 2026-09-19 — GRS-12 full TriMode VarAC preparation lifecycle
+
+Status: automated implementation gate passed; external Linux operator
+qualification remains open.
+
+Operator evidence: in `Settings > Radios > Add Radio > Software`, TriMode with
+FIO Spotter, CommStat, Fast Light, JS8Call, and an explicit **Create VarAC
+cluster** choice displayed all application candidates but left VarAC at an
+unexplained attention state and disabled Continue. Repeated attempts also
+showed brief UI stalls.
+
+The correction establishes one family state across the card, Software setup
+status, and navigation gate. Native VarAC planning is independently pending
+after general software discovery; it publishes Preparing rather than Ready.
+A qualified bundle enables Continue. A qualified bundle that requires VarAC
+and VARA to be stopped before the transactional final Save is a visible,
+non-blocking warning. A non-ready result persists and displays its exact native
+reason, marks the card Blocked, and prevents Continue. Planning remains
+read-only while applications run; the final apply transaction is unchanged as
+the no-write safety boundary.
+
+Rendering/review consume the prepared native bundle and must not call legacy
+synchronous VarAC filesystem discovery. Candidate publication is batch-only.
+The matrix covers JS8 only, Fast Light only, JS8 + FIO Spotter + CommStat,
+full TriMode without VarAC, and full TriMode with Create VarAC cluster. It also
+covers delayed native preparation and deselecting VarAC during that delay: the
+remaining prepared families regain Continue immediately and a late stale VarAC
+result cannot reinsert the draft or gate navigation.
+
+Work-package ownership:
+
+- Primary `gpt-5.6-sol`, high reasoning: production-evidence review,
+  architecture, native-plan lifecycle/concurrency and stale-result fencing,
+  final-save safety boundary, delegated-diff review, integration corrections,
+  and final automated gate.
+- `gpt-5.6-terra`, medium reasoning: bounded real-dialog combination matrix,
+  pending/ready/warning/blocked native-state coverage, stale deselection
+  coverage, legacy-discovery prohibition, and specification/work-log update.
+- `gpt-5.6-luna`, medium reasoning: bounded performance audit of the supplied
+  production log and CPU hotspot captures.
+
+Final evidence:
+
+- exact GRS-12 focused suite: **30 passed**;
+- broader guided-radio, native preparation/writer/transaction, inventory,
+  launch, and production-shaped suite: **180 passed**;
+- Software Administration layout and assistant suite: **77 passed**;
+- changed Python compilation and `git diff --check`: passed.
+
+No schema, migration, production database, application file, process,
+endpoint, radio, commit, or remote was changed. The unrelated DOCX and rendered
+document changes remain untouched. The live Linux operator run of the complete
+reported route, including no visible UI stall and successful progression to
+Connections, remains required before release qualification.

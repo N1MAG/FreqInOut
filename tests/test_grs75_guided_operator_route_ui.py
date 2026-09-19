@@ -1043,6 +1043,417 @@ def test_warning_recipe_permits_save_but_explicit_safety_block_does_not(
     _open_add_radio_dialog(monkeypatch, tmp_path, inspect)
 
 
+@pytest.mark.parametrize(
+    ("selected", "expected_drafts"),
+    (
+        (("JS8Call",), {"js8call"}),
+        (("FLRig", "FLDigi", "FLMsg", "FLAmp"), {"fast_light"}),
+        (("JS8Call", "FIO Spotter", "CommStat"), {"js8call"}),
+        (
+            (
+                "FLRig",
+                "FLDigi",
+                "FLMsg",
+                "FLAmp",
+                "JS8Call",
+                "FIO Spotter",
+                "CommStat",
+            ),
+            {"fast_light", "js8call"},
+        ),
+    ),
+    ids=("js8-only", "fast-light-only", "js8-spotter-commstat", "trimode-without-varac"),
+)
+def test_guided_software_selection_matrix_allows_non_safety_warnings_to_continue(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    selected: tuple[str, ...],
+    expected_drafts: set[str],
+) -> None:
+    """Every supported non-VarAC mix prepares without a hidden combination gate.
+
+    FIO Spotter and CommStat deliberately produce no radio-owned draft: they
+    use the in-process feature and station-shared binding respectively.  They
+    must therefore never turn an otherwise usable JS8Call mix into a blocked
+    Add Radio step.  Empty discovery intentionally yields launch-pending
+    recipes, proving those warnings are not confused with safety failures.
+    """
+
+    import freqinout.gui.settings_tab as settings_tab_module
+
+    class _ImmediateThread(QObject):
+        started = Signal()
+        finished = Signal()
+
+        def start(self) -> None:
+            self.started.emit()
+
+        def quit(self) -> None:
+            self.finished.emit()
+
+    def publish_empty_snapshot(worker: object) -> None:
+        request = getattr(worker, "request")
+        worker.finished.emit(
+            {
+                "guided_discovery_request": request,
+                "install_candidates": (),
+                "fast_results": {},
+                "js8_results": {},
+                "varac_results": {},
+                "js8_file_profiles": (),
+            }
+        )
+
+    monkeypatch.setattr(
+        settings_tab_module._GuidedRadioAutofillWorker,
+        "run",
+        publish_empty_snapshot,
+    )
+    monkeypatch.setattr(settings_tab_module, "QThread", _ImmediateThread)
+    monkeypatch.setattr(
+        settings_tab_module._GuidedRadioAutofillWorker,
+        "moveToThread",
+        lambda *_args: None,
+    )
+
+    all_radio_owned = (
+        "FLRig",
+        "FLDigi",
+        "FLMsg",
+        "FLAmp",
+        "JS8Call",
+        "FIO Spotter",
+        "CommStat",
+        "VarAC",
+    )
+
+    def inspect(dialog: QDialog) -> None:
+        _enter_trimode_software_step(dialog)
+        # Start each parameter case from an exact, visible checkbox state;
+        # this catches retained defaults or implicit-service coupling.
+        for label in all_radio_owned:
+            _checkbox(dialog, label).setChecked(label in selected)
+        _app().processEvents()
+
+        status = dialog.findChild(QLabel, "guidedConfigureAutomaticallyStatus")
+        next_button = dialog.findChild(QPushButton, "guidedWizardNext")
+        assert status is not None and next_button is not None
+        assert _wait_until(lambda: status.text().startswith(("Ready —", "Needs attention —"))), status.text()
+        assert _wait_until(next_button.isEnabled), status.text()
+
+        drafts = getattr(dialog, "_guided_software_instance_drafts", {})
+        assert expected_drafts <= set(drafts)
+        assert "varac" not in drafts
+        for family in expected_drafts:
+            assert drafts[family]["launch_recipe_status"] in {
+                "qualified_managed",
+                "ready_with_warnings",
+                "launch_pending",
+            }
+        dialog.reject()
+
+    _open_add_radio_dialog(monkeypatch, tmp_path, inspect)
+
+
+@pytest.mark.parametrize(
+    ("native_state", "apply_requires_stopped_process", "expected_card_state", "can_continue"),
+    (
+        ("ready", False, "ready", True),
+        ("ready", True, "warning", True),
+        ("blocked", False, "blocked", False),
+    ),
+    ids=("ready", "ready-requires-stopped-process", "blocked-preserves-why"),
+)
+def test_full_trimode_varac_cluster_native_result_controls_continue(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    native_state: str,
+    apply_requires_stopped_process: bool,
+    expected_card_state: str,
+    can_continue: bool,
+) -> None:
+    """Native VarAC outcomes are visible and have exactly one navigation policy.
+
+    This is the production combination: Fast Light, JS8Call, FIO Spotter,
+    CommStat, and a new VarAC cluster.  The discovery worker completes first;
+    the VarAC writer then completes independently.  Continue stays disabled
+    during that second operation.  A qualified result (including the
+    non-destructive "stop the app before final Save" warning) enables it;
+    a blocked result keeps the exact native explanation visible and blocks it.
+    """
+
+    import freqinout.gui.settings_tab as settings_tab_module
+    from freqinout.core.varac_native_preparation import (
+        VarACNativePreparationResult,
+        native_draft_fingerprint,
+    )
+    from freqinout.gui.settings_tab import SettingsTab
+    import freqinout.core.guided_app_config_plan as guided_app_config_plan_module
+
+    def fail_legacy_varac_scan(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError(
+            "Add Radio must consume its native VarAC bundle; it must not run "
+            "legacy synchronous VarAC filesystem discovery while rendering or navigating."
+        )
+
+    monkeypatch.setattr(
+        guided_app_config_plan_module,
+        "discover_varac_local_assets",
+        fail_legacy_varac_scan,
+    )
+
+    class _ImmediateThread(QObject):
+        started = Signal()
+        finished = Signal()
+
+        def start(self) -> None:
+            self.started.emit()
+
+        def quit(self) -> None:
+            self.finished.emit()
+
+    def publish_empty_snapshot(worker: object) -> None:
+        request = getattr(worker, "request")
+        worker.finished.emit(
+            {
+                "guided_discovery_request": request,
+                "install_candidates": (),
+                "fast_results": {},
+                "js8_results": {},
+                "varac_results": {},
+                "js8_file_profiles": (),
+            }
+        )
+
+    pending_native: list[tuple[object, Callable[[object], None]]] = []
+
+    def hold_native_prepare(
+        _self: object,
+        worker: object,
+        *,
+        on_finished: Callable[[object], None],
+        on_failed: Callable[[str], None],
+    ) -> None:
+        if isinstance(worker, settings_tab_module._VarACNativePrepareWorker):
+            pending_native.append((worker, on_finished))
+        else:
+            on_finished(())
+
+    monkeypatch.setattr(
+        settings_tab_module._GuidedRadioAutofillWorker,
+        "run",
+        publish_empty_snapshot,
+    )
+    monkeypatch.setattr(settings_tab_module, "QThread", _ImmediateThread)
+    monkeypatch.setattr(
+        settings_tab_module._GuidedRadioAutofillWorker,
+        "moveToThread",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(SettingsTab, "_start_varac_native_job", hold_native_prepare)
+
+    def native_result(worker: object) -> object:
+        draft = dict(getattr(worker, "draft"))
+        if native_state != "ready":
+            return VarACNativePreparationResult(
+                state=native_state,
+                presentation={
+                    "state": native_state,
+                    "why": "The selected VarAC database is already owned by another active node.",
+                    "writer_qualified": False,
+                    "generation": getattr(worker, "generation"),
+                },
+                draft_fingerprint=native_draft_fingerprint(draft),
+                generation=getattr(worker, "generation"),
+                plan=None,
+            )
+        presentation = {
+            "state": "ready",
+            "writer_qualified": True,
+            "apply_requires_stopped_process": apply_requires_stopped_process,
+            "writer_version": "13.2.7",
+            "generation": getattr(worker, "generation"),
+            "application_path": "/wine/drive_c/VarAC/VarAC.exe",
+            "configuration_path": "/wine/drive_c/VarAC/FT-710.ini",
+            "storage_path": "/cluster/VarAC.db",
+            "secondary_storage_path": "/managed/ft-710/incoming",
+            "outbox_path": "/managed/ft-710/outbox",
+            "cluster_bbs_path": "/cluster/BBS",
+            "cluster_bbs_archive_path": "/cluster/BBS-Archive",
+            "working_directory": "/wine/drive_c/VarAC",
+            "vara_runtime_path": "/managed/ft-710/VARA",
+            "vara_ini_path": "/managed/ft-710/VARA/VARA.ini",
+            "launch_command": 'wine /wine/drive_c/VarAC/VarAC.exe "C:\\VarAC\\FT-710.ini"',
+            "launch_argv": ("wine", "/wine/drive_c/VarAC/VarAC.exe", "C:\\VarAC\\FT-710.ini"),
+            "launch_environment": {"WINEPREFIX": "/wine"},
+            "ports_summary": "command 8304 · KISS 8306",
+        }
+        return VarACNativePreparationResult(
+            state="ready",
+            presentation=presentation,
+            draft_fingerprint=native_draft_fingerprint(draft),
+            generation=getattr(worker, "generation"),
+            plan=SimpleNamespace(plan_fingerprint="trimode-varac-cluster"),
+        )
+
+    def inspect(dialog: QDialog) -> None:
+        _enter_trimode_software_step(dialog)
+        arrangement = dialog.findChild(QComboBox, "guidedVaracArrangement")
+        assert arrangement is not None
+        create_cluster = arrangement.findData("create_cluster")
+        assert create_cluster >= 0
+        arrangement.setCurrentIndex(create_cluster)
+        for label in ("FLRig", "FLDigi", "FLMsg", "FLAmp", "JS8Call", "FIO Spotter", "CommStat", "VarAC"):
+            _checkbox(dialog, label).setChecked(True)
+        _app().processEvents()
+
+        next_button = dialog.findChild(QPushButton, "guidedWizardNext")
+        varac_card = dialog.findChild(QGroupBox, "guidedSoftwareResponsibility_varac")
+        assert next_button is not None and varac_card is not None
+        assert _wait_until(lambda: bool(pending_native)), "VarAC native preparation did not start"
+        # The UI must identify the in-flight qualified writer—not describe it
+        # as an unexplained needs-attention condition—and Continue must wait.
+        assert not next_button.isEnabled()
+        assert varac_card.property("guidedPreparationState") == "preparing"
+        software_step_status = dialog.findChild(QLabel, "guidedSetupStepStatus_software")
+        assert software_step_status is not None
+        assert software_step_status.text() != "Ready"
+
+        worker, finish = pending_native[-1]
+        finish(native_result(worker))
+        expected_why = "The selected VarAC database is already owned by another active node."
+        if can_continue:
+            assert _wait_until(next_button.isEnabled), "qualified VarAC bundle did not enable Continue"
+        else:
+            assert _wait_until(
+                lambda: varac_card.property("guidedPreparationState") == "blocked"
+            ), "blocked VarAC result was not rendered"
+            assert not next_button.isEnabled()
+        assert varac_card.property("guidedPreparationState") == expected_card_state
+        drafts = getattr(dialog, "_guided_software_instance_drafts", {})
+        native = drafts["varac"]["varac_native_presentation"]
+        assert native["state"] == native_state
+        if can_continue:
+            assert drafts["varac"]["configuration_path"] == "/wine/drive_c/VarAC/FT-710.ini"
+            if apply_requires_stopped_process:
+                state = dialog.findChild(QLabel, "guidedSoftwarePreparedState_varac")
+                assert state is not None and "Close VarAC and VARA before final Save" in state.text()
+        else:
+            state = dialog.findChild(QLabel, "guidedSoftwarePreparedState_varac")
+            top_status = dialog.findChild(QLabel, "guidedConfigureAutomaticallyStatus")
+            assert state is not None and expected_why in state.text()
+            assert top_status is not None and expected_why in top_status.text()
+        dialog.reject()
+
+    _open_add_radio_dialog(monkeypatch, tmp_path, inspect)
+
+
+def test_deselecting_varac_clears_pending_native_gate_and_discards_late_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A removed VarAC choice cannot retain a worker gate or reappear later."""
+
+    import freqinout.gui.settings_tab as settings_tab_module
+    from freqinout.core.varac_native_preparation import (
+        VarACNativePreparationResult,
+        native_draft_fingerprint,
+    )
+    from freqinout.gui.settings_tab import SettingsTab
+
+    class _ImmediateThread(QObject):
+        started = Signal()
+        finished = Signal()
+
+        def start(self) -> None:
+            self.started.emit()
+
+        def quit(self) -> None:
+            self.finished.emit()
+
+    def publish_empty_snapshot(worker: object) -> None:
+        request = getattr(worker, "request")
+        worker.finished.emit(
+            {
+                "guided_discovery_request": request,
+                "install_candidates": (),
+                "fast_results": {},
+                "js8_results": {},
+                "varac_results": {},
+                "js8_file_profiles": (),
+            }
+        )
+
+    held_native: list[tuple[object, Callable[[object], None]]] = []
+
+    def hold_native_prepare(
+        _self: object,
+        worker: object,
+        *,
+        on_finished: Callable[[object], None],
+        on_failed: Callable[[str], None],
+    ) -> None:
+        if isinstance(worker, settings_tab_module._VarACNativePrepareWorker):
+            held_native.append((worker, on_finished))
+        else:
+            on_finished(())
+
+    monkeypatch.setattr(
+        settings_tab_module._GuidedRadioAutofillWorker,
+        "run",
+        publish_empty_snapshot,
+    )
+    monkeypatch.setattr(settings_tab_module, "QThread", _ImmediateThread)
+    monkeypatch.setattr(
+        settings_tab_module._GuidedRadioAutofillWorker,
+        "moveToThread",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(SettingsTab, "_start_varac_native_job", hold_native_prepare)
+
+    def stale_ready_result(worker: object) -> object:
+        draft = dict(getattr(worker, "draft"))
+        return VarACNativePreparationResult(
+            state="ready",
+            presentation={
+                "state": "ready",
+                "writer_qualified": True,
+                "generation": getattr(worker, "generation"),
+                "application_path": "/wine/drive_c/VarAC/VarAC.exe",
+            },
+            draft_fingerprint=native_draft_fingerprint(draft),
+            generation=getattr(worker, "generation"),
+            plan=SimpleNamespace(plan_fingerprint="late-removed-varac"),
+        )
+
+    def inspect(dialog: QDialog) -> None:
+        _enter_trimode_software_step(dialog)
+        arrangement = dialog.findChild(QComboBox, "guidedVaracArrangement")
+        assert arrangement is not None
+        arrangement.setCurrentIndex(arrangement.findData("create_cluster"))
+        _checkbox(dialog, "JS8Call").setChecked(True)
+        _checkbox(dialog, "VarAC").setChecked(True)
+        _app().processEvents()
+
+        next_button = dialog.findChild(QPushButton, "guidedWizardNext")
+        assert next_button is not None
+        assert _wait_until(lambda: bool(held_native)), "VarAC native preparation did not start"
+        assert not next_button.isEnabled()
+
+        _checkbox(dialog, "VarAC").setChecked(False)
+        assert _wait_until(next_button.isEnabled), "removing VarAC did not release Continue"
+        assert "varac" not in getattr(dialog, "_guided_software_instance_drafts", {})
+
+        worker, finish = held_native[-1]
+        finish(stale_ready_result(worker))
+        _app().processEvents()
+        assert "varac" not in getattr(dialog, "_guided_software_instance_drafts", {})
+        assert next_button.isEnabled(), "late VarAC result reintroduced a navigation gate"
+        dialog.reject()
+
+    _open_add_radio_dialog(monkeypatch, tmp_path, inspect)
+
+
 def test_radios_mode_collapses_empty_compact_header_and_top_packs_profile_content(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

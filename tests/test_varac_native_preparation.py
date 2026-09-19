@@ -221,9 +221,9 @@ def test_join_cluster_inherits_durable_shared_bbs_paths(tmp_path) -> None:
     assert result.presentation["outbox_path"] != archive
 
 
-def test_prepare_requires_stopped_process_and_exact_qualified_version(tmp_path) -> None:
+def test_prepare_warns_for_running_process_and_still_requires_exact_qualified_version(tmp_path) -> None:
     node, profile = _evidence(tmp_path)
-    stopped = prepare_varac_native_configuration(
+    running = prepare_varac_native_configuration(
         _draft(),
         varac_nodes=(node,),
         device_profiles=(profile,),
@@ -234,7 +234,9 @@ def test_prepare_requires_stopped_process_and_exact_qualified_version(tmp_path) 
         platform_override="linux-wine",
         process_running=True,
     )
-    assert stopped.state == "stop required" and stopped.plan is None
+    assert running.ready
+    assert running.presentation["apply_requires_stopped_process"] is True
+    assert "close both applications before final Save" in running.presentation["why"]
 
     Path(node["install_path"]).joinpath("VarAC.exe").write_bytes(b"fixture VarAC version 15.0.18")
     unsupported = prepare_varac_native_configuration(

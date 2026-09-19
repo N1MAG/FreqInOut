@@ -101,7 +101,12 @@ def prepare_varac_native_configuration(
     platform_override: str = "",
     process_running: bool = False,
 ) -> VarACNativePreparationResult:
-    """Prepare the exact supported create/join plan from reviewed evidence."""
+    """Prepare the exact supported create/join plan from reviewed evidence.
+
+    Preparation is read-only, so a running VarAC/VARA process is retained as
+    an apply-time warning.  The transactional writer independently checks the
+    live process state before backup or mutation and remains the safety gate.
+    """
 
     intent = dict(draft or {})
     fingerprint = native_draft_fingerprint(intent)
@@ -112,9 +117,6 @@ def prepare_varac_native_configuration(
         return _result("manual setup required", "Choose a new FIO-managed VarAC instance to use native configuration.", intent, fingerprint, generation)
     if arrangement not in {"create_cluster", "join_cluster"}:
         return _result("manual setup required", "Choose Create cluster or Join cluster before preparing native VarAC.", intent, fingerprint, generation)
-    if process_running:
-        return _result("stop required", "Close VarAC and VARA before preparing or applying their configuration.", intent, fingerprint, generation)
-
     platform_key = _platform_key(platform_override)
     if platform_key not in {"windows", "linux-wine"}:
         return _result(
@@ -157,9 +159,17 @@ def prepare_varac_native_configuration(
     )
     member_root = new_member.vara_target_runtime_folder.parent
     vara_values = new_member.changes.get("VARAHF_CONFIG", {})
+    apply_warning = (
+        " VarAC or VARA is currently running; close both applications before final Save so FIO can apply the reviewed files safely."
+        if process_running
+        else ""
+    )
     presentation = {
         "state": "ready",
-        "why": "Exact VarAC 13.2.7 source, paths, ports, runtime copies, and target state are qualified and ready for transactional apply.",
+        "why": (
+            "Exact VarAC 13.2.7 source, paths, ports, runtime copies, and target state are qualified and ready for transactional apply."
+            + apply_warning
+        ),
         "arrangement": arrangement,
         "affected_radios": tuple(_affected_radio_names(intent, plan, device_profiles)),
         "shared_database_summary": plan.shared_db_path,
@@ -170,6 +180,7 @@ def prepare_varac_native_configuration(
         "writer_platform": plan.platform,
         "writer_operation": plan.operation,
         "writer_qualified": True,
+        "apply_requires_stopped_process": bool(process_running),
         "application_path": prepared_application_path,
         "varac_ini_path": str(new_member.target_path),
         "configuration_path": str(new_member.target_path),

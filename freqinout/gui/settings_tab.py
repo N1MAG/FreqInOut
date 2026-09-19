@@ -25715,6 +25715,7 @@ class SettingsTab(QWidget):
         software_preparation_in_progress = False
         software_preparation_pending = False
         software_preparation_failed = False
+        varac_native_preparation_in_progress = False
         software_preparation_request_context: Tuple[str, ...] = ()
         software_preparation_focus_key: Tuple[object, ...] = ()
         software_preparation_timer = QTimer(dlg)
@@ -27210,7 +27211,9 @@ class SettingsTab(QWidget):
                 )
                 if not selected:
                     state_label.setText("")
-                elif software_preparation_in_progress:
+                elif software_preparation_in_progress or (
+                    family_key == "varac" and varac_native_preparation_in_progress
+                ):
                     state_label.setText("Preparing — FIO is checking this software and deriving its isolated configuration.")
                 elif prepared:
                     if family_key == "varac":
@@ -27219,14 +27222,22 @@ class SettingsTab(QWidget):
                         native_state = str(native.get("state") or "").replace("_", " ").strip().lower()
                         if native_state == "ready" and bool(native.get("writer_qualified")):
                             software_detail_buttons[family_key].setText("Review Details (optional)…")
-                            state_label.setText(
-                                "Ready — FIO prepared the complete VarAC, VARA, file, port, and structured launch bundle. Review Details is optional."
-                            )
+                            if bool(native.get("apply_requires_stopped_process")):
+                                state_label.setText(
+                                    "Ready with warning — FIO prepared the complete VarAC cluster bundle. "
+                                    "Close VarAC and VARA before final Save; Review Details is optional."
+                                )
+                            else:
+                                state_label.setText(
+                                    "Ready — FIO prepared the complete VarAC, VARA, file, port, and structured launch bundle. Review Details is optional."
+                                )
                         elif native_state == "preparing":
                             state_label.setText("Preparing — FIO is deriving the complete VarAC and VARA bundle.")
                         else:
+                            native_why = str(native.get("why") or "").strip()
                             state_label.setText(
-                                "Needs attention — prepare the qualified VarAC bundle before saving this radio."
+                                "Blocked — "
+                                + (native_why or "FIO could not prepare a qualified VarAC bundle safely.")
                             )
                     elif family_key in {"js8call", "fast_light"} and managed_recipe_ready:
                         software_detail_buttons[family_key].setText("Review Details (optional)…")
@@ -27533,11 +27544,7 @@ class SettingsTab(QWidget):
         ) -> None:
             """Atomically publish native facts to Connections, Review, and Save."""
 
-            if not result.ready or result.plan is None:
-                software_prepared_state_labels["varac"].setText(
-                    "Needs attention — " + str(result.presentation.get("why") or "VarAC preparation did not produce a safe plan.")
-                )
-                return
+            nonlocal varac_native_preparation_in_progress
             retained_raw = getattr(dlg, "_guided_software_instance_drafts", {})
             current = (
                 dict(retained_raw.get("varac") or {})
@@ -27546,8 +27553,30 @@ class SettingsTab(QWidget):
                 else {}
             )
             if native_draft_fingerprint(current) != expected_fingerprint:
+                log.info("Ignored stale guided VarAC preparation result for an obsolete draft.")
                 return
+            varac_native_preparation_in_progress = False
             presentation = dict(result.presentation)
+            if not result.ready or result.plan is None:
+                current["varac_native_presentation"] = presentation
+                setattr(
+                    dlg,
+                    "_guided_software_instance_drafts",
+                    {**dict(retained_raw or {}), "varac": current},
+                )
+                detail = str(
+                    presentation.get("why")
+                    or "VarAC preparation did not produce a safe plan."
+                ).strip()
+                configure_auto_status.setText("Blocked — " + detail)
+                log.warning(
+                    "Guided VarAC preparation blocked state=%s detail=%s",
+                    str(presentation.get("state") or result.state),
+                    detail,
+                )
+                _update_software_responsibility_cards()
+                _apply_guided_wizard_visibility(connection_group.isVisible())
+                return
             bundle = dict(current)
 
             def _cluster_shared_path(*keys: str) -> str:
@@ -27634,21 +27663,33 @@ class SettingsTab(QWidget):
             for wrapper in (varac_bbs_wrap, varac_bbs_archive_wrap):
                 for button in wrapper.findChildren(QPushButton):
                     button.setEnabled(False)
+            if bool(presentation.get("apply_requires_stopped_process")):
+                configure_auto_status.setText(
+                    "Ready with warning — the VarAC cluster plan is complete. "
+                    "Close VarAC and VARA before final Save."
+                )
             _update_software_responsibility_cards()
             _update_guided_app_setup_plan_review()
             _update_guided_save_review()
+            _apply_guided_wizard_visibility(connection_group.isVisible())
 
         def _prepare_varac_parent_bundle() -> None:
             """Start the generation-fenced native preparation without opening details."""
 
+            nonlocal varac_native_preparation_in_progress
             if not use_varac_chk.isChecked():
                 return
             seed = _varac_parent_preparation_seed()
             fingerprint = native_draft_fingerprint(seed)
+            seed["varac_native_presentation"] = {
+                "state": "preparing",
+                "why": "FIO is deriving the complete VarAC and VARA bundle in the background.",
+            }
             retained_raw = getattr(dlg, "_guided_software_instance_drafts", {})
             setattr(dlg, "_guided_software_instance_drafts", {**dict(retained_raw or {}), "varac": seed})
             self._varac_native_generation = int(getattr(self, "_varac_native_generation", 0)) + 1
             generation = self._varac_native_generation
+            varac_native_preparation_in_progress = True
             software_prepared_state_labels["varac"].setText("Preparing — FIO is deriving the complete VarAC and VARA bundle.")
             worker = _VarACNativePrepareWorker(
                 draft=seed,
@@ -27660,15 +27701,46 @@ class SettingsTab(QWidget):
             def _ready(result: object) -> None:
                 if not isinstance(result, VarACNativePreparationResult):
                     return
-                if result.generation != generation:
+                if (
+                    result.generation != generation
+                    or generation != int(getattr(self, "_varac_native_generation", 0))
+                ):
                     return
                 self._varac_native_preparations[fingerprint] = result
                 _project_prepared_varac_parent_bundle(result, expected_fingerprint=fingerprint)
 
             def _failed(detail: str) -> None:
-                software_prepared_state_labels["varac"].setText(
-                    "Needs attention — FIO could not prepare VarAC: " + str(detail)
+                nonlocal varac_native_preparation_in_progress
+                if generation != int(getattr(self, "_varac_native_generation", 0)):
+                    return
+                current_raw = getattr(dlg, "_guided_software_instance_drafts", {})
+                current = (
+                    dict(current_raw.get("varac") or {})
+                    if isinstance(current_raw, Mapping)
+                    and isinstance(current_raw.get("varac"), Mapping)
+                    else {}
                 )
+                if native_draft_fingerprint(current) != fingerprint:
+                    return
+                varac_native_preparation_in_progress = False
+                current["varac_native_presentation"] = {
+                    "state": "blocked",
+                    "why": "FIO could not prepare VarAC: " + str(detail),
+                    "writer_qualified": False,
+                    "generation": generation,
+                    "draft_fingerprint": fingerprint,
+                }
+                setattr(
+                    dlg,
+                    "_guided_software_instance_drafts",
+                    {**dict(current_raw or {}), "varac": current},
+                )
+                configure_auto_status.setText(
+                    "Blocked — FIO could not prepare VarAC: " + str(detail)
+                )
+                _update_software_responsibility_cards()
+                _apply_guided_wizard_visibility(connection_group.isVisible())
+                log.warning("Guided VarAC preparation failed: %s", detail)
 
             self._start_varac_native_job(worker, on_finished=_ready, on_failed=_failed)
 
@@ -28664,7 +28736,12 @@ class SettingsTab(QWidget):
         def _js8_app_selected() -> bool:
             return _app_choice_app_selected("js8call")
 
-        def _apply_detected_app_choice(app_id: str, *, reprepare: bool = True) -> None:
+        def _apply_detected_app_choice(
+            app_id: str,
+            *,
+            reprepare: bool = True,
+            publish: bool = True,
+        ) -> None:
             combo = app_choice_combos.get(app_id)
             target = app_choice_targets.get(app_id)
             if combo is None or target is None:
@@ -28695,6 +28772,8 @@ class SettingsTab(QWidget):
             if changed and reprepare:
                 _invalidate_prepared_software_plan()
                 _update_dialog_visibility()
+                return
+            if not publish:
                 return
             # A choice can resolve the highlighted ambiguity without changing
             # the already prepared path. Republish navigation immediately;
@@ -28909,10 +28988,19 @@ class SettingsTab(QWidget):
                         # This runs inside the current preparation result. The
                         # selected path is consumed by that same result and
                         # must not invalidate it or start a duplicate worker.
-                        _apply_detected_app_choice(app_id, reprepare=False)
+                        _apply_detected_app_choice(
+                            app_id,
+                            reprepare=False,
+                            publish=False,
+                        )
                     _sync_app_choice_combo_to_target(app_id)
                 _configure_combo_width(combo, minimum=360)
             _update_app_choice_visibility()
+            # Candidate publication is one atomic discovery-result batch.
+            # Rebuilding Review for every sole detected application performs
+            # redundant filesystem work and causes visible Add Radio stalls.
+            _apply_guided_wizard_visibility(connection_group.isVisible())
+            _update_dialog_readiness()
 
         def _update_js8_profile_choices(profiles: Sequence[Any]) -> None:
             choices = self._guided_js8_profile_choices(profiles)
@@ -29666,6 +29754,17 @@ class SettingsTab(QWidget):
                 and str(varac_native.get("state") or "").replace("_", " ").strip().lower() == "ready"
                 and bool(varac_native.get("writer_qualified"))
             )
+            managed_varac_route = bool(
+                varac_selected
+                and str(
+                    software_source_combos["varac"].currentData() or ""
+                ).strip().lower() == "create"
+                and str(
+                    software_management_combos["varac"].currentData() or ""
+                ).strip().lower() == "fio_identity_launch"
+                and str(_selected_varac_arrangement().get("cluster_path") or "").strip()
+                in {"create_cluster", "join_cluster"}
+            )
             app_paths = {
                 "flrig": flrig_path_edit.text().strip(),
                 "fldigi": fldigi_path_edit.text().strip(),
@@ -29703,9 +29802,28 @@ class SettingsTab(QWidget):
                 "varac_bbs_archive_dir": varac_bbs_archive_edit.text().strip(),
                 "varac_launch_cmd": varac_launch_cmd_edit.text().strip(),
             }
+            blueprint_for_plan = _current_guided_blueprint()
+            proposals_for_plan = tuple(proposals)
+            if managed_varac_route:
+                # Native VarAC preparation owns this family's complete
+                # immutable evidence.  The legacy read/import presenter does
+                # synchronous filesystem discovery and must not run from a
+                # render/navigation path only to be filtered out afterward.
+                blueprint_for_plan = replace(
+                    blueprint_for_plan,
+                    selected_apps=tuple(
+                        app
+                        for app in blueprint_for_plan.selected_apps
+                        if str(app).strip().lower() != "varac"
+                    ),
+                )
+                proposals_for_plan = tuple(
+                    replace(proposal, varac_enabled=False)
+                    for proposal in proposals_for_plan
+                )
             plan = build_app_config_plan_for_blueprint(
-                _current_guided_blueprint(),
-                tuple(proposals),
+                blueprint_for_plan,
+                proposals_for_plan,
                 config_root=get_config_dir(),
                 app_paths=app_paths,
             )
@@ -29776,6 +29894,17 @@ class SettingsTab(QWidget):
                 schedule_decision=schedule_decision,
                 setup_started=setup_started,
             )
+            software_allowed, software_reason = _guided_software_step_can_continue()
+            if any(
+                _guided_software_family_selected(family)
+                for family in software_responsibility_cards
+            ) and not software_allowed:
+                _set_guided_step_override(
+                    "software",
+                    status="needs_input",
+                    title="Software",
+                    detail=software_reason,
+                )
             flow_lines = guided_setup_flow_summary_lines(
                 blueprint,
                 plan,
@@ -30298,6 +30427,8 @@ class SettingsTab(QWidget):
             _update_dialog_visibility()
 
         def _guided_save_allowed() -> bool:
+            if use_varac_chk.isChecked() and varac_native_preparation_in_progress:
+                return False
             if guided_wizard_step_id != "review":
                 return False
             if guided_wizard_max_index_seen < _guided_wizard_index("review"):
@@ -30404,7 +30535,11 @@ class SettingsTab(QWidget):
                 )
 
         def _guided_software_step_can_continue() -> Tuple[bool, str]:
-            if software_preparation_in_progress or software_preparation_pending:
+            if (
+                software_preparation_in_progress
+                or software_preparation_pending
+                or (use_varac_chk.isChecked() and varac_native_preparation_in_progress)
+            ):
                 return False, "FIO is preparing the current software choices."
             if use_varac_chk.isChecked() and not str(
                 _selected_varac_arrangement().get("cluster_path") or ""
@@ -30905,6 +31040,15 @@ class SettingsTab(QWidget):
                 )
             if not responsibility_lines:
                 responsibility_lines.append("No software capability selected.")
+            varac_stop_before_save = bool(
+                use_varac_chk.isChecked()
+                and native_for_review.get("apply_requires_stopped_process")
+            )
+            if varac_stop_before_save:
+                responsibility_lines.append(
+                    "VarAC apply prerequisite — Close VarAC and VARA before Save. "
+                    "The reviewed plan is complete; FIO will recheck the live process state before writing anything."
+                )
             if not launch_plan_lines:
                 launch_plan_lines.append("No external launch item selected.")
 
@@ -31006,7 +31150,7 @@ class SettingsTab(QWidget):
                 _review_card_html(
                     "Software Responsibilities",
                     responsibility_lines,
-                    tone="info",
+                    tone="warning" if varac_stop_before_save else "info",
                 ),
                 _review_card_html(
                     "Endpoints",
