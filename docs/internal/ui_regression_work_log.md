@@ -8405,3 +8405,30 @@ endpoint, radio, commit, or remote was changed. The unrelated DOCX and rendered
 document changes remain untouched. The live Linux operator run of the complete
 reported route, including no visible UI stall and successful progression to
 Connections, remains required before release qualification.
+
+## 2026-09-19 — GRS-12.1 Wine Desktop symlink compatibility
+
+Status: automated implementation gate passed; Linux-Wine operator
+qualification remains open.
+
+Operator evidence: native VarAC preparation reported `Symlink path is not
+allowed` for a BBS directory below
+`~/.wine/drive_c/users/<user>/Desktop`. The writer applied its strict native
+configuration/runtime symlink policy to data-directory ancestry. Wine commonly
+uses that Desktop alias to expose the operator's Linux desktop, so the plan was
+blocked before Save despite having no native INI or executable symlink target.
+
+The correction separates the two safety policies. Native VarAC INI and VARA
+runtime/configuration paths still reject all symlink ancestry. Reviewed BBS,
+archive, incoming, and outbox directories may traverse a stable Wine directory
+alias. Their resolved destinations are captured in the immutable plan and its
+fingerprint, checked again immediately before creation, and checked after
+creation. Broken aliases, file targets, or aliases retargeted after review are
+blocked before a directory is created.
+
+Evidence: **47 native preparation/writer/transaction acceptance tests passed**
+and the broader guided-radio/native suite passed **184 tests**,
+including a production-shaped Wine Desktop alias and a retargeted-alias
+rejection. Changed Python compilation and `git diff --check` passed. No schema,
+migration, production database, external application file, process, endpoint,
+radio, commit, or remote was changed.

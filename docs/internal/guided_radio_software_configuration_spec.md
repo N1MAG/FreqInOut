@@ -3218,3 +3218,23 @@ suite passed **77 tests**. Changed Python compilation and `git diff --check`
 pass. No schema or migration is introduced. Live Linux operator qualification,
 including the reported full TriMode/Create-VarAC-cluster route, remains an
 external release gate.
+
+### GRS-12.1 — Wine Directory Aliases
+
+Wine may expose an operator-owned Linux directory, especially
+`drive_c/users/<user>/Desktop`, through a symbolic-link alias. A reviewed VarAC
+BBS, archive, incoming, or outbox directory below that alias is not by itself a
+native-writer safety failure.
+
+FIO records the resolved destination of every managed data directory in the
+immutable native plan. Final Save must verify that each alias still resolves to
+that exact destination before creating anything, create only the reviewed
+missing directories, and verify the resolved destination again afterward. A
+broken alias, non-directory target, changed destination, or path outside the
+reviewed lexical roots remains blocked before mutation.
+
+This exception applies only to managed data directories. VarAC INI targets,
+VARA source files, and managed VARA runtime/configuration targets retain the
+strict rule that no path component may be a symbolic link. The plan fingerprint
+includes the reviewed resolved data-directory destinations, so changing an
+alias changes or invalidates the plan rather than silently redirecting it.

@@ -146,6 +146,84 @@ def test_apply_creates_only_reviewed_shared_and_member_directories_and_rollback_
     assert not archive.exists() and not bbs.exists()
 
 
+def test_managed_bbs_directory_allows_stable_wine_desktop_symlink(tmp_path) -> None:
+    request = _request(tmp_path / "plan", 1)
+    host_desktop = tmp_path / "home" / "bill" / "Desktop"
+    host_desktop.mkdir(parents=True)
+    wine_user = tmp_path / "prefix" / "drive_c" / "users" / "bill"
+    wine_user.mkdir(parents=True)
+    desktop_alias = wine_user / "Desktop"
+    desktop_alias.symlink_to(host_desktop, target_is_directory=True)
+    bbs = desktop_alias / "VaraFile" / "BBS"
+    archive = bbs / "Archive"
+    request = VarACNativeClusterRequest(
+        **{
+            **request.__dict__,
+            "shared_bbs_path": str(bbs),
+            "shared_bbs_archive_path": str(archive),
+            "managed_directories": (bbs, archive),
+            "allowed_roots": (*request.allowed_roots, bbs, archive),
+        }
+    )
+
+    plan = build_varac_native_cluster_plan(request)
+    result = apply_varac_native_cluster_plan(plan, backup_root=tmp_path / "backups")
+
+    assert result.ok
+    assert (host_desktop / "VaraFile" / "BBS").is_dir()
+    assert (host_desktop / "VaraFile" / "BBS" / "Archive").is_dir()
+
+
+def test_managed_bbs_directory_rejects_retargeted_wine_symlink(tmp_path) -> None:
+    request = _request(tmp_path / "plan", 1)
+    first_desktop = tmp_path / "first-desktop"
+    second_desktop = tmp_path / "second-desktop"
+    first_desktop.mkdir()
+    second_desktop.mkdir()
+    wine_user = tmp_path / "prefix" / "drive_c" / "users" / "bill"
+    wine_user.mkdir(parents=True)
+    desktop_alias = wine_user / "Desktop"
+    desktop_alias.symlink_to(first_desktop, target_is_directory=True)
+    bbs = desktop_alias / "VaraFile" / "BBS"
+    request = VarACNativeClusterRequest(
+        **{
+            **request.__dict__,
+            "shared_bbs_path": str(bbs),
+            "managed_directories": (bbs,),
+            "allowed_roots": (*request.allowed_roots, bbs),
+        }
+    )
+    plan = build_varac_native_cluster_plan(request)
+
+    desktop_alias.unlink()
+    desktop_alias.symlink_to(second_desktop, target_is_directory=True)
+    result = apply_varac_native_cluster_plan(plan, backup_root=tmp_path / "backups")
+
+    assert not result.ok
+    assert "directory alias changed before apply" in result.error
+    assert not (second_desktop / "VaraFile").exists()
+
+
+def test_managed_bbs_directory_rejects_broken_wine_symlink_ancestor(tmp_path) -> None:
+    request = _request(tmp_path / "plan", 1)
+    wine_user = tmp_path / "prefix" / "drive_c" / "users" / "bill"
+    wine_user.mkdir(parents=True)
+    desktop_alias = wine_user / "Desktop"
+    desktop_alias.symlink_to(tmp_path / "missing-desktop", target_is_directory=True)
+    bbs = desktop_alias / "VaraFile" / "BBS"
+    request = VarACNativeClusterRequest(
+        **{
+            **request.__dict__,
+            "shared_bbs_path": str(bbs),
+            "managed_directories": (bbs,),
+            "allowed_roots": (*request.allowed_roots, bbs),
+        }
+    )
+
+    with pytest.raises(VarACNativeConfigurationError, match="Broken symlink"):
+        build_varac_native_cluster_plan(request)
+
+
 @pytest.mark.parametrize("phase", ["preflight", "backup", "stage", "validate_staged", "validate_promoted"])
 def test_phase_failures_remove_new_runtime_and_restore_varac_bytes(tmp_path, phase: str) -> None:
     request = _request(tmp_path)

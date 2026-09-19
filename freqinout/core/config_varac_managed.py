@@ -301,6 +301,7 @@ class VarACNativeClusterPlan:
     shared_bbs_path: str
     shared_bbs_archive_path: str
     managed_directories: Tuple[Path, ...]
+    managed_directory_resolved_paths: Tuple[Path, ...]
     native_shared_db_path: str
     allowed_roots: Tuple[Path, ...]
     plan_fingerprint: str
@@ -428,6 +429,10 @@ def build_varac_native_cluster_plan(
     if not members:
         raise VarACNativeConfigurationError("A native VarAC cluster requires at least one member.")
     _validate_request(request, capability, roots)
+    managed_directory_resolved_paths = tuple(
+        _resolved_managed_directory_target(Path(path))
+        for path in request.managed_directories
+    )
     changes_by_member = _member_changes(request)
     member_plans = tuple(
         VarACNativeMemberPlan(
@@ -467,6 +472,9 @@ def build_varac_native_cluster_plan(
             "shared_bbs_path": request.shared_bbs_path,
             "shared_bbs_archive_path": request.shared_bbs_archive_path,
             "managed_directories": [str(path) for path in request.managed_directories],
+            "managed_directory_resolved_paths": [
+                str(path) for path in managed_directory_resolved_paths
+            ],
             "native_shared_db_path": request.native_shared_db_path,
             "counter_refresh_seconds": request.counter_refresh_seconds,
             "ptt_lock_enabled": request.ptt_lock_enabled,
@@ -519,6 +527,7 @@ def build_varac_native_cluster_plan(
         shared_bbs_path=request.shared_bbs_path,
         shared_bbs_archive_path=request.shared_bbs_archive_path,
         managed_directories=tuple(Path(path).expanduser() for path in request.managed_directories),
+        managed_directory_resolved_paths=managed_directory_resolved_paths,
         native_shared_db_path=request.native_shared_db_path or request.shared_db_path,
         allowed_roots=roots,
         plan_fingerprint=_sha256(fingerprint_data),
@@ -618,8 +627,17 @@ def apply_varac_native_cluster_plan(
             staged[member.target_path] = _stage_bytes(member.target_path, payload)
             created_dirs.extend(_mkdir_untrusted_safe(member.vara_target_runtime_folder.parent, plan.allowed_roots))
             staged_runtime_dirs[member.vara_target_runtime_folder] = _stage_runtime(member, plan.capability)
-        for directory in plan.managed_directories:
-            created_dirs.extend(_mkdir_untrusted_safe(directory, plan.allowed_roots))
+        for directory, resolved_directory in zip(
+            plan.managed_directories,
+            plan.managed_directory_resolved_paths,
+        ):
+            created_dirs.extend(
+                _mkdir_reviewed_data_directory(
+                    directory,
+                    plan.allowed_roots,
+                    expected_resolved=resolved_directory,
+                )
+            )
             items.append(
                 GuidedAppConfigApplyItem(
                     action_id=f"varac:directory:{directory}",
@@ -752,7 +770,7 @@ def _validate_request(request: VarACNativeClusterRequest, capability: VarACWrite
         raise VarACNativeConfigurationError("Close VarAC before preparing a native configuration write.")
     for directory in request.managed_directories:
         _require_contained(Path(directory), roots, "managed VarAC directory")
-        _reject_symlink_path(Path(directory))
+        _resolved_managed_directory_target(Path(directory))
     if request.shared_bbs_path:
         _require_contained(Path(request.shared_bbs_path), roots, "shared VarAC BBS directory")
     if request.shared_bbs_archive_path:
@@ -1036,6 +1054,19 @@ def _rewrite_ini(text: str, changes: Mapping[str, Mapping[str, str]], *, capabil
 
 
 def _revalidate_plan_paths_and_state(plan: VarACNativeClusterPlan) -> None:
+    if len(plan.managed_directories) != len(plan.managed_directory_resolved_paths):
+        raise VarACNativeConfigurationError(
+            "Managed VarAC directory evidence is incomplete; prepare the plan again."
+        )
+    for directory, expected_resolved in zip(
+        plan.managed_directories,
+        plan.managed_directory_resolved_paths,
+    ):
+        _require_contained(directory, plan.allowed_roots, "managed VarAC directory")
+        if _resolved_managed_directory_target(directory) != _lexical_path(expected_resolved):
+            raise VarACNativeConfigurationError(
+                f"Reviewed VarAC directory alias changed before apply: {directory}"
+            )
     target_paths = set()
     for member in plan.members:
         _require_contained(member.vara_source_runtime_folder, plan.allowed_roots, "VARA source runtime folder")
@@ -1161,6 +1192,8 @@ def _inject(phase: str, fail_at: str, injector: Callable[[str], None] | None) ->
 
 
 def _mkdir_untrusted_safe(target_parent: Path, roots: Sequence[Path]) -> list[Path]:
+    """Create a native configuration/runtime parent with no symlink ancestry."""
+
     _require_contained(target_parent, roots, "target directory")
     if target_parent.exists() and not target_parent.is_dir():
         raise VarACNativeConfigurationError(
@@ -1180,6 +1213,88 @@ def _mkdir_untrusted_safe(target_parent: Path, roots: Sequence[Path]) -> list[Pa
         created.append(directory)
     _reject_symlink_path(target_parent)
     return created
+
+
+def _mkdir_reviewed_data_directory(
+    target_parent: Path,
+    roots: Sequence[Path],
+    *,
+    expected_resolved: Path,
+) -> list[Path]:
+    """Create reviewed data directories through a stable filesystem alias.
+
+    Wine commonly exposes the Linux Desktop as a symlink below
+    ``drive_c/users/<user>``.  That alias is valid for VarAC BBS data, but it
+    must resolve to the same directory at apply time that it resolved to when
+    the immutable plan was built.  Native INI and executable/runtime targets
+    continue to use the stricter no-symlink policy.
+    """
+
+    _require_contained(target_parent, roots, "target directory")
+    expected = _lexical_path(expected_resolved)
+    actual_before = _resolved_managed_directory_target(target_parent)
+    if actual_before != expected:
+        raise VarACNativeConfigurationError(
+            f"Reviewed VarAC directory alias changed before apply: {target_parent}"
+        )
+    if target_parent.exists() and not target_parent.is_dir():
+        raise VarACNativeConfigurationError(
+            f"Reviewed VarAC directory target is not a directory: {target_parent}"
+        )
+    created: list[Path] = []
+    stack: list[Path] = []
+    current = target_parent
+    while not current.exists():
+        stack.append(current)
+        if current == current.parent:
+            raise VarACNativeConfigurationError(f"Cannot create target directory: {target_parent}")
+        current = current.parent
+    if not current.is_dir():
+        raise VarACNativeConfigurationError(
+            f"Reviewed VarAC directory ancestor is not a directory: {current}"
+        )
+    for directory in reversed(stack):
+        directory.mkdir()
+        if directory.is_symlink() or not directory.is_dir():
+            raise VarACNativeConfigurationError(
+                f"Reviewed VarAC directory changed while it was being created: {directory}"
+            )
+        created.append(directory)
+    actual_after = _resolved_managed_directory_target(target_parent)
+    if actual_after != expected:
+        raise VarACNativeConfigurationError(
+            f"Reviewed VarAC directory alias changed during apply: {target_parent}"
+        )
+    return created
+
+
+def _resolved_managed_directory_target(path: Path) -> Path:
+    """Resolve a reviewed data-directory alias without accepting broken links."""
+
+    candidate = _lexical_path(path)
+    existing_ancestor = candidate
+    while not existing_ancestor.exists():
+        if existing_ancestor.is_symlink():
+            raise VarACNativeConfigurationError(
+                f"Broken symlink is not allowed for a managed VarAC directory: {path}"
+            )
+        if existing_ancestor == existing_ancestor.parent:
+            break
+        existing_ancestor = existing_ancestor.parent
+    if existing_ancestor.exists() and not existing_ancestor.is_dir():
+        raise VarACNativeConfigurationError(
+            f"Managed VarAC directory ancestor is not a directory: {existing_ancestor}"
+        )
+    if candidate.exists() and not candidate.is_dir():
+        raise VarACNativeConfigurationError(
+            f"Managed VarAC directory target is not a directory: {path}"
+        )
+    try:
+        return _lexical_path(candidate.resolve(strict=False))
+    except (OSError, RuntimeError) as exc:
+        raise VarACNativeConfigurationError(
+            f"Managed VarAC directory alias could not be resolved safely: {path}"
+        ) from exc
 
 
 def _cleanup_staged(paths: Sequence[Path]) -> None:

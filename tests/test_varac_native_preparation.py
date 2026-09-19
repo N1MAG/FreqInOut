@@ -138,6 +138,42 @@ def test_create_cluster_inherits_shared_bbs_paths_and_keeps_member_mail_paths_lo
     assert str(tmp_path / "existing-bbs") not in result.presentation["outbox_path"]
 
 
+def test_create_cluster_accepts_bbs_below_stable_wine_desktop_alias(tmp_path) -> None:
+    node, profile = _evidence(tmp_path)
+    host_desktop = tmp_path / "home" / "bill" / "Desktop"
+    host_desktop.mkdir(parents=True)
+    wine_user = tmp_path / "prefix" / "drive_c" / "users" / "bill"
+    wine_user.mkdir(parents=True)
+    desktop_alias = wine_user / "Desktop"
+    desktop_alias.symlink_to(host_desktop, target_is_directory=True)
+    bbs = desktop_alias / "VaraFile" / "BBS"
+    archive = bbs / "Archive"
+    profile.update(
+        varac_bbs_dir=str(bbs),
+        varac_bbs_archive_dir=str(archive),
+    )
+
+    result = prepare_varac_native_configuration(
+        _draft(),
+        varac_nodes=(node,),
+        device_profiles=(profile,),
+        varac_clusters=(),
+        varac_members=(),
+        managed_root=tmp_path / "managed",
+        generation=12,
+        platform_override="linux-wine",
+    )
+
+    assert result.ready
+    assert result.presentation["bbs_path"] == str(bbs)
+    assert result.presentation["bbs_archive_path"] == str(archive)
+    assert result.plan is not None
+    assert result.plan.managed_directory_resolved_paths[-2:] == (
+        host_desktop / "VaraFile" / "BBS",
+        host_desktop / "VaraFile" / "BBS" / "Archive",
+    )
+
+
 def test_create_cluster_derives_shared_bbs_defaults_under_varac_install(tmp_path) -> None:
     node, profile = _evidence(tmp_path)
     result = prepare_varac_native_configuration(
