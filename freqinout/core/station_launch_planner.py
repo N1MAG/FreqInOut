@@ -42,6 +42,46 @@ def _truthy(value: Any) -> bool:
     return bool(value)
 
 
+def _structured_launch_facts(item: Mapping[str, Any], name: str) -> Dict[str, Any]:
+    """Return a managed structured recipe without interpreting command text.
+
+    The additive readiness JSON extension is deliberately scoped to VarAC here:
+    JS8Call/Fast Light rows retain their existing recipe projection.  A VarAC
+    row with structured arguments is authoritative even if an older
+    ``launch_cmd``/command override is still present beside it.
+    """
+
+    if str(name or "").strip() != "VarAC":
+        return {}
+    readiness = item.get("readiness_policy", {})
+    if not isinstance(readiness, Mapping):
+        return {}
+    nested = readiness.get("launch_recipe")
+    recipe = nested if isinstance(nested, Mapping) else readiness
+    has_structured = bool(
+        _truthy(readiness.get("structured_launch", False))
+        or "executable" in recipe
+        or "launch_executable" in recipe
+        or "launch_arguments" in recipe
+    )
+    if not has_structured:
+        return {}
+    executable = str(recipe.get("executable", recipe.get("launch_executable", "")) or "")
+    arguments = recipe.get("launch_arguments", recipe.get("arguments", ()))
+    if not isinstance(arguments, (list, tuple)):
+        arguments = ()
+    environment = recipe.get("environment", {})
+    if not isinstance(environment, Mapping):
+        environment = {}
+    cwd = str(recipe.get("working_directory", recipe.get("cwd", "")) or "")
+    return {
+        "executable": executable,
+        "arguments": tuple(str(value) for value in arguments),
+        "environment": {str(key): str(value) for key, value in environment.items() if str(key).strip()},
+        "working_directory": cwd,
+    }
+
+
 @dataclass(frozen=True)
 class PlannedInstance:
     name: str
@@ -185,7 +225,23 @@ class StationLaunchPlanner:
                 validate_observer_launch_items(normalized_items)
             for order, raw_item in enumerate(normalized_items):
                 item = self._with_profile_overrides(profile, raw_item)
-                item_readiness = item.get("readiness_policy", {})
+                name = str(item["name"])
+                structured_facts = _structured_launch_facts(item, name)
+                if structured_facts:
+                    # Structured VarAC launch facts are canonical.  Preserve
+                    # them in the planned item and suppress any stale legacy
+                    # command that could otherwise be reparsed by Launch
+                    # Control.
+                    item["launch_path_override"] = structured_facts["executable"]
+                    item["launch_command_override"] = ""
+                    item_readiness = dict(item.get("readiness_policy", {}))
+                    item_readiness["launch_arguments"] = list(structured_facts["arguments"])
+                    item_readiness["environment"] = dict(structured_facts["environment"])
+                    if structured_facts["working_directory"]:
+                        item_readiness["working_directory"] = structured_facts["working_directory"]
+                    item["readiness_policy"] = item_readiness
+                else:
+                    item_readiness = item.get("readiness_policy", {})
                 operator_start_row = bool(
                     isinstance(item_readiness, Mapping)
                     and _truthy(item_readiness.get("operator_starts", False))
@@ -194,7 +250,6 @@ class StationLaunchPlanner:
                     not review_all and (not item["startup"] or operator_start_row)
                 ):
                     continue
-                name = str(item["name"])
                 dependencies = tuple(item["dependencies"] or DEFAULT_DEPENDENCIES.get(name, ()))
                 identity = self._identity(profile, item)
                 readiness = dict(item["readiness_policy"])
@@ -253,6 +308,7 @@ class StationLaunchPlanner:
                     known_recipe=bool(
                         str(item.get("launch_path_override", "") or "").strip()
                         or str(item.get("launch_command_override", "") or "").strip()
+                        or bool(structured_facts)
                         or operator_starts
                     ),
                     startup_included=bool(item["startup"]),
@@ -553,9 +609,16 @@ class StationLaunchPlanner:
     def _with_profile_overrides(profile: Mapping[str, Any], item: Mapping[str, Any]) -> Dict[str, Any]:
         effective = dict(item)
         name = str(effective.get("name", "") or "")
-        if not str(effective.get("launch_command_override", "") or "").strip() and name == "VarAC":
+        structured_facts = _structured_launch_facts(effective, name)
+        if structured_facts:
+            # A structured VarAC recipe wins over the legacy profile command
+            # and installation-path fields.  The orchestrator receives the
+            # executable and argv as separate values and never reparses them.
+            effective["launch_path_override"] = structured_facts["executable"]
+            effective["launch_command_override"] = ""
+        elif not str(effective.get("launch_command_override", "") or "").strip() and name == "VarAC":
             effective["launch_command_override"] = str(profile.get("launch_cmd", "") or "").strip()
-        if not str(effective.get("launch_path_override", "") or "").strip():
+        if not structured_facts and not str(effective.get("launch_path_override", "") or "").strip():
             path_key = {
                 "FLRig": "flrig_path",
                 "FLDigi": "fldigi_path",

@@ -10686,6 +10686,22 @@ class SettingsTab(QWidget):
                 message="Choose a radio and one supported software family before saving.",
             )
             return
+        # Outside Add Radio, Add instance is the final reviewed boundary rather
+        # than a draft handoff. Reuse the same immutable native preparation and
+        # verified external/FIO session path before persisting the assignment.
+        # The nested Add Radio route does not reach this handler; it retains the
+        # request until outer Save Radio and Software.
+        varac_apply_request = payload.get("_varac_native_apply_request")
+        if (
+            family == "varac"
+            and varac_session is None
+            and isinstance(varac_apply_request, Mapping)
+        ):
+            self._on_varac_native_apply_requested(
+                varac_apply_request,
+                publisher=workspace,
+            )
+            return
         reviewed_inventory_fingerprint = str(
             payload.get("inventory_fingerprint") or ""
         ).strip()
@@ -26569,22 +26585,27 @@ class SettingsTab(QWidget):
         )
 
         varac_install_edit = QLineEdit(str((profile_seed or {}).get("varac_install_path", "") or ""))
+        varac_install_edit.setObjectName("guidedVaracExecutable")
         varac_install_wrap = _make_browse_row(varac_install_edit, title="Select VarAC install folder", mode="folder")
         _add_form_row(connection_form, "VarAC Install:", varac_install_wrap, "VarAC install folder used for this radio.")
 
         varac_db_edit = QLineEdit(str((profile_seed or {}).get("varac_db_path", "") or ""))
+        varac_db_edit.setObjectName("guidedVaracDatabase")
         varac_db_wrap = _make_browse_row(varac_db_edit, title="Select VarAC database", file_filter="Database Files (*.db);;All Files (*)")
         _add_form_row(connection_form, "VarAC DB:", varac_db_wrap, "VarAC database path for this radio.")
 
         varac_ini_edit = QLineEdit(str((profile_seed or {}).get("varac_ini_path", "") or ""))
+        varac_ini_edit.setObjectName("guidedVaracIni")
         varac_ini_wrap = _make_browse_row(varac_ini_edit, title="Select VarAC INI", file_filter="INI Files (*.ini);;All Files (*)")
         _add_form_row(connection_form, "VarAC INI:", varac_ini_wrap, "VarAC INI/config path for this radio.")
 
         varac_incoming_edit = QLineEdit(str((profile_seed or {}).get("varac_incoming_path", "") or ""))
+        varac_incoming_edit.setObjectName("guidedVaracIncoming")
         varac_incoming_wrap = _make_browse_row(varac_incoming_edit, title="Select VarAC incoming folder", mode="folder")
         _add_form_row(connection_form, "VarAC Incoming:", varac_incoming_wrap, "Optional VarAC incoming-files path associated with this radio.")
 
         varac_outbox_edit = QLineEdit(str((profile_seed or {}).get("varac_outbox_dir", "") or ""))
+        varac_outbox_edit.setObjectName("guidedVaracOutbox")
         varac_outbox_wrap = _make_browse_row(varac_outbox_edit, title="Select VarAC outbox folder", mode="folder")
         _add_form_row(connection_form, "VarAC Outbox:", varac_outbox_wrap, "Optional VarAC outbox path associated with this radio.")
 
@@ -26602,6 +26623,7 @@ class SettingsTab(QWidget):
         )
 
         varac_launch_cmd_edit = QLineEdit(str((profile_seed or {}).get("launch_cmd", "") or ""))
+        varac_launch_cmd_edit.setObjectName("guidedVaracLaunchDisplay")
         varac_launch_cmd_wrap = _make_browse_row(varac_launch_cmd_edit, title="Select VarAC launch command", mode="folder")
         _add_form_row(connection_form, "VarAC Launch:", varac_launch_cmd_wrap, "Optional VarAC launch override for this radio.")
 
@@ -27133,7 +27155,22 @@ class SettingsTab(QWidget):
                 if not selected:
                     state_label.setText("")
                 elif prepared:
-                    if family_key in {"js8call", "fast_light"} and managed_recipe_ready:
+                    if family_key == "varac":
+                        native = managed_draft.get("varac_native_presentation")
+                        native = native if isinstance(native, Mapping) else {}
+                        native_state = str(native.get("state") or "").replace("_", " ").strip().lower()
+                        if native_state == "ready" and bool(native.get("writer_qualified")):
+                            software_detail_buttons[family_key].setText("Review Details (optional)…")
+                            state_label.setText(
+                                "Ready — FIO prepared the complete VarAC, VARA, file, port, and structured launch bundle. Review Details is optional."
+                            )
+                        elif native_state == "preparing":
+                            state_label.setText("Preparing — FIO is deriving the complete VarAC and VARA bundle.")
+                        else:
+                            state_label.setText(
+                                "Needs attention — prepare the qualified VarAC bundle before saving this radio."
+                            )
+                    elif family_key in {"js8call", "fast_light"} and managed_recipe_ready:
                         software_detail_buttons[family_key].setText("Review Details (optional)…")
                         software_detail_buttons[family_key].setToolTip(
                             "FIO has prepared this complete managed instance. Review its exact identity, files, "
@@ -27322,6 +27359,167 @@ class SettingsTab(QWidget):
             setattr(dlg, "_guided_auto_prepared_draft_families", tuple(auto_prepared_families))
             _update_commstat_binding_summary()
             return tuple(needs_attention)
+
+        def _varac_parent_preparation_seed() -> Dict[str, Any]:
+            """Build the one parent-owned VarAC intent before opening details.
+
+            The nested editor is a correction surface, not the owner of the
+            prepared facts.  This seed deliberately mirrors the assistant's
+            initial intent so either surface can render the same immutable
+            native bundle when the worker returns.
+            """
+
+            retained_raw = getattr(dlg, "_guided_software_instance_drafts", {})
+            retained = (
+                dict(retained_raw.get("varac") or {})
+                if isinstance(retained_raw, Mapping)
+                and isinstance(retained_raw.get("varac"), Mapping)
+                else {}
+            )
+            radio_label = name_edit.text().strip() or "Unsaved radio"
+            state = _guided_software_editor_state()
+            selection = _selected_varac_arrangement()
+            arrangement = str(selection.get("cluster_path") or "standalone").strip() or "standalone"
+            creating_cluster = arrangement == "create_cluster"
+            cluster_route = arrangement in {"create_cluster", "join_cluster"}
+            if not retained:
+                retained = distinct_draft_seed(
+                    "varac",
+                    owner_draft_key=guided_discovery_session_key,
+                    snapshot=_refresh_guided_instance_inventory({}),
+                    source={"application_path": str(state.get("varac_path") or "")},
+                )
+            retained.update(
+                family_key="varac",
+                instance_name=radio_label,
+                owner_label=radio_label,
+                owner_draft_key=guided_discovery_session_key,
+                radio_role=str(device_class_combo.currentData() or "tx_rx").strip().lower(),
+                mode="managed",
+                ownership="fio-managed",
+                launch_at_startup=(
+                    str(software_launch_policy_combos["varac"].currentData() or "operator") == "fio"
+                ),
+                application_path=str(state.get("varac_path") or retained.get("application_path") or ""),
+                cluster_path=arrangement,
+                cluster_id=str(selection.get("cluster_id") or selection.get("proposed_cluster_id") or ""),
+                cluster_name=str(selection.get("proposed_cluster_name") or ""),
+                cluster_instance_number=int(
+                    (selection.get("cluster_instance_number") or varac_arrangement_presentation.get("new_member_instance_number") or 0)
+                    if cluster_route else 0
+                ),
+                existing_standalone_node_id=int(
+                    (selection.get("existing_node_id") or varac_arrangement_presentation.get("recommended_existing_node_id") or 0)
+                    if creating_cluster else 0
+                ),
+                existing_standalone_device_profile_id=int(
+                    (selection.get("existing_device_profile_id") or varac_arrangement_presentation.get("recommended_existing_device_profile_id") or 0)
+                    if creating_cluster else 0
+                ),
+                existing_standalone_member_number=int(
+                    varac_arrangement_presentation.get("existing_member_instance_number") or 0
+                ) if creating_cluster else 0,
+            )
+            return retained
+
+        def _project_prepared_varac_parent_bundle(
+            result: VarACNativePreparationResult,
+            *,
+            expected_fingerprint: str,
+        ) -> None:
+            """Atomically publish native facts to Connections, Review, and Save."""
+
+            if not result.ready or result.plan is None:
+                software_prepared_state_labels["varac"].setText(
+                    "Needs attention — " + str(result.presentation.get("why") or "VarAC preparation did not produce a safe plan.")
+                )
+                return
+            retained_raw = getattr(dlg, "_guided_software_instance_drafts", {})
+            current = (
+                dict(retained_raw.get("varac") or {})
+                if isinstance(retained_raw, Mapping)
+                and isinstance(retained_raw.get("varac"), Mapping)
+                else {}
+            )
+            if native_draft_fingerprint(current) != expected_fingerprint:
+                return
+            presentation = dict(result.presentation)
+            bundle = dict(current)
+            bundle.update(
+                application_path=str(presentation.get("application_path") or ""),
+                configuration_path=str(presentation.get("configuration_path") or ""),
+                storage_path=str(presentation.get("storage_path") or ""),
+                cluster_shared_database=str(presentation.get("storage_path") or ""),
+                secondary_storage_path=str(presentation.get("secondary_storage_path") or ""),
+                outbox_path=str(presentation.get("outbox_path") or ""),
+                working_directory=str(presentation.get("working_directory") or ""),
+                launch_command=str(presentation.get("launch_command") or ""),
+                launch_argv=tuple(presentation.get("launch_argv") or ()),
+                launch_environment=dict(presentation.get("launch_environment") or {}),
+                port=int(presentation.get("port") or 0),
+                secondary_port=int(presentation.get("secondary_port") or 0),
+                udp_port=int(presentation.get("udp_port") or 0),
+                vara_runtime_path=str(presentation.get("vara_runtime_path") or ""),
+                vara_ini_path=str(presentation.get("vara_ini_path") or ""),
+                varac_native_generation=int(result.generation),
+                varac_native_plan_fingerprint=str(result.plan.plan_fingerprint),
+            )
+            presentation["plan_fingerprint"] = str(result.plan.plan_fingerprint)
+            presentation["draft_fingerprint"] = native_draft_fingerprint(bundle)
+            bundle["varac_native_presentation"] = presentation
+            # This transient request is consumed only by the outer final-save
+            # boundary.  It is neither a native apply result nor persistence.
+            bundle["_varac_native_apply_request"] = {
+                "draft": dict(bundle),
+                "native_presentation": dict(presentation),
+            }
+            setattr(dlg, "_guided_software_instance_drafts", {**dict(retained_raw or {}), "varac": bundle})
+            for target, value in (
+                (varac_install_edit, bundle["application_path"]),
+                (varac_ini_edit, bundle["configuration_path"]),
+                (varac_db_edit, bundle["storage_path"]),
+                (varac_incoming_edit, bundle["secondary_storage_path"]),
+                (varac_outbox_edit, bundle["outbox_path"]),
+                (varac_launch_cmd_edit, bundle["launch_command"]),
+            ):
+                target.setText(str(value))
+            _update_software_responsibility_cards()
+            _update_guided_app_setup_plan_review()
+            _update_guided_save_review()
+
+        def _prepare_varac_parent_bundle() -> None:
+            """Start the generation-fenced native preparation without opening details."""
+
+            if not use_varac_chk.isChecked():
+                return
+            seed = _varac_parent_preparation_seed()
+            fingerprint = native_draft_fingerprint(seed)
+            retained_raw = getattr(dlg, "_guided_software_instance_drafts", {})
+            setattr(dlg, "_guided_software_instance_drafts", {**dict(retained_raw or {}), "varac": seed})
+            self._varac_native_generation = int(getattr(self, "_varac_native_generation", 0)) + 1
+            generation = self._varac_native_generation
+            software_prepared_state_labels["varac"].setText("Preparing — FIO is deriving the complete VarAC and VARA bundle.")
+            worker = _VarACNativePrepareWorker(
+                draft=seed,
+                db_path=self.multi_radio_store.db_path,
+                managed_root=Path(get_config_dir()) / "managed-instances",
+                generation=generation,
+            )
+
+            def _ready(result: object) -> None:
+                if not isinstance(result, VarACNativePreparationResult):
+                    return
+                if result.generation != generation:
+                    return
+                self._varac_native_preparations[fingerprint] = result
+                _project_prepared_varac_parent_bundle(result, expected_fingerprint=fingerprint)
+
+            def _failed(detail: str) -> None:
+                software_prepared_state_labels["varac"].setText(
+                    "Needs attention — FIO could not prepare VarAC: " + str(detail)
+                )
+
+            self._start_varac_native_job(worker, on_finished=_ready, on_failed=_failed)
 
         def _sync_software_policy_from_source(family_key: str) -> None:
             source_combo = software_source_combos.get(family_key)
@@ -27747,17 +27945,16 @@ class SettingsTab(QWidget):
                     parent=editor_dialog,
                 )
                 assistant.set_discovery_results(inventory_snapshot.rows_for(family))
+                if family == "varac" and isinstance(seed.get("varac_native_presentation"), Mapping):
+                    # The parent already owns the prepared canonical bundle.
+                    # Details is only a correction/review surface and must not
+                    # reconstruct an alternate VarAC plan.
+                    assistant.set_varac_native_presentation(seed["varac_native_presentation"])
                 # The Add Radio host forwards only a cache-only payload.  The
-                # primary integration layer owns the bounded native-plan/apply
+                # primary integration layer owns the bounded native-plan
                 # worker and republishes its result through the assistant.
                 assistant.varac_native_prepare_requested.connect(
                     lambda payload, target=assistant: self._on_varac_native_prepare_requested(
-                        payload,
-                        publisher=target,
-                    )
-                )
-                assistant.varac_native_apply_requested.connect(
-                    lambda payload, target=assistant: self._on_varac_native_apply_requested(
                         payload,
                         publisher=target,
                     )
@@ -29177,6 +29374,11 @@ class SettingsTab(QWidget):
                 if isinstance(retained.get("fast_light"), Mapping)
                 else {}
             )
+            varac_draft = (
+                dict(retained.get("varac") or {})
+                if isinstance(retained.get("varac"), Mapping)
+                else {}
+            )
             shared_ports = (
                 _guided_plan_port_assignment("flrig", flrig_port_edit.text()),
                 _guided_plan_port_assignment("fldigi", fldigi_port_edit.text()),
@@ -29230,6 +29432,14 @@ class SettingsTab(QWidget):
                 str(js8_draft.get("ownership") or "").strip().lower() == "fio-managed"
                 and str(js8_draft.get("mode") or "").strip().lower() == "managed"
             )
+            varac_native = varac_draft.get("varac_native_presentation")
+            varac_native = varac_native if isinstance(varac_native, Mapping) else {}
+            qualified_varac_bundle = bool(
+                varac_selected
+                and str(varac_draft.get("mode") or "").strip().lower() == "managed"
+                and str(varac_native.get("state") or "").replace("_", " ").strip().lower() == "ready"
+                and bool(varac_native.get("writer_qualified"))
+            )
             app_paths = {
                 "flrig": flrig_path_edit.text().strip(),
                 "fldigi": fldigi_path_edit.text().strip(),
@@ -29254,22 +29464,42 @@ class SettingsTab(QWidget):
                 ),
                 "js8_writer_platform": str(js8_draft.get("writer_platform") or "").strip(),
                 "js8_writer_operation": str(js8_draft.get("writer_operation") or "create").strip(),
-                "varac": varac_install_edit.text().strip(),
-                "varac_install_path": varac_install_edit.text().strip(),
-                "varac_ini_path": varac_ini_edit.text().strip(),
-                "varac_db_path": varac_db_edit.text().strip(),
-                "varac_incoming_dir": varac_incoming_edit.text().strip(),
-                "varac_outbox_dir": varac_outbox_edit.text().strip(),
+                # A qualified VarAC bundle owns these facts.  Never rebuild
+                # its review from loose parent widgets or the legacy generic
+                # read/import plan.
+                "varac": str(varac_draft.get("application_path") or varac_install_edit.text()).strip(),
+                "varac_install_path": str(varac_draft.get("application_path") or varac_install_edit.text()).strip(),
+                "varac_ini_path": str(varac_draft.get("configuration_path") or varac_ini_edit.text()).strip(),
+                "varac_db_path": str(varac_draft.get("storage_path") or varac_db_edit.text()).strip(),
+                "varac_incoming_dir": str(varac_draft.get("secondary_storage_path") or varac_incoming_edit.text()).strip(),
+                "varac_outbox_dir": str(varac_draft.get("outbox_path") or varac_outbox_edit.text()).strip(),
                 "varac_bbs_dir": varac_bbs_edit.text().strip(),
                 "varac_bbs_archive_dir": varac_bbs_archive_edit.text().strip(),
                 "varac_launch_cmd": varac_launch_cmd_edit.text().strip(),
             }
-            return build_app_config_plan_for_blueprint(
+            plan = build_app_config_plan_for_blueprint(
                 _current_guided_blueprint(),
                 tuple(proposals),
                 config_root=get_config_dir(),
                 app_paths=app_paths,
             )
+            if qualified_varac_bundle:
+                # Native VarAC preparation and final transaction own this
+                # family.  Excluding the obsolete generic action keeps the
+                # parent review from claiming it is read/import-only.
+                return GuidedAppConfigPlan(
+                    actions=tuple(action for action in plan.actions if action.app_id != "varac"),
+                    review_items=tuple(
+                        item for item in plan.review_items
+                        if "varac guided setup is read/import only" not in str(item).casefold()
+                        and "cluster membership remains read-only" not in str(item).casefold()
+                    ),
+                    # A qualified VarAC bundle is removed only from this
+                    # legacy presenter.  Unrelated JS8/Fast Light safety
+                    # blockers remain authoritative for the final review.
+                    blocked=bool(plan.blocked),
+                )
+            return plan
 
         def _apply_guided_app_configuration() -> None:
             plan = _current_guided_app_config_plan()
@@ -29876,6 +30106,14 @@ class SettingsTab(QWidget):
                     continue
                 draft = retained.get(family)
                 if isinstance(draft, Mapping):
+                    if family == "varac" and str(draft.get("mode") or "").strip().lower() == "managed":
+                        native = draft.get("varac_native_presentation")
+                        native = native if isinstance(native, Mapping) else {}
+                        if (
+                            str(native.get("state") or "").replace("_", " ").strip().lower() != "ready"
+                            or not bool(native.get("writer_qualified"))
+                        ):
+                            return False
                     # Confidence and launch readiness are not safety blocks.
                     # Save the isolated FIO identity as Ready with warnings or
                     # launch setup pending; reserve a disabled Save for an
@@ -30161,6 +30399,15 @@ class SettingsTab(QWidget):
                     )
             backend_value = str(backend_combo.currentData() or "manual").strip().lower()
             backend_label = self._device_backend_label(backend_value)
+            retained_for_review = getattr(dlg, "_guided_software_instance_drafts", {})
+            varac_for_review = (
+                dict(retained_for_review.get("varac") or {})
+                if isinstance(retained_for_review, Mapping)
+                and isinstance(retained_for_review.get("varac"), Mapping)
+                else {}
+            )
+            native_for_review = varac_for_review.get("varac_native_presentation")
+            native_for_review = native_for_review if isinstance(native_for_review, Mapping) else {}
             endpoint_lines: List[str] = []
             if backend_value == "flrig" or use_flrig_chk.isChecked():
                 endpoint_lines.append(_endpoint_summary("FLRig", flrig_host_edit.text(), flrig_port_edit.text()))
@@ -30173,7 +30420,10 @@ class SettingsTab(QWidget):
             if str(device_class_combo.currentData() or "").strip().lower() == "observer":
                 endpoint_lines.append(_endpoint_summary("Observer SDR", sdr_host_edit.text(), sdr_port_edit.text()))
             if use_varac_chk.isChecked():
-                endpoint_lines.append("VarAC monitor/import: FIO will not control VarAC frequency")
+                ports = str(native_for_review.get("ports_summary") or "").strip()
+                endpoint_lines.append(
+                    "VarAC / VARA ports: " + (ports or "not prepared")
+                )
             if not endpoint_lines:
                 endpoint_lines.append("No app endpoint selected")
             file_lines: List[str] = []
@@ -30183,10 +30433,13 @@ class SettingsTab(QWidget):
             if use_external_js8spotter_chk.isChecked():
                 file_lines.append(_path_summary("External JS8Spotter", js8spotter_launch_edit.text()))
             if use_varac_chk.isChecked():
-                file_lines.append(_path_summary("VarAC install", varac_install_edit.text()))
-                file_lines.append(_path_summary("VarAC DB", varac_db_edit.text()))
-                file_lines.append(_path_summary("VarAC incoming", varac_incoming_edit.text()))
-                file_lines.append(_path_summary("VarAC outbox", varac_outbox_edit.text()))
+                file_lines.append(_path_summary("VarAC executable", str(varac_for_review.get("application_path") or varac_install_edit.text())))
+                file_lines.append(_path_summary("VarAC INI", str(varac_for_review.get("configuration_path") or varac_ini_edit.text())))
+                file_lines.append(_path_summary("VarAC DB", str(varac_for_review.get("storage_path") or varac_db_edit.text())))
+                file_lines.append(_path_summary("VarAC incoming", str(varac_for_review.get("secondary_storage_path") or varac_incoming_edit.text())))
+                file_lines.append(_path_summary("VarAC outbox", str(varac_for_review.get("outbox_path") or varac_outbox_edit.text())))
+                file_lines.append(_path_summary("VARA runtime", str(varac_for_review.get("vara_runtime_path") or "")))
+                file_lines.append(_path_summary("VARA INI", str(varac_for_review.get("vara_ini_path") or "")))
                 file_lines.append(_path_summary("VarAC BBS", varac_bbs_edit.text()))
                 file_lines.append(_path_summary("VarAC BBS archive", varac_bbs_archive_edit.text()))
             if radio_apps_base_edit.text().strip():
@@ -30195,6 +30448,15 @@ class SettingsTab(QWidget):
                 file_lines.append("No message/forms paths selected")
             app_config_plan = _current_guided_app_config_plan()
             app_config_lines = guided_app_config_review_lines(app_config_plan)
+            if use_varac_chk.isChecked() and bool(native_for_review.get("writer_qualified")):
+                varac_bundle_lines = [
+                    "App Configuration: VarAC native bundle is prepared; no external file changes occur until Save Radio and Software.",
+                    "VarAC executable: " + str(varac_for_review.get("application_path") or "not set"),
+                    "VarAC INI: " + str(varac_for_review.get("configuration_path") or "not set"),
+                    "Working directory: " + str(varac_for_review.get("working_directory") or "not set"),
+                    "Structured arguments: " + str(list(varac_for_review.get("launch_argv") or ())),
+                ]
+                app_config_lines = varac_bundle_lines + list(app_config_lines)
             app_config_summary = _line_without_prefix(
                 app_config_lines[0] if app_config_lines else "App Configuration: no external app setup changes.",
                 "App Configuration",
@@ -30222,6 +30484,10 @@ class SettingsTab(QWidget):
                 files_review_lines.append(f"Needs review: {len(missing_file_lines)} path(s)")
             else:
                 files_review_lines.append("No missing paths for the selected software.")
+            # Files is a review surface, not merely a count: include the
+            # canonical VarAC INI and every prepared file fact so the parent
+            # can be approved without opening the nested correction dialog.
+            files_review_lines.extend(file_lines)
             files_review_lines.append(app_config_summary)
 
             policy = guided_setup_capability_policy(_current_guided_blueprint())
@@ -30269,7 +30535,7 @@ class SettingsTab(QWidget):
                 "receiver": receiver_launch_path_edit.text().strip(),
                 "js8call": js8_install_edit.text().strip(),
                 "external_spotter": js8spotter_launch_edit.text().strip(),
-                "varac": varac_launch_cmd_edit.text().strip() or varac_install_edit.text().strip(),
+                "varac": str(varac_for_review.get("application_path") or varac_install_edit.text()).strip(),
             }
             for family_key in selected_family_keys:
                 family_title = software_family_titles.get(family_key, family_key)
@@ -30319,6 +30585,18 @@ class SettingsTab(QWidget):
                             f"Working directory: application default; Dependencies: reviewed per component; "
                             f"Execution scope: {execution_scope}; Readiness policy: checked after start."
                         )
+                    continue
+                if family_key == "varac":
+                    argv = tuple(str(value) for value in (varac_for_review.get("launch_argv") or ()) if str(value))
+                    executable = argv[0] if argv else str(varac_for_review.get("application_path") or "")
+                    arguments = argv[1:] if len(argv) > 1 else ()
+                    launch_plan_lines.append(
+                        "VarAC — Launch policy: " + launch_text
+                        + "; Executable: " + (executable or "not prepared")
+                        + "; Arguments: " + (str(list(arguments)) if arguments else "None")
+                        + "; Working directory: " + str(varac_for_review.get("working_directory") or "not set")
+                        + "; Dependencies: distinct VARA runtime; Readiness policy: process and endpoint health."
+                    )
                     continue
                 target = family_launch_targets.get(family_key, "")
                 effective = target or "application path still required"
@@ -30750,6 +31028,12 @@ class SettingsTab(QWidget):
             if _js8_app_selected() and (js8_profile_edit.text().strip() or js8_directed_edit.text().strip()):
                 _update_js8_profile_choices(js8_file_profiles)
             managed_recipe_attention = _publish_prepared_managed_instance_drafts()
+            if (
+                use_varac_chk.isChecked()
+                and str(software_source_combos["varac"].currentData() or "").strip().lower() == "create"
+                and str(software_management_combos["varac"].currentData() or "").strip().lower() == "fio_identity_launch"
+            ):
+                _prepare_varac_parent_bundle()
             prepared_software_context = _guided_software_plan_context()
             review = guided_setup_autofill_review(
                 filled=filled,
@@ -32909,15 +33193,40 @@ class SettingsTab(QWidget):
             return
         draft = dict(raw_payload["draft"])
         fingerprint = native_draft_fingerprint(draft)
-        prepared = self._varac_native_preparations.get(fingerprint)
         presentation = raw_payload.get("native_presentation")
         reviewed_generation = int(
             presentation.get("generation", 0) if isinstance(presentation, Mapping) else 0
+        )
+        reviewed_plan_fingerprint = str(
+            presentation.get("plan_fingerprint")
+            or presentation.get("fingerprints_summary")
+            or ""
+            if isinstance(presentation, Mapping)
+            else ""
+        ).strip()
+        reviewed_draft_fingerprint = str(
+            presentation.get("draft_fingerprint", "")
+            if isinstance(presentation, Mapping)
+            else ""
+        ).strip()
+        prepared = next(
+            (
+                item
+                for item in self._varac_native_preparations.values()
+                if isinstance(item, VarACNativePreparationResult)
+                and item.plan is not None
+                and item.plan.plan_fingerprint == reviewed_plan_fingerprint
+            ),
+            None,
         )
         if (
             prepared is None
             or not prepared.ready
             or prepared.generation != reviewed_generation
+            or prepared.plan is None
+            or prepared.plan.plan_fingerprint != reviewed_plan_fingerprint
+            or not reviewed_draft_fingerprint
+            or fingerprint != reviewed_draft_fingerprint
             or self._publisher_varac_draft_fingerprint(publisher) != fingerprint
         ):
             self._publish_varac_native_presentation(
@@ -32954,15 +33263,48 @@ class SettingsTab(QWidget):
                 self._rollback_varac_native_session(result)
                 return
             member = result.plan.members[-1]
+            launch_argv = tuple(str(value) for value in member.launch_command)
+            launch_environment = (
+                {"WINEPREFIX": str(member.wine_prefix)}
+                if member.wine_prefix
+                else {}
+            )
             completed = dict(draft)
+            completed.pop("_varac_native_apply_request", None)
             completed.update(
                 {
                     "_varac_native_external_session": result,
+                    "application_path": (
+                        launch_argv[1]
+                        if result.plan.platform == "linux-wine" and len(launch_argv) > 1
+                        else launch_argv[0]
+                    ),
                     "configuration_path": str(member.target_path),
                     "storage_path": result.plan.shared_db_path,
                     "cluster_shared_database": result.plan.shared_db_path,
                     "working_directory": member.working_directory,
-                    "launch_command": " ".join(member.launch_command),
+                    "launch_command": " ".join(launch_argv),
+                    "launch_argv": launch_argv,
+                    "launch_environment": launch_environment,
+                    "launch_recipe": {
+                        "status": "qualified_managed",
+                        "components": (
+                            {
+                                "component_key": "varac",
+                                "executable": launch_argv[0],
+                                "arguments": launch_argv[1:],
+                                "effective_command": launch_argv,
+                                "working_directory": member.working_directory,
+                                "environment": launch_environment,
+                                "dependencies": (),
+                                "execution_scope": "standard",
+                                "operator_starts": False,
+                                "readiness": {"kind": "process"},
+                            },
+                        ),
+                        "fingerprint": result.plan.plan_fingerprint,
+                    },
+                    "launch_recipe_fingerprint": result.plan.plan_fingerprint,
                     "vara_runtime_path": str(member.vara_target_runtime_folder),
                     "vara_ini_path": str(member.vara_target_path),
                     "native_management_state": "managed",
@@ -33125,7 +33467,10 @@ class SettingsTab(QWidget):
                         "The backup was restored and the radio was not saved.",
                     )
                     return
-                self._complete_add_device_profile(payload, native_result=result)
+                self._continue_add_device_profile_after_guided_native(
+                    payload,
+                    native_result=result,
+                )
 
             def _native_failed(detail: str) -> None:
                 if varac_session is not None:
@@ -33143,7 +33488,195 @@ class SettingsTab(QWidget):
                 on_failed=_native_failed,
             )
             return
-        self._complete_add_device_profile(created)
+        self._continue_add_device_profile_after_guided_native(created)
+
+    def _continue_add_device_profile_after_guided_native(
+        self,
+        created: Mapping[str, Any],
+        *,
+        native_result: GuidedAppConfigApplyResult | None = None,
+    ) -> None:
+        """Apply a reviewed VarAC native plan only at final Add Radio Save.
+
+        Software Administration is a cache-only draft editor.  A managed
+        VarAC cluster draft carries a fingerprinted request that resolves to
+        the immutable preparation retained by this SettingsTab.  The external
+        writer runs here, after the outer review was accepted, and its session
+        is handed to the existing split external/FIO transaction for commit or
+        rollback.
+        """
+
+        payload = dict(created)
+        drafts = payload.get("guided_software_instance_drafts")
+        varac = drafts.get("varac") if isinstance(drafts, Mapping) else None
+        requires_apply = bool(
+            isinstance(varac, Mapping)
+            and str(varac.get("mode") or "").strip().lower() == "managed"
+            and str(varac.get("cluster_path") or "").strip().lower()
+            in {"create_cluster", "join_cluster"}
+        )
+        if not requires_apply:
+            self._complete_add_device_profile(payload, native_result=native_result)
+            return
+
+        request = varac.get("_varac_native_apply_request")
+        reviewed_draft = request.get("draft") if isinstance(request, Mapping) else None
+        presentation = request.get("native_presentation") if isinstance(request, Mapping) else None
+        current_draft_fingerprint = (
+            native_draft_fingerprint(reviewed_draft)
+            if isinstance(reviewed_draft, Mapping)
+            else ""
+        )
+        reviewed_draft_fingerprint = str(
+            presentation.get("draft_fingerprint", "")
+            if isinstance(presentation, Mapping)
+            else ""
+        ).strip()
+        reviewed_generation = int(
+            presentation.get("generation", 0)
+            if isinstance(presentation, Mapping)
+            else 0
+        )
+        reviewed_plan_fingerprint = str(
+            presentation.get("plan_fingerprint")
+            or presentation.get("fingerprints_summary")
+            or ""
+            if isinstance(presentation, Mapping)
+            else ""
+        ).strip()
+        prepared = next(
+            (
+                item
+                for item in getattr(self, "_varac_native_preparations", {}).values()
+                if isinstance(item, VarACNativePreparationResult)
+                and item.plan is not None
+                and item.plan.plan_fingerprint == reviewed_plan_fingerprint
+            ),
+            None,
+        )
+        if (
+            not isinstance(prepared, VarACNativePreparationResult)
+            or not prepared.ready
+            or prepared.generation != reviewed_generation
+            or prepared.plan is None
+            or prepared.plan.plan_fingerprint != reviewed_plan_fingerprint
+            or not reviewed_draft_fingerprint
+            or current_draft_fingerprint != reviewed_draft_fingerprint
+        ):
+            self._rollback_guided_native_config(native_result)
+            QMessageBox.warning(
+                self,
+                "VarAC Configuration",
+                "The prepared VarAC plan changed or is no longer available. Nothing was saved or written. "
+                "Return to Software, prepare VarAC again, and review the updated plan.",
+            )
+            return
+
+        worker = _VarACNativeApplyWorker(
+            action="apply",
+            db_path=self.multi_radio_store.db_path,
+            preparation=prepared,
+            backup_root=Path(get_config_dir()) / "backups" / "varac-native",
+        )
+
+        def _applied(result: object) -> None:
+            if not isinstance(result, VarACNativeExternalSession) or not result.ok:
+                self._rollback_guided_native_config(native_result)
+                detail = (
+                    result.error
+                    if isinstance(result, VarACNativeExternalSession)
+                    else "Native apply returned no verified session."
+                )
+                QMessageBox.warning(
+                    self,
+                    "VarAC Configuration",
+                    "FIO could not safely apply and verify the reviewed VarAC configuration. "
+                    f"The backup was restored and the radio was not saved. {detail}",
+                )
+                return
+            updated = dict(payload)
+            updated_drafts = {
+                str(key): dict(value) if isinstance(value, Mapping) else value
+                for key, value in dict(drafts).items()
+            }
+            updated_varac = dict(updated_drafts["varac"])
+            updated_varac.pop("_varac_native_apply_request", None)
+            member = result.plan.members[-1]
+            launch_argv = tuple(str(value) for value in member.launch_command)
+            launch_environment = (
+                {"WINEPREFIX": str(member.wine_prefix)}
+                if member.wine_prefix
+                else {}
+            )
+            updated_varac.update(
+                {
+                    "_varac_native_external_session": result,
+                    "application_path": (
+                        launch_argv[1]
+                        if result.plan.platform == "linux-wine" and len(launch_argv) > 1
+                        else launch_argv[0]
+                    ),
+                    "configuration_path": str(member.target_path),
+                    "storage_path": result.plan.shared_db_path,
+                    "cluster_shared_database": result.plan.shared_db_path,
+                    "working_directory": member.working_directory,
+                    "launch_command": " ".join(launch_argv),
+                    "launch_argv": launch_argv,
+                    "launch_environment": launch_environment,
+                    "launch_recipe": {
+                        "status": "qualified_managed",
+                        "components": (
+                            {
+                                "component_key": "varac",
+                                "executable": launch_argv[0],
+                                "arguments": launch_argv[1:],
+                                "effective_command": launch_argv,
+                                "working_directory": member.working_directory,
+                                "environment": launch_environment,
+                                "dependencies": (),
+                                "execution_scope": "standard",
+                                "operator_starts": False,
+                                "readiness": {"kind": "process"},
+                            },
+                        ),
+                        "fingerprint": result.plan.plan_fingerprint,
+                    },
+                    "launch_recipe_fingerprint": result.plan.plan_fingerprint,
+                    "vara_runtime_path": str(member.vara_target_runtime_folder),
+                    "vara_ini_path": str(member.vara_target_path),
+                    "native_management_state": "managed",
+                    "native_writer_key": ":".join(
+                        (
+                            "varac",
+                            result.plan.version,
+                            result.plan.platform,
+                            result.plan.operation,
+                        )
+                    ),
+                    "desired_fingerprint": result.plan.plan_fingerprint,
+                    "observed_fingerprint": str(
+                        result.observed.get("observed_fingerprint") or ""
+                    ),
+                    "native_verification_summary": (
+                        "Native VarAC and distinct VARA runtime applied and read back."
+                    ),
+                    "native_configuration_status": "native_applied_readback_verified",
+                }
+            )
+            updated_drafts["varac"] = updated_varac
+            updated["guided_software_instance_drafts"] = updated_drafts
+            self._complete_add_device_profile(updated, native_result=native_result)
+
+        def _failed(detail: str) -> None:
+            self._rollback_guided_native_config(native_result)
+            QMessageBox.warning(
+                self,
+                "VarAC Configuration",
+                "FIO could not start the reviewed VarAC transaction. Nothing was saved or written. "
+                f"{detail}",
+            )
+
+        self._start_varac_native_job(worker, on_finished=_applied, on_failed=_failed)
 
     @staticmethod
     def _varac_native_session_from_guided_profile(

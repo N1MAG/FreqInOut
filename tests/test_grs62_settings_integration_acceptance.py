@@ -49,7 +49,10 @@ def test_blank_managed_root_fails_closed_for_js8_and_fast_light() -> None:
         },
         managed_root="   ",
     )
-    assert js8.status == fast.status == "unsupported"
+    # Missing the managed root is an unresolved destructive-path risk, not an
+    # unsupported application family.  The canonical guided status therefore
+    # uses the GRS-9/GRS-10 safety boundary for both recipes.
+    assert js8.status == fast.status == "blocked_for_safety"
     assert not js8.components and not fast.components
     assert "managed-instance root" in js8.recovery_action
 

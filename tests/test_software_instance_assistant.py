@@ -82,6 +82,34 @@ def test_conflicts_are_explicit_and_importing_same_row_is_safe() -> None:
     )
 
 
+def test_varac_cluster_shared_database_is_not_reported_as_private_storage_collision() -> None:
+    findings = instance_conflicts(
+        {
+            "family_key": "varac",
+            "name": "New Radio",
+            "radio_id": 7,
+            "mode": "managed",
+            "cluster_path": "create_cluster",
+            "cluster_id": "FIELD",
+            "cluster_shared_database": "/varac/VarAC.db",
+            "storage_path": "/varac/VarAC.db",
+            "existing_standalone_node_id": 11,
+            "cluster_instance_number": 2,
+        },
+        (
+            {
+                "id": 3,
+                "name": "Existing Radio",
+                "family_key": "varac",
+                "varac_node_id": 11,
+                "db_path": "/varac/VarAC.db",
+                "cluster_path": "standalone",
+            },
+        ),
+    )
+    assert "duplicate_storage" not in {item.code for item in findings}
+
+
 def test_unsaved_radio_owner_uses_authoritative_assistant_without_fake_radio_id() -> None:
     app = _app()
     assistant = SoftwareInstanceAssistant(
@@ -300,7 +328,7 @@ def test_varac_native_presentation_is_cache_only_and_exposes_worker_seams() -> N
         _app().processEvents()
 
 
-def test_native_managed_varac_cluster_final_review_emits_apply_with_prepared_snapshot() -> None:
+def test_native_managed_varac_cluster_final_review_returns_draft_with_prepared_snapshot() -> None:
     _app()
     assistant = SoftwareInstanceAssistant(
         "varac",
@@ -327,22 +355,49 @@ def test_native_managed_varac_cluster_final_review_emits_apply_with_prepared_sna
         assistant.email_gateway_sender_combo.setCurrentIndex(
             assistant.email_gateway_sender_combo.findData("new_member")
         )
+        assistant.set_varac_native_presentation(
+            {
+                "state": "ready",
+                "generation": 9,
+                "writer_version": "13.2.7",
+                "writer_qualified": True,
+                "application_path": "/wine/drive_c/VarAC/VarAC.exe",
+                "configuration_path": "/wine/drive_c/VarAC/VarAC-new-radio.ini",
+                "storage_path": "/cluster/VarAC.db",
+                "secondary_storage_path": "/managed/new/incoming",
+                "outbox_path": "/managed/new/outbox",
+                "working_directory": "/wine/drive_c/VarAC",
+                "vara_runtime_path": "/managed/new/VARA",
+                "vara_ini_path": "/managed/new/VARA/VARA.ini",
+                "launch_argv": ("wine", "/wine/drive_c/VarAC/VarAC.exe", "C:\\VarAC\\VarAC-new-radio.ini"),
+                "launch_environment": {"WINEPREFIX": "/wine"},
+                "ports_summary": "command 8304 · KISS 8306",
+                "plan_fingerprint": "bundle-9",
+            }
+        )
         assistant._step = len(assistant.STEP_TITLES) - 1
         assistant._refresh()
-        assert assistant.next_button.text() == "Review & Save"
+        assert assistant.next_button.text() == "Save as draft"
         assert assistant.next_button.isEnabled()
+        review = assistant.review_label.text()
+        assert "Executable: wine" in review
+        assert "Arguments:" in review and "VarAC-new-radio.ini" in review
+        assert "Working directory: /wine/drive_c/VarAC" in review
+        assert "VarAC INI: /wine/drive_c/VarAC/VarAC-new-radio.ini" in review
+        assert "Application: /wine/drive_c/VarAC" not in review
         assert "cluster_launch_required" not in {item.code for item in assistant.validation()}
         completed = []
         apply_requests = []
         assistant.completed.connect(completed.append)
         assistant.varac_native_apply_requested.connect(apply_requests.append)
         assistant._next()
-        assert not completed
-        assert len(apply_requests) == 1
-        payload = apply_requests[0]
-        assert payload["draft"]["email_gateway_sender_choice"] == "new_member"
-        assert payload["draft"]["varac_native_generation"] == 9
-        assert payload["native_presentation"]["writer_qualified"] is True
+        assert len(completed) == 1
+        assert not apply_requests
+        payload = completed[0]
+        assert payload["email_gateway_sender_choice"] == "new_member"
+        assert payload["varac_native_generation"] == 9
+        assert payload["varac_native_presentation"]["writer_qualified"] is True
+        assert payload["_varac_native_apply_request"]["draft"]["varac_native_generation"] == 9
     finally:
         assistant.deleteLater()
         _app().processEvents()

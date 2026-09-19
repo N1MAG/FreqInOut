@@ -50,5 +50,10 @@ def test_resolved_managed_recipe_has_effective_command_while_unknown_uses_advanc
         managed_root="/fio/managed-instances",
     )
     assert known.qualified and known.components[0].effective_command
-    assert unknown.status == "unsupported" and unknown.raw_override_allowed
-    assert "Advanced" in unknown.recovery_action or "operator" in unknown.recovery_action.casefold()
+    # A future/unknown executable can be saved as an isolated launch-pending
+    # identity. FIO gives a bounded confirmation action rather than enabling a
+    # raw command override that could bypass the reviewed profile contract.
+    assert unknown.status == "launch_pending"
+    assert not unknown.raw_override_allowed
+    assert "confirm" in unknown.recovery_action.casefold()
+    assert "isolated profile can still be saved" in unknown.recovery_action.casefold()

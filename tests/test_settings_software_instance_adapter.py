@@ -339,6 +339,38 @@ def test_settings_instance_replacement_passes_stale_assignment_guard(
     assert refreshed == [True]
 
 
+def test_direct_varac_add_instance_runs_reviewed_native_apply_before_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _Store()
+    tab, workspace, replaced, refreshed, _profile = _tab(monkeypatch, store=store)
+    applied: list[tuple[dict[str, Any], object]] = []
+    tab._on_varac_native_apply_requested = (
+        lambda request, *, publisher: applied.append((dict(request), publisher))
+    )
+    request = {
+        "draft": {"family_key": "varac", "mode": "managed"},
+        "native_presentation": {"state": "ready", "plan_fingerprint": "plan-a"},
+    }
+
+    tab._on_software_instance_add_requested(
+        {
+            "family_key": "varac",
+            "radio_id": 1,
+            "instance_name": "VarAC A",
+            "mode": "managed",
+            "cluster_path": "create_cluster",
+            "_varac_native_apply_request": request,
+        }
+    )
+
+    assert applied == [(request, workspace)]
+    assert store.adoptions == []
+    assert workspace.completed == []
+    assert replaced == []
+    assert refreshed == []
+
+
 def test_settings_disassociate_requires_confirmation_and_preserves_expected_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -10,8 +10,10 @@ from __future__ import annotations
 import os
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from PySide6.QtWidgets import QApplication, QWidget
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -28,6 +30,7 @@ from freqinout.core.varac_native_preparation import (
     prepare_varac_native_configuration,
 )
 from freqinout.core.varac_native_transaction import (
+    VarACNativeExternalSession,
     begin_varac_native_external_apply,
     recover_unfinished_varac_native_applies,
     rollback_varac_native_external_session,
@@ -116,7 +119,7 @@ def test_prepare_is_cross_platform_and_explicit_about_sender_and_runtime(
     assert result.plan.platform == platform
     assert result.plan.email_gateway_sender_member_id == expected_sender
     assert result.plan.members[0].target_path == Path(node["ini_path"])
-    assert result.plan.members[1].target_path == tmp_path / "managed" / "new-radio" / "varac-native" / "VarAC.ini"
+    assert result.plan.members[1].target_path == tmp_path / "VarAC" / "VarAC-new-radio.ini"
     assert result.plan.members[0].vara_target_runtime_folder != result.plan.members[1].vara_target_runtime_folder
     assert result.plan.members[1].vara_target_path == result.plan.members[1].vara_target_runtime_folder / "VARA.ini"
     assert result.plan.members[1].launch_command[0] == ("wine" if platform == "linux-wine" else str(node["install_path"]) + "/VarAC.exe")
@@ -231,6 +234,178 @@ def test_add_radio_stale_review_compensates_an_already_applied_native_session() 
 
     SettingsTab._add_device_profile(host)
     assert rolled_back == [session]
+
+
+def test_final_add_radio_save_applies_reviewed_varac_plan_and_hands_session_to_transaction(
+    tmp_path: Path,
+) -> None:
+    """Draft completion is pure; the outer accepted Save owns native apply."""
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    node, profile = _evidence(tmp_path)
+    draft = _draft()
+    prepared = prepare_varac_native_configuration(
+        draft,
+        varac_nodes=(node,),
+        device_profiles=(profile,),
+        varac_clusters=(),
+        varac_members=(),
+        managed_root=tmp_path / "managed",
+        generation=7,
+        platform_override="linux-wine",
+    )
+    assert prepared.ready and prepared.plan is not None
+    hydrated = {
+        **draft,
+        "application_path": prepared.presentation["application_path"],
+        "configuration_path": prepared.presentation["configuration_path"],
+        "storage_path": prepared.presentation["storage_path"],
+        "cluster_shared_database": prepared.presentation["storage_path"],
+        "secondary_storage_path": prepared.presentation["secondary_storage_path"],
+        "outbox_path": prepared.presentation["outbox_path"],
+        "working_directory": prepared.presentation["working_directory"],
+        "launch_command": prepared.presentation["launch_command"],
+        "port": prepared.presentation["port"],
+        "secondary_port": prepared.presentation["secondary_port"],
+        "vara_runtime_path": prepared.presentation["vara_runtime_path"],
+        "vara_ini_path": prepared.presentation["vara_ini_path"],
+    }
+    native_presentation = {
+        **dict(prepared.presentation),
+        "draft_fingerprint": native_draft_fingerprint(hydrated),
+    }
+    reviewed_request = {
+        **hydrated,
+        "varac_native_presentation": native_presentation,
+        "varac_native_generation": 7,
+        "varac_native_plan_fingerprint": prepared.plan.plan_fingerprint,
+    }
+    reviewed = {
+        **hydrated,
+        "_varac_native_apply_request": {
+            "draft": reviewed_request,
+            "native_presentation": native_presentation,
+        },
+    }
+    session = VarACNativeExternalSession(
+        journal_id="journal",
+        plan=prepared.plan,
+        apply_result=SimpleNamespace(ok=True),
+        observed={"observed_fingerprint": "observed"},
+    )
+    completed: list[dict[str, object]] = []
+    host = SettingsTab.__new__(SettingsTab)
+    host.multi_radio_store = SimpleNamespace(db_path=tmp_path / "fio.db")
+    host._varac_native_preparations = {prepared.draft_fingerprint: prepared}
+    host._rollback_guided_native_config = lambda _value: None
+    host._start_varac_native_job = (
+        lambda _worker, *, on_finished, on_failed: on_finished(session)
+    )
+    host._complete_add_device_profile = (
+        lambda payload, **_kwargs: completed.append(dict(payload))
+    )
+
+    SettingsTab._continue_add_device_profile_after_guided_native(
+        host,
+        {"guided_software_instance_drafts": {"varac": reviewed}},
+    )
+
+    assert len(completed) == 1
+    saved = completed[0]["guided_software_instance_drafts"]["varac"]
+    assert saved["_varac_native_external_session"] is session
+    assert "_varac_native_apply_request" not in saved
+    assert tuple(saved["launch_argv"]) == prepared.plan.members[-1].launch_command
+    component = saved["launch_recipe"]["components"][0]
+    assert tuple((component["executable"], *component["arguments"])) == prepared.plan.members[-1].launch_command
+
+
+def test_direct_software_admin_native_apply_resolves_hydrated_plan_fingerprint(
+    tmp_path: Path,
+) -> None:
+    from freqinout.gui.settings_tab import SettingsTab
+
+    node, profile = _evidence(tmp_path)
+    draft = _draft()
+    prepared = prepare_varac_native_configuration(
+        draft,
+        varac_nodes=(node,),
+        device_profiles=(profile,),
+        varac_clusters=(),
+        varac_members=(),
+        managed_root=tmp_path / "managed",
+        generation=11,
+        platform_override="linux-wine",
+    )
+    assert prepared.ready and prepared.plan is not None
+    hydrated = {
+        **draft,
+        "application_path": prepared.presentation["application_path"],
+        "configuration_path": prepared.presentation["configuration_path"],
+        "storage_path": prepared.presentation["storage_path"],
+        "cluster_shared_database": prepared.presentation["storage_path"],
+        "secondary_storage_path": prepared.presentation["secondary_storage_path"],
+        "outbox_path": prepared.presentation["outbox_path"],
+        "working_directory": prepared.presentation["working_directory"],
+        "launch_command": prepared.presentation["launch_command"],
+        "port": prepared.presentation["port"],
+        "secondary_port": prepared.presentation["secondary_port"],
+        "vara_runtime_path": prepared.presentation["vara_runtime_path"],
+        "vara_ini_path": prepared.presentation["vara_ini_path"],
+    }
+    presentation = {
+        **dict(prepared.presentation),
+        "draft_fingerprint": native_draft_fingerprint(hydrated),
+    }
+
+    class Publisher:
+        def __init__(self) -> None:
+            self.completed: list[dict[str, object]] = []
+            self.presentations: list[dict[str, object]] = []
+
+        def varac_native_draft_payload(self):
+            return dict(hydrated)
+
+        def set_varac_native_presentation(self, value):
+            self.presentations.append(dict(value))
+            return True
+
+        def complete_varac_native_apply(self, value):
+            self.completed.append(dict(value))
+            return True
+
+    publisher = Publisher()
+    session = VarACNativeExternalSession(
+        journal_id="direct-journal",
+        plan=prepared.plan,
+        apply_result=SimpleNamespace(ok=True),
+        observed={"observed_fingerprint": "direct-observed"},
+    )
+    host = SettingsTab.__new__(SettingsTab)
+    app = QApplication.instance()
+    if not isinstance(app, QApplication):
+        app = QApplication([])
+    QWidget.__init__(host)
+    host.multi_radio_store = SimpleNamespace(db_path=tmp_path / "fio.db")
+    host._varac_native_preparations = {prepared.draft_fingerprint: prepared}
+    host._rollback_varac_native_session = lambda _session: None
+    host._start_varac_native_job = (
+        lambda _worker, *, on_finished, on_failed: on_finished(session)
+    )
+
+    SettingsTab._on_varac_native_apply_requested(
+        host,
+        {"draft": hydrated, "native_presentation": presentation},
+        publisher=publisher,
+    )
+
+    assert len(publisher.completed) == 1
+    completed = publisher.completed[0]
+    assert completed["_varac_native_external_session"] is session
+    assert tuple(completed["launch_argv"]) == prepared.plan.members[-1].launch_command
+    assert completed["launch_recipe"]["status"] == "qualified_managed"
+    host.deleteLater()
+    app.processEvents()
 
 
 def test_startup_recovery_resolves_pending_and_fio_committed_without_forward_write(tmp_path: Path) -> None:

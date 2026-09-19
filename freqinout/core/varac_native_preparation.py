@@ -76,6 +76,8 @@ def native_draft_fingerprint(draft: Mapping[str, Any]) -> str:
         not in {
             "varac_native_presentation",
             "varac_native_generation",
+            "varac_native_plan_fingerprint",
+            "_varac_native_apply_request",
             *generated_fields,
         }
     }
@@ -142,13 +144,13 @@ def prepare_varac_native_configuration(
         for member in plan.members
     )
     new_member = plan.members[-1]
-    prepared_application_path = str(intent.get("application_path") or "").strip()
-    if not prepared_application_path and new_member.launch_command:
-        prepared_application_path = str(
-            new_member.launch_command[1]
-            if plan.platform == "linux-wine" and len(new_member.launch_command) > 1
-            else new_member.launch_command[0]
-        )
+    # The canonical application fact is the executable, even when the
+    # operator selected the containing VarAC directory.
+    prepared_application_path = str(
+        new_member.launch_command[1]
+        if plan.platform == "linux-wine" and len(new_member.launch_command) > 1
+        else new_member.launch_command[0]
+    )
     member_root = new_member.target_path.parent
     vara_values = new_member.changes.get("VARAHF_CONFIG", {})
     presentation = {
@@ -176,6 +178,9 @@ def prepare_varac_native_configuration(
         "vara_runtime_path": str(new_member.vara_target_runtime_folder),
         "vara_ini_path": str(new_member.vara_target_path),
         "launch_command": _display_argv(new_member.launch_command),
+        "launch_argv": tuple(new_member.launch_command),
+        "launch_environment": {"WINEPREFIX": str(new_member.wine_prefix)}
+        if new_member.wine_prefix else {},
         "port": int(vara_values.get("VarahfMainPort") or 0),
         "secondary_port": int(vara_values.get("VarahfMainKissPort") or 0),
         "ports_summary": _ports_summary(plan),
@@ -207,8 +212,10 @@ def _build_plan(
     new_key = str(draft.get("draft_instance_key") or draft.get("owner_draft_key") or draft.get("instance_name") or "new-varac").strip()
     new_label = str(draft.get("instance_name") or draft.get("owner_label") or "New VarAC").strip()
     new_slug = _slug(new_label or new_key)
+    # VarAC's native multi-instance contract is one executable installation
+    # with one distinct INI beside that installation.  FIO-owned member data
+    # (VARA, incoming and outbox) remains below the managed root.
     managed_member_root = managed_root / new_slug / "varac-native"
-    new_ini_target = managed_member_root / "VarAC.ini"
     new_vara_target = managed_member_root / "VARA"
 
     existing_node: Mapping[str, Any] | None = None
@@ -242,6 +249,7 @@ def _build_plan(
     source_executable = _resolve_varac_executable(
         draft.get("application_path") or existing_node.get("install_path")
     )
+    new_ini_target = source_executable.parent / f"VarAC-{new_slug}.ini"
     version = _qualified_version(
         str(draft.get("version") or "").strip(),
         str(existing_node.get("native_writer_key") or "").strip(),
@@ -308,6 +316,7 @@ def _build_plan(
     roots = _minimal_roots(
         managed_root,
         source_ini_path.parent,
+        source_executable.parent,
         source_vara_root,
         Path(shared_db).expanduser().parent,
     )

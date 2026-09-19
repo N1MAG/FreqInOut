@@ -8281,7 +8281,72 @@ class MultiRadioStore:
             in {"qualified_managed", "ready_with_warnings", "launch_pending"}
             else ()
         )
-        if qualified_components and family_key in {"js8call", "fast_light"}:
+        if qualified_components and family_key == "varac":
+            # VarAC native preparation already produces the exact argv that
+            # must be launched (including Wine-visible Windows paths).  Keep
+            # that structured recipe in the existing readiness JSON seam;
+            # command_override remains empty so older launch adapters cannot
+            # accidentally reparse the display command or fall back to the
+            # installation directory as the executable.
+            recipe_rows = []
+            for component in qualified_components:
+                component_key = str(component.get("component_key", "") or "").strip().lower()
+                if component_key not in {"varac", "vara"}:
+                    raise ValueError(f"Unsupported managed VarAC launch component: {component_key or 'blank'}")
+                executable = str(
+                    component.get("executable", component.get("launch_executable", "")) or ""
+                ).strip()
+                arguments = [str(value) for value in component.get("arguments", ()) or ()]
+                environment = component.get("environment", {})
+                if not isinstance(environment, Mapping):
+                    environment = {}
+                readiness = dict(component.get("readiness") or {})
+                readiness.update(
+                    {
+                        "structured_launch": True,
+                        "executable": executable,
+                        "launch_arguments": arguments,
+                        "environment": {
+                            str(key): str(value)
+                            for key, value in environment.items()
+                            if str(key).strip()
+                        },
+                        "effective_command": [
+                            str(value) for value in component.get("effective_command", ()) or ()
+                        ],
+                        "effective_command_text": str(component.get("effective_command_text", "") or ""),
+                        "working_directory": str(component.get("working_directory", "") or "").strip(),
+                        "profile_selector": str(component.get("profile_selector", "") or "").strip(),
+                        "configuration_roots": [
+                            str(value) for value in component.get("configuration_roots", ()) or ()
+                        ],
+                        "data_roots": [
+                            str(value) for value in component.get("data_roots", ()) or ()
+                        ],
+                        "endpoints": [
+                            dict(value) for value in component.get("endpoints", ()) or ()
+                            if isinstance(value, Mapping)
+                        ],
+                        "evidence": dict(component.get("evidence") or {}),
+                        "confidence": str(component.get("confidence", "") or ""),
+                        "execution_scope": str(component.get("execution_scope", "standard") or "standard").strip().lower(),
+                        "operator_starts": bool(component.get("operator_starts", False)),
+                    }
+                )
+                instance_key = f"{manifest_key}:varac"
+                recipe_rows.append(
+                    (
+                        instance_key,
+                        "VarAC",
+                        40,
+                        "",
+                        executable,
+                        [str(value) for value in component.get("dependencies", ()) or ()],
+                        readiness,
+                    )
+                )
+            rows = tuple(recipe_rows)
+        elif qualified_components and family_key in {"js8call", "fast_light"}:
             order_by_component = {"flrig": 10, "fldigi": 20, "flmsg": 30, "flamp": 31, "js8call": 50}
             name_by_component = {
                 "flrig": "FLRig",

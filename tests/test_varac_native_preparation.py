@@ -82,7 +82,7 @@ def test_prepare_existing_standalone_and_new_member_is_immutable_and_ready(tmp_p
     assert result.plan is not None and len(result.plan.members) == 2
     assert result.plan.email_gateway_sender_member_id == "node:11"
     assert result.plan.members[0].target_path == Path(node["ini_path"])
-    assert result.plan.members[1].target_path.name == "VarAC.ini"
+    assert result.plan.members[1].target_path == Path(node["install_path"]) / "VarAC-new-radio.ini"
     assert result.plan.members[0].vara_target_runtime_folder != result.plan.members[1].vara_target_runtime_folder
     assert result.plan.members[0].vara_changes["Setup"]["TCP Command Port"] == "8300"
     assert result.plan.members[1].vara_changes["Setup"]["TCP Command Port"] == "8310"
@@ -99,6 +99,8 @@ def test_prepare_existing_standalone_and_new_member_is_immutable_and_ready(tmp_p
     assert result.presentation["application_path"] == str(
         Path(node["install_path"]) / "VarAC.exe"
     )
+    assert result.presentation["launch_argv"] == result.plan.members[1].launch_command
+    assert result.presentation["working_directory"] == str(Path(node["install_path"]))
     assert result.presentation["configuration_path"] == str(member.target_path)
     assert result.presentation["storage_path"] == str(result.plan.shared_db_path)
     assert result.presentation["secondary_storage_path"].endswith("/incoming")

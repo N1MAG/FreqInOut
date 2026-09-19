@@ -976,6 +976,13 @@ class LaunchOrchestrator(QObject):
     def _resolve_launch_command(self, item_or_name: Any) -> Tuple[Optional[List[str]], str]:
         name = self._queue_item_name(item_or_name)
         item = item_or_name if isinstance(item_or_name, Mapping) else {}
+        structured = self._structured_launch_command(item, name)
+        if structured is not None:
+            # Managed VarAC recipes are already tokenized.  They may contain
+            # spaces, backslashes, Windows drive paths, or Wine-visible paths;
+            # feeding them through shlex would change the bytes.  shell=False
+            # below receives this vector unchanged.
+            return structured, "structured VarAC launch recipe"
         launch_arguments = self._launch_arguments_for(item)
         override_cmd = str(item.get("launch_command_override", "") or "").strip()
         if override_cmd:
@@ -1016,6 +1023,35 @@ class LaunchOrchestrator(QObject):
         if fallback:
             return self._finalize_launch_command(name, fallback, launch_arguments), "fallback command"
         return None, "none"
+
+    @staticmethod
+    def _structured_launch_command(item: Mapping[str, Any], name: str) -> Optional[List[str]]:
+        """Resolve an additive structured VarAC recipe without shell parsing."""
+
+        if str(name or "").strip() != "VarAC":
+            return None
+        readiness = item.get("readiness_policy", {})
+        if not isinstance(readiness, Mapping):
+            return None
+        nested = readiness.get("launch_recipe")
+        recipe = nested if isinstance(nested, Mapping) else readiness
+        if not (
+            LaunchOrchestrator.is_truthy(readiness.get("structured_launch", False))
+            or "executable" in recipe
+            or "launch_executable" in recipe
+            or "launch_arguments" in recipe
+        ):
+            return None
+        executable = str(recipe.get("executable", recipe.get("launch_executable", "")) or "")
+        if not executable:
+            # A malformed structured recipe must not fall through to a stale
+            # launch_cmd/path override.  Report an empty structured command so
+            # the caller records a launch failure for operator repair.
+            return []
+        arguments = recipe.get("launch_arguments", recipe.get("arguments", item.get("launch_arguments", ())))
+        if not isinstance(arguments, (list, tuple)):
+            arguments = ()
+        return [executable, *(str(argument) for argument in arguments)]
 
     @staticmethod
     def _launch_arguments_for(item: Mapping[str, Any]) -> List[str]:

@@ -3,10 +3,13 @@
 Status: authoritative product and implementation specification; policy approved
 2026-09-16. GRS-0 through GRS-5, GRS-6.1 through GRS-6.5, and GRS-7.1 through
 GRS-7.5 passed their automated implementation gates on 2026-09-17. Linux
-operator testing reopened the GRS-8 implementation gate. GRS-9 is the corrected
-controlling specification for selected-family state and complete prepared-
-bundle projection; its implementation has not started. Operator-assisted live
-release qualification remains **open and blocked**. No existing application
+operator testing reopened the GRS-8 implementation gate. GRS-9 automated gates
+passed, but operator testing exposed an incomplete projection and transaction
+contract. GRS-10 is therefore the corrected controlling specification for a
+single cross-service prepared bundle, platform-correct launch identity, and a
+non-mutating draft boundary. Its automated implementation gate passed on
+2026-09-18. Operator-
+assisted live release qualification remains **open and blocked**. No existing application
 configuration may be replaced, relinked, cloned, cleaned up, or reused through
 this flow until the exact operation is explicitly chosen and its gate passes.
 
@@ -2613,6 +2616,246 @@ timestamp, and hash were unchanged. No production database or native
 application profile was written. The remaining GRS-9 item is the explicit
 operator run with the supported applications installed on Linux; it is not
 represented as completed by automated macOS tests.
+
+### GRS-10 — Canonical Software Bundle And Platform Launch Contract
+
+Status: specification accepted and automated implementation gate passed
+2026-09-18; live Windows and Linux/Wine qualification remains open. This
+section supersedes any earlier text that permits assistant-local state, a
+flattened command string, an eager native apply, or a second review plan for a
+guided software family.
+
+#### Binding Operator Evidence And Root Cause
+
+On the exact route `Settings > Radios > Add Radio`, operator testing showed a
+prepared VarAC plan in Software Administration while the parent Add Radio
+Connections page retained blank VarAC fields. The nested assistant could not
+complete `Save as draft` because it treated a deliberately shared cluster
+database as a duplicate private-storage collision. Until that completion, the
+parent copied none of the prepared fields. Review then reconstructed VarAC from
+loose fields and displayed the installation directory as an effective command.
+Separately, persistence flattened a valid argument vector into text and launch
+reparsed it with POSIX shell rules, which can remove backslashes from a Wine
+Windows path. These are code defects, not operator-entry omissions.
+
+The correction applies to every supported service. It is not sufficient for a
+technical preview to contain a value while Connections, Review, persistence,
+or Launch Control uses another representation.
+
+#### One Canonical Prepared Software Bundle
+
+Each selected software family owns one immutable, generation-fenced
+`PreparedSoftwareBundle`. The bundle is authoritative from automatic
+preparation through draft editing, Connections, Review, final transaction,
+persistence, launch, readiness, and later reconciliation. It contains:
+
+- stable draft-session, generation, radio, family, instance, and component
+  identities;
+- platform and source evidence, executable files, supported variant/version,
+  and confidence;
+- configuration, data, message, log, incoming, outbox, database, and working-
+  directory paths, with ownership (`instance`, `cluster`, `station`, or
+  `built-in`) and mutation policy;
+- endpoints and collision-free resource claims;
+- for every external component, a structured argument vector, working
+  directory, environment overrides, dependency order, launch policy, and
+  readiness policy;
+- the exact staged filesystem/native mutations, backup/readback/rollback plan,
+  warnings, safety blockers, and plan fingerprint; and
+- intended and subsequently observed/effective state for audit and guided
+  reconciliation.
+
+An argument vector is the durable launch authority. A shell-formatted string is
+display-only and must never be reparsed to recover the command. No guided view
+may rebuild this bundle from checkboxes, loose widgets, an installation path,
+or the legacy external-application plan. Publication replaces the current
+family bundle atomically and immediately makes the same bundle available to
+the parent Add Radio flow; entering or completing every nested page is not a
+prerequisite for parent projection.
+
+#### Service Responsibility Matrix
+
+| Family | FIO safely prepares and owns | Operator decisions | Never inferred or duplicated |
+| --- | --- | --- | --- |
+| JS8Call family | qualified stock/Improved/Subspace executable, unique radio data/profile root, settings/message paths, unique API port, radio binding, structured launch recipe, readiness and reconciliation | family variant only when more than one qualified choice exists; launch with FIO | another instance's profile, API port, or data root |
+| Fast Light | distinct FLRig and FLDigi profiles, ports, bindings, launch order and structured recipes; FLMsg/FLAmp executable and dependency recipes when selected | launch policy and explicit advanced transmit behavior for a transceiver | another radio's profiles or endpoints; transmit authority for an observer |
+| FIO Spotter | built-in radio binding and known internal resources | enable/disable | external process, launcher, or MCF path question in the normal route |
+| CommStat | one station-shared service plus a per-radio JS8 endpoint binding and health evidence | enable/disable binding | a second radio-owned CommStat process or duplicate station configuration |
+| VarAC/VARA | qualified installation, topology, unique member identity, ports, INI, VARA runtime/configuration, incoming/outbox, working directory, structured commands, dependencies, native transaction and recovery | standalone/create/join, genuine source ambiguity, email gateway sender, PTT lock, launch policy | silent standalone conversion, another member's INI/runtime/ports, or an unreviewed shared mutation |
+
+This matrix is the minimum cross-service contract. A supported recipe may add
+facts, but it may not shift a deterministic safe configuration task back to the
+operator. A missing optional fact is a warning. Only the GRS-9 no-damage
+boundary may block final Save.
+
+#### VarAC Layout And Platform Contract
+
+The qualified VarAC installation is the native configuration home. Consistent
+with VarAC's cluster guide, FIO uses one installation and a distinct INI name
+per instance in that installation, plus a distinct VARA runtime and unique
+ports per member. For radio `FT-710`, a typical qualified Linux/Wine plan is:
+
+- host executable: `/home/bill/.wine/drive_c/VarAC/VarAC.exe`;
+- host INI: `/home/bill/.wine/drive_c/VarAC/VarAC-FT-710.ini`;
+- Windows INI argument: `C:\\VarAC\\VarAC-FT-710.ini`;
+- structured arguments: `["wine", "/home/bill/.wine/drive_c/VarAC/VarAC.exe",
+  "C:\\VarAC\\VarAC-FT-710.ini"]`; and
+- working directory: `/home/bill/.wine/drive_c/VarAC`, with the discovered
+  `WINEPREFIX` recorded when it is not the platform default.
+
+On Windows, the vector is `[C:\\VarAC\\VarAC.exe,
+C:\\VarAC\\VarAC-FT-710.ini]` and the working directory is the installation
+directory. Linux/Wine and native Windows are release platforms. macOS remains
+best-effort and may report `Saved; launch setup pending` rather than invent a
+Wine contract.
+
+FIO may use a different sanitized INI filename selected by its stable identity,
+but it must be install-adjacent when the qualified installation supports the
+native writer. It must not silently substitute a `Z:` path below
+`~/.freqinout` for that INI. If the installation is not writable or its Windows
+mapping cannot be proven, FIO preserves the prepared bundle, explains the one
+concern, and offers a reviewed location choice or launch-pending state without
+changing an existing installation.
+
+The VarAC database is private for standalone instances and cluster-owned for a
+cluster. Sharing the reviewed cluster database among members is intentional and
+must not trigger the generic duplicate-private-storage blocker. The collision
+remains blocking if the same path is claimed as private storage, belongs to a
+different cluster, or would be overwritten without the qualified transaction.
+INI files, incoming/outbox folders, working identities, VARA runtimes, and ports
+remain member-distinct.
+
+#### Draft, Final Save, And Recovery Boundary
+
+Automatic preparation and `Save as draft` are non-mutating. They may inspect
+reviewed evidence, reserve in-memory resources, and construct staged bytes, but
+they do not create application directories/files, edit native configuration,
+or persist a radio. `Save as draft` validates internal consistency, returns the
+complete bundle to Add Radio, and remains available for `Ready`, `Ready with
+warnings`, and `Saved; launch setup pending`. It does not require an external
+application to be running and it does not reject an intentional cluster-shared
+database.
+
+Only final `Save Radio and Software`, after the human-readable review, may run
+the accepted transaction:
+
+1. revalidate the bundle fingerprint, current source digests, process/stop
+   requirements, resource claims, platform mapping, and RF authority;
+2. create staged instance-owned directories/files and qualified native files;
+3. back up any reviewed existing target, atomically promote, and semantically
+   read back the exact allowlist;
+4. persist the identical bundle, structured launches, radio assignments, and
+   recovery journal in the FIO database; and
+5. finalize only after both external and database commits succeed.
+
+Cancel, Back, stale generation, injected failure, or FIO database commit
+failure restores the prior external bytes and database state, releases draft
+reservations, and leaves existing configurations untouched. Recovery is
+idempotent and launch remains blocked only for the affected unresolved journal.
+
+#### Required Operator Presentation
+
+The primary task is `Review and save the software FIO prepared for <radio>`.
+Automatic discovery/preparation appears before technical administration. The
+normal route shows family, status, purpose, significant generated identity,
+ports, launch policy, warnings, and one recovery action. Derived paths and
+arguments are read-only facts. `Show technical details` reveals the complete
+bundle, including exact structured command display, working directory,
+environment, files, ownership, evidence, and mutation plan. Advanced editing
+is a correction path, not a required form.
+
+Software Administration uses the same bundle and the action `Save as draft`;
+its successful result returns to Add Radio without external changes. The final
+primary action is `Save Radio and Software`. Every failure or warning states
+what FIO determined, what FIO will do, and the one operator action if any. The
+dialog uses one body scroll owner, a persistent reachable footer, the shared
+theme/type scale, and no raw technical dump by default.
+
+#### GRS-10 Exit Gate
+
+Implementation passes only when all of the following succeed against the final
+integrated tree:
+
+1. The reported first-cluster route prepares VarAC, shows the complete bundle
+   in both Software Administration and Add Radio before nested completion, and
+   enables non-mutating `Save as draft`; the intentional shared database is not
+   diagnosed as duplicate private storage.
+2. Windows and Linux/Wine fixtures produce install-adjacent unique VarAC INIs,
+   platform-native structured argument vectors, correct working directories
+   and Wine-prefix environment, distinct VARA runtimes/ports, and a reviewed
+   cluster-shared database. macOS reports its bounded support state.
+3. Argument vectors containing spaces, backslashes, and Windows drive paths
+   round-trip through the store and launch orchestration byte-for-byte without
+   shell reparsing. Review displays the executable file and arguments, never an
+   installation directory as the effective command.
+4. Parent Connections, family cards, Software Administration, Review, final
+   transaction, persistence, and Launch Control assert the same family bundle
+   ID, generation, fingerprint, paths, endpoints, and launch components.
+5. Final Save creates every reviewed FIO-owned directory/file exactly once and
+   persists exactly the selected families. Cancel, draft save, stale result,
+   and injected failure leave the source database and every existing
+   application file byte-for-byte unchanged.
+6. Focused end-to-end fixtures cover JS8Call stock/Improved/Subspace, FLRig,
+   FLDigi, FLMsg, FLAmp, FIO Spotter, station-shared CommStat, and VarAC/VARA in
+   one-instance and multi-instance plans. Each proves the matrix above,
+   structured launch persistence, dependency order, unique resources, and no
+   cross-radio profile reuse.
+7. A copied production-shaped database opens, prepares, saves, reloads, and
+   relaunches the canonical bundles through any additive migration. The source
+   database hash, size, and timestamp remain unchanged.
+8. Real-widget tests exercise the exact route at Normal/Large Text and the
+   supported viewport matrix. Preparation remains asynchronous and bounded;
+   no page clips the draft/final action or performs synchronous discovery.
+9. The governing specifications and work log record each work package, exact
+   model/reasoning, commands, counts, skips, human-review limits, and the still-
+   open Windows/Linux live qualification gate.
+
+Helper-only and button-enabled tests do not satisfy this gate. The acceptance
+suite must inspect rendered values, accepted payloads, staged/committed files,
+durable bundles, and the launch request received by the process runner.
+
+#### GRS-10 Implementation Evidence — 2026-09-18
+
+The final integrated implementation uses one reviewed VarAC native plan from
+automatic preparation through parent Add Radio projection, non-mutating draft
+save, final native apply, FIO transaction, launch-bundle persistence, planner,
+and process start. Qualified Windows/Linux-Wine plans use an install-adjacent
+unique INI, distinct managed VARA runtime and ports, reviewed cluster-owned
+database, executable path, structured argument vector, working directory, and
+Wine-prefix environment. The nested editor no longer invokes the writer;
+`Save as draft` returns the complete plan, and only accepted outer `Save Radio
+and Software` starts the rollback-capable external/FIO transaction.
+
+Add Radio now prepares and projects VarAC without requiring the operator to
+open every nested details page. Connections and Review show the VarAC INI,
+database, incoming/outbox, VARA runtime/INI, ports, executable, arguments, and
+working directory from the retained bundle. Qualified VarAC is excluded from
+the obsolete generic read/import-only presenter. Intentional same-cluster
+database sharing is valid while private-path, cross-cluster, endpoint, INI,
+runtime, and overwrite collisions remain safety blockers.
+
+Structured VarAC launch data is persisted through the existing additive
+launch-bundle readiness JSON seam. Store reload, station planning, and launch
+orchestration preserve spaces, backslashes, drive letters, arguments, cwd, and
+environment without shell reparsing. The process-runner acceptance test
+observed the exact vector passed to `subprocess` with `shell=False`. Legacy
+VarAC command text remains a compatibility fallback only when no structured
+recipe exists. Existing JS8Call and Fast Light structured recipes, built-in
+FIO Spotter, and station-shared CommStat behavior remain covered by the
+integrated matrix.
+
+Final-tree evidence is **508 unique passing tests** in bounded partitions,
+including native writer/rollback, exact Add Radio widgets, draft/final
+transaction handoff, cross-service guided recipes, manifest/store reload,
+Windows and Linux/Wine launch vectors, responsive/layout contracts, and an
+immutable production-shaped source plus migrated disposable copy. Changed
+Python compilation and `git diff --check` passed. The source production
+database retained its size, timestamp, and SHA-256 hash. No production native
+profile, process, endpoint, radio, or remote was changed.
+
+The remaining release gate is an operator walkthrough on supported Windows
+and Linux/Wine installations. Automated macOS/offscreen fixtures do not claim
+that external VarAC/VARA binaries launched or communicated successfully.
 
 ## Approved Product Decisions
 

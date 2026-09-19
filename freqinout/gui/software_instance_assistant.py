@@ -162,11 +162,14 @@ class VarACNativePresentation:
     vara_runtime_path: str = ""
     vara_ini_path: str = ""
     launch_command: str = ""
+    launch_argv: tuple[str, ...] = ()
+    launch_environment: Mapping[str, str] = field(default_factory=dict)
     port: int = 0
     secondary_port: int = 0
     udp_port: int = 0
     ports_summary: str = ""
     fingerprints_summary: str = ""
+    plan_fingerprint: str = ""
     draft_fingerprint: str = ""
     generation: int = 0
 
@@ -202,11 +205,17 @@ class VarACNativePresentation:
             vara_runtime_path=_text(row.get("vara_runtime_path") or row.get("vara_runtime")),
             vara_ini_path=_text(row.get("vara_ini_path")),
             launch_command=_text(row.get("launch_command")),
+            launch_argv=tuple(_text(item) for item in (row.get("launch_argv") or ()) if _text(item)),
+            launch_environment={
+                str(key): _text(value)
+                for key, value in dict(row.get("launch_environment") or {}).items()
+            },
             port=_int(row.get("port") or row.get("vara_command_port")) or 0,
             secondary_port=_int(row.get("secondary_port") or row.get("vara_kiss_port")) or 0,
             udp_port=_int(row.get("udp_port") or row.get("vara_monitor_port")) or 0,
             ports_summary=_text(row.get("ports_summary") or row.get("ports")),
             fingerprints_summary=_text(row.get("fingerprints_summary") or row.get("fingerprints")),
+            plan_fingerprint=_text(row.get("plan_fingerprint") or row.get("fingerprints_summary")),
             draft_fingerprint=_text(row.get("draft_fingerprint")),
             generation=_int(row.get("generation")) or 0,
         )
@@ -235,11 +244,14 @@ class VarACNativePresentation:
             "vara_runtime_path": self.vara_runtime_path,
             "vara_ini_path": self.vara_ini_path,
             "launch_command": self.launch_command,
+            "launch_argv": self.launch_argv,
+            "launch_environment": dict(self.launch_environment),
             "port": self.port,
             "secondary_port": self.secondary_port,
             "udp_port": self.udp_port,
             "ports_summary": self.ports_summary,
             "fingerprints_summary": self.fingerprints_summary,
+            "plan_fingerprint": self.plan_fingerprint,
             "draft_fingerprint": self.draft_fingerprint,
             "generation": self.generation,
         }
@@ -921,6 +933,39 @@ def instance_conflicts(
             )
             if _text(row.get(key))
         }
+        # A first-cluster conversion intentionally points the new member at
+        # the existing standalone database, and a join intentionally points
+        # at the selected cluster database.  That one cluster-owned resource
+        # is shared by design; every member-local INI, VARA runtime, inbox,
+        # outbox, and endpoint remains exclusive.  Do not weaken the generic
+        # collision rule for private storage or for a different cluster.
+        if current.family_key == "varac" and current.cluster_path in {"create_cluster", "join_cluster"}:
+            shared_path = (current.cluster_shared_database or current.storage_path).casefold()
+            existing_shared_path = _text(
+                row.get("cluster_shared_database")
+                or row.get("varac_cluster_shared_database")
+                or row.get("db_path")
+                or row.get("storage_path")
+            ).casefold()
+            same_cluster = bool(
+                shared_path
+                and shared_path == existing_shared_path
+                and (
+                    (
+                        current.cluster_id
+                        and _text(row.get("cluster_id") or row.get("varac_cluster_id")).casefold()
+                        == current.cluster_id.casefold()
+                    )
+                    or (
+                        current.existing_standalone_node_id
+                        and _int(row.get("varac_node_id") or row.get("node_id"))
+                        == current.existing_standalone_node_id
+                    )
+                )
+            )
+            if same_cluster:
+                current_paths.discard(shared_path)
+                existing_paths.discard(shared_path)
         if current_paths & existing_paths:
             conflicts.append(InstanceConflict("duplicate_storage", "error", "Configuration or storage is shared", "Each independently launched instance needs its own native profile, database, inbox, outbox, or log path."))
         if current.family_key == "varac" and current.cluster_id and current.cluster_instance_number:
@@ -1360,6 +1405,7 @@ class SoftwareInstanceAssistant(QWidget):
                 "application_path": native.application_path,
                 "configuration_path": native.varac_ini_path,
                 "storage_path": native.storage_path,
+                "cluster_shared_database": native.storage_path,
                 "secondary_storage_path": native.secondary_storage_path,
                 "outbox_path": native.outbox_path,
                 "working_directory": native.working_directory,
@@ -1398,6 +1444,15 @@ class SoftwareInstanceAssistant(QWidget):
         native_payload = self._varac_native_presentation.payload()
         draft_payload["varac_native_presentation"] = native_payload
         draft_payload["varac_native_generation"] = int(native_payload["generation"] or 0)
+        # The outer Add Radio transaction uses these cache-only facts to look
+        # up the prepared plan and begin native apply at its final save
+        # boundary.  They are deliberately not an apply result or a durable
+        # store migration.
+        draft_payload["varac_native_plan_fingerprint"] = str(
+            native_payload.get("plan_fingerprint")
+            or native_payload.get("fingerprints_summary")
+            or ""
+        )
         return {
             "draft": draft_payload,
             "native_presentation": native_payload,
@@ -1521,6 +1576,10 @@ class SoftwareInstanceAssistant(QWidget):
             lines.append(f"VARA INI: {native.vara_ini_path}")
         if native.launch_command:
             lines.append(f"Native launch command: {native.launch_command}")
+        if native.launch_argv:
+            lines.append(f"Native launch argv: {list(native.launch_argv)}")
+        if native.launch_environment:
+            lines.append(f"Launch environment: {dict(native.launch_environment)}")
         if native.ports_summary:
             lines.append(f"VARA ports: {native.ports_summary}")
         if native.fingerprints_summary:
@@ -1830,7 +1889,7 @@ class SoftwareInstanceAssistant(QWidget):
 
     def _build_connections_page(self) -> None:
         self._new_form_page(
-            "Connections: endpoints identify the instance at runtime. Use unique local ports for independently launched instances. FIO does not rewrite third-party settings from this screen.",
+            "Connections: endpoints identify the instance at runtime. Use unique local ports for independently launched instances. This draft screen makes no external change; a qualified native writer runs only after outer Save Radio and Software.",
             (
                 ("rig_name", "JS8 rig name", "Unique --rig-name (JS8Call only)"),
                 ("host", "FLRig/JS8 host", "127.0.0.1"),
@@ -3101,13 +3160,19 @@ class SoftwareInstanceAssistant(QWidget):
                         )
                     )
         else:
+            native = self._varac_native_presentation
+            argv = tuple(native.launch_argv)
+            executable = argv[0] if argv else draft.application_path
+            arguments = argv[1:] if len(argv) > 1 else ()
             lines.extend(
                 (
-                    f"Application: {draft.application_path or 'Not set'}",
-                    f"INI: {draft.configuration_path or 'Not set'}",
+                    f"Executable: {executable or 'Not set'}",
+                    f"Arguments: {list(arguments) if arguments else 'None'}",
+                    f"VarAC INI: {draft.configuration_path or 'Not set'}",
                     f"Database: {draft.storage_path or 'Not set'}",
                     f"Incoming/outbox: {draft.secondary_storage_path or 'Not set'} · {draft.outbox_path or 'Not set'}",
                     f"Working directory: {draft.working_directory or 'Not set'}",
+                    f"VARA runtime/INI: {draft.vara_runtime_path or 'Not set'} · {draft.vara_ini_path or 'Not set'}",
                     f"Cluster path: {draft.cluster_path.replace('_', ' ').title()}",
                     f"Cluster: {draft.cluster_id or draft.cluster_name or 'Not assigned'}"
                     + (f" · instance {draft.cluster_instance_number}" if draft.cluster_instance_number else ""),
@@ -3135,6 +3200,21 @@ class SoftwareInstanceAssistant(QWidget):
                 lines.append(
                     f"Advanced launch override: {draft.launch_command or 'Not set'}"
                 )
+        elif draft.family_key == "varac":
+            native = self._varac_native_presentation
+            argv = tuple(native.launch_argv)
+            executable = argv[0] if argv else draft.application_path
+            arguments = argv[1:] if len(argv) > 1 else ()
+            lines.extend(
+                (
+                    "Launch recipe",
+                    f"Executable: {executable or 'Not set'}",
+                    f"Arguments: {list(arguments) if arguments else 'None'}",
+                    f"Working directory: {draft.working_directory or 'Not set'}",
+                    f"Environment: {dict(native.launch_environment) if native.launch_environment else 'None'}",
+                    f"Launch at FIO startup: {'Yes' if draft.launch_at_startup else 'No'}",
+                )
+            )
         else:
             lines.extend(
                 (
@@ -3142,11 +3222,14 @@ class SoftwareInstanceAssistant(QWidget):
                     f"Launch at FIO startup: {'Yes' if draft.launch_at_startup else 'No'}",
                 )
             )
-        lines.append(
-            "External configuration: eligible for reviewed native apply"
-            if draft.family_key == "js8call" and draft.variant and draft.version and draft.configuration_path
-            else "External configuration: operator action required unless an exact supported writer is qualified"
-        )
+        if draft.family_key == "varac" and self._varac_native_presentation.writer_qualified:
+            lines.append("External configuration: qualified native writer will run only at outer Save Radio and Software.")
+        else:
+            lines.append(
+                "External configuration: eligible for reviewed native apply"
+                if draft.family_key == "js8call" and draft.variant and draft.version and draft.configuration_path
+                else "External configuration: operator action required unless an exact supported writer is qualified"
+            )
         self.review_label.setText("\n".join(lines))
         compact_lines = [
             family,
@@ -3183,11 +3266,9 @@ class SoftwareInstanceAssistant(QWidget):
         self.back_button.setEnabled(self._step > 0)
         last_step = len(self.STEP_TITLES) - 1
         draft = self.draft()
-        final_action = (
-            "Review & Save"
-            if self._native_varac_apply_required(draft)
-            else "Apply to radio draft" if self._unsaved_owner_key else "Add instance"
-        )
+        # Nested Software Administration returns a non-mutating canonical
+        # bundle to Add Radio.  The parent owns the one final native apply.
+        final_action = "Save as draft" if self._unsaved_owner_key else "Add instance"
         self.next_button.setText(final_action if self._step == last_step else "Next")
         blocked_for_radio = not self._selected_radio_id and not self._unsaved_owner_key
         blocked_for_replacement = self._replacement_instance is not None and not self._replacement_confirmed
@@ -3245,15 +3326,22 @@ class SoftwareInstanceAssistant(QWidget):
         draft = self.draft()
         payload = draft.payload()
         native_apply_required = self._native_varac_apply_required(draft)
+        native_worker_payload: dict[str, Any] | None = None
         if native_apply_required:
             native_worker_payload = self.varac_native_worker_payload()
             payload = dict(native_worker_payload["draft"])
+            # Keep the exact host worker request beside the draft so the outer
+            # Add Radio save can apply the already-prepared plan at its final
+            # transaction boundary.  It is transient and must be popped by
+            # the persistence owner; no native writer runs here.
+            payload["_varac_native_apply_request"] = native_worker_payload
         self.validation_requested.emit(payload)
         if not any(item.severity == "error" for item in self.validation()):
-            if native_apply_required:
-                self.varac_native_apply_requested.emit(native_worker_payload)
-            else:
-                self.completed.emit(payload)
+            # Software Administration is a draft editor.  It returns the
+            # prepared canonical bundle to Add Radio and never invokes the
+            # native writer.  Final native apply belongs exclusively to the
+            # outer Add Radio Save Radio and Software transaction.
+            self.completed.emit(payload)
 
     def _back(self) -> None:
         if self._step > 0:

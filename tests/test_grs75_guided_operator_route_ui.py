@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -345,6 +346,114 @@ def test_deselecting_varac_purges_its_dialog_draft_and_review_projection(
         dialog.reject()
 
     _open_add_radio_dialog(monkeypatch, tmp_path, inspect_new)
+
+
+def test_qualified_varac_projection_keeps_unrelated_generic_plan_blockers() -> None:
+    """Filtering legacy VarAC review text must not waive JS8/Fast Light safety."""
+
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    projection = source[source.index("def _current_guided_app_config_plan") : source.index("def _apply_guided_app_configuration")]
+    assert 'action.app_id != "varac"' in projection
+    assert "blocked=bool(plan.blocked)" in projection
+
+
+def test_parent_varac_bundle_projects_connections_and_review_before_details(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The Settings > Radios > Add Radio parent renders the worker bundle itself."""
+
+    import freqinout.gui.settings_tab as settings_tab_module
+    from freqinout.core.varac_native_preparation import (
+        VarACNativePreparationResult,
+        native_draft_fingerprint,
+    )
+    from freqinout.gui.settings_tab import SettingsTab
+
+    class _ImmediateThread(QObject):
+        started = Signal()
+        finished = Signal()
+
+        def start(self) -> None:
+            self.started.emit()
+
+        def quit(self) -> None:
+            self.finished.emit()
+
+    def publish_empty_bounded_snapshot(worker: object) -> None:
+        request = getattr(worker, "request")
+        worker.finished.emit(
+            {
+                "guided_discovery_request": request,
+                "install_candidates": (),
+                "fast_results": {},
+                "js8_results": {},
+                "varac_results": {},
+                "js8_file_profiles": (),
+            }
+        )
+
+    def immediate_native_start(self: object, worker: object, *, on_finished: Callable[[object], None], on_failed: Callable[[str], None]) -> None:
+        if not isinstance(worker, settings_tab_module._VarACNativePrepareWorker):
+            on_finished(())
+            return
+        draft = dict(worker.draft)
+        presentation = {
+            "state": "ready",
+            "writer_qualified": True,
+            "writer_version": "13.2.7",
+            "generation": worker.generation,
+            "application_path": "/wine/drive_c/VarAC/VarAC.exe",
+            "configuration_path": "/wine/drive_c/VarAC/VarAC-Field.ini",
+            "storage_path": "/cluster/VarAC.db",
+            "secondary_storage_path": "/managed/field/incoming",
+            "outbox_path": "/managed/field/outbox",
+            "working_directory": "/wine/drive_c/VarAC",
+            "vara_runtime_path": "/managed/field/VARA",
+            "vara_ini_path": "/managed/field/VARA/VARA.ini",
+            "launch_command": 'wine /wine/drive_c/VarAC/VarAC.exe "C:\\VarAC\\VarAC-Field.ini"',
+            "launch_argv": ("wine", "/wine/drive_c/VarAC/VarAC.exe", "C:\\VarAC\\VarAC-Field.ini"),
+            "launch_environment": {"WINEPREFIX": "/wine"},
+            "ports_summary": "command 8304 · KISS 8306",
+        }
+        on_finished(
+            VarACNativePreparationResult(
+                state="ready",
+                presentation=presentation,
+                draft_fingerprint=native_draft_fingerprint(draft),
+                generation=worker.generation,
+                plan=SimpleNamespace(plan_fingerprint="prepared-varac-bundle"),
+            )
+        )
+
+    monkeypatch.setattr(settings_tab_module._GuidedRadioAutofillWorker, "run", publish_empty_bounded_snapshot)
+    monkeypatch.setattr(settings_tab_module, "QThread", _ImmediateThread)
+    monkeypatch.setattr(settings_tab_module._GuidedRadioAutofillWorker, "moveToThread", lambda _worker, _thread: None)
+    monkeypatch.setattr(SettingsTab, "_start_varac_native_job", immediate_native_start)
+
+    def inspect(dialog: QDialog) -> None:
+        _enter_trimode_software_step(dialog)
+        prepare = dialog.findChild(QPushButton, "guidedConfigureAutomaticallyButton")
+        assert prepare is not None
+        prepare.click()
+        assert _wait_until(lambda: prepare.isEnabled())
+        assert dialog.findChild(QLineEdit, "guidedVaracExecutable").text() == "/wine/drive_c/VarAC/VarAC.exe"  # type: ignore[union-attr]
+        assert dialog.findChild(QLineEdit, "guidedVaracIni").text() == "/wine/drive_c/VarAC/VarAC-Field.ini"  # type: ignore[union-attr]
+        assert dialog.findChild(QLineEdit, "guidedVaracDatabase").text() == "/cluster/VarAC.db"  # type: ignore[union-attr]
+        drafts = getattr(dialog, "_guided_software_instance_drafts")
+        varac = drafts["varac"]
+        presentation = varac["varac_native_presentation"]
+        assert native_draft_fingerprint(varac) == presentation["draft_fingerprint"]
+        assert varac["_varac_native_apply_request"]["native_presentation"]["plan_fingerprint"] == "prepared-varac-bundle"
+        review = dialog.findChild(QLabel, "guidedSaveReview")
+        assert review is not None
+        assert "VarAC INI: /wine/drive_c/VarAC/VarAC-Field.ini" in review.text()
+        assert "Executable: wine" in review.text()
+        assert "Arguments:" in review.text() and "VarAC-Field.ini" in review.text()
+        assert "read/import only" not in review.text().casefold()
+        dialog.reject()
+
+    _open_add_radio_dialog(monkeypatch, tmp_path, inspect)
 
 
 def test_zero_entry_managed_fast_js8_route_publishes_drafts_and_leaves_schedule_optional(

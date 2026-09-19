@@ -1,8 +1,11 @@
 # VarAC Native Cluster Configuration Specification
 
 Status: authoritative implementation specification; approved direction
-2026-09-17. Automated implementation gate passed; live Windows and Linux/Wine
-operator qualification remains open.
+2026-09-17. Operator testing on 2026-09-18 reopened the automated gate under
+VNC-6: the native plan was not projected into Add Radio, intentional shared
+database use blocked draft completion, and durable launch identity was not
+platform-safe. The VNC-6 automated correction gate passed on 2026-09-18. Live
+Windows and Linux/Wine operator qualification remains open.
 
 Governing contracts:
 
@@ -451,6 +454,83 @@ then a controlled station test, one Windows and one Linux/Wine two-member
 cluster: preview, stop, backup, native apply, readback, launch, shared mailbox,
 unique VARA ports, email-gateway sender, PTT lock behavior, Cancel, and recovery.
 No automated result substitutes for this live RF/application qualification.
+
+## VNC-6 Correction — Canonical Draft, Native Layout, And Launch Identity
+
+Status: specified and automated implementation gate passed 2026-09-18. Live
+Windows and Linux/Wine qualification remains open. This correction is
+governed by GRS-10 and supersedes any earlier allowance for a managed-root
+VarAC INI, eager native apply from Software Administration, flattened launch
+text, or a generic duplicate-storage check against a cluster-owned database.
+
+### Native layout and platform mapping
+
+A qualified VarAC cluster recipe uses one reviewed VarAC installation and one
+distinct INI per instance in that installation, as described by the official
+VarAC cluster guide. The INI filename is derived from the stable sanitized
+instance identity. A new member receives a separate VARA runtime/configuration,
+incoming/outbox identity, command/KISS ports, and launch identity. Members may
+share only the reviewed cluster database and explicitly selected cluster
+policy.
+
+On native Windows, launch stores an argument vector containing the exact
+`VarAC.exe` and Windows INI path and uses the VarAC installation as its working
+directory. On Linux/Wine, launch stores `wine`, the host `VarAC.exe`, and the
+Wine-visible installation-adjacent INI path as three distinct arguments, plus
+the discovered Wine prefix environment and installation working directory.
+The durable vector is never flattened and reparsed by a shell. macOS is best-
+effort and may remain launch-pending when no qualified Wine mapping exists.
+
+A `Z:` managed-root INI is not the default for a qualified native writer. An
+unwritable or unmappable installation is a visible concern with a reviewed
+location choice or launch-pending outcome; it is not permission to mutate an
+existing file or silently invent a different native contract.
+
+### Canonical draft and collision semantics
+
+Native preparation publishes one complete VarAC bundle to the Add Radio draft
+session as soon as the current-generation plan is ready. Software
+Administration and the parent Connections/Review pages render that same bundle
+without waiting for the nested assistant to complete every page. Application,
+INI, database, incoming, outbox, working directory, VARA runtime/INI, ports,
+cluster identity, exact argument vectors, environment, and mutation plan may
+not exist solely in a technical presentation or loose widget.
+
+The database claim is classified before collision validation. An intentional
+cluster-owned database shared by members of that same reviewed cluster is
+valid. Private storage reuse, a database owned by another cluster, or any
+unapproved overwrite remains a safety blocker. INI, incoming/outbox, working
+identity, VARA runtime, and endpoints must remain distinct.
+
+### Draft and final transaction boundary
+
+`Save as draft` performs no external mutation. It validates and returns the
+complete immutable plan to Add Radio for Ready, warning-ready, and launch-
+pending results. It neither invokes the native writer nor requires VarAC/VARA
+to be running. Cancel or Back discards editor changes without creating files.
+
+Only final `Save Radio and Software` may revalidate and execute the accepted
+native transaction. It stages, backs up, atomically promotes, semantically
+reads back, and commits the same canonical bundle to FIO. Failure in native or
+database commit restores prior bytes and assignments. The recovery journal is
+durable and idempotent, and only an unresolved affected transaction blocks its
+launch.
+
+### VNC-6 exit gate
+
+- First-cluster and join-cluster fixtures enable non-mutating draft save while
+  sharing only the reviewed cluster database.
+- Windows and Linux/Wine fixtures assert install-adjacent unique INIs,
+  structured argument vectors, working directory, environment, distinct VARA
+  resources, and exact readback.
+- The parent and nested UI assert identical bundle IDs/fingerprints and all
+  populated facts before nested completion.
+- Store and launch tests round-trip spaces, backslashes, drive letters, and
+  Wine paths without shell reparsing or directory-as-command substitution.
+- Cancel, draft save, stale generation, failure injection, and FIO commit
+  failure preserve existing external bytes and database state.
+- A copied production-shaped database passes additive migration and reload;
+  live Windows and Linux/Wine qualification remains a separate release gate.
 
 ## Implementation Evidence — 2026-09-17
 

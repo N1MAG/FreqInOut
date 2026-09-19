@@ -8117,3 +8117,80 @@ database, external application profile, process, endpoint, radio, commit, or
 remote was changed. The operator's unrelated DOCX and rendered-document changes
 remain untouched. The exact supported-applications Linux walkthrough is the
 remaining live qualification and is intentionally not claimed by this entry.
+
+## 2026-09-18 — GRS-10 canonical software bundle and platform launch correction
+
+Status: integrated automated exit gate passed; live Windows and Linux/Wine
+operator qualification remains open.
+
+Operator testing reopened the prior completion claim. A prepared VarAC plan
+was visible inside Software Administration while Add Radio retained blank
+fields; intentional first-cluster database sharing triggered the generic
+private-storage collision; draft completion attempted native mutation; Review
+could display an installation directory as a command; and persistence flattened
+Wine argv before POSIX reparsing. These were implementation defects rather than
+missing operator input.
+
+The governing specifications now require one cross-service prepared bundle and
+structured launch identity. The implementation:
+
+- generates an installation-adjacent unique VarAC INI for qualified Windows
+  and Linux/Wine installations while retaining distinct managed VARA runtime,
+  incoming/outbox identity, ports, and member policy;
+- permits a reviewed cluster-owned database to be shared only by members of
+  that cluster and retains destructive/private collision blockers;
+- makes Software Administration `Save as draft` non-mutating and moves native
+  apply to accepted outer `Save Radio and Software`;
+- projects the same prepared executable, INI, database, folders, VARA facts,
+  ports, argv, cwd, environment, generation, and fingerprint into Add Radio
+  before Details, through final apply, persistence, and launch;
+- removes qualified VarAC from the contradictory generic read/import-only
+  presenter and shows the exact executable/arguments rather than a directory;
+- persists structured VarAC launch facts through the additive readiness JSON
+  seam, suppresses stale legacy fallback, and passes exact argv/cwd/environment
+  to `subprocess` with `shell=False`; and
+- leaves JS8Call/Fast Light managed recipes, built-in FIO Spotter, and the one
+  station-shared CommStat process with per-radio bindings under their existing
+  canonical contracts.
+
+Work packages and exact model ownership:
+
+- Primary `gpt-5.6-sol`, high reasoning: GRS-10/VNC-6 architecture and
+  specification, final transaction placement, fingerprint reconciliation,
+  production-copy migration audit, review of every delegated diff, integration
+  corrections, and final exit-gate decision.
+- `gpt-5.6-luna`, high reasoning: bounded VarAC native layout/draft mechanics
+  and focused preparation/writer/assistant tests. Primary added and verified
+  the final Add Radio apply boundary.
+- `gpt-5.6-terra`, high reasoning: bounded parent/nested UI projection, exact
+  Review presentation, legacy-plan exclusion, and real-widget tests.
+- `gpt-5.6-luna`, high reasoning: bounded launch-store/planner/orchestrator
+  round trip and focused Windows/Linux-Wine tests. Primary added the direct
+  process-runner assertion.
+
+Sequential exit gates and final evidence:
+
+- specification/diff gate: passed;
+- native preparation/draft/final-transaction gate: **49 passed**;
+- Add Radio/Software Administration UI gate: **45 passed**;
+- structured persistence/planner/launcher gate: **73 passed**;
+- final non-overlapping integrated partitions: **508 unique tests passed**;
+- immutable production source and migrated disposable-copy checks: included;
+- changed Python compilation and `git diff --check`: passed.
+
+The first monolithic Qt aggregate was stopped after entering the repository's
+known long-running teardown behavior. Its two completed failures were stale
+pre-GRS-9 expectations (`unsupported`) rather than product regressions; those
+assertions were corrected to the governing `blocked_for_safety` and
+`launch_pending` outcomes, then every partition passed. The interrupted Qt
+process emitted a teardown crash after the interrupt; no application process
+or production data was involved.
+
+The source at `/Users/bill/RadioTools/FIO_DB_prod/current/freqinout.db`
+retained its size, modification timestamp, and SHA-256 hash. The copied
+database opened through additive migrations, accepted and reloaded a structured
+VarAC bundle, and replanned the exact Wine argv. The operator's unrelated DOCX
+and rendered-document changes remain untouched and uncommitted. No production
+database, native application profile, process, endpoint, radio, commit, or
+remote was modified. Live Windows/Linux-Wine launch, native readback, cluster
+mailbox, and RF/application behavior remain explicit external release gates.
