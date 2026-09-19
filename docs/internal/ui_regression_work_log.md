@@ -8432,3 +8432,58 @@ including a production-shaped Wine Desktop alias and a retargeted-alias
 rejection. Changed Python compilation and `git diff --check` passed. No schema,
 migration, production database, external application file, process, endpoint,
 radio, commit, or remote was changed.
+
+## 2026-09-19 — GRS-12.2 VarAC review identity and discovery single-flight
+
+Status: automated implementation gate passed; live Linux operator qualification
+remains open.
+
+Observable reproduction: in `Settings > Radios > Add Radio`, the operator
+prepared and reviewed a managed VarAC setup, but final Save reported that the
+prepared plan had changed and routed back to Software. The supplied log also
+shows same-session guided discovery generations 1 and 2 each timing out the
+JS8 profile phase after about two seconds while application, Fast Light, and
+VarAC evidence came from cache. The supplied CPU captures place a discovery
+worker inside `read_js8call_multisettings` / `ConfigParser.read` during the
+sustained hotspot.
+
+Code review found two distinct lifecycle faults. Final native apply required
+the cached preparation's UI generation to equal the reviewed generation even
+when the immutable plan and operator intent were identical. Separately, timed-
+out discovery futures remain active, but the in-flight key included generation,
+allowing another generation to submit the same parser work.
+
+The correction makes immutable plan plus reviewed/current draft fingerprints
+the final-apply identity while retaining generation fencing for async UI
+publication. A newer equivalent preparation is accepted; changed live intent,
+missing identity, or a different plan remains blocked before writer start.
+Identical active discovery phases now single-flight across generations within
+one assistant session and input fingerprint.
+
+Work-package ownership:
+
+- Primary `gpt-5.6-sol`, high reasoning: evidence review, transaction and
+  concurrency design, implementation, delegated-diff review, integration,
+  specification reconciliation, and final exit gate.
+- `gpt-5.6-luna`, low reasoning: read-only focused apply-boundary and regression
+  audit. It identified the missing changed-live-intent assertions; the primary
+  added them at both entry points.
+- `gpt-5.6-terra`, medium reasoning: read-only hotspot/concurrency audit. It
+  confirmed duplicate cross-generation JS8 scan eligibility and recommended
+  the bounded same-session single-flight correction.
+
+No schema, migration, production database, native application file, process,
+endpoint, radio, commit, or remote is changed by this slice. The unrelated DOCX
+and rendered-document changes remain untouched.
+
+Final evidence:
+
+- focused VarAC/discovery regression suite: **28 passed**;
+- broader Add Radio, guided software, native preparation/writer/transaction,
+  and save suite: **230 passed**;
+- Software Administration assistant/persistence/layout suite: **141 passed**;
+- changed Python compilation and `git diff --check`: passed.
+
+The automated exit gate is closed. A relaunched Linux production run of the
+exact reported route is still required for external qualification; the running
+application cannot hot-load this source correction.

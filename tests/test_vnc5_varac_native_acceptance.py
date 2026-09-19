@@ -168,8 +168,10 @@ def test_native_apply_fault_has_no_partial_ini_or_runtime_and_explicit_session_r
     assert store.get_varac_native_apply_journal(session.journal_id)["state"] == "rolled_back"
 
 
-def test_generation_fence_rejects_stale_apply_without_starting_a_worker(tmp_path: Path) -> None:
-    """A reviewed generation may not apply after the operator edits the draft."""
+def test_direct_apply_rejects_incomplete_review_metadata_without_starting_a_worker(
+    tmp_path: Path,
+) -> None:
+    """Missing immutable review identity cannot reach the native writer."""
 
     # Importing the host class is safe; no QWidget is constructed here.
     from freqinout.gui.settings_tab import SettingsTab
@@ -208,8 +210,8 @@ def test_generation_fence_rejects_stale_apply_without_starting_a_worker(tmp_path
         "native_presentation": {"state": "ready", "generation": 1},
     }
 
-    # A real generation-2 preparation is present, but the review payload is
-    # generation 1.  The handler must stop before emitting/starting apply.
+    # A real preparation is present, but incomplete review metadata cannot
+    # identify the immutable plan or reviewed intent.
     SettingsTab._on_varac_native_apply_requested(host, stale_payload, publisher=publisher)
     assert publisher.presentations
     assert publisher.presentations[-1]["state"] == "needs attention"
@@ -238,8 +240,9 @@ def test_add_radio_stale_review_compensates_an_already_applied_native_session() 
 
 def test_final_add_radio_save_applies_reviewed_varac_plan_and_hands_session_to_transaction(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Draft completion is pure; the outer accepted Save owns native apply."""
+    """Equivalent re-preparation cannot invalidate the reviewed transaction."""
 
     from freqinout.gui.settings_tab import SettingsTab
 
@@ -256,6 +259,18 @@ def test_final_add_radio_save_applies_reviewed_varac_plan_and_hands_session_to_t
         platform_override="linux-wine",
     )
     assert prepared.ready and prepared.plan is not None
+    latest_prepared = prepare_varac_native_configuration(
+        draft,
+        varac_nodes=(node,),
+        device_profiles=(profile,),
+        varac_clusters=(),
+        varac_members=(),
+        managed_root=tmp_path / "managed",
+        generation=8,
+        platform_override="linux-wine",
+    )
+    assert latest_prepared.ready and latest_prepared.plan is not None
+    assert latest_prepared.plan.plan_fingerprint == prepared.plan.plan_fingerprint
     hydrated = {
         **draft,
         "application_path": prepared.presentation["application_path"],
@@ -290,18 +305,29 @@ def test_final_add_radio_save_applies_reviewed_varac_plan_and_hands_session_to_t
     }
     session = VarACNativeExternalSession(
         journal_id="journal",
-        plan=prepared.plan,
+        plan=latest_prepared.plan,
         apply_result=SimpleNamespace(ok=True),
         observed={"observed_fingerprint": "observed"},
     )
     completed: list[dict[str, object]] = []
+    started: list[object] = []
+    rolled_back: list[object] = []
+    warnings: list[tuple[object, ...]] = []
     host = SettingsTab.__new__(SettingsTab)
     host.multi_radio_store = SimpleNamespace(db_path=tmp_path / "fio.db")
-    host._varac_native_preparations = {prepared.draft_fingerprint: prepared}
-    host._rollback_guided_native_config = lambda _value: None
-    host._start_varac_native_job = (
-        lambda _worker, *, on_finished, on_failed: on_finished(session)
-    )
+    # The reviewed UI payload is generation 7, while an automatic equivalent
+    # refresh has replaced the cache with generation 8.  The immutable plan
+    # and reviewed/live intent are unchanged, so Final Save must proceed.
+    host._varac_native_preparations = {
+        latest_prepared.draft_fingerprint: latest_prepared
+    }
+    host._rollback_guided_native_config = rolled_back.append
+
+    def _start(worker, *, on_finished, on_failed):
+        started.append(worker)
+        on_finished(session)
+
+    host._start_varac_native_job = _start
     host._complete_add_device_profile = (
         lambda payload, **_kwargs: completed.append(dict(payload))
     )
@@ -315,9 +341,29 @@ def test_final_add_radio_save_applies_reviewed_varac_plan_and_hands_session_to_t
     saved = completed[0]["guided_software_instance_drafts"]["varac"]
     assert saved["_varac_native_external_session"] is session
     assert "_varac_native_apply_request" not in saved
-    assert tuple(saved["launch_argv"]) == prepared.plan.members[-1].launch_command
+    assert tuple(saved["launch_argv"]) == latest_prepared.plan.members[-1].launch_command
     component = saved["launch_recipe"]["components"][0]
-    assert tuple((component["executable"], *component["arguments"])) == prepared.plan.members[-1].launch_command
+    assert tuple((component["executable"], *component["arguments"])) == latest_prepared.plan.members[-1].launch_command
+    assert len(started) == 1
+
+    # Generation equality is not the safety boundary.  A real intent change
+    # after review remains blocked before a native writer starts.
+    from freqinout.gui import settings_tab as settings_module
+
+    monkeypatch.setattr(
+        settings_module.QMessageBox,
+        "warning",
+        lambda *args: warnings.append(tuple(args)),
+    )
+    changed_live = {**reviewed, "cluster_ptt_lock": False}
+    SettingsTab._continue_add_device_profile_after_guided_native(
+        host,
+        {"guided_software_instance_drafts": {"varac": changed_live}},
+    )
+    assert len(started) == 1
+    assert len(completed) == 1
+    assert rolled_back == [None]
+    assert warnings
 
 
 def test_direct_software_admin_native_apply_resolves_hydrated_plan_fingerprint(
@@ -338,6 +384,18 @@ def test_direct_software_admin_native_apply_resolves_hydrated_plan_fingerprint(
         platform_override="linux-wine",
     )
     assert prepared.ready and prepared.plan is not None
+    latest_prepared = prepare_varac_native_configuration(
+        draft,
+        varac_nodes=(node,),
+        device_profiles=(profile,),
+        varac_clusters=(),
+        varac_members=(),
+        managed_root=tmp_path / "managed",
+        generation=12,
+        platform_override="linux-wine",
+    )
+    assert latest_prepared.ready and latest_prepared.plan is not None
+    assert latest_prepared.plan.plan_fingerprint == prepared.plan.plan_fingerprint
     hydrated = {
         **draft,
         "application_path": prepared.presentation["application_path"],
@@ -360,11 +418,12 @@ def test_direct_software_admin_native_apply_resolves_hydrated_plan_fingerprint(
 
     class Publisher:
         def __init__(self) -> None:
+            self.current = dict(hydrated)
             self.completed: list[dict[str, object]] = []
             self.presentations: list[dict[str, object]] = []
 
         def varac_native_draft_payload(self):
-            return dict(hydrated)
+            return dict(self.current)
 
         def set_varac_native_presentation(self, value):
             self.presentations.append(dict(value))
@@ -377,7 +436,7 @@ def test_direct_software_admin_native_apply_resolves_hydrated_plan_fingerprint(
     publisher = Publisher()
     session = VarACNativeExternalSession(
         journal_id="direct-journal",
-        plan=prepared.plan,
+        plan=latest_prepared.plan,
         apply_result=SimpleNamespace(ok=True),
         observed={"observed_fingerprint": "direct-observed"},
     )
@@ -387,11 +446,17 @@ def test_direct_software_admin_native_apply_resolves_hydrated_plan_fingerprint(
         app = QApplication([])
     QWidget.__init__(host)
     host.multi_radio_store = SimpleNamespace(db_path=tmp_path / "fio.db")
-    host._varac_native_preparations = {prepared.draft_fingerprint: prepared}
+    host._varac_native_preparations = {
+        latest_prepared.draft_fingerprint: latest_prepared
+    }
     host._rollback_varac_native_session = lambda _session: None
-    host._start_varac_native_job = (
-        lambda _worker, *, on_finished, on_failed: on_finished(session)
-    )
+    started: list[object] = []
+
+    def _start(worker, *, on_finished, on_failed):
+        started.append(worker)
+        on_finished(session)
+
+    host._start_varac_native_job = _start
 
     SettingsTab._on_varac_native_apply_requested(
         host,
@@ -402,8 +467,18 @@ def test_direct_software_admin_native_apply_resolves_hydrated_plan_fingerprint(
     assert len(publisher.completed) == 1
     completed = publisher.completed[0]
     assert completed["_varac_native_external_session"] is session
-    assert tuple(completed["launch_argv"]) == prepared.plan.members[-1].launch_command
+    assert tuple(completed["launch_argv"]) == latest_prepared.plan.members[-1].launch_command
     assert completed["launch_recipe"]["status"] == "qualified_managed"
+
+    publisher.current["cluster_ptt_lock"] = False
+    SettingsTab._on_varac_native_apply_requested(
+        host,
+        {"draft": hydrated, "native_presentation": presentation},
+        publisher=publisher,
+    )
+    assert len(started) == 1
+    assert len(publisher.completed) == 1
+    assert publisher.presentations[-1]["state"] == "needs attention"
     host.deleteLater()
     app.processEvents()
 

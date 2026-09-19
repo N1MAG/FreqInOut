@@ -66,6 +66,48 @@ def test_slow_profile_scan_times_out_without_holding_the_prepared_result() -> No
         coordinator.shutdown(wait_for_workers=True)
 
 
+def test_new_generation_coalesces_identical_timed_out_profile_scan() -> None:
+    release = threading.Event()
+    calls = 0
+
+    def fast(_request, _cancelled):
+        return PhaseDiscoveryResult(DiscoveryPhase.APPLICATIONS)
+
+    def slow(_request, _cancelled):
+        nonlocal calls
+        calls += 1
+        release.wait(1.0)
+        return PhaseDiscoveryResult(DiscoveryPhase.JS8_PROFILES)
+
+    coordinator = GuidedSoftwareDiscoveryCoordinator(
+        {
+            DiscoveryPhase.APPLICATIONS: fast,
+            DiscoveryPhase.JS8_PROFILES: slow,
+        },
+        phase_timeout_seconds=0.05,
+    )
+    try:
+        first = coordinator.discover(_request())
+        second_request = DiscoveryRequest(
+            "grs9-session",
+            "grs9-request-2",
+            2,
+            2,
+            RadioRole.TRANSCEIVER,
+            ("js8call",),
+            {},
+            True,
+        )
+        second = coordinator.discover(second_request)
+
+        assert calls == 1
+        assert any("continuing with safe partial evidence" in item for item in first.diagnostics)
+        assert any("continuing with safe partial evidence" in item for item in second.diagnostics)
+    finally:
+        release.set()
+        coordinator.shutdown(wait_for_workers=True)
+
+
 def test_completed_phase_inside_budget_is_cached_normally() -> None:
     calls = 0
 

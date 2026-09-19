@@ -417,6 +417,29 @@ class GuidedSoftwareDiscoveryCoordinator:
                     inflight_key,
                     self._inflight_started.get(inflight_key, self._monotonic()),
                 )
+            # A phase timeout stops waiting; it cannot interrupt Python code
+            # already parsing a file.  Reuse identical work still running for
+            # this assistant session even when a newer UI generation requested
+            # it, instead of stacking duplicate JS8 profile parses.
+            shared_key = next(
+                (
+                    key
+                    for key, future in self._inflight.items()
+                    if key[0] == request.session_key
+                    and key[2] == phase
+                    and key[3] == request.scan_input_fingerprint
+                    and not future.done()
+                ),
+                None,
+            )
+            if shared_key is not None:
+                shared = self._inflight[shared_key]
+                return (
+                    shared,
+                    "coalesced",
+                    shared_key,
+                    self._inflight_started.get(shared_key, self._monotonic()),
+                )
             scanner = self._scanners.get(phase)
             if scanner is None:
                 future = Future()

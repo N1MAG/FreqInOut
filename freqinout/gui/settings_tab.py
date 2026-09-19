@@ -33718,26 +33718,37 @@ class SettingsTab(QWidget):
             if isinstance(presentation, Mapping)
             else ""
         ).strip()
-        prepared = next(
-            (
-                item
-                for item in self._varac_native_preparations.values()
-                if isinstance(item, VarACNativePreparationResult)
-                and item.plan is not None
-                and item.plan.plan_fingerprint == reviewed_plan_fingerprint
-            ),
-            None,
+        matching_preparations = tuple(
+            item
+            for item in self._varac_native_preparations.values()
+            if isinstance(item, VarACNativePreparationResult)
+            and item.plan is not None
+            and item.plan.plan_fingerprint == reviewed_plan_fingerprint
         )
+        prepared = max(
+            matching_preparations,
+            key=lambda item: int(item.generation),
+            default=None,
+        )
+        publisher_fingerprint = self._publisher_varac_draft_fingerprint(publisher)
         if (
             prepared is None
             or not prepared.ready
-            or prepared.generation != reviewed_generation
             or prepared.plan is None
             or prepared.plan.plan_fingerprint != reviewed_plan_fingerprint
             or not reviewed_draft_fingerprint
             or fingerprint != reviewed_draft_fingerprint
-            or self._publisher_varac_draft_fingerprint(publisher) != fingerprint
+            or publisher_fingerprint != fingerprint
         ):
+            log.warning(
+                "Rejected reviewed VarAC apply: plan=%s candidate_generation=%s reviewed_generation=%s "
+                "draft_match=%s publisher_match=%s",
+                reviewed_plan_fingerprint[:12] or "missing",
+                int(prepared.generation) if prepared is not None else "missing",
+                reviewed_generation,
+                bool(reviewed_draft_fingerprint and fingerprint == reviewed_draft_fingerprint),
+                bool(publisher_fingerprint and publisher_fingerprint == fingerprint),
+            )
             self._publish_varac_native_presentation(
                 publisher,
                 {
@@ -34053,25 +34064,47 @@ class SettingsTab(QWidget):
             if isinstance(presentation, Mapping)
             else ""
         ).strip()
-        prepared = next(
-            (
-                item
-                for item in getattr(self, "_varac_native_preparations", {}).values()
-                if isinstance(item, VarACNativePreparationResult)
-                and item.plan is not None
-                and item.plan.plan_fingerprint == reviewed_plan_fingerprint
-            ),
-            None,
+        live_draft_fingerprint = (
+            native_draft_fingerprint(varac)
+            if isinstance(varac, Mapping)
+            else ""
+        )
+        matching_preparations = tuple(
+            item
+            for item in getattr(self, "_varac_native_preparations", {}).values()
+            if isinstance(item, VarACNativePreparationResult)
+            and item.plan is not None
+            and item.plan.plan_fingerprint == reviewed_plan_fingerprint
+        )
+        prepared = max(
+            matching_preparations,
+            key=lambda item: int(item.generation),
+            default=None,
         )
         if (
             not isinstance(prepared, VarACNativePreparationResult)
             or not prepared.ready
-            or prepared.generation != reviewed_generation
             or prepared.plan is None
             or prepared.plan.plan_fingerprint != reviewed_plan_fingerprint
             or not reviewed_draft_fingerprint
             or current_draft_fingerprint != reviewed_draft_fingerprint
+            or live_draft_fingerprint != reviewed_draft_fingerprint
         ):
+            log.warning(
+                "Rejected guided Add Radio VarAC save: plan=%s candidate_generation=%s reviewed_generation=%s "
+                "request_match=%s live_match=%s",
+                reviewed_plan_fingerprint[:12] or "missing",
+                int(prepared.generation) if isinstance(prepared, VarACNativePreparationResult) else "missing",
+                reviewed_generation,
+                bool(
+                    reviewed_draft_fingerprint
+                    and current_draft_fingerprint == reviewed_draft_fingerprint
+                ),
+                bool(
+                    reviewed_draft_fingerprint
+                    and live_draft_fingerprint == reviewed_draft_fingerprint
+                ),
+            )
             self._rollback_guided_native_config(native_result)
             QMessageBox.warning(
                 self,

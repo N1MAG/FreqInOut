@@ -3238,3 +3238,62 @@ VARA source files, and managed VARA runtime/configuration targets retain the
 strict rule that no path component may be a symbolic link. The plan fingerprint
 includes the reviewed resolved data-directory destinations, so changing an
 alias changes or invalidates the plan rather than silently redirecting it.
+
+### GRS-12.2 — Stable Review Identity And Timed-Out Discovery Single-Flight
+
+The binding production route is `Settings > Radios > Add Radio`: prepare a
+managed VarAC cluster, review the prepared software plan, and select final
+`Save Radio and Software`. The reported failure displayed **The prepared VarAC
+plan changed or is no longer available** and sent the operator back to Software
+even after another review of unchanged choices.
+
+A preparation generation is a UI-lifecycle token, not transaction identity.
+It fences publication of obsolete asynchronous results while an editor is
+open. It must not invalidate an already reviewed transaction merely because an
+automatic equivalent preparation completed later with a higher generation.
+Final native apply resolves the newest cached ready preparation with the exact
+reviewed immutable `plan_fingerprint`, then independently requires both of the
+following to equal the reviewed `draft_fingerprint`:
+
+- the draft embedded in the reviewed apply request; and
+- the current live VarAC draft in Add Radio, or the current publisher draft in
+  Software Administration.
+
+Missing review fingerprints, a different immutable plan, edited topology or
+policy intent, or a changed live draft still blocks before the native writer
+starts. The existing final-writer process, source digest, target, Wine alias,
+backup, journal, readback, rollback, and durable FIO transaction checks remain
+unchanged. A rejected Add Radio save compensates any earlier guided native
+configuration result before returning control to the operator.
+
+A discovery timeout ends the UI's bounded wait; it does not stop Python code
+already reading a JS8Call settings file. Identical phase work still running for
+the same Add Radio session and scan-input fingerprint must therefore be reused
+across newer UI generations. A newer generation may publish only its own
+current combined snapshot, but it must not start a duplicate identical parser
+while the earlier future is active. This single-flight rule limits the observed
+CPU amplification without making file parsing synchronous or changing the
+two-second partial-evidence budget.
+
+Acceptance requires paired regressions at both native-apply entry points:
+generation N review plus an equivalent generation N+1 cached preparation must
+apply; a valid reviewed request followed by changed live intent must not start
+another writer. Discovery coverage must prove that two same-session generations
+which time out on one identical active JS8 profile scan invoke that scanner only
+once. The VarAC acceptance, guided discovery/budget, and broader guided-radio
+native suites, changed-file compilation, and `git diff --check` must pass. Live
+Linux qualification of the exact Add Radio route remains the external gate.
+
+Implementation ownership and automated evidence:
+
+- primary `gpt-5.6-sol`, high reasoning: transaction/concurrency architecture,
+  implementation, integration review, specification reconciliation, and gate;
+- `gpt-5.6-luna`, low reasoning: read-only apply-boundary regression audit;
+- `gpt-5.6-terra`, medium reasoning: read-only hotspot and discovery
+  concurrency audit.
+
+The focused VarAC/discovery suite passed **28 tests**. The broader Add Radio,
+guided software, native preparation/writer/transaction, and save suite passed
+**230 tests**. The Software Administration assistant/persistence/layout suite
+passed **141 tests**. Changed Python compilation and `git diff --check` pass.
+No schema or migration is introduced.
