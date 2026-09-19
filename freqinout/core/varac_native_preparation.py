@@ -61,6 +61,10 @@ def native_draft_fingerprint(draft: Mapping[str, Any]) -> str:
         "storage_path",
         "secondary_storage_path",
         "outbox_path",
+        "bbs_path",
+        "bbs_archive_path",
+        "cluster_bbs_path",
+        "cluster_bbs_archive_path",
         "working_directory",
         "launch_command",
         "vara_runtime_path",
@@ -151,7 +155,7 @@ def prepare_varac_native_configuration(
         if plan.platform == "linux-wine" and len(new_member.launch_command) > 1
         else new_member.launch_command[0]
     )
-    member_root = new_member.target_path.parent
+    member_root = new_member.vara_target_runtime_folder.parent
     vara_values = new_member.changes.get("VARAHF_CONFIG", {})
     presentation = {
         "state": "ready",
@@ -174,6 +178,10 @@ def prepare_varac_native_configuration(
             intent.get("secondary_storage_path") or member_root / "incoming"
         ),
         "outbox_path": str(intent.get("outbox_path") or member_root / "outbox"),
+        "bbs_path": str(plan.shared_bbs_path),
+        "bbs_archive_path": str(plan.shared_bbs_archive_path),
+        "cluster_bbs_path": str(plan.shared_bbs_path),
+        "cluster_bbs_archive_path": str(plan.shared_bbs_archive_path),
         "working_directory": str(new_member.working_directory),
         "vara_runtime_path": str(new_member.vara_target_runtime_folder),
         "vara_ini_path": str(new_member.vara_target_path),
@@ -249,6 +257,31 @@ def _build_plan(
     source_executable = _resolve_varac_executable(
         draft.get("application_path") or existing_node.get("install_path")
     )
+    default_bbs = source_executable.parent / "BBS"
+    explicit_bbs = str(
+        draft.get("cluster_bbs_path")
+        or draft.get("bbs_path")
+        or draft.get("varac_bbs_dir")
+        or ""
+    ).strip()
+    explicit_archive = str(
+        draft.get("cluster_bbs_archive_path")
+        or draft.get("bbs_archive_path")
+        or draft.get("varac_bbs_archive_dir")
+        or ""
+    ).strip()
+    inherited_bbs = ""
+    inherited_archive = ""
+    if arrangement == "create_cluster" and existing_profile is not None:
+        inherited_bbs = str(existing_profile.get("varac_bbs_dir") or "").strip()
+        inherited_archive = str(existing_profile.get("varac_bbs_archive_dir") or "").strip()
+    elif cluster is not None:
+        inherited_bbs = str(cluster.get("shared_bbs_path") or "").strip()
+        inherited_archive = str(cluster.get("shared_bbs_archive_path") or "").strip()
+    shared_bbs = Path(explicit_bbs or inherited_bbs or default_bbs).expanduser()
+    shared_bbs_archive = Path(
+        explicit_archive or inherited_archive or shared_bbs / "Archive"
+    ).expanduser()
     new_ini_target = source_executable.parent / f"VarAC-{new_slug}.ini"
     version = _qualified_version(
         str(draft.get("version") or "").strip(),
@@ -319,7 +352,23 @@ def _build_plan(
         source_executable.parent,
         source_vara_root,
         Path(shared_db).expanduser().parent,
+        shared_bbs,
+        shared_bbs_archive,
     )
+    incoming_path = Path(str(draft.get("secondary_storage_path") or managed_member_root / "incoming")).expanduser()
+    outbox_path = Path(str(draft.get("outbox_path") or managed_member_root / "outbox")).expanduser()
+    if _paths_overlap(incoming_path, outbox_path):
+        raise ValueError("VarAC incoming and outbox folders must be distinct node-local paths.")
+    for local_label, local_path in (("incoming", incoming_path), ("outbox", outbox_path)):
+        for shared_label, shared_path in (("BBS", shared_bbs), ("BBS archive", shared_bbs_archive)):
+            if _paths_overlap(local_path, shared_path):
+                raise ValueError(
+                    f"VarAC {local_label} is node-local and cannot overlap the cluster-shared {shared_label} path."
+                )
+    if _paths_overlap(shared_bbs, shared_bbs_archive) and not _is_parent_path(
+        shared_bbs, shared_bbs_archive
+    ):
+        raise ValueError("The VarAC BBS archive cannot contain or replace the shared BBS folder.")
     return build_varac_native_cluster_plan(
         VarACNativeClusterRequest(
             version=version,
@@ -327,6 +376,9 @@ def _build_plan(
             operation=operation,
             members=tuple(members),
             shared_db_path=str(Path(shared_db).expanduser()),
+            shared_bbs_path=str(shared_bbs),
+            shared_bbs_archive_path=str(shared_bbs_archive),
+            managed_directories=(incoming_path, outbox_path, shared_bbs, shared_bbs_archive),
             native_shared_db_path=_native_varac_path(
                 Path(shared_db).expanduser(),
                 platform_key=platform_key,
@@ -573,6 +625,18 @@ def _minimal_roots(*paths: Path) -> tuple[Path, ...]:
         if candidate not in roots:
             roots.append(candidate)
     return tuple(roots)
+
+
+def _is_parent_path(parent: Path, child: Path) -> bool:
+    left = Path(parent).expanduser().absolute()
+    right = Path(child).expanduser().absolute()
+    return left != right and left in right.parents
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    first = Path(left).expanduser().absolute()
+    second = Path(right).expanduser().absolute()
+    return first == second or first in second.parents or second in first.parents
 
 
 def _wine_prefix(ini_path: Path) -> str:

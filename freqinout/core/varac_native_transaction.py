@@ -99,6 +99,7 @@ def begin_varac_native_external_apply(
         for member in plan.members
         for target in (member.target_path, member.vara_target_runtime_folder)
     ]
+    targets.extend(str(path) for path in plan.managed_directories)
     store.begin_varac_native_apply_journal(
         journal_id=entry_id,
         plan_fingerprint=plan.plan_fingerprint,
@@ -240,6 +241,46 @@ def rollback_varac_native_external_session(
     error: str = "FIO guided save did not commit.",
 ) -> VarACNativeTransactionResult:
     """Compensate a verified external apply after FIO save cancellation/failure."""
+
+    journal = store.get_varac_native_apply_journal(session.journal_id)
+    if journal is None:
+        raise ValueError(
+            f"Native VarAC journal {session.journal_id} is unavailable; rollback was not attempted."
+        )
+    journal_state = str(journal.get("state") or "").strip().lower()
+    if journal_state == "rolled_back":
+        # Retry/review recovery can converge on the same session through more
+        # than one UI cleanup path.  The first rollback owns the filesystem
+        # restore; later requests are an idempotent no-op.
+        return VarACNativeTransactionResult(
+            journal_id=session.journal_id,
+            apply_result=session.apply_result,
+            committed=False,
+            needs_recovery=False,
+        )
+    if journal_state in {"fio_committed", "complete"}:
+        # Once the FIO transaction owns the result, restoring the old native
+        # files would split committed database and application state.  Treat a
+        # late cleanup request as already resolved without touching the files.
+        return VarACNativeTransactionResult(
+            journal_id=session.journal_id,
+            apply_result=session.apply_result,
+            committed=True,
+            needs_recovery=False,
+        )
+    if journal_state == "recovery_required":
+        return VarACNativeTransactionResult(
+            journal_id=session.journal_id,
+            apply_result=session.apply_result,
+            committed=False,
+            needs_recovery=True,
+            error=str(journal.get("error") or error),
+        )
+    if journal_state != "external_applied":
+        raise ValueError(
+            "Native VarAC rollback requires an external_applied journal; "
+            f"found {journal_state or 'unknown'}. No files were changed."
+        )
 
     if session.apply_result is None:
         return VarACNativeTransactionResult(
@@ -419,6 +460,9 @@ def _desired_evidence(plan: VarACNativeClusterPlan) -> Mapping[str, Any]:
     return {
         "plan_fingerprint": plan.plan_fingerprint,
         "shared_db_path": plan.shared_db_path,
+        "shared_bbs_path": plan.shared_bbs_path,
+        "shared_bbs_archive_path": plan.shared_bbs_archive_path,
+        "managed_directories": [str(path) for path in plan.managed_directories],
         "ptt_lock_enabled": bool(plan.ptt_lock_enabled),
         "email_gateway_sender_member_id": plan.email_gateway_sender_member_id,
         "members": [
@@ -451,6 +495,7 @@ def _observed_evidence(
         "plan_fingerprint": plan.plan_fingerprint,
         "observed_fingerprint": hashlib.sha256(joined.encode("utf-8")).hexdigest(),
         "target_digests": digests,
+        "created_directories": [str(path) for path in result.created_directories],
         "apply_items": [asdict(item) for item in result.items],
     }
 

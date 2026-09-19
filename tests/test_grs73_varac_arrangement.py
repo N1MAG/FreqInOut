@@ -221,6 +221,8 @@ def test_create_cluster_with_existing_standalone_commits_both_members_and_gatewa
             "name": "Relief Cluster",
             "cluster_id": "relief",
             "shared_db_path": "/varac/shared/relief.db",
+            "shared_bbs_path": "/varac/shared/bbs",
+            "shared_bbs_archive_path": "/varac/shared/bbs/archive",
             "ptt_lock_enabled": True,
             "existing_standalone_node_id": old_node["id"],
             "existing_standalone_instance_number": 1,
@@ -236,11 +238,25 @@ def test_create_cluster_with_existing_standalone_commits_both_members_and_gatewa
     assert cluster["cluster_id"] == "RELIEF"
     assert cluster["ptt_lock_enabled"] == 1
     assert cluster["gateway_handler_device_id"] == old_radio["id"]
+    assert cluster["shared_bbs_path"] == "/varac/shared/bbs"
+    assert cluster["shared_bbs_archive_path"] == "/varac/shared/bbs/archive"
     members = store.list_varac_cluster_members(cluster_id=cluster["id"])
     assert {(row["device_profile_id"], row["instance_number"]) for row in members} == {
         (old_radio["id"], 1),
         (new_radio["id"], 2),
     }
+    assert all(row["shared_bbs_path"] == cluster["shared_bbs_path"] for row in members)
+    assert all(
+        row["shared_bbs_archive_path"] == cluster["shared_bbs_archive_path"]
+        for row in members
+    )
+    profiles = {int(row["id"]): row for row in store.list_device_profiles()}
+    for profile_id in (old_radio["id"], new_radio["id"]):
+        assert profiles[int(profile_id)]["varac_bbs_dir"] == cluster["shared_bbs_path"]
+        assert (
+            profiles[int(profile_id)]["varac_bbs_archive_dir"]
+            == cluster["shared_bbs_archive_path"]
+        )
     assert result["radio"]["varac_node_id"] == result["application"]["id"]
     assert store.get_varac_node(old_node["id"])["name"] == old_node["name"]
 
@@ -287,6 +303,47 @@ def test_native_cluster_reuses_standalone_db_and_selects_email_sender_without_le
         row for row in store.list_varac_nodes() if int(row["id"]) != int(old_node["id"])
     )
     assert new_node["db_path"] == cluster["shared_db_path"]
+
+
+def test_cluster_bbs_paths_save_list_and_membership_projection(tmp_path):
+    store = MultiRadioStore(tmp_path / "varac-bbs-cluster.db")
+    radio = store.save_device_profile({"system_key": "radio-bbs", "name": "Radio BBS"})
+    cluster = store.save_varac_cluster(
+        {
+            "name": "BBS Shared",
+            "cluster_id": "bbs-shared",
+            "shared_db_path": "/varac/shared/cluster.db",
+            "shared_bbs_path": "/varac/shared/bbs",
+            "shared_bbs_archive_path": "/varac/shared/bbs/archive",
+        }
+    )
+
+    listed = next(row for row in store.list_varac_clusters() if row["id"] == cluster["id"])
+    assert listed["shared_bbs_path"] == "/varac/shared/bbs"
+    assert listed["shared_bbs_archive_path"] == "/varac/shared/bbs/archive"
+
+    store.set_varac_cluster_member(cluster["id"], radio["id"], instance_number=1)
+    membership = store.list_varac_cluster_members(
+        cluster_id=cluster["id"], device_profile_id=radio["id"]
+    )[0]
+    assert membership["shared_bbs_path"] == listed["shared_bbs_path"]
+    assert membership["shared_bbs_archive_path"] == listed["shared_bbs_archive_path"]
+    assigned_profile = next(
+        row for row in store.list_device_profiles() if row["id"] == radio["id"]
+    )
+    assert assigned_profile["varac_bbs_dir"] == listed["shared_bbs_path"]
+    assert assigned_profile["varac_bbs_archive_dir"] == listed["shared_bbs_archive_path"]
+
+    updated = store.save_varac_cluster(
+        {
+            "id": cluster["id"],
+            "shared_bbs_path": "/varac/shared/bbs-v2",
+            "shared_bbs_archive_path": "/varac/shared/bbs-v2/archive",
+        }
+    )
+    profile = next(row for row in store.list_device_profiles() if row["id"] == radio["id"])
+    assert profile["varac_bbs_dir"] == updated["shared_bbs_path"]
+    assert profile["varac_bbs_archive_dir"] == updated["shared_bbs_archive_path"]
 
 
 def test_native_managed_join_uses_the_existing_cluster_shared_database(tmp_path):

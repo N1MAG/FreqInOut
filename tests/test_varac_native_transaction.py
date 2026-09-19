@@ -120,11 +120,16 @@ def test_additive_schema_keeps_legacy_gateway_as_unconfirmed_evidence(tmp_path) 
         """
     )
     ensure_multi_radio_settings_schema(conn)
+    migrated_cluster_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(varac_clusters)")
+    }
+    assert {"shared_bbs_path", "shared_bbs_archive_path"} <= migrated_cluster_columns
     row = conn.execute(
-        "SELECT gateway_handler_device_id, email_gateway_sender_device_id, native_management_state "
+        "SELECT gateway_handler_device_id, email_gateway_sender_device_id, native_management_state, "
+        "shared_bbs_path, shared_bbs_archive_path "
         "FROM varac_clusters WHERE id=1"
     ).fetchone()
-    assert row == (77, None, "operator")
+    assert row == (77, None, "operator", None, None)
     conn.close()
 
 
@@ -232,6 +237,19 @@ def test_split_external_session_rolls_back_when_guided_store_transaction_is_canc
     assert not vara.parent.exists()
     assert store.get_varac_native_apply_journal(session.journal_id)["state"] == "rolled_back"
 
+    # Review Again can revisit the same retained draft/session. Compensation
+    # must recognize the durable terminal journal and avoid a second restore.
+    second = rollback_varac_native_external_session(
+        store,
+        session,
+        error="operator returned to Review Again",
+    )
+    assert not second.committed and not second.needs_recovery
+    assert store.get_varac_native_apply_journal(session.journal_id)["error"] == "operator cancelled Add Radio"
+    assert varac.read_bytes() == original_varac
+    assert not vara.parent.exists()
+    assert store.get_varac_native_apply_journal(session.journal_id)["state"] == "rolled_back"
+
 
 def test_restart_completes_fio_committed_journal_without_rewriting_files(tmp_path) -> None:
     plan, varac, vara = _plan(tmp_path)
@@ -251,6 +269,27 @@ def test_restart_completes_fio_committed_journal_without_rewriting_files(tmp_pat
     recovered = recover_unfinished_varac_native_applies(store)
     assert recovered and recovered[0]["state"] == "complete"
     assert (varac.read_bytes(), vara.read_bytes()) == before
+
+
+def test_rollback_never_restores_a_fio_committed_session(tmp_path) -> None:
+    plan, varac, vara = _plan(tmp_path)
+    store = MultiRadioStore(tmp_path / "fio.db")
+    session = begin_varac_native_external_apply(
+        store=store,
+        plan=plan,
+        backup_root=tmp_path / "backups",
+    )
+    assert session.ok
+    with store.guided_save_transaction() as transaction:
+        mark_varac_native_fio_committed(store, session)
+        transaction.complete()
+    before = (varac.read_bytes(), vara.read_bytes())
+
+    result = rollback_varac_native_external_session(store, session)
+
+    assert result.committed and not result.needs_recovery
+    assert (varac.read_bytes(), vara.read_bytes()) == before
+    assert store.get_varac_native_apply_journal(session.journal_id)["state"] == "fio_committed"
 
 
 def test_restart_rolls_back_a_promoting_external_apply_from_manifest(tmp_path) -> None:

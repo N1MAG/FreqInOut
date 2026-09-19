@@ -565,3 +565,74 @@ database and unrelated operator documents are not modified.
   review required.
 - Final integration, corrections, specification/work-log reconciliation, and
   exit-gate decision: `gpt-5.6-sol`, high reasoning.
+
+## VNC-7 — Cluster-Shared BBS Projection And Freshness Correction
+
+Status: automated implementation gate passed 2026-09-19; live Windows and
+Linux/Wine operator qualification remains open.
+
+### Canonical cluster resources
+
+The prepared VarAC bundle has two cluster-shared facts: `bbs_path` and
+`bbs_archive_path`. For a native-managed cluster they persist exactly as
+`varac_clusters.shared_bbs_path` and
+`varac_clusters.shared_bbs_archive_path`; a member does not own a competing
+private copy of either fact. Incoming and outbox remain member-local and
+continue to use their distinct canonical bundle fields.
+
+For a create-cluster route, FIO inherits a nonblank BBS/archive pair from the
+reviewed standalone profile. For either missing inherited value, FIO derives
+the corresponding path from the qualified VarAC installation as
+`<VarAC install>/BBS` or `<VarAC install>/BBS/Archive`. For a join-cluster
+route, both facts come from the selected cluster's durable shared paths; the
+new member must not substitute its profile, working-directory, incoming, or
+outbox path. These decisions are part of the frozen reviewed payload and its
+fingerprint.
+
+Final accepted Save may create a reviewed missing BBS or archive directory. It
+never replaces, clears, or deletes existing directory content. A successful
+external apply records the exact directories it created; same-session
+compensation removes only a directory from that set and only when it is empty.
+A nonempty or pre-existing directory is retained exactly as found. If a crash
+occurs before created-directory evidence is durable, recovery leaves an empty
+directory in place rather than guessing that it is safe to delete.
+
+### Readback, freshness, and recovery
+
+Post-native readback may enrich the prepared bundle with observed paths,
+digests, and verification evidence. That enrichment is an expected result of
+the accepted plan and must not invalidate the already rendered Review or force
+the operator to re-prepare. Before mutation, FIO compares the current durable
+cluster/member inventory with the original frozen reviewed payload, not with a
+post-readback-enriched UI copy. A material durable-inventory difference is a
+stale-plan failure; readback-only enrichment is not.
+
+Rollback terminal journal states are explicit and idempotent. Repeating cleanup
+for `complete` or `fio_committed` never restores committed native files;
+repeating cleanup for `rolled_back` performs no mutation. `recovery_required`
+is deliberately nonterminal: it retains backup evidence, blocks launch, and
+requires explicit operator recovery rather than an unbounded automatic retry.
+Startup recovery never performs automatic forward apply.
+
+### Required presentation and ownership
+
+Connections, Review, and Software Administration render BBS and archive as
+prepared read-only cluster facts from the same canonical bundle as the shared
+database. They must never show blank editable BBS fields after a qualified
+cluster plan is prepared.
+
+Work packages for this correction:
+
+- Primary `gpt-5.6-sol`, high reasoning: schema/migration, transaction,
+  concurrency, frozen-payload comparison, integration review, and final gate.
+- `gpt-5.6-terra`, medium reasoning: bounded Settings projection, focused UI
+  tests, and this documentation package.
+- `gpt-5.6-luna`, medium reasoning: focused regression tests.
+
+Automated final-tree evidence: **139 passed** across the guided-radio,
+transaction, cluster persistence, native writer/preparation, production-shaped
+audit, and real-widget partitions. Changed Python compilation,
+production-copy migration/reload and integrity checks, and diff hygiene passed.
+This is an automated implementation correction only. A controlled operator
+walkthrough on supported Windows and Linux/Wine VarAC/VARA installations
+remains an open release gate.

@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QGroupBox,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -66,8 +67,16 @@ def _open_add_radio_dialog(
         SettingsTab, "_refresh_running_status_compat", lambda self, force=False: None
     )
     tab = SettingsTab()
+    inspected_dialog: QDialog | None = None
 
     def fake_exec(dialog: QDialog) -> int:
+        nonlocal inspected_dialog
+        if inspected_dialog is not None:
+            # Nested correction surfaces are deliberately cancelled unless a
+            # test explicitly needs to inspect them.
+            dialog.done(QDialog.Rejected)
+            return QDialog.Rejected
+        inspected_dialog = dialog
         dialog.resize(900, 560)
         dialog.show()
         _app().processEvents()
@@ -162,7 +171,7 @@ def test_trimode_intent_precedes_preparation_and_preserves_builtin_contracts(
         prepare = dialog.findChild(QPushButton, "guidedConfigureAutomaticallyButton")
         assert prepare is not None
         assert prepare.text() == "Prepare selected software automatically"
-        assert prepare.isVisible() and prepare.isEnabled()
+        assert not prepare.isVisible()
         for family in ("js8call", "fast_light", "fio_spotter", "commstat", "varac"):
             details = dialog.findChild(QPushButton, f"guidedSoftwareDetails_{family}")
             assert details is not None
@@ -207,11 +216,17 @@ def test_varac_requires_explicit_arrangement_before_background_prepare(
         assert arrangement is not None and prepare is not None and status is not None
         assert arrangement.currentData() == ""
         assert arrangement.currentText() == "Choose VarAC arrangement…"
-        prepare.click()
+        assert not prepare.isVisible()
         _app().processEvents()
         assert "choose the VarAC arrangement" in status.text()
         assert prepare.text() == "Prepare selected software automatically"
         assert prepare.isEnabled()
+        card = dialog.findChild(QGroupBox, "guidedSoftwareResponsibility_varac")
+        next_button = dialog.findChild(QPushButton, "guidedWizardNext")
+        assert card is not None
+        assert card.property("guidedPreparationState") == "needs_choice"
+        assert card.property("guidedCardExpanded") is True
+        assert next_button is not None and not next_button.isEnabled()
         dialog.reject()
 
     _open_add_radio_dialog(monkeypatch, tmp_path, inspect)
@@ -237,8 +252,11 @@ def test_prepared_route_enables_only_prepared_review_actions(
         def quit(self) -> None:
             self.finished.emit()
 
+    requests: list[object] = []
+
     def publish_empty_bounded_snapshot(worker: object) -> None:
         request = getattr(worker, "request")
+        requests.append(request)
         worker.finished.emit(
             {
                 "guided_discovery_request": request,
@@ -261,37 +279,367 @@ def test_prepared_route_enables_only_prepared_review_actions(
         "moveToThread",
         lambda _worker, _thread: None,
     )
+    from freqinout.gui.settings_tab import SettingsTab
+    monkeypatch.setattr(
+        SettingsTab,
+        "_start_varac_native_job",
+        lambda self, _worker, *, on_finished, on_failed: on_finished(()),
+    )
 
     def inspect(dialog: QDialog) -> None:
         _enter_trimode_software_step(dialog)
+        # Coalesce this burst of capability edits into one final request.
+        # VarAC's separate native worker is outside this discovery regression.
+        _checkbox(dialog, "VarAC").setChecked(False)
         for text in ("FLRig", "FLDigi", "FLMsg", "FLAmp", "FIO Spotter", "CommStat"):
             _checkbox(dialog, text).setChecked(True)
         _app().processEvents()
         prepare = dialog.findChild(QPushButton, "guidedConfigureAutomaticallyButton")
         status = dialog.findChild(QLabel, "guidedConfigureAutomaticallyStatus")
         assert prepare is not None and status is not None
-        prepare.click()
         assert _wait_until(
-            lambda: prepare.isEnabled()
-            and prepare.text() == "Prepare selected software automatically"
+            lambda: bool(requests)
+            and status.text().startswith(("Ready —", "Needs attention —"))
         ), status.text()
+        assert not prepare.isVisible()
+        assert len(requests) == 1
+        requested_families = {str(getattr(family, "value", family)) for family in requests[0].families}
+        assert {"fast_light", "js8call"} <= requested_families
         assert status.text().startswith(("Ready —", "Needs attention —"))
         for family in ("js8call", "fast_light", "fio_spotter", "commstat", "varac"):
             state = dialog.findChild(QLabel, f"guidedSoftwarePreparedState_{family}")
             details = dialog.findChild(QPushButton, f"guidedSoftwareDetails_{family}")
-            assert state is not None and details is not None
-            assert state.isVisible()
-            assert details.isVisible() and details.isEnabled()
+            card = dialog.findChild(QGroupBox, f"guidedSoftwareResponsibility_{family}")
+            assert state is not None and details is not None and card is not None
+            selected = family != "varac"
+            assert card.isVisible() is selected
+            if selected:
+                assert state.isVisible()
+                assert details.isVisible() and details.isEnabled()
+                assert card.property("guidedPreparationState") in {"ready", "launch_pending", "warning"}
+                assert card.property("guidedCardExpanded") is False
         for family in ("js8call", "fast_light"):
             state = dialog.findChild(QLabel, f"guidedSoftwarePreparedState_{family}")
             details = dialog.findChild(QPushButton, f"guidedSoftwareDetails_{family}")
             assert state is not None and state.text().startswith("Ready to save · launch setup pending —")
-            assert details is not None and details.text() == "Review Launch Setup…"
+            assert details is not None and details.text() == "Review Details (optional)…"
         assert "fast_light" in getattr(dialog, "_guided_software_instance_drafts", {})
+        before_checks = {
+            text: _checkbox(dialog, text).isChecked()
+            for text in ("JS8Call", "FIO Spotter", "CommStat", "FLRig", "FLDigi", "FLMsg", "FLAmp", "VarAC")
+        }
+        before_drafts = dict(getattr(dialog, "_guided_software_instance_drafts", {}))
+        details = dialog.findChild(QPushButton, "guidedSoftwareDetails_js8call")
+        assert details is not None
+        details.click()
+        _app().processEvents()
+        assert {
+            text: _checkbox(dialog, text).isChecked() for text in before_checks
+        } == before_checks
+        assert getattr(dialog, "_guided_software_instance_drafts", {}) == before_drafts
+        assert len(requests) == 1
         fast_source = _selected_source(dialog, "fast_light")
         fast_source.setCurrentIndex(fast_source.findData("existing"))
         _app().processEvents()
         assert "fast_light" not in getattr(dialog, "_guided_software_instance_drafts", {})
+        dialog.reject()
+
+    _open_add_radio_dialog(monkeypatch, tmp_path, inspect)
+
+
+def test_explicit_detected_js8_choice_reprepares_plan_and_unblocks_next(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The requested app choice is authoritative and refreshes launch readiness."""
+
+    import freqinout.gui.settings_tab as settings_tab_module
+    from freqinout.core.config_autodiscovery import AppCandidate
+
+    class _ImmediateThread(QObject):
+        started = Signal()
+        finished = Signal()
+
+        def start(self) -> None:
+            self.started.emit()
+
+        def quit(self) -> None:
+            self.finished.emit()
+
+    chosen_path = "/opt/JS8Call-2.2.0/js8call"
+    candidates = (
+        AppCandidate(
+            app_id="js8call",
+            display_name="JS8Call stock",
+            path=chosen_path,
+            source="known_path",
+            confidence="high",
+            exists=True,
+            executable=True,
+            target_type="file",
+        ),
+        AppCandidate(
+            app_id="js8call",
+            display_name="JS8Call Subspace",
+            path="/opt/js8call-subspace-4.1.0.478/js8call-subspace",
+            source="known_path",
+            confidence="high",
+            exists=True,
+            executable=True,
+            target_type="file",
+        ),
+    )
+    requests: list[object] = []
+
+    def publish_candidates(worker: object) -> None:
+        request = getattr(worker, "request")
+        requests.append(request)
+        worker.finished.emit(
+            {
+                "guided_discovery_request": request,
+                "install_candidates": candidates,
+                "fast_results": {},
+                "js8_results": {},
+                "varac_results": {},
+                "js8_file_profiles": (),
+            }
+        )
+
+    monkeypatch.setattr(settings_tab_module._GuidedRadioAutofillWorker, "run", publish_candidates)
+    monkeypatch.setattr(settings_tab_module, "QThread", _ImmediateThread)
+    monkeypatch.setattr(
+        settings_tab_module._GuidedRadioAutofillWorker,
+        "moveToThread",
+        lambda *_args: None,
+    )
+
+    def inspect(dialog: QDialog) -> None:
+        setup = dialog.findChild(QComboBox, "guidedSetupType")
+        assert setup is not None
+        setup.setCurrentIndex(setup.findData("js8_only"))
+        _app().processEvents()
+        for step_id in ("model", "software"):
+            step = dialog.findChild(QPushButton, f"guidedWizardStep_{step_id}")
+            assert step is not None and step.isEnabled()
+            step.click()
+            _app().processEvents()
+
+        choice = dialog.findChild(QComboBox, "guidedAutoAppChoice_js8call")
+        next_button = dialog.findChild(QPushButton, "guidedWizardNext")
+        assert choice is not None and next_button is not None
+        assert _wait_until(lambda: len(requests) == 1 and choice.count() == 3)
+        assert choice.currentIndex() == 0
+        assert not next_button.isEnabled()
+
+        selected_index = choice.findData(chosen_path)
+        assert selected_index > 0
+        choice.setCurrentIndex(selected_index)
+        assert _wait_until(lambda: len(requests) == 2)
+        assert _wait_until(lambda: next_button.isEnabled())
+        assert choice.currentData() == chosen_path
+        drafts = getattr(dialog, "_guided_software_instance_drafts", {})
+        assert drafts["js8call"]["application_path"] == chosen_path
+        assert len(requests) == 2
+        dialog.reject()
+
+    _open_add_radio_dialog(monkeypatch, tmp_path, inspect)
+
+
+def test_preparing_next_stays_blocked_and_stale_worker_result_is_discarded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Only the current software context can publish a held discovery result."""
+
+    import freqinout.gui.settings_tab as settings_tab_module
+
+    class _HeldThread(QObject):
+        started = Signal()
+        finished = Signal()
+
+        def start(self) -> None:
+            self.started.emit()
+
+        def quit(self) -> None:
+            self.finished.emit()
+
+    workers: list[object] = []
+
+    def hold_worker(worker: object) -> None:
+        workers.append(worker)
+
+    monkeypatch.setattr(settings_tab_module._GuidedRadioAutofillWorker, "run", hold_worker)
+    monkeypatch.setattr(settings_tab_module, "QThread", _HeldThread)
+    monkeypatch.setattr(
+        settings_tab_module._GuidedRadioAutofillWorker,
+        "moveToThread",
+        lambda *_args: None,
+    )
+
+    def result_for(worker: object, marker: str) -> dict[str, object]:
+        request = getattr(worker, "request")
+        return {
+            "guided_discovery_request": request,
+            "install_candidates": (),
+            "fast_results": {},
+            "js8_results": {},
+            "varac_results": {},
+            "js8_file_profiles": (),
+            "test_result_marker": marker,
+        }
+
+    def inspect(dialog: QDialog) -> None:
+        setup = dialog.findChild(QComboBox, "guidedSetupType")
+        assert setup is not None
+        custom = setup.findData("custom")
+        assert custom >= 0
+        setup.setCurrentIndex(custom)
+        _app().processEvents()
+        for step_id in ("model", "software"):
+            step = dialog.findChild(QPushButton, f"guidedWizardStep_{step_id}")
+            assert step is not None and step.isEnabled()
+            step.click()
+            _app().processEvents()
+
+        js8 = _checkbox(dialog, "JS8Call")
+        js8.setChecked(True)
+        assert _wait_until(lambda: len(workers) == 1), "initial held discovery did not start"
+        first = workers[0]
+        first_request = getattr(first, "request")
+        card = dialog.findChild(QGroupBox, "guidedSoftwareResponsibility_js8call")
+        next_button = dialog.findChild(QPushButton, "guidedWizardNext")
+        assert card is not None and card.property("guidedPreparationState") == "preparing"
+        assert next_button is not None and not next_button.isEnabled()
+
+        # Changing the source invalidates the held request but keeps the family
+        # selected, so the replacement request remains observable.
+        source = _selected_source(dialog, "js8call")
+        existing_index = source.findData("existing")
+        assert existing_index >= 0
+        source.setCurrentIndex(existing_index)
+        _app().processEvents()
+        assert js8.isChecked()
+
+        first.finished.emit(result_for(first, "stale"))
+        assert _wait_until(lambda: len(workers) == 2), "replacement discovery did not start"
+        second = workers[1]
+        second_request = getattr(second, "request")
+        assert second_request != first_request
+        assert getattr(second_request, "generation") > getattr(first_request, "generation")
+        assert js8.isChecked()
+        assert card.property("guidedPreparationState") == "preparing"
+        status = dialog.findChild(QLabel, "guidedConfigureAutomaticallyStatus")
+        assert status is not None and not status.text().startswith(("Ready —", "Needs attention —"))
+        assert getattr(dialog, "_guided_software_instance_drafts", {}) == {}
+
+        second.finished.emit(result_for(second, "current"))
+        assert _wait_until(lambda: status.text().startswith(("Ready —", "Needs attention —")))
+        assert js8.isChecked()
+        assert card.property("guidedPreparationState") != "preparing"
+        assert card.property("guidedPreparationState") == "needs_choice"
+        assert getattr(dialog, "_guided_software_instance_drafts", {}) == {}
+        dialog.reject()
+
+    _open_add_radio_dialog(monkeypatch, tmp_path, inspect)
+
+
+def test_first_unresolved_managed_card_is_revealed_once_per_prepared_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A blocked managed recipe receives one scroll reveal, not one per refresh."""
+
+    import freqinout.gui.settings_tab as settings_tab_module
+
+    class _ImmediateThread(QObject):
+        started = Signal()
+        finished = Signal()
+
+        def start(self) -> None:
+            self.started.emit()
+
+        def quit(self) -> None:
+            self.finished.emit()
+
+    def publish_empty_snapshot(worker: object) -> None:
+        request = getattr(worker, "request")
+        worker.finished.emit(
+            {
+                "guided_discovery_request": request,
+                "install_candidates": (),
+                "fast_results": {},
+                "js8_results": {},
+                "varac_results": {},
+                "js8_file_profiles": (),
+            }
+        )
+
+    monkeypatch.setattr(settings_tab_module._GuidedRadioAutofillWorker, "run", publish_empty_snapshot)
+    monkeypatch.setattr(settings_tab_module, "QThread", _ImmediateThread)
+    monkeypatch.setattr(
+        settings_tab_module._GuidedRadioAutofillWorker,
+        "moveToThread",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        settings_tab_module,
+        "resolve_guided_launch_recipe",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            qualified=False,
+            recovery_action="Choose a distinct JS8Call profile path.",
+        ),
+    )
+    monkeypatch.setattr(
+        settings_tab_module,
+        "recipe_draft_updates",
+        lambda _resolution: {
+            "launch_recipe_status": "blocked_for_safety",
+            "launch_recipe": {"status": "blocked_for_safety"},
+        },
+    )
+
+    reveals: list[QWidget] = []
+    original_ensure_visible = QScrollArea.ensureWidgetVisible
+
+    def record_reveal(
+        scroll: QScrollArea,
+        target: QWidget,
+        x_margin: int = 50,
+        y_margin: int = 50,
+    ) -> None:
+        reveals.append(target)
+        original_ensure_visible(scroll, target, x_margin, y_margin)
+
+    monkeypatch.setattr(QScrollArea, "ensureWidgetVisible", record_reveal)
+
+    def inspect(dialog: QDialog) -> None:
+        setup = dialog.findChild(QComboBox, "guidedSetupType")
+        assert setup is not None
+        custom = setup.findData("custom")
+        assert custom >= 0
+        setup.setCurrentIndex(custom)
+        _app().processEvents()
+        for step_id in ("model", "software"):
+            step = dialog.findChild(QPushButton, f"guidedWizardStep_{step_id}")
+            assert step is not None and step.isEnabled()
+            step.click()
+            _app().processEvents()
+        _checkbox(dialog, "JS8Call").setChecked(True)
+
+        card = dialog.findChild(QGroupBox, "guidedSoftwareResponsibility_js8call")
+        status = dialog.findChild(QLabel, "guidedConfigureAutomaticallyStatus")
+        assert card is not None and status is not None
+        assert _wait_until(lambda: status.text().startswith("Needs attention —"))
+        assert card.property("guidedPreparationState") == "blocked"
+        assert card.property("guidedCardExpanded") is True
+        _app().processEvents()
+        assert reveals == [card]
+
+        # Ordinary event processing/layout refreshes must not steal the scroll
+        # position by issuing the same reveal repeatedly for one prepared plan.
+        dialog.resize(880, 550)
+        _app().processEvents()
+        assert reveals == [card]
         dialog.reject()
 
     _open_add_radio_dialog(monkeypatch, tmp_path, inspect)
@@ -408,6 +756,8 @@ def test_parent_varac_bundle_projects_connections_and_review_before_details(
             "storage_path": "/cluster/VarAC.db",
             "secondary_storage_path": "/managed/field/incoming",
             "outbox_path": "/managed/field/outbox",
+            "cluster_bbs_path": "/cluster/BBS",
+            "cluster_bbs_archive_path": "/cluster/BBS-Archive",
             "working_directory": "/wine/drive_c/VarAC",
             "vara_runtime_path": "/managed/field/VARA",
             "vara_ini_path": "/managed/field/VARA/VARA.ini",
@@ -440,8 +790,19 @@ def test_parent_varac_bundle_projects_connections_and_review_before_details(
         assert dialog.findChild(QLineEdit, "guidedVaracExecutable").text() == "/wine/drive_c/VarAC/VarAC.exe"  # type: ignore[union-attr]
         assert dialog.findChild(QLineEdit, "guidedVaracIni").text() == "/wine/drive_c/VarAC/VarAC-Field.ini"  # type: ignore[union-attr]
         assert dialog.findChild(QLineEdit, "guidedVaracDatabase").text() == "/cluster/VarAC.db"  # type: ignore[union-attr]
+        bbs = dialog.findChild(QLineEdit, "guidedVaracBbs")
+        bbs_archive = dialog.findChild(QLineEdit, "guidedVaracBbsArchive")
+        assert bbs is not None and bbs.text() == "/cluster/BBS" and bbs.isReadOnly()
+        assert bbs_archive is not None and bbs_archive.text() == "/cluster/BBS-Archive" and bbs_archive.isReadOnly()
+        assert all(not button.isEnabled() for button in bbs.parent().findChildren(QPushButton))
+        assert all(
+            not button.isEnabled()
+            for button in bbs_archive.parent().findChildren(QPushButton)
+        )
         drafts = getattr(dialog, "_guided_software_instance_drafts")
         varac = drafts["varac"]
+        assert varac["bbs_path"] == "/cluster/BBS"
+        assert varac["bbs_archive_path"] == "/cluster/BBS-Archive"
         presentation = varac["varac_native_presentation"]
         assert native_draft_fingerprint(varac) == presentation["draft_fingerprint"]
         assert varac["_varac_native_apply_request"]["native_presentation"]["plan_fingerprint"] == "prepared-varac-bundle"
@@ -476,8 +837,11 @@ def test_zero_entry_managed_fast_js8_route_publishes_drafts_and_leaves_schedule_
         def quit(self) -> None:
             self.finished.emit()
 
+    requests: list[object] = []
+
     def publish_qualified_snapshot(worker: object) -> None:
         request = getattr(worker, "request")
+        requests.append(request)
         worker.finished.emit(
             {
                 "guided_discovery_request": request,
@@ -505,7 +869,10 @@ def test_zero_entry_managed_fast_js8_route_publishes_drafts_and_leaves_schedule_
         lambda _worker, _thread: None,
     )
 
+    visible_selection: dict[str, bool] = {}
+
     def inspect(dialog: QDialog) -> None:
+        nonlocal visible_selection
         radio_name = next(
             field
             for field in dialog.findChildren(QLineEdit)
@@ -526,9 +893,12 @@ def test_zero_entry_managed_fast_js8_route_publishes_drafts_and_leaves_schedule_
         _app().processEvents()
 
         prepare = dialog.findChild(QPushButton, "guidedConfigureAutomaticallyButton")
-        assert prepare is not None
-        prepare.click()
-        assert _wait_until(lambda: prepare.isEnabled()), "managed preparation did not complete"
+        assert prepare is not None and not prepare.isVisible()
+        assert _wait_until(lambda: bool(requests)), "managed preparation did not start automatically"
+        assert _wait_until(
+            lambda: dialog.findChild(QLabel, "guidedConfigureAutomaticallyStatus").text().startswith(("Ready", "Needs attention"))  # type: ignore[union-attr]
+        ), "managed preparation did not complete"
+        assert len(requests) == 1
 
         drafts = getattr(dialog, "_guided_software_instance_drafts", {})
         assert set(drafts) >= {"js8call", "fast_light"}
@@ -552,12 +922,24 @@ def test_zero_entry_managed_fast_js8_route_publishes_drafts_and_leaves_schedule_
         assert footer is not None
         save = footer.button(QDialogButtonBox.Save)
         assert save is not None and save.isEnabled(), save.toolTip()
+        visible_selection = {
+            "use_flrig": _checkbox(dialog, "FLRig").isChecked(),
+            "use_fldigi": _checkbox(dialog, "FLDigi").isChecked(),
+            "use_flmsg": _checkbox(dialog, "FLMsg").isChecked(),
+            "use_flamp": _checkbox(dialog, "FLAmp").isChecked(),
+            "use_js8call": _checkbox(dialog, "JS8Call").isChecked(),
+            "use_js8spotter": _checkbox(dialog, "FIO Spotter").isChecked(),
+            "use_commstat": _checkbox(dialog, "CommStat").isChecked(),
+            "use_varac": _checkbox(dialog, "VarAC").isChecked(),
+        }
         save.click()
         assert _wait_until(lambda: dialog.result() == QDialog.Accepted)
 
     payload = _open_add_radio_dialog(monkeypatch, tmp_path, inspect)
     assert isinstance(payload, dict)
     drafts = payload["guided_software_instance_drafts"]
+    assert {key: bool(payload[key]) for key in visible_selection} == visible_selection
+    assert set(drafts) == {"js8call", "fast_light"}
     assert drafts["js8call"]["launch_recipe_status"] == "qualified_managed"
     assert drafts["fast_light"]["launch_recipe_status"] == "qualified_managed"
     assert "fio_spotter" not in drafts and "commstat" not in drafts
@@ -615,9 +997,16 @@ def test_warning_recipe_permits_save_but_explicit_safety_block_does_not(
             step.click()
         _checkbox(dialog, "JS8Call").setChecked(True)
         prepare = dialog.findChild(QPushButton, "guidedConfigureAutomaticallyButton")
-        assert prepare is not None
-        prepare.click()
-        assert _wait_until(lambda: prepare.isEnabled())
+        assert prepare is not None and not prepare.isVisible()
+        assert _wait_until(
+            lambda: dialog.findChild(QLabel, "guidedConfigureAutomaticallyStatus").text().startswith(("Ready", "Needs attention"))  # type: ignore[union-attr]
+        )
+        card = dialog.findChild(QGroupBox, "guidedSoftwareResponsibility_js8call")
+        next_button = dialog.findChild(QPushButton, "guidedWizardNext")
+        assert card is not None and card.property("guidedCardExpanded") is False
+        assert next_button is not None and next_button.isEnabled()
+        # Pending launch is an operator-visible warning, not a safety block.
+        assert card.property("guidedPreparationState") in {"launch_pending", "warning"}
         for step_id in ("connection", "guard", "schedule", "review"):
             step = dialog.findChild(QPushButton, f"guidedWizardStep_{step_id}")
             assert step is not None and step.isEnabled(), step_id
@@ -639,6 +1028,16 @@ def test_warning_recipe_permits_save_but_explicit_safety_block_does_not(
         review.click()
         _app().processEvents()
         assert not save.isEnabled()
+        software = dialog.findChild(QPushButton, "guidedWizardStep_software")
+        assert software is not None and software.isEnabled()
+        software.click()
+        _app().processEvents()
+        next_button = dialog.findChild(QPushButton, "guidedWizardNext")
+        card = dialog.findChild(QGroupBox, "guidedSoftwareResponsibility_js8call")
+        assert next_button is not None and not next_button.isEnabled()
+        assert card is not None
+        assert card.property("guidedPreparationState") == "blocked"
+        assert card.property("guidedCardExpanded") is True
         dialog.reject()
 
     _open_add_radio_dialog(monkeypatch, tmp_path, inspect)
@@ -690,7 +1089,12 @@ def test_add_radio_fixed_navigation_has_one_body_scroll_owner_and_no_horizontal_
 
     def inspect(dialog: QDialog) -> None:
         dialog.resize(*size)
-        _enter_trimode_software_step(dialog)
+        name = next(
+            field for field in dialog.findChildren(QLineEdit)
+            if "radio name" in field.placeholderText().casefold()
+        )
+        name.setText("Footer reachability radio")
+        _app().processEvents()
         _app().processEvents()
         scrolls = dialog.findChildren(QScrollArea)
         assert len(scrolls) == 1
@@ -701,6 +1105,9 @@ def test_add_radio_fixed_navigation_has_one_body_scroll_owner_and_no_horizontal_
         assert body.horizontalScrollBar().maximum() == 0
         footer = dialog.findChild(QDialogButtonBox, "guidedRadioSetupActionFooter")
         assert footer is not None and footer.isVisible()
+        body.verticalScrollBar().setValue(body.verticalScrollBar().maximum())
+        _app().processEvents()
+        assert body.verticalScrollBar().value() == body.verticalScrollBar().maximum()
         for button in (
             dialog.findChild(QPushButton, "guidedWizardBack"),
             dialog.findChild(QPushButton, "guidedWizardNext"),
@@ -712,6 +1119,12 @@ def test_add_radio_fixed_navigation_has_one_body_scroll_owner_and_no_horizontal_
             assert top_left.x() >= 0 and top_left.y() >= 0
             assert bottom_right.x() <= dialog.width() + 1
             assert bottom_right.y() <= dialog.height() + 1
+        next_button = dialog.findChild(QPushButton, "guidedWizardNext")
+        assert next_button is not None and next_button.isEnabled()
+        next_button.click()
+        _app().processEvents()
+        back_button = dialog.findChild(QPushButton, "guidedWizardBack")
+        assert back_button is not None and back_button.isEnabled()
         dialog.reject()
 
     _open_add_radio_dialog(monkeypatch, tmp_path, inspect)

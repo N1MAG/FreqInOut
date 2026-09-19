@@ -105,12 +105,120 @@ def test_prepare_existing_standalone_and_new_member_is_immutable_and_ready(tmp_p
     assert result.presentation["storage_path"] == str(result.plan.shared_db_path)
     assert result.presentation["secondary_storage_path"].endswith("/incoming")
     assert result.presentation["outbox_path"].endswith("/outbox")
+    assert result.presentation["secondary_storage_path"] != result.presentation["outbox_path"]
     assert result.presentation["working_directory"] == str(member.working_directory)
     assert result.presentation["vara_runtime_path"] == str(member.vara_target_runtime_folder)
     assert result.presentation["vara_ini_path"] == str(member.vara_target_path)
     assert result.presentation["port"] == 8310
     assert result.presentation["secondary_port"] == 8312
     assert not result.plan.members[1].target_path.exists()
+
+
+def test_create_cluster_inherits_shared_bbs_paths_and_keeps_member_mail_paths_local(tmp_path) -> None:
+    node, profile = _evidence(tmp_path)
+    profile.update(
+        varac_bbs_dir=str(tmp_path / "existing-bbs"),
+        varac_bbs_archive_dir=str(tmp_path / "existing-bbs-archive"),
+    )
+    result = prepare_varac_native_configuration(
+        _draft(),
+        varac_nodes=(node,),
+        device_profiles=(profile,),
+        varac_clusters=(),
+        varac_members=(),
+        managed_root=tmp_path / "managed",
+        generation=8,
+        platform_override="linux-wine",
+    )
+    assert result.ready
+    assert result.presentation["bbs_path"] == profile["varac_bbs_dir"]
+    assert result.presentation["bbs_archive_path"] == profile["varac_bbs_archive_dir"]
+    assert result.presentation["secondary_storage_path"] != result.presentation["outbox_path"]
+    assert str(tmp_path / "existing-bbs") not in result.presentation["secondary_storage_path"]
+    assert str(tmp_path / "existing-bbs") not in result.presentation["outbox_path"]
+
+
+def test_create_cluster_derives_shared_bbs_defaults_under_varac_install(tmp_path) -> None:
+    node, profile = _evidence(tmp_path)
+    result = prepare_varac_native_configuration(
+        _draft(),
+        varac_nodes=(node,),
+        device_profiles=(profile,),
+        varac_clusters=(),
+        varac_members=(),
+        managed_root=tmp_path / "managed",
+        generation=9,
+        platform_override="linux-wine",
+    )
+    assert result.ready
+    assert result.presentation["bbs_path"] == str(Path(node["install_path"]) / "BBS")
+    assert result.presentation["bbs_archive_path"] == str(Path(node["install_path"]) / "BBS" / "Archive")
+
+
+def test_prepare_rejects_member_mailbox_overlap_with_cluster_shared_bbs(tmp_path) -> None:
+    node, profile = _evidence(tmp_path)
+    draft = _draft()
+    draft["bbs_path"] = str(tmp_path / "shared-bbs")
+    draft["secondary_storage_path"] = str(tmp_path / "shared-bbs" / "incoming")
+
+    result = prepare_varac_native_configuration(
+        draft,
+        varac_nodes=(node,),
+        device_profiles=(profile,),
+        varac_clusters=(),
+        varac_members=(),
+        managed_root=tmp_path / "managed",
+        generation=10,
+        platform_override="linux-wine",
+    )
+
+    assert not result.ready
+    assert "node-local" in result.error
+    assert "cluster-shared BBS" in result.error
+
+
+def test_join_cluster_inherits_durable_shared_bbs_paths(tmp_path) -> None:
+    node, profile = _evidence(tmp_path)
+    draft = _draft()
+    draft.update(
+        cluster_path="join_cluster",
+        cluster_id="FIELD",
+        email_gateway_sender_choice="none",
+    )
+    draft.pop("existing_standalone_node_id")
+    draft.pop("existing_standalone_member_number")
+    shared_db = str(tmp_path / "shared" / "VarAC.db")
+    bbs = str(tmp_path / "shared" / "BBS")
+    archive = str(tmp_path / "shared" / "BBS" / "Archive")
+
+    result = prepare_varac_native_configuration(
+        draft,
+        varac_nodes=(node,),
+        device_profiles=(profile,),
+        varac_clusters=(
+            {
+                "id": 19,
+                "name": "Field Cluster",
+                "cluster_id": "FIELD",
+                "shared_db_path": shared_db,
+                "shared_bbs_path": bbs,
+                "shared_bbs_archive_path": archive,
+            },
+        ),
+        varac_members=(
+            {"cluster_id": 19, "device_profile_id": 5, "enabled": 1},
+        ),
+        managed_root=tmp_path / "managed",
+        generation=11,
+        platform_override="linux-wine",
+    )
+
+    assert result.ready
+    assert result.presentation["storage_path"] == shared_db
+    assert result.presentation["bbs_path"] == bbs
+    assert result.presentation["bbs_archive_path"] == archive
+    assert result.presentation["secondary_storage_path"] != bbs
+    assert result.presentation["outbox_path"] != archive
 
 
 def test_prepare_requires_stopped_process_and_exact_qualified_version(tmp_path) -> None:

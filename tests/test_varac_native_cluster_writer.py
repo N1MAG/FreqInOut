@@ -9,7 +9,8 @@ from freqinout.core.config_varac_managed import (
     VarACNativeClusterRequest, VarACNativeConfigurationError, VarACWriterCapability,
     VarARuntimeInput, apply_varac_native_cluster_plan, build_varac_native_cluster_plan,
     parse_vara_ini_bytes, parse_varac_ini_bytes, plan_varac_launch_command,
-    render_varac_ini, snapshot_target_state, snapshot_vara_runtime_files, supported_varac_versions,
+    render_varac_ini, rollback_varac_native_cluster_apply, snapshot_target_state,
+    snapshot_vara_runtime_files, supported_varac_versions,
 )
 
 
@@ -112,6 +113,37 @@ def test_clones_distinct_runtime_updates_real_keys_and_preserves_unknown_files(t
     assert b"TCP Command Port=8310\r\n" in vara and b"KISS Port=8312\r\n" in vara
     assert b"Vendor Setup=keep\r\n" in vara and b"KeepMonitorValue=keep\r\n" in vara
     assert b"VarahfMonitorPort=8313\r\n" in (tmp_path / "member-1.ini").read_bytes()
+
+
+def test_apply_creates_only_reviewed_shared_and_member_directories_and_rollback_cleans_empty_ones(tmp_path) -> None:
+    request = _request(tmp_path, 1)
+    bbs = tmp_path / "VarAC" / "BBS"
+    archive = bbs / "Archive"
+    incoming = tmp_path / "managed" / "radio" / "incoming"
+    outbox = tmp_path / "managed" / "radio" / "outbox"
+    request = VarACNativeClusterRequest(
+        **{
+            **request.__dict__,
+            "shared_bbs_path": str(bbs),
+            "shared_bbs_archive_path": str(archive),
+            "managed_directories": (incoming, outbox, bbs, archive),
+        }
+    )
+    plan = build_varac_native_cluster_plan(request)
+
+    result = apply_varac_native_cluster_plan(plan, backup_root=tmp_path / "backups")
+
+    assert result.ok
+    assert all(path.is_dir() for path in (incoming, outbox, bbs, archive))
+    assert {item.target for item in result.items if item.action_type == "create_directory"} == {
+        str(incoming), str(outbox), str(bbs), str(archive)
+    }
+
+    rolled_back = rollback_varac_native_cluster_apply(result)
+
+    assert rolled_back.restore is not None and rolled_back.restore.ok
+    assert not incoming.exists() and not outbox.exists()
+    assert not archive.exists() and not bbs.exists()
 
 
 @pytest.mark.parametrize("phase", ["preflight", "backup", "stage", "validate_staged", "validate_promoted"])

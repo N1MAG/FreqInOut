@@ -1030,6 +1030,8 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             name TEXT NOT NULL,
             cluster_id TEXT NOT NULL,
             shared_db_path TEXT,
+            shared_bbs_path TEXT,
+            shared_bbs_archive_path TEXT,
             counters_refresh_sec INTEGER NOT NULL DEFAULT 30,
             ptt_lock_enabled INTEGER NOT NULL DEFAULT 0,
             gateway_handler_device_id INTEGER,
@@ -1049,6 +1051,8 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             "name": "TEXT NOT NULL",
             "cluster_id": "TEXT NOT NULL",
             "shared_db_path": "TEXT",
+            "shared_bbs_path": "TEXT",
+            "shared_bbs_archive_path": "TEXT",
             "counters_refresh_sec": "INTEGER NOT NULL DEFAULT 30",
             "ptt_lock_enabled": "INTEGER NOT NULL DEFAULT 0",
             "gateway_handler_device_id": "INTEGER",
@@ -2533,6 +2537,8 @@ def _list_varac_cluster_members_conn(
             c.name AS cluster_name,
             c.cluster_id AS cluster_public_id,
             c.shared_db_path,
+            c.shared_bbs_path,
+            c.shared_bbs_archive_path,
             c.counters_refresh_sec,
             c.ptt_lock_enabled,
             c.gateway_handler_device_id,
@@ -7714,6 +7720,10 @@ class MultiRadioStore:
                         "varac_db_path": str(saved_app.get("db_path", "") or ""),
                         "varac_ini_path": str(saved_app.get("ini_path", "") or ""),
                         "varac_outbox_dir": str(app_values.get("outbox_path", "") or ""),
+                        "varac_bbs_dir": str(app_values.get("bbs_path", "") or ""),
+                        "varac_bbs_archive_dir": str(
+                            app_values.get("bbs_archive_path", "") or ""
+                        ),
                     }
                     if create_cluster_values:
                         cluster_name = _coerce_text(
@@ -7731,6 +7741,12 @@ class MultiRadioStore:
                         if duplicate_cluster is not None:
                             raise ValueError(f"VarAC cluster ID {public_cluster_id} is already in use.")
                         shared_db_path = _coerce_text(create_cluster_values.get("shared_db_path", ""), "")
+                        shared_bbs_path = _coerce_text(
+                            create_cluster_values.get("shared_bbs_path", ""), ""
+                        )
+                        shared_bbs_archive_path = _coerce_text(
+                            create_cluster_values.get("shared_bbs_archive_path", ""), ""
+                        )
                         normalized_shared_db = (
                             normalize_varac_path(shared_db_path, "VarAC shared database path")
                             if shared_db_path
@@ -7807,18 +7823,21 @@ class MultiRadioStore:
                         conn.execute(
                             """
                             INSERT INTO varac_clusters (
-                                name, cluster_id, shared_db_path, counters_refresh_sec,
+                                name, cluster_id, shared_db_path, shared_bbs_path,
+                                shared_bbs_archive_path, counters_refresh_sec,
                                 ptt_lock_enabled, gateway_handler_device_id,
                                 email_gateway_sender_device_id, native_management_state,
                                 native_writer_key, desired_fingerprint, observed_fingerprint,
                                 resource_claims_json, native_verification_summary,
                                 created_utc, updated_utc
-                            ) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 cluster_name,
                                 public_cluster_id,
                                 shared_db_path or None,
+                                shared_bbs_path or None,
+                                shared_bbs_archive_path or None,
                                 max(5, min(600, _coerce_int(create_cluster_values.get("counters_refresh_sec", 30), 30))),
                                 _coerce_bool_int(create_cluster_values.get("ptt_lock_enabled", 0), False),
                                 create_cluster_native_state,
@@ -7870,6 +7889,19 @@ class MultiRadioStore:
                                 )
                             except sqlite3.IntegrityError as exc:
                                 raise ValueError("Unable to retain the existing VarAC standalone node as a cluster member.") from exc
+                            conn.execute(
+                                """
+                                UPDATE device_profiles
+                                   SET varac_bbs_dir=?, varac_bbs_archive_dir=?, updated_utc=?
+                                 WHERE id=?
+                                """,
+                                (
+                                    shared_bbs_path or None,
+                                    shared_bbs_archive_path or None,
+                                    now_iso,
+                                    int(existing_standalone_device_id),
+                                ),
+                            )
                 current_link = _coerce_optional_int(profile.get(link_column))
                 if current_link is not None and current_link != int(saved_app["id"]) and not replace_existing:
                     raise ValueError(
@@ -7915,6 +7947,10 @@ class MultiRadioStore:
                         raise KeyError(f"Unknown VarAC cluster id: {cluster_db_id_value}")
                     if observer_profile:
                         raise ValueError("Observer / SDR device profiles cannot participate in VarAC clusters.")
+                    updates["varac_bbs_dir"] = str(cluster.get("shared_bbs_path") or "")
+                    updates["varac_bbs_archive_dir"] = str(
+                        cluster.get("shared_bbs_archive_path") or ""
+                    )
                     if str(saved_app.get("native_management_state") or "operator").strip().lower() == "managed":
                         member_db = normalize_varac_path(
                             str(saved_app.get("db_path") or ""),
@@ -8678,6 +8714,16 @@ class MultiRadioStore:
             name = _coerce_text(payload.get("name", name_default), name_default) or name_default
             cluster_key = _normalize_varac_cluster_id(payload.get("cluster_id", cluster_id_default), _normalize_varac_cluster_id(name))
             shared_db_path = _coerce_text(payload.get("shared_db_path", (existing or {}).get("shared_db_path", "")), "")
+            shared_bbs_path = _coerce_text(
+                payload.get("shared_bbs_path", (existing or {}).get("shared_bbs_path", "")), ""
+            )
+            shared_bbs_archive_path = _coerce_text(
+                payload.get(
+                    "shared_bbs_archive_path",
+                    (existing or {}).get("shared_bbs_archive_path", ""),
+                ),
+                "",
+            )
             counters_refresh_sec = max(
                 5,
                 min(
@@ -8767,7 +8813,8 @@ class MultiRadioStore:
                 conn.execute(
                     """
                     UPDATE varac_clusters
-                       SET name=?, cluster_id=?, shared_db_path=?, counters_refresh_sec=?,
+                       SET name=?, cluster_id=?, shared_db_path=?, shared_bbs_path=?,
+                           shared_bbs_archive_path=?, counters_refresh_sec=?,
                            ptt_lock_enabled=?, gateway_handler_device_id=?,
                            email_gateway_sender_device_id=?, native_management_state=?,
                            native_writer_key=?, desired_fingerprint=?, observed_fingerprint=?,
@@ -8779,6 +8826,8 @@ class MultiRadioStore:
                         name,
                         cluster_key,
                         shared_db_path or None,
+                        shared_bbs_path or None,
+                        shared_bbs_archive_path or None,
                         counters_refresh_sec,
                         ptt_lock_enabled,
                         gateway_handler_device_id,
@@ -8799,18 +8848,21 @@ class MultiRadioStore:
                 conn.execute(
                     """
                     INSERT INTO varac_clusters (
-                        name, cluster_id, shared_db_path, counters_refresh_sec,
+                        name, cluster_id, shared_db_path, shared_bbs_path,
+                        shared_bbs_archive_path, counters_refresh_sec,
                         ptt_lock_enabled, gateway_handler_device_id,
                         email_gateway_sender_device_id, native_management_state,
                         native_writer_key, desired_fingerprint, observed_fingerprint,
                         resource_claims_json, last_native_verified_utc, native_verification_summary,
                         created_utc, updated_utc
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         name,
                         cluster_key,
                         shared_db_path or None,
+                        shared_bbs_path or None,
+                        shared_bbs_archive_path or None,
                         counters_refresh_sec,
                         ptt_lock_enabled,
                         None,
@@ -8827,6 +8879,26 @@ class MultiRadioStore:
                     ),
                 )
                 row_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            # Cluster BBS storage is one shared resource.  Keep every current
+            # member profile's compatibility projection synchronized with the
+            # canonical cluster row in the same transaction.
+            conn.execute(
+                """
+                UPDATE device_profiles
+                   SET varac_bbs_dir=?, varac_bbs_archive_dir=?, updated_utc=?
+                 WHERE id IN (
+                    SELECT device_profile_id
+                      FROM varac_cluster_members
+                     WHERE cluster_id=? AND enabled=1
+                 )
+                """,
+                (
+                    shared_bbs_path or None,
+                    shared_bbs_archive_path or None,
+                    now_iso,
+                    row_id,
+                ),
+            )
             conn.commit()
             _sync_derived_coordination_policies_conn(conn)
             cluster = next((row for row in _list_varac_clusters_conn(conn) if int(row.get("id", 0) or 0) == row_id), None)
@@ -8957,6 +9029,20 @@ class MultiRadioStore:
                     )
                 except sqlite3.IntegrityError as exc:
                     raise ValueError("Unable to update the VarAC cluster membership. Check cluster and instance uniqueness.") from exc
+            if enabled_value == 1:
+                conn.execute(
+                    """
+                    UPDATE device_profiles
+                       SET varac_bbs_dir=?, varac_bbs_archive_dir=?, updated_utc=?
+                     WHERE id=?
+                    """,
+                    (
+                        str(cluster.get("shared_bbs_path") or "") or None,
+                        str(cluster.get("shared_bbs_archive_path") or "") or None,
+                        now_iso,
+                        int(device_profile_id),
+                    ),
+                )
             conn.commit()
             _sync_derived_coordination_policies_conn(conn)
             rows = _list_varac_cluster_members_conn(conn, cluster_id=int(cluster_id), device_profile_id=int(device_profile_id))

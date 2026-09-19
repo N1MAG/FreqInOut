@@ -254,6 +254,9 @@ class VarACNativeClusterRequest:
     members: Tuple[VarACMemberInput, ...]
     shared_db_path: str
     allowed_roots: Tuple[Path, ...]
+    shared_bbs_path: str = ""
+    shared_bbs_archive_path: str = ""
+    managed_directories: Tuple[Path, ...] = ()
     native_shared_db_path: str = ""
     counter_refresh_seconds: int = 30
     ptt_lock_enabled: bool = True
@@ -295,6 +298,9 @@ class VarACNativeClusterPlan:
     capability: VarACWriterCapability
     members: Tuple[VarACNativeMemberPlan, ...]
     shared_db_path: str
+    shared_bbs_path: str
+    shared_bbs_archive_path: str
+    managed_directories: Tuple[Path, ...]
     native_shared_db_path: str
     allowed_roots: Tuple[Path, ...]
     plan_fingerprint: str
@@ -311,6 +317,7 @@ class VarACNativeApplyResult:
     restore: ConfigRestoreResult | None = None
     phase: str = ""
     error: str = ""
+    created_directories: Tuple[Path, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -457,6 +464,9 @@ def build_varac_native_cluster_plan(
             "platform": request.platform,
             "operation": request.operation,
             "shared_db_path": request.shared_db_path,
+            "shared_bbs_path": request.shared_bbs_path,
+            "shared_bbs_archive_path": request.shared_bbs_archive_path,
+            "managed_directories": [str(path) for path in request.managed_directories],
             "native_shared_db_path": request.native_shared_db_path,
             "counter_refresh_seconds": request.counter_refresh_seconds,
             "ptt_lock_enabled": request.ptt_lock_enabled,
@@ -506,6 +516,9 @@ def build_varac_native_cluster_plan(
         capability=capability,
         members=member_plans,
         shared_db_path=request.shared_db_path,
+        shared_bbs_path=request.shared_bbs_path,
+        shared_bbs_archive_path=request.shared_bbs_archive_path,
+        managed_directories=tuple(Path(path).expanduser() for path in request.managed_directories),
         native_shared_db_path=request.native_shared_db_path or request.shared_db_path,
         allowed_roots=roots,
         plan_fingerprint=_sha256(fingerprint_data),
@@ -605,6 +618,18 @@ def apply_varac_native_cluster_plan(
             staged[member.target_path] = _stage_bytes(member.target_path, payload)
             created_dirs.extend(_mkdir_untrusted_safe(member.vara_target_runtime_folder.parent, plan.allowed_roots))
             staged_runtime_dirs[member.vara_target_runtime_folder] = _stage_runtime(member, plan.capability)
+        for directory in plan.managed_directories:
+            created_dirs.extend(_mkdir_untrusted_safe(directory, plan.allowed_roots))
+            items.append(
+                GuidedAppConfigApplyItem(
+                    action_id=f"varac:directory:{directory}",
+                    app_id="varac",
+                    action_type="create_directory",
+                    target=str(directory),
+                    status="applied",
+                    detail="Reviewed VarAC managed directory is ready.",
+                )
+            )
         phase = "validate_staged"
         _inject(phase, fail_at, failure_injector)
         for member in plan.members:
@@ -626,7 +651,12 @@ def apply_varac_native_cluster_plan(
         for member in plan.members:
             _semantic_verify(member.target_path.read_bytes(), member.changes)
             _semantic_verify(member.vara_target_path.read_bytes(), member.vara_changes)
-        return VarACNativeApplyResult(items=tuple(items), backup=backup, phase="complete")
+        return VarACNativeApplyResult(
+            items=tuple(items),
+            backup=backup,
+            phase="complete",
+            created_directories=tuple(created_dirs),
+        )
     except Exception as exc:
         for member in plan.members:
             if not any(item.target == str(member.target_path) for item in items):
@@ -649,7 +679,13 @@ def apply_varac_native_cluster_plan(
         _cleanup_staged(staged.values())
         _cleanup_staged_dirs(staged_runtime_dirs.values())
         _cleanup_empty_dirs(created_dirs)
-        return VarACNativeApplyResult(items=tuple(items), backup=backup, restore=restore, phase=phase, error=str(exc))
+        return VarACNativeApplyResult(
+            items=tuple(items),
+            backup=backup,
+            restore=restore,
+            phase=phase,
+            error=str(exc),
+        )
     finally:
         _cleanup_staged(staged.values())
         _cleanup_staged_dirs(staged_runtime_dirs.values())
@@ -661,6 +697,8 @@ def rollback_varac_native_cluster_apply(result: VarACNativeApplyResult) -> VarAC
     if result.backup is None:
         return result
     restore = restore_config_backup(result.backup)
+    if restore.ok:
+        _cleanup_empty_dirs(result.created_directories)
     items = tuple(
         GuidedAppConfigApplyItem(
             action_id=item.action_id,
@@ -672,7 +710,13 @@ def rollback_varac_native_cluster_apply(result: VarACNativeApplyResult) -> VarAC
         )
         for item in result.items
     )
-    return VarACNativeApplyResult(items=items, backup=result.backup, restore=restore, phase="rolled_back", error="" if restore.ok else "Native rollback failed.")
+    return VarACNativeApplyResult(
+        items=items,
+        backup=result.backup,
+        restore=restore,
+        phase="rolled_back",
+        error="" if restore.ok else "Native rollback failed.",
+    )
 
 
 def _find_capability(request: VarACNativeClusterRequest, capabilities: Sequence[VarACWriterCapability]) -> VarACWriterCapability:
@@ -706,6 +750,13 @@ def _validate_request(request: VarACNativeClusterRequest, capability: VarACWrite
         raise VarACNativeConfigurationError("Running-process evidence identifies an unknown native VarAC member.")
     if running:
         raise VarACNativeConfigurationError("Close VarAC before preparing a native configuration write.")
+    for directory in request.managed_directories:
+        _require_contained(Path(directory), roots, "managed VarAC directory")
+        _reject_symlink_path(Path(directory))
+    if request.shared_bbs_path:
+        _require_contained(Path(request.shared_bbs_path), roots, "shared VarAC BBS directory")
+    if request.shared_bbs_archive_path:
+        _require_contained(Path(request.shared_bbs_archive_path), roots, "shared VarAC BBS archive directory")
     target_keys: list[Path] = []
     runtime_folders: list[Path] = []
     claimed_ports: dict[int, str] = {}
@@ -1111,6 +1162,10 @@ def _inject(phase: str, fail_at: str, injector: Callable[[str], None] | None) ->
 
 def _mkdir_untrusted_safe(target_parent: Path, roots: Sequence[Path]) -> list[Path]:
     _require_contained(target_parent, roots, "target directory")
+    if target_parent.exists() and not target_parent.is_dir():
+        raise VarACNativeConfigurationError(
+            f"Reviewed VarAC directory target is not a directory: {target_parent}"
+        )
     created: list[Path] = []
     stack: list[Path] = []
     current = target_parent

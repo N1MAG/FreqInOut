@@ -2885,3 +2885,250 @@ that external VarAC/VARA binaries launched or communicated successfully.
   opt-in and final-review confirmed.
 - FIO Spotter's normal MCF catalog is resolved by FIO and is not a radio-scoped
   external launch or folder-selection task.
+
+## 2026-09-19 — GRS-10 Cluster-Shared BBS Projection Correction
+
+Status: automated implementation gate passed 2026-09-19; Windows and
+Linux/Wine operator qualification remains open.
+
+The canonical prepared VarAC bundle includes cluster-shared `bbs_path` and
+`bbs_archive_path`. Native-managed cluster persistence stores them as
+`varac_clusters.shared_bbs_path` and
+`varac_clusters.shared_bbs_archive_path`. A create-cluster route inherits
+nonblank reviewed standalone-profile values; any missing value is derived from
+the qualified VarAC installation as `<VarAC install>/BBS` and
+`<VarAC install>/BBS/Archive`. A join-cluster route inherits the selected
+cluster values. Incoming and outbox remain member-local and may not be
+reclassified as shared BBS resources.
+
+The parent Add Radio Connections and Review surfaces, plus Software
+Administration, project these canonical facts as prepared read-only values.
+They do not invent member persistence or expose a second editable ownership
+path. A missing core publisher field may retain an existing value only as a
+safe display fallback while the canonical bundle is upgraded.
+
+Only accepted `Save Radio and Software` may create reviewed missing BBS/archive
+directories. It never replaces, removes, or clears an existing directory or
+its contents. A successful external apply records its FIO-created directory
+set; same-session compensation removes only those directories and only while
+they remain empty. Recovery never guesses that an unrecorded directory is safe
+to delete.
+
+Native readback enrichment is expected output of the accepted plan. Observed
+path/digest/verification additions must not invalidate the operator's Review.
+The final mutation boundary instead compares current durable cluster/member
+inventory with the original frozen reviewed payload; a material inventory
+difference is stale, while readback-only enrichment is not. Journal terminal
+states `complete`, `fio_committed`, and `rolled_back` are idempotent: repeated
+cleanup never restores a committed apply and never restores an already rolled
+back apply. `recovery_required` is an unfinished blocking state; automatic
+startup recovery never rolls forward and leaves unresolved compensation for
+explicit operator recovery.
+
+Work-package ownership: primary `gpt-5.6-sol`, high reasoning, owns schema,
+migrations, transaction, concurrency, integration, and final gate;
+`gpt-5.6-terra`, medium reasoning, owns bounded UI projection, focused UI
+tests, and documentation; `gpt-5.6-luna`, medium reasoning, owns focused
+regressions. Automated final-tree evidence: **139 passed**, changed Python
+compilation passed, production-copy migration/reload and integrity checks
+passed, and diff hygiene passed. The live Windows/Linux-Wine VarAC/VARA
+operator walkthrough remains an external release qualification and is not
+claimed as passed.
+
+## GRS-11 — Automatic Preparation And Decision-First Software Cards
+
+### Operator Outcome
+
+The Add Radio Software step is one continuous decision flow, not a sequence of
+checkbox selection, scrolling, a separate Prepare command, and a second pass
+through the same software. The operator selects each software family exactly
+once. FIO immediately starts the safe discovery and preparation work that can
+be derived from those selections. The operator is asked only for a decision
+that FIO cannot safely infer.
+
+The normal route is:
+
+`Select software -> FIO prepares in the background -> resolve any highlighted
+choice -> review compact Ready cards -> Next: Connections`.
+
+There is no required global Prepare button in this route. A retry action is
+shown only after preparation fails or becomes stale. The selected checkboxes
+remain the sole family-selection source and the accepted radio payload must
+match them exactly; family cards may explain or correct a selected family's
+plan but never duplicate its selection state.
+
+### Automatic Preparation State Machine
+
+Any change to a selected family, source choice, management choice, launch
+policy, or explicit VarAC arrangement invalidates the prior prepared context
+and schedules a new preparation pass after a short coalescing interval. Rapid
+checkbox changes produce one pass for the final state. Preparation reports
+visible progress without blocking the GUI and without moving the operator to
+another page.
+
+The existing generation-fenced background discovery path remains the only
+preparation path. At most one pass is authoritative at a time. If inputs change
+while a pass is running, FIO cancels or disregards that generation, preserves
+the new selections, and starts one coalesced replacement pass. A result may be
+published only when its captured software-plan context still equals the live
+context. Dialog close, cancellation, and superseded generations may not publish
+drafts or mutate external software.
+
+VarAC topology is an explicit exception to inference. When VarAC is selected,
+FIO first presents the decision between standalone, create cluster, or join
+cluster as applicable. It does not start VarAC preparation until that decision
+is made and never infers cluster membership. Once selected, the same automatic
+preparation state machine applies.
+
+Automatic preparation is preview-only. It may inspect software and prepare
+canonical drafts; it does not create profiles, write native configuration,
+launch processes, or change durable FIO state before accepted final Save.
+
+### Compact Per-Family Cards
+
+The Software step shows one card for each selected family and no card for an
+unselected family. Each card has a single state:
+
+- **Preparing** — compact progress; no technical form.
+- **Ready** — collapsed summary with source, launch policy, significant
+  identity or endpoints, and optional `Details`.
+- **Ready with warning** — collapsed summary plus the specific non-blocking
+  warning and optional `Details`; the operator may continue.
+- **Launch pending** — the saved plan is valid but the application is not yet
+  running or verified; the operator may continue.
+- **Needs choice** — only the unresolved operator decision and its explanation
+  are expanded inline.
+- **Blocked** — the safety condition and one recovery action are expanded; the
+  operator may not continue until it is resolved or the family is deselected.
+
+Ready families do not expose source, completion, management, launch-policy, or
+path forms in the normal route. `Details` opens the existing family editor for
+inspection or intentional correction. Opening and cancelling Details is
+non-mutating. Qualified FIO-derived paths, arguments, commands, and files remain
+read-only facts; unsupported or ambiguous recovery fields appear only in the
+advanced correction route.
+
+After preparation, FIO may bring the first unresolved card into view once for
+that result generation. It must not repeatedly steal scrolling after the
+operator moves the page. Ready cards stay collapsed so they do not displace the
+decision that requires attention.
+
+### Navigation And Severity
+
+The existing Back/Next/Cancel/Save footer remains outside the single body
+scroll area and reachable at every supported viewport and text scale. On the
+Software step:
+
+- `Next: Connections` is disabled while preparation is active, while required
+  preparation is stale, or while a selected family has a safety blocker or an
+  unresolved required choice.
+- `Next: Connections` is enabled for Ready, Ready with warning, and Launch
+  pending states. Warnings explain the consequence and remain visible in Review
+  but do not force a configuration loop.
+- Invoking Next against stale inputs schedules preparation and keeps the
+  operator on Software. It does not silently accept an older result.
+- The first unresolved card receives focus/visibility once; the global page is
+  not scrolled back to a former Prepare control.
+
+### Performance And Accessibility Contract
+
+Selection feedback and a Preparing state appear within 100 ms. Changes are
+coalesced before discovery, and no duplicate worker is started for an identical
+live context. All preparation remains off the GUI thread. Card status, warning,
+and actions have stable object names and accessible text; state is conveyed by
+text in addition to color. Large Text, keyboard navigation, and the supported
+viewport matrix retain a single vertical body scroll and the fixed footer.
+
+### GRS-11 Exit Gate
+
+Implementation passes only when all of the following succeed against the final
+integrated tree:
+
+1. Selecting JS8Call, Fast Light, FIO Spotter, CommStat, or VarAC starts the
+   existing safe preparation path without clicking or scrolling to a Prepare
+   button; a checkbox burst produces one authoritative pass.
+2. A mid-flight selection/source change cannot publish the stale generation;
+   the replacement result preserves the final visible selections and its
+   accepted payload and retained draft keys match those selections exactly.
+3. VarAC waits for explicit topology and then prepares automatically. No
+   standalone/create/join choice is inferred.
+4. Ready cards collapse; only the first unresolved family expands and is made
+   visible once. Details may be opened and cancelled without changing the
+   parent selection, canonical draft, or preparation count.
+5. Warning and launch-pending families allow Next. Preparing, stale,
+   needs-choice, and safety-blocked families prevent Next and show one clear
+   recovery action.
+6. Scrolling the body to either extreme leaves Back and Next reachable and
+   functional. Normal and Large Text layouts do not introduce a second page
+   scrollbar or hide the footer.
+7. Existing canonical bundle, native writer, transaction, rollback, selected-
+   family isolation, and production-copy acceptance suites remain green. No
+   schema or migration is introduced by this UI slice.
+
+### GRS-11 Implementation Evidence — 2026-09-19
+
+The Software step now treats preparation as an automatic state transition.
+Family, source, completion, management, launch, radio identity, and explicit
+VarAC-arrangement changes invalidate one canonical context and enter a 200 ms
+coalescing window. The existing background coordinator remains authoritative.
+An in-flight change cancels or rejects the old generation, and its result is
+published only when the captured context still matches the live dialog. The
+normal Prepare button is hidden; it returns only as `Retry preparation` after
+a recoverable failure.
+
+Selected-family cards now present explicit textual states. Preparing cards hide
+forms. Ready, warning, and launch-pending cards collapse to a concise status,
+source/launch/endpoint facts, and optional Details. Needs-choice and blocked
+cards expose the required decision or recovery action and are marked expanded.
+The first unresolved card is brought into view once per prepared context. The
+existing Details editors remain the intentional correction route and cancelling
+them does not change the parent selection, drafts, or preparation count.
+
+The Software Next action uses the same managed-recipe, native-VarAC,
+detected-choice, and no-damage tests as final Save. Preparing, stale, missing
+VarAC topology, missing managed drafts, and explicit safety blocks stop Next;
+ready-with-warning and launch-pending plans continue. The action footer remains
+outside the one body scroll owner.
+
+Work-package ownership: primary `gpt-5.6-sol`, high reasoning, owned the state
+and concurrency contract, specification, delegated-diff review, integration
+corrections, and final gate; `gpt-5.6-terra`, medium reasoning, owned the
+bounded Settings UI implementation and its initial focused verification;
+`gpt-5.6-luna`, medium reasoning, owned the focused test audit and real-widget
+regressions.
+
+Final-tree evidence is **215 unique passing tests** in non-overlapping
+partitions: 82 guided Add Radio/VarAC/native transaction tests, 118 canonical
+inventory/recipe/persistence/launch-bundle tests, and 15 production-shaped
+inventory/launch round-trip tests. The focused GRS-11 UI subset is 35 passing
+tests. Changed Python compilation and `git diff --check` pass. This slice adds
+no schema or migration and performs no production database, application-file,
+process, endpoint, radio, commit, or remote mutation.
+
+### GRS-11.1 — Detected Application Choice And Launch-Details Stability
+
+An explicit detected-application selection is authoritative. If the operator
+chooses a JS8Call, Fast Light, or other detected executable, FIO replaces any
+provisional path for that family, invalidates the old launch recipe, and
+automatically prepares exactly one replacement plan. Next remains disabled
+while that replacement is pending and is republished immediately when the
+choice resolves the last ambiguity. A choice matching the current path does
+not start another worker but still refreshes navigation state.
+
+Automatic selection of the sole detected candidate occurs inside the current
+preparation result and must not recursively start a second worker. A manual
+Browse choice follows the same authoritative replacement and preparation
+contract as a detected choice.
+
+`Launch pending` is a saveable warning, not a required administration detour.
+Its family action is labelled `Review Details (optional)` and the operator may
+continue. When Details is opened, its one-scroll assistant and fixed footer
+must fit inside the current screen's available geometry with a desktop margin;
+compact Linux window managers may not move an oversized nested modal off-screen
+or make it appear to swipe away.
+
+Acceptance requires a real-widget route with multiple detected JS8Call
+candidates: the initial ambiguity disables Next; selecting one candidate
+persists that exact path, starts one replacement preparation, publishes the
+same path in the retained JS8 draft, and enables Next. Assistant reflow/resize
+coverage must also retain visible active content and footer controls.

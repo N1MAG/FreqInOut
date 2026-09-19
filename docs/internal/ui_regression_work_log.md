@@ -8194,3 +8194,159 @@ and rendered-document changes remain untouched and uncommitted. No production
 database, native application profile, process, endpoint, radio, commit, or
 remote was modified. Live Windows/Linux-Wine launch, native readback, cluster
 mailbox, and RF/application behavior remain explicit external release gates.
+
+## 2026-09-19 — VarAC cluster-shared BBS projection correction
+
+Status: automated implementation gate passed. Live Windows/Linux-Wine operator
+qualification remains open.
+
+Observable route: `Settings > Radios > Add Radio > managed VarAC cluster`.
+The reported defect was a prepared INI/database/incoming/outbox bundle with
+blank BBS and archive fields. The correction defines `bbs_path` and
+`bbs_archive_path` as cluster-shared canonical bundle facts, durable as
+`varac_clusters.shared_bbs_path` and
+`varac_clusters.shared_bbs_archive_path`. Create-cluster inherits nonblank
+standalone BBS/archive paths or derives `<VarAC install>/BBS` and
+`<VarAC install>/BBS/Archive`; join-cluster uses the selected cluster's durable
+paths. Incoming/outbox remain member-local.
+
+Settings projects the prepared BBS/archive facts read-only into Connections and
+Review. The accepted final transaction may create reviewed missing directories,
+never changes existing content, and compensates only FIO-created empty
+directories recorded as created by that successful apply. Post-native readback
+enrichment is expected output rather than a review-invalidating change; final
+mutation compares durable inventory against the frozen reviewed payload.
+Cleanup for `complete`, `fio_committed`, and `rolled_back` is idempotent;
+`recovery_required` remains a launch-blocking operator-recovery state. Recovery
+never triggers an automatic forward apply.
+
+Work packages and exact ownership:
+
+- Primary `gpt-5.6-sol`, high reasoning: schema/migration, transaction,
+  concurrency/freshness, integration review, and final gate.
+- `gpt-5.6-terra`, medium reasoning: Settings UI projection, focused UI test,
+  and specification/work-log update.
+- `gpt-5.6-luna`, medium reasoning: focused regression coverage.
+
+Primary integration review additionally disabled the Browse actions attached to
+prepared read-only BBS fields, synchronized later cluster-path changes to all
+enabled member-profile projections, and rejected overlap between member-local
+incoming/outbox and cluster-shared BBS resources.
+
+Final evidence:
+
+- the focused integrated guided-radio, transaction, cluster persistence,
+  native writer/preparation, production-shaped audit, and real-widget matrix:
+  **139 passed**;
+- changed Python compilation: passed;
+- a SQLite backup of the supplied production database migrated, saved, and
+  reloaded the shared BBS/archive columns and passed `PRAGMA integrity_check`;
+- the production source retained SHA-256
+  `7840e95f30d2d2862e7e128852da20d9225acf51b24749e7017319a3f48ae074`,
+  size `966656`, and mtime `1789686201` before and after the copy audit; and
+- `git diff --check`: passed.
+
+No production database, native application configuration, process, endpoint,
+radio, commit, or remote was changed. The operator's unrelated DOCX and
+rendered-document changes remain untouched. Automated fixtures do not satisfy
+the live Windows/Linux-Wine VarAC/VARA operator release gate.
+
+## 2026-09-19 — GRS-11 automatic preparation and compact software cards
+
+Status: implementation and automated exit gate passed.
+
+The Add Radio Software step no longer requires the operator to select software,
+scroll to a separate Prepare command, and then revisit a second expanded set of
+controls. The checkbox grid is the sole family-selection surface. Selection or
+policy changes schedule one coalesced background preparation automatically;
+the former primary button is hidden and appears only as a retry after failure.
+VarAC arrangement remains an explicit prerequisite and is never inferred.
+
+The existing discovery coordinator, canonical dialog draft map, and final-save
+transaction remain authoritative. Each worker captures the full software-plan
+context. A mid-flight edit cancels or invalidates that generation; only a result
+matching the live context may publish, and one replacement request is scheduled.
+This UI slice introduces no schema, migration, writer, or external mutation.
+
+Ready, ready-with-warning, and launch-pending family cards collapse to status,
+compact source/launch/endpoint facts, and Details. Preparing cards hide forms.
+Needs-choice and blocked cards expose the one operator decision or recovery
+action, and the first unresolved card is revealed only once per prepared
+context. Software Next now mirrors final Save's managed-recipe, VarAC-native,
+detected-choice, and safety-block rules. Warnings and launch-pending plans may
+continue; stale, preparing, missing-choice, and safety-blocked plans may not.
+The existing fixed footer and one body-scroll contract are unchanged.
+
+Sequential work packages and exact model ownership:
+
+- Gate 1 — primary `gpt-5.6-sol`, high reasoning: interaction/state contract,
+  concurrency and no-migration decision, GRS-11 specification, and exit gates.
+- Gate 1 audit / Gate 2 UI — `gpt-5.6-terra`, medium reasoning: bounded review
+  of the live dialog seams, then the Settings-only automatic preparation,
+  compact-card, navigation, and one-time reveal implementation.
+- Gate 1 test audit / Gate 3 tests — `gpt-5.6-luna`, medium reasoning: focused
+  real-widget test design and implementation for automatic/coalesced selection,
+  stale-result rejection, selection/payload preservation, card severity,
+  non-mutating Details cancel, VarAC topology, one-time reveal, and fixed footer.
+- Final integration — primary `gpt-5.6-sol`, high reasoning: reviewed every
+  delegated diff, corrected policy-widget overlap, completed context/Next/card
+  state contracts, refined operator language and compact facts, and ran the
+  integrated acceptance partitions.
+
+Exit evidence:
+
+- focused GRS-11 operator-route, prepare-first, and layout suite: **35 passed**;
+- guided Add Radio, VarAC, native writer/preparation/transaction, and final
+  apply partition: **82 passed**;
+- canonical inventory, launch recipe, proposal, persistence, and launch-bundle
+  partition: **118 passed**;
+- production-shaped inventory and structured launch round-trip partition:
+  **15 passed**;
+- total non-overlapping final-tree evidence: **215 passed**;
+- changed Python compilation and `git diff --check`: passed.
+
+No production database, native application configuration, process, endpoint,
+radio, commit, or remote was changed. The unrelated DOCX and rendered-document
+changes remain untouched. Live application qualification remains an external
+release gate.
+
+## 2026-09-19 — GRS-11.1 detected JS8 choice and detail-window correction
+
+Status: implementation and automated regression gate passed.
+
+Operator report: Add Radio requested a JS8Call selection, but making that
+selection did not permit the operator to continue. Opening `Review Launch
+Setup` then appeared to swipe away.
+
+Code review found that the detected-app handler updated a path only when its
+hidden target field was blank. If preparation had already supplied any value,
+the explicit operator choice was ignored. Even when the choice resolved the
+ambiguity, the handler updated Review readiness only; outside Review that
+function returns early, so the Software-step Next gate retained its disabled
+state. The chosen executable also did not invalidate and rebuild the pending
+launch recipe.
+
+The correction makes explicit detected and Browse selections authoritative,
+replaces a different provisional path, invalidates the old recipe, and
+coalesces one replacement preparation. The sole-candidate automatic path is
+still consumed inside its current result and cannot recurse. Matching choices
+republish navigation without an unnecessary worker. Launch-pending plans now
+label Details as optional, consistent with the warning policy. Both managed
+and general detail dialogs are clamped to available screen geometry with an
+80-pixel desktop margin; their own body scroll and fixed footer handle compact
+screens without an oversized native modal being moved off-screen.
+
+Primary `gpt-5.6-sol`, high reasoning, performed the code-path diagnosis,
+state/concurrency correction, geometry correction, regression implementation,
+and final review. No delegation was used for this bounded follow-up.
+
+Evidence:
+
+- exact multiple-candidate JS8 selection regression: passed within the GRS-7.5
+  file (**15 passed** total in that file);
+- combined operator-route, prepare-first, unified-layout, assistant responsive,
+  active-page geometry, and Software Administration reflow suite:
+  **101 passed**;
+- changed Python compilation: passed;
+- no schema, migration, native writer, external application file, production
+  database, process, endpoint, radio, commit, or remote was changed.
