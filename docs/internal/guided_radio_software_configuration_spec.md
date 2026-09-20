@@ -766,6 +766,18 @@ no qualified VarAC writer or launch recipe exists, it says **Manual VarAC
 configuration required** and gives one precise next action; blank technical
 fields are not presented as if the operator should know how to complete them.
 
+The native cluster writer is invoked **only** for an explicit `Create cluster`
+or `Join cluster` arrangement. `Standalone` must never be passed to that writer
+and must never be rewritten as a one-member cluster. For standalone, FIO saves
+the distinct radio/software identity, retains any discovered node-local paths,
+marks native standalone files as operator-owned, and presents a non-blocking
+warning. The VarAC arrangement selector remains visible on that warning so the
+operator can intentionally change to Create or Join and trigger a new prepared
+context. If Create/Join preparation is blocked, the selector likewise remains
+visible and enabled beside the exact blocking reason; a blocked result may not
+collapse or hide its only recovery control. Create/Join continues to require a
+qualified, generation-current native bundle before Next or final Save.
+
 Membership records cluster ID, unique positive instance number, effective shared
 database, counter refresh, email-gateway sender, and PTT-lock policy. For
 create-cluster using an existing standalone node, final Review names that node,
@@ -4184,3 +4196,39 @@ paths, and no draft key or private FIO managed-instance root in any persisted
 JS8Call path or normal UI text. Helper-only fixtures with hand-authored final
 paths do not satisfy this gate. Legacy draft-derived rows remain unchanged and
 must exercise the explicit `Needs attention` recovery route.
+
+## GRS-14 — VarAC Topology Recovery And Writer Routing
+
+Operator testing found a state-machine contradiction in the Tri-Mode Add Radio
+route: automatic preparation submitted the safe `Standalone` default to the
+cluster-only native writer; the resulting `Choose Create cluster or Join
+cluster` block then collapsed the VarAC card and hid the arrangement selector.
+The operator was told how to recover but was not given the control needed to do
+so.
+
+The corrected route has one topology-to-writer contract:
+
+- `Standalone` prepares a distinct, non-mutating VarAC identity and retains
+  discovered node-local evidence without starting the cluster writer. It is a
+  `Ready with warning` plan because native standalone files remain
+  operator-owned; the operator may continue.
+- `Create cluster` and `Join cluster` alone start the qualified native cluster
+  preparation worker. Next and Save remain disabled until its current
+  generation returns a writer-qualified ready bundle.
+- A blocked Create/Join result displays its exact reason and keeps the
+  arrangement selector visible and enabled. Changing topology invalidates the
+  prior context and schedules one generation-fenced replacement preparation.
+- The arrangement selector also stays available on the standalone warning so
+  the operator may opt into cluster management after automatic discovery. It
+  is not hidden in Details or Software Administration.
+- Final Review may call a standalone identity prepared only to the documented
+  warning level; it may not describe it as a qualified native cluster bundle.
+  Conversely, no Create/Join plan may pass Next or Save under the standalone
+  exception.
+
+Acceptance requires a real Tri-Mode widget route proving: standalone does not
+invoke the cluster worker, the selector remains actionable, Continue is
+available for the non-blocking standalone plan, Create/Join still invokes the
+worker, a blocked native result keeps the selector visible, and a qualified
+result alone unlocks the cluster route. No schema or data migration is part of
+this correction.

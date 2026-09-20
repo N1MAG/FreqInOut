@@ -9075,3 +9075,40 @@ No schema, settings, or production-data migration was required. No device,
 native application configuration, external process, radio, commit, or remote
 was changed. The unrelated modified installation-guide DOCX and rendered guide
 directory were preserved and excluded from this work.
+
+## 2026-09-20 — Tri-Mode VarAC topology recovery and writer routing
+
+Status: automated implementation gate passed; live Windows/Linux-Wine Add
+Radio qualification remains open.
+
+Operator testing found that the safe default `Standalone VarAC node` was sent
+through the cluster-only native writer. Its correct refusal instructed the
+operator to choose Create Cluster or Join Cluster, but the prepared-card state
+then hid the VarAC arrangement selector. The route therefore exposed a recovery
+instruction without its recovery control and could not continue.
+
+The correction makes topology authoritative before writer selection.
+Standalone now prepares a distinct non-mutating FIO identity, retains any
+discovered node-local paths, records native standalone configuration as
+operator-owned, and returns a non-blocking `Ready with warning` state without
+starting the cluster writer. Its arrangement selector stays visible so the
+operator can opt into Create or Join. Only explicit Create/Join starts the
+generation-fenced native cluster worker and still requires a qualified current
+bundle before Next or Save. A blocked Create/Join result keeps the selector
+visible and enabled beside the exact reason, and changing it invalidates and
+reprepares the canonical context.
+
+Automated evidence:
+
+- focused real-widget topology and Tri-Mode route: **29 passed**;
+- broader guided-radio, VarAC arrangement, production-shaped audit,
+  final-apply, and native-preparation partition: **131 passed**;
+- changed Python compilation and diff hygiene: passed.
+
+The high-reasoning primary model owned the state-machine design, implementation,
+specification, tests, and final integration review. No subagent was used because
+this surgical correction did not include a new delegation request. No schema or
+data migration was required. No production database, VarAC/VARA file, external
+process, radio, commit, or remote was changed. The unrelated modified
+installation-guide DOCX and rendered guide directory were preserved and
+excluded from this work.

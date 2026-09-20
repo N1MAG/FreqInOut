@@ -783,6 +783,9 @@ def test_parent_varac_bundle_projects_connections_and_review_before_details(
 
     def inspect(dialog: QDialog) -> None:
         _enter_trimode_software_step(dialog)
+        arrangement = dialog.findChild(QComboBox, "guidedVaracArrangement")
+        assert arrangement is not None
+        arrangement.setCurrentIndex(arrangement.findData("create_cluster"))
         prepare = dialog.findChild(QPushButton, "guidedConfigureAutomaticallyButton")
         assert prepare is not None
         prepare.click()
@@ -1038,6 +1041,106 @@ def test_warning_recipe_permits_save_but_explicit_safety_block_does_not(
         assert card is not None
         assert card.property("guidedPreparationState") == "blocked"
         assert card.property("guidedCardExpanded") is True
+        dialog.reject()
+
+    _open_add_radio_dialog(monkeypatch, tmp_path, inspect)
+
+
+def test_trimode_standalone_varac_skips_cluster_writer_and_keeps_topology_actionable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The safe standalone default is valid and never enters the cluster writer."""
+
+    import freqinout.gui.settings_tab as settings_tab_module
+    from freqinout.gui.settings_tab import SettingsTab
+
+    class _ImmediateThread(QObject):
+        started = Signal()
+        finished = Signal()
+
+        def start(self) -> None:
+            self.started.emit()
+
+        def quit(self) -> None:
+            self.finished.emit()
+
+    def publish_empty_snapshot(worker: object) -> None:
+        request = getattr(worker, "request")
+        worker.finished.emit(
+            {
+                "guided_discovery_request": request,
+                "install_candidates": (),
+                "fast_results": {},
+                "js8_results": {},
+                "varac_results": {},
+                "js8_file_profiles": (),
+            }
+        )
+
+    cluster_writer_calls: list[object] = []
+
+    def hold_cluster_writer(
+        _self: object,
+        worker: object,
+        *,
+        on_finished: Callable[[object], None],
+        on_failed: Callable[[str], None],
+    ) -> None:
+        if isinstance(worker, settings_tab_module._VarACNativePrepareWorker):
+            cluster_writer_calls.append(worker)
+        else:
+            on_finished(())
+
+    monkeypatch.setattr(
+        settings_tab_module._GuidedRadioAutofillWorker,
+        "run",
+        publish_empty_snapshot,
+    )
+    monkeypatch.setattr(settings_tab_module, "QThread", _ImmediateThread)
+    monkeypatch.setattr(
+        settings_tab_module._GuidedRadioAutofillWorker,
+        "moveToThread",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(SettingsTab, "_start_varac_native_job", hold_cluster_writer)
+
+    def inspect(dialog: QDialog) -> None:
+        radio_name = next(
+            field
+            for field in dialog.findChildren(QLineEdit)
+            if "radio name" in field.placeholderText().casefold()
+        )
+        radio_name.setText("TriMode Standalone")
+        _enter_trimode_software_step(dialog)
+        arrangement = dialog.findChild(QComboBox, "guidedVaracArrangement")
+        card = dialog.findChild(QGroupBox, "guidedSoftwareResponsibility_varac")
+        next_button = dialog.findChild(QPushButton, "guidedWizardNext")
+        state = dialog.findChild(QLabel, "guidedSoftwarePreparedState_varac")
+        assert arrangement is not None and card is not None
+        assert next_button is not None and state is not None
+        assert arrangement.currentData() == "standalone"
+        assert _wait_until(
+            lambda: card.property("guidedPreparationState") == "warning"
+        ), state.text()
+        assert cluster_writer_calls == []
+        assert arrangement.isVisible() and arrangement.isEnabled()
+        assert card.property("guidedCardExpanded") is True
+        assert "standalone VarAC is selected" in state.text()
+        assert _wait_until(next_button.isEnabled), next_button.toolTip()
+        draft = getattr(dialog, "_guided_software_instance_drafts", {})["varac"]
+        assert draft["cluster_path"] == "standalone"
+        assert draft["varac_native_presentation"]["state"] == "standalone_ready"
+        assert draft["varac_native_presentation"]["writer_required"] is False
+        for step_id in ("connection", "guard", "schedule", "review"):
+            step = dialog.findChild(QPushButton, f"guidedWizardStep_{step_id}")
+            assert step is not None and step.isEnabled(), step_id
+            step.click()
+            _app().processEvents()
+        footer = dialog.findChild(QDialogButtonBox, "guidedRadioSetupActionFooter")
+        assert footer is not None
+        save = footer.button(QDialogButtonBox.Save)
+        assert save is not None and save.isEnabled(), save.toolTip()
         dialog.reject()
 
     _open_add_radio_dialog(monkeypatch, tmp_path, inspect)
@@ -1343,6 +1446,8 @@ def test_full_trimode_varac_cluster_native_result_controls_continue(
             top_status = dialog.findChild(QLabel, "guidedConfigureAutomaticallyStatus")
             assert state is not None and expected_why in state.text()
             assert top_status is not None and expected_why in top_status.text()
+            assert arrangement.isVisible() and arrangement.isEnabled()
+            assert varac_card.property("guidedCardExpanded") is True
         dialog.reject()
 
     _open_add_radio_dialog(monkeypatch, tmp_path, inspect)

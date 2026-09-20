@@ -25989,6 +25989,7 @@ class SettingsTab(QWidget):
         software_preparation_timer = QTimer(dlg)
         software_preparation_timer.setSingleShot(True)
         software_preparation_timer.setInterval(200)
+        varac_arrangement_label: Optional[QLabel] = None
         varac_arrangement_combo: Optional[QComboBox] = None
         varac_arrangement_hint: Optional[QLabel] = None
         varac_arrangement_presentation: Mapping[str, Any] = {}
@@ -27499,6 +27500,16 @@ class SettingsTab(QWidget):
                                 state_label.setText(
                                     "Ready — FIO prepared the complete VarAC, VARA, file, port, and structured launch bundle. Review Details is optional."
                                 )
+                        elif native_state == "standalone ready" and not bool(
+                            native.get("writer_required", True)
+                        ):
+                            software_detail_buttons[family_key].setText("Review Details (optional)…")
+                            state_label.setText(
+                                "Ready with warning — standalone VarAC is selected. "
+                                "FIO prepared the distinct identity and retained discovered node-local paths; "
+                                "native standalone files remain operator-owned. You may continue or choose "
+                                "Create/Join cluster here."
+                            )
                         elif native_state == "preparing":
                             state_label.setText("Preparing — FIO is deriving the complete VarAC and VARA bundle.")
                         else:
@@ -27607,9 +27618,30 @@ class SettingsTab(QWidget):
                             state_label.text() + "\n" + " · ".join(compact_facts)
                         )
                 card.setProperty("guidedPreparationState", card_state)
+                # VarAC topology is operator intent, not a derived technical
+                # field.  Keep it available when a standalone plan is a
+                # non-blocking warning or when native cluster preparation is
+                # blocked, so the operator can switch to Create/Join without
+                # opening a hidden correction editor.
+                varac_arrangement_actionable = bool(
+                    family_key == "varac"
+                    and selected
+                    and not software_preparation_in_progress
+                    and not varac_native_preparation_in_progress
+                    and card_state in {"needs_choice", "blocked", "warning"}
+                )
+                if family_key == "varac":
+                    for widget in (
+                        varac_arrangement_label,
+                        varac_arrangement_combo,
+                        varac_arrangement_hint,
+                    ):
+                        if widget is not None:
+                            widget.setVisible(varac_arrangement_actionable)
                 card.setProperty(
                     "guidedCardExpanded",
-                    card_state in {"needs_choice", "blocked"},
+                    card_state in {"needs_choice", "blocked"}
+                    or varac_arrangement_actionable,
                 )
             software_responsibility_group.setVisible(selected_count > 0)
 
@@ -27810,6 +27842,19 @@ class SettingsTab(QWidget):
                     varac_arrangement_presentation.get("existing_member_instance_number") or 0
                 ) if creating_cluster else 0,
             )
+            if not cluster_route:
+                # Standalone preparation retains discovered/operator-reviewed
+                # node-local evidence.  It does not invent cluster resources
+                # and never sends this intent through the cluster-only writer.
+                retained.update(
+                    configuration_path=str(state.get("varac_ini_path") or ""),
+                    storage_path=str(state.get("varac_db_path") or ""),
+                    secondary_storage_path=str(state.get("varac_incoming_path") or ""),
+                    outbox_path=str(state.get("varac_outbox_dir") or ""),
+                    bbs_path=str(state.get("varac_bbs_dir") or ""),
+                    bbs_archive_path=str(state.get("varac_bbs_archive_dir") or ""),
+                    launch_command=str(state.get("varac_launch_cmd") or ""),
+                )
             return retained
 
         def _project_prepared_varac_parent_bundle(
@@ -27955,6 +28000,43 @@ class SettingsTab(QWidget):
             if not use_varac_chk.isChecked():
                 return
             seed = _varac_parent_preparation_seed()
+            arrangement = str(seed.get("cluster_path") or "standalone").strip().lower()
+            if arrangement not in {"create_cluster", "join_cluster"}:
+                # The qualified native writer is intentionally cluster-only.
+                # A standalone node remains a valid, non-mutating identity and
+                # launch plan whose native VarAC files are operator-owned.  Do
+                # not manufacture a one-member cluster or turn that limitation
+                # into an unrecoverable navigation block.
+                varac_native_preparation_in_progress = False
+                seed.update(
+                    native_management_state="operator",
+                    native_configuration_status="operator_action_required",
+                    safety_status="ready_with_warnings",
+                    save_status="ready_with_warnings",
+                    varac_native_presentation={
+                        "state": "standalone_ready",
+                        "why": (
+                            "Standalone VarAC is selected. FIO prepared the distinct radio identity "
+                            "and retained discovered node-local paths; native standalone VarAC files "
+                            "remain operator-owned. Choose Create cluster or Join cluster here to use "
+                            "the qualified native cluster writer."
+                        ),
+                        "writer_qualified": False,
+                        "writer_required": False,
+                        "arrangement": "standalone",
+                    },
+                )
+                retained_raw = getattr(dlg, "_guided_software_instance_drafts", {})
+                setattr(
+                    dlg,
+                    "_guided_software_instance_drafts",
+                    {**dict(retained_raw or {}), "varac": seed},
+                )
+                _update_software_responsibility_cards()
+                _update_guided_app_setup_plan_review()
+                _update_guided_save_review()
+                _apply_guided_wizard_visibility(connection_group.isVisible())
+                return
             fingerprint = native_draft_fingerprint(seed)
             seed["varac_native_presentation"] = {
                 "state": "preparing",
@@ -30746,7 +30828,12 @@ class SettingsTab(QWidget):
                     continue
                 draft = retained.get(family)
                 if isinstance(draft, Mapping):
-                    if family == "varac" and str(draft.get("mode") or "").strip().lower() == "managed":
+                    if (
+                        family == "varac"
+                        and str(draft.get("mode") or "").strip().lower() == "managed"
+                        and str(draft.get("cluster_path") or "standalone").strip().lower()
+                        in {"create_cluster", "join_cluster"}
+                    ):
                         native = draft.get("varac_native_presentation")
                         native = native if isinstance(native, Mapping) else {}
                         if (
@@ -30854,7 +30941,12 @@ class SettingsTab(QWidget):
                 draft = retained.get(family)
                 if not isinstance(draft, Mapping):
                     return False, f"FIO still needs to prepare the {software_family_titles[family]} draft."
-                if family == "varac" and str(draft.get("mode") or "").strip().lower() == "managed":
+                if (
+                    family == "varac"
+                    and str(draft.get("mode") or "").strip().lower() == "managed"
+                    and str(draft.get("cluster_path") or "standalone").strip().lower()
+                    in {"create_cluster", "join_cluster"}
+                ):
                     native = draft.get("varac_native_presentation")
                     native = native if isinstance(native, Mapping) else {}
                     if (
@@ -31828,13 +31920,17 @@ class SettingsTab(QWidget):
             if _js8_app_selected() and (js8_profile_edit.text().strip() or js8_directed_edit.text().strip()):
                 _update_js8_profile_choices(js8_file_profiles)
             managed_recipe_attention = _publish_prepared_managed_instance_drafts()
+            # Publish the discovery context before the VarAC projection.  The
+            # standalone route completes synchronously and renders cards from
+            # inside that projection; without this ordering it would compare
+            # against the prior context and immediately invalidate itself.
+            prepared_software_context = _guided_software_plan_context()
             if (
                 use_varac_chk.isChecked()
                 and str(software_source_combos["varac"].currentData() or "").strip().lower() == "create"
                 and str(software_management_combos["varac"].currentData() or "").strip().lower() == "fio_identity_launch"
             ):
                 _prepare_varac_parent_bundle()
-            prepared_software_context = _guided_software_plan_context()
             review = guided_setup_autofill_review(
                 filled=filled,
                 preserved=preserved,
