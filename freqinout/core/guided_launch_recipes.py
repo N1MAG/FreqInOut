@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import ntpath
+import os
 from pathlib import Path
 import posixpath
 import re
@@ -21,9 +22,11 @@ from typing import Any, Mapping, Sequence
 
 from freqinout.core.js8_storage import (
     js8_application_name,
+    native_managed_rig_name,
     normalize_variant_family,
+    normalize_rig_name,
+    qt_config_path_candidates,
     qt_data_root_candidates,
-    stable_managed_rig_name,
 )
 
 
@@ -46,6 +49,78 @@ def _key(value: object) -> str:
 def _join(root: str, *parts: str) -> str:
     joiner = ntpath if "\\" in root and "/" not in root else posixpath
     return joiner.join(root, *parts)
+
+
+def _native_identity_child(draft: Mapping[str, Any]) -> str:
+    """Return a readable, durable child name for native Fast Light data.
+
+    The Add Radio transaction key is intentionally excluded.  The readable
+    radio label makes the directory recognizable outside FIO while a short
+    suffix from the separately allocated durable application key prevents two
+    same-named radios from colliding.
+    """
+
+    label = re.sub(
+        r"[^A-Za-z0-9_.-]+",
+        "-",
+        _text(draft.get("owner_label") or draft.get("instance_name") or "Radio"),
+    ).strip("-._")[:48] or "Radio"
+    durable_key = _text(draft.get("application_system_key"))
+    suffix = durable_key.rsplit("-", 1)[-1][:8] if durable_key else ""
+    return f"{label}-{suffix}" if suffix else label
+
+
+def _fast_light_native_roots(
+    draft: Mapping[str, Any],
+    *,
+    platform: object | None = None,
+    storage_home: Path | None = None,
+) -> dict[str, str]:
+    """Derive application-native Fast Light roots without probing or writing.
+
+    Explicit reviewed native bases win.  Otherwise FIO uses the conventional
+    FLRig, FLDigi, and NBEMS locations for the platform.  These paths remain
+    usable and discoverable if the operator later stops using FIO.
+    """
+
+    system = str(platform or os.sys.platform or "").strip().casefold()
+    home = Path(storage_home) if storage_home is not None else Path.home()
+    child = _native_identity_child(draft)
+
+    flrig_base = Path(
+        _text(draft.get("flrig_native_base")) or str(home / ".flrig")
+    ).expanduser()
+    fldigi_base = Path(
+        _text(draft.get("fldigi_native_base")) or str(home / ".fldigi")
+    ).expanduser()
+    default_nbems = home / "NBEMS.files" if system in {"windows", "win", "win32", "cygwin"} else home / ".nbems"
+    nbems_base = Path(
+        _text(draft.get("nbems_native_base")) or str(default_nbems)
+    ).expanduser()
+
+    # A reviewed explicit root is retained; normal preparation derives one
+    # collision-resistant child below the familiar application directory.
+    flrig_root = Path(_text(draft.get("flrig_native_root")) or flrig_base / "instances" / child)
+    fldigi_root = Path(_text(draft.get("fldigi_native_root")) or fldigi_base / "instances" / child)
+    flmsg_root = Path(_text(draft.get("flmsg_native_root")) or nbems_base / "instances" / child)
+    flamp_receive = Path(
+        _text(draft.get("flamp_receive_path")) or nbems_base / "FLAMP" / "rx"
+    )
+    flamp_outgoing = Path(
+        _text(draft.get("flamp_outgoing_path")) or nbems_base / "FLAMP" / "tx"
+    )
+    return {
+        "flrig_root": str(flrig_root),
+        "fldigi_root": str(fldigi_root),
+        "fldigi_logs": str(fldigi_root / "logs"),
+        "flmsg_root": str(flmsg_root),
+        "flmsg_messages": str(flmsg_root / "ICS" / "messages"),
+        "flmsg_templates": str(flmsg_root / "ICS" / "templates"),
+        "flmsg_auto": str(flmsg_root / "WRAP" / "auto"),
+        "flamp_receive": str(flamp_receive),
+        "flamp_outgoing": str(flamp_outgoing),
+        "nbems_base": str(nbems_base),
+    }
 
 
 def _command_text(values: Sequence[str]) -> str:
@@ -392,12 +467,6 @@ def resolve_js8_managed_recipe(
             "FIO could not allocate a distinct JS8Call identity. Return to Identity and prepare again.",
             code="missing_distinct_identity",
         )
-    if not _text(managed_root):
-        return _safety_block(
-            "js8call",
-            "FIO's managed-instance root is unavailable. Return to Settings and reopen this setup before continuing.",
-            code="missing_managed_root",
-        )
     collision = _collision_detail(draft, instance_key)
     if collision is not None:
         code, detail = collision
@@ -416,18 +485,31 @@ def resolve_js8_managed_recipe(
         executable and (variant not in _KNOWN_JS8_VERSIONS or not known_variant_hint)
     )
     radio_name = _text(draft.get("owner_label") or draft.get("instance_name") or "Radio")
-    rig_name = stable_managed_rig_name(system_key=instance_key, name=radio_name)
-    root = _join(_text(managed_root), instance_key, "js8call")
-    profile_root = root
-    save_root = _join(root, "save")
-    forms_root = _join(root, "forms")
+    try:
+        rig_name = normalize_rig_name(draft.get("rig_name")) or native_managed_rig_name(radio_name)
+    except ValueError:
+        return _safety_block(
+            "js8call",
+            "The reviewed JS8Call rig name contains a slash, backslash, or comma. Return to Identity and choose a valid distinct name.",
+            code="invalid_rig_name",
+        )
+    application_name = js8_application_name(rig_name)
     data_root = str(
         qt_data_root_candidates(
-            application_name=js8_application_name(rig_name),
+            application_name=application_name,
             platform=platform,
             home=storage_home,
         )[0]
     )
+    profile_path = str(
+        qt_config_path_candidates(
+            application_name=application_name,
+            platform=platform,
+            home=storage_home,
+        )[0]
+    )
+    save_root = _join(data_root, "save")
+    forms_root = _join(data_root, "forms")
     host = _text(draft.get("host")) or "127.0.0.1"
     tcp_port = _safe_port(draft.get("port"))
     udp_port = _safe_port(draft.get("udp_port"))
@@ -476,15 +558,15 @@ def resolve_js8_managed_recipe(
         executable=executable,
         arguments=("--rig-name", rig_name),
         profile_selector=rig_name,
-        working_directory=root,
-        configuration_roots=(profile_root,),
+        working_directory="",
+        configuration_roots=(profile_path,),
         data_roots=(data_root, save_root, forms_root),
         endpoints=(
             {"name": "JS8Call API", "protocol": "tcp", "host": host, "port": tcp_port},
             {"name": "JS8Call UDP", "protocol": "udp", "host": host, "port": udp_port},
         ),
         readiness={"kind": "js8_api", "host": host, "port": tcp_port, "require_api": True},
-        evidence={"executable": executable_evidence, "version": version_evidence, "profile": {"source": "generated", "confidence": "isolated", "root": profile_root}},
+        evidence={"executable": executable_evidence, "version": version_evidence, "profile": {"source": "js8call_qt_native", "confidence": "isolated", "root": profile_path}},
         confidence=confidence,
         execution_scope=_scope(draft),
         launch_at_startup=bool(draft.get("launch_at_startup", False)) and status != "launch_pending",
@@ -497,7 +579,7 @@ def resolve_js8_managed_recipe(
         recovery_action=recovery,
         summary=summary,
         confidence=confidence,
-        evidence={"executable": executable_evidence, "version": version_evidence, "profile_root": profile_root, "data_root": data_root},
+        evidence={"executable": executable_evidence, "version": version_evidence, "profile_root": profile_path, "data_root": data_root},
     )
 
 
@@ -505,6 +587,8 @@ def resolve_fast_light_managed_recipe(
     draft: Mapping[str, Any],
     *,
     managed_root: str,
+    platform: object | None = None,
+    storage_home: Path | None = None,
 ) -> GuidedLaunchRecipeResolution:
     observer = _scope(draft) == "receive_only"
     flrig = _text(draft.get("application_path"))
@@ -516,21 +600,19 @@ def resolve_fast_light_managed_recipe(
             "FIO could not allocate a distinct Fast Light identity. Return to Identity and prepare again.",
             code="missing_distinct_identity",
         )
-    if not _text(managed_root):
-        return _safety_block(
-            "fast_light",
-            "FIO's managed-instance root is unavailable. Return to Settings and reopen this setup before continuing.",
-            code="missing_managed_root",
-        )
     collision = _collision_detail(draft, instance_key)
     if collision is not None:
         code, detail = collision
         return _safety_block("fast_light", detail, code=code)
-    root = _join(_text(managed_root), instance_key, "fast-light")
-    flrig_profile = _join(root, "flrig")
-    fldigi_profile = _join(root, "fldigi")
-    logs = _join(fldigi_profile, "logs")
-    checkins = _join(fldigi_profile, "checkins")
+    native = _fast_light_native_roots(
+        draft,
+        platform=platform,
+        storage_home=storage_home,
+    )
+    flrig_profile = native["flrig_root"]
+    fldigi_profile = native["fldigi_root"]
+    logs = native["fldigi_logs"]
+    checkins = native["flmsg_auto"]
     host = _text(draft.get("host")) or "127.0.0.1"
     flrig_port = _safe_port(draft.get("port"))
     fldigi_port = _safe_port(draft.get("secondary_port"))
@@ -543,7 +625,24 @@ def resolve_fast_light_managed_recipe(
     startup = bool(draft.get("launch_at_startup", False))
     flrig_evidence = _executable_evidence(draft, "flrig", flrig)
     fldigi_evidence = _executable_evidence(draft, "fldigi", fldigi)
-    missing_required = not fldigi or (not observer and not flrig)
+    selected_flmsg = (
+        _truth(draft.get("use_flmsg"))
+        if "use_flmsg" in draft
+        else bool(_text(draft.get("flmsg_application_path")))
+    )
+    selected_flamp = (
+        _truth(draft.get("use_flamp"))
+        if "use_flamp" in draft
+        else bool(_text(draft.get("flamp_application_path")))
+    )
+    flmsg_path = _text(draft.get("flmsg_application_path"))
+    flamp_path = _text(draft.get("flamp_application_path"))
+    missing_required = (
+        not fldigi
+        or (not observer and not flrig)
+        or (selected_flmsg and not flmsg_path)
+        or (selected_flamp and not flamp_path)
+    )
     confidence = "pending" if missing_required else "verified"
     status = "launch_pending" if missing_required else "qualified_managed"
     missing_labels = []
@@ -551,6 +650,10 @@ def resolve_fast_light_managed_recipe(
         missing_labels.append("FLDigi")
     if not observer and not flrig:
         missing_labels.append("FLRig")
+    if selected_flmsg and not flmsg_path:
+        missing_labels.append("FLMsg")
+    if selected_flamp and not flamp_path:
+        missing_labels.append("FLAmp")
     recovery = (
         "Browse for " + " and ".join(missing_labels) + " to enable launch; this isolated Fast Light profile can still be saved."
         if missing_labels
@@ -579,6 +682,7 @@ def resolve_fast_light_managed_recipe(
         "--config-dir", fldigi_profile,
         "--xmlrpc-server-address", host,
         "--xmlrpc-server-port", str(fldigi_port),
+        "--auto-dir", native["flmsg_auto"],
     )
     components.append(
         GuidedLaunchComponent(
@@ -600,21 +704,55 @@ def resolve_fast_light_managed_recipe(
             operator_starts=missing_required,
         )
     )
-    for key, label, path in (
-        ("flmsg", "FLMsg", _text(draft.get("flmsg_application_path"))),
-        ("flamp", "FLAmp", _text(draft.get("flamp_application_path"))),
-    ):
-        if path:
-            components.append(
-                GuidedLaunchComponent(
-                    component_key=key,
-                    label=label,
-                    executable=path,
-                    dependencies=("fldigi",),
-                    execution_scope="station_shared_utility",
-                    launch_at_startup=startup,
-                )
+    if selected_flmsg:
+        components.append(
+            GuidedLaunchComponent(
+                component_key="flmsg",
+                label="FLMsg",
+                executable=flmsg_path,
+                arguments=("--flmsg-dir", native["flmsg_root"], "--auto-dir", native["flmsg_auto"]),
+                working_directory=native["flmsg_root"],
+                dependencies=("fldigi",),
+                profile_selector=native["flmsg_root"],
+                configuration_roots=(native["flmsg_root"],),
+                data_roots=(
+                    native["flmsg_messages"],
+                    native["flmsg_templates"],
+                    native["flmsg_auto"],
+                ),
+                evidence={
+                    "source": "nbems_native_radio_root",
+                    "confidence": "isolated",
+                    "nbems_base": native["nbems_base"],
+                },
+                confidence="pending" if not flmsg_path else "verified",
+                execution_scope=_scope(draft),
+                launch_at_startup=startup and bool(flmsg_path),
+                operator_starts=not bool(flmsg_path),
             )
+        )
+    if selected_flamp:
+        components.append(
+            GuidedLaunchComponent(
+                component_key="flamp",
+                label="FLAmp",
+                executable=flamp_path,
+                dependencies=("fldigi",),
+                data_roots=(native["flamp_receive"], native["flamp_outgoing"]),
+                evidence={
+                    "source": "nbems_station_standard",
+                    "confidence": "shared",
+                    "attribution": "station_shared_limited",
+                },
+                confidence="pending" if not flamp_path else "verified",
+                execution_scope="station_shared_utility",
+                # This FLAmp family has no universally qualified native-root
+                # selector.  Persist and monitor the shared standard paths,
+                # but do not imply isolated automatic launch.
+                launch_at_startup=False,
+                operator_starts=True,
+            )
+        )
     return GuidedLaunchRecipeResolution(
         family_key="fast_light",
         status=status,
@@ -637,6 +775,13 @@ def resolve_fast_light_managed_recipe(
             "fldigi_root": fldigi_profile,
             "logs_root": logs,
             "checkins_root": checkins,
+            "flmsg_root": native["flmsg_root"],
+            "flmsg_messages": native["flmsg_messages"],
+            "flmsg_templates": native["flmsg_templates"],
+            "flmsg_auto": native["flmsg_auto"],
+            "flamp_receive": native["flamp_receive"],
+            "flamp_outgoing": native["flamp_outgoing"],
+            "native_layout": "application_standard",
         },
     )
 
@@ -665,7 +810,12 @@ def resolve_guided_launch_recipe(
             storage_home=storage_home,
         )
     if family == "fast_light":
-        return resolve_fast_light_managed_recipe(draft, managed_root=managed_root)
+        return resolve_fast_light_managed_recipe(
+            draft,
+            managed_root=managed_root,
+            platform=platform,
+            storage_home=storage_home,
+        )
     return GuidedLaunchRecipeResolution(
         family_key=family,
         status="incomplete",
@@ -744,6 +894,60 @@ def recipe_draft_updates(resolution: GuidedLaunchRecipeResolution) -> dict[str, 
                     key: component.working_directory
                     for key, component in by_key.items()
                 },
+            )
+        claims: list[dict[str, Any]] = []
+        claim_names = {
+            "flrig": (("flrig_configuration", 0, True),),
+            "fldigi": (
+                ("fldigi_configuration", 0, True),
+                ("fldigi_logs", 0, True),
+                ("fldigi_checkins", 1, True),
+            ),
+            "flmsg": (
+                ("flmsg_root", 0, True),
+                ("flmsg_messages", 0, True),
+                ("flmsg_templates", 1, True),
+                ("flmsg_auto", 2, True),
+            ),
+            "flamp": (
+                ("flamp_receive", 0, False),
+                ("flamp_outgoing", 1, False),
+            ),
+        }
+        for component_key, component in by_key.items():
+            if component.executable and component_key in {"flmsg", "flamp"}:
+                claims.append(
+                    {
+                        "kind": f"{component_key}_application",
+                        "value": component.executable,
+                        "exclusive": False,
+                    }
+                )
+            for kind, index, exclusive in claim_names.get(component_key, ()):
+                roots = component.configuration_roots if "configuration" in kind or kind == "flmsg_root" else component.data_roots
+                if index < len(roots) and roots[index]:
+                    claims.append({"kind": kind, "value": roots[index], "exclusive": exclusive})
+        updates["resource_claims"] = claims
+        updates["ports"] = [
+            dict(endpoint)
+            for component in by_key.values()
+            for endpoint in component.endpoints
+        ]
+        flmsg = by_key.get("flmsg")
+        if flmsg is not None:
+            updates.update(
+                flmsg_application_path=flmsg.executable,
+                flmsg_native_root=flmsg.configuration_roots[0],
+                flmsg_message_path=flmsg.data_roots[0],
+                flmsg_templates_path=flmsg.data_roots[1],
+                flmsg_auto_path=flmsg.data_roots[2],
+            )
+        flamp = by_key.get("flamp")
+        if flamp is not None:
+            updates.update(
+                flamp_application_path=flamp.executable,
+                flamp_receive_path=flamp.data_roots[0],
+                flamp_outgoing_path=flamp.data_roots[1],
             )
     return updates
 

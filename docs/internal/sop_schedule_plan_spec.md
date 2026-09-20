@@ -341,6 +341,13 @@ Required behavior:
   - source actions: new, save/update, rename, delete, import/export
   - editable schedule table
   - reusable row library
+- `New Schedule` has one identical draft contract in HF Daily and HF Nets:
+  it detaches from every saved source and clears all schedule rows. If the
+  operator typed a name before clicking New, that draft name is preserved; if
+  New is clicked first, the empty name field remains editable. Selecting a
+  saved source and clicking New does not copy the saved source name or rows.
+  Unsaved row edits receive the existing discard confirmation before the blank
+  draft replaces them.
 - Net schedule names are first-class source identities, not metadata below the
   table.
 

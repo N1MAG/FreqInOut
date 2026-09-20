@@ -50,13 +50,15 @@ def test_js8_variants_have_platform_managed_roots_and_dual_protocol_identity(
         js8call_path="/opt/js8call",
     )
     assert len(plans) == 2
-    assert len({p.config_dir for p in plans}) == 2
+    assert len({p.settings_path for p in plans}) == 2
     assert len({p.application_data_root for p in plans}) == 2
     assert len({p.rig_name for p in plans}) == 2
     assert len({(p.tcp_host, p.tcp_port) for p in plans}) == 2
     assert len({(p.tcp_host, p.udp_port) for p in plans}) == 2
     for plan in plans:
-        assert plan.config_dir.parent.parent.name == "managed-instances"
+        assert plan.settings_path.parent == plan.config_dir
+        assert plan.settings_path.name == f"{plan.application_name}.ini"
+        assert "managed-instances" not in str(plan.settings_path)
         assert plan.settings["TCPServerPort"] == str(plan.tcp_port)
         assert plan.settings["UDPServerPort"] == str(plan.udp_port)
         assert plan.settings["SaveDir"] == str(plan.save_dir)

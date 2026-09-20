@@ -184,6 +184,29 @@ def test_observer_sdrpp_and_js8_keep_receive_only_identity() -> None:
     assert plan.instances[1].rig_name
 
 
+def test_js8_launch_uses_persisted_reviewed_rig_identity_not_system_key() -> None:
+    profile = {
+        **_profile(),
+        "js8_instance_system_key": "js8call-ft-710-opaque-db-key",
+        "js8_instance_name": "FT-710",
+        "js8_rig_name": "FT-710",
+        "js8_message_storage_root": "/operator/.local/share/JS8Call - FT-710",
+    }
+    item = _item("JS8Call", "js8:ft-710", path="/usr/bin/js8call-subspace")
+
+    plan = StationLaunchPlanner().plan_startup(
+        [profile],
+        {1: {"launch_enabled": True, "items": [item]}},
+    )
+
+    instance = plan.instances[0]
+    assert instance.rig_name == "FT-710"
+    assert instance.rig_name_source == "persisted"
+    assert instance.launch_arguments == ("--rig-name", "FT-710")
+    assert instance.application_data_root == "/operator/.local/share/JS8Call - FT-710"
+    assert "opaque-db-key" not in " ".join(instance.effective_command)
+
+
 def test_varac_exact_command_and_working_directory_reach_execution_preview() -> None:
     profile = _profile()
     command = 'wine "/opt/VarAC A/VarAC.exe" --profile "Node A"'

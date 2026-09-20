@@ -468,14 +468,22 @@ class StationLaunchPlanner:
             if rig_name:
                 rig_source = "command_override"
         if not rig_name:
+            stored_rig = str(profile.get("js8_rig_name", profile.get("rig_name", "")) or "").strip()
             system_key = str(profile.get("js8_instance_system_key", "") or "").strip()
             instance_name = str(profile.get("js8_instance_name", "") or "").strip()
-            if not system_key and not instance_name:
+            if stored_rig:
+                rig_name = normalize_rig_name(stored_rig)
+                rig_source = "persisted"
+            elif not system_key and not instance_name:
                 raise ValueError(
                     "JS8Call requires a persisted instance system key or name to generate a stable rig name."
                 )
-            rig_name = stable_managed_rig_name(system_key=system_key, name=instance_name)
-            rig_source = "managed"
+            else:
+                # Compatibility fallback for old rows that predate an explicit
+                # persisted rig identity.  New guided instances always persist
+                # the reviewed radio-derived rig name.
+                rig_name = stable_managed_rig_name(system_key=system_key, name=instance_name)
+                rig_source = "legacy_managed_fallback"
             launch_arguments = ("--rig-name", rig_name)
         storage_values = {
             **dict(profile),

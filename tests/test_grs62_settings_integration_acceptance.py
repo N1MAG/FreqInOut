@@ -36,11 +36,13 @@ def _js8_draft(**updates: object) -> dict[str, object]:
     return draft
 
 
-def test_blank_managed_root_fails_closed_for_js8_and_fast_light() -> None:
+def test_js8_and_fast_light_use_native_roots_without_a_private_managed_root(tmp_path: Path) -> None:
     js8 = resolve_js8_managed_recipe(_js8_draft(), managed_root="")
     fast = resolve_fast_light_managed_recipe(
         {
             "draft_instance_key": "fast-key",
+            "application_system_key": "fast-light-instance-native123456",
+            "owner_label": "Radio A",
             "radio_role": "tx_rx",
             "application_path": "/opt/flrig",
             "secondary_application_path": "/opt/fldigi",
@@ -48,13 +50,14 @@ def test_blank_managed_root_fails_closed_for_js8_and_fast_light() -> None:
             "secondary_port": 7363,
         },
         managed_root="   ",
+        platform="linux",
+        storage_home=tmp_path / "home",
     )
-    # Missing the managed root is an unresolved destructive-path risk, not an
-    # unsupported application family.  The canonical guided status therefore
-    # uses the GRS-9/GRS-10 safety boundary for both recipes.
-    assert js8.status == fast.status == "blocked_for_safety"
-    assert not js8.components and not fast.components
-    assert "managed-instance root" in js8.recovery_action
+    assert js8.qualified and js8.components
+    assert "stable-key" not in js8.components[0].configuration_roots[0]
+    assert fast.qualified and fast.components
+    assert all("managed-instances" not in root for item in fast.components for root in item.configuration_roots)
+    assert fast.components[0].configuration_roots[0].startswith(str(tmp_path / "home" / ".flrig"))
 
 
 @pytest.mark.parametrize(
@@ -79,21 +82,25 @@ def test_recipe_roots_align_with_platform_profile_builder_and_canonical_versions
         storage_home=tmp_path / "home",
     )[0]
     component = resolution.components[0]
-    assert component.configuration_roots[0] == str(built.config_dir)
+    assert component.configuration_roots[0] == str(built.settings_path)
     assert component.data_roots[1] == str(built.save_dir)
     assert component.data_roots[2] == str(built.forms_dir)
     assert component.data_roots[0] == str(built.application_data_root)
     assert component.effective_command[2] == built.rig_name
 
 
-def test_settings_standalone_native_plan_prefers_draft_instance_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_settings_native_plan_keeps_draft_key_internal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(settings_tab, "get_config_dir", lambda: tmp_path)
     plan = settings_tab.SettingsTab._native_plan_for_software_instance_payload(
         _js8_draft(), {"name": "Radio A", "device_class": "tx_rx"}
     )
     assert plan is not None and plan.actions
     assert all(action.instance_name == "stable-key" for action in plan.actions)
-    assert all("stable-key" in action.target or "stable-key" in str(action.details) for action in plan.actions)
+    assert all("stable-key" not in action.target for action in plan.actions)
+    assert all("stable-key" not in str(action.details) for action in plan.actions)
+    writer_actions = [action for action in plan.actions if action.action_type == "update_js8_multisettings"]
+    assert len(writer_actions) == 1
+    assert "JS8Call - Radio-A" in str(writer_actions[0].details)
 
 
 def test_software_workspace_routes_its_settings_managed_root_into_assistant() -> None:

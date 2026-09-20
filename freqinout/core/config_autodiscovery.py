@@ -634,12 +634,13 @@ def default_js8call_ini_paths(
         for env_key in ("LOCALAPPDATA", "APPDATA"):
             raw = str(os.environ.get(env_key, "") or "").strip()
             if raw:
-                directory = Path(raw) / "JS8Call"
-                env_paths.extend(_js8call_ini_name_candidates(directory))
-                env_paths.extend(_js8call_named_ini_files(directory))
-        home_directory = user_home / "AppData" / "Local" / "JS8Call"
-        env_paths.extend(_js8call_ini_name_candidates(home_directory))
-        env_paths.extend(_js8call_named_ini_files(home_directory))
+                for directory in (Path(raw), Path(raw) / "JS8Call"):
+                    env_paths.extend(_js8call_ini_name_candidates(directory))
+                    env_paths.extend(_js8call_named_ini_files(directory))
+        home_root = user_home / "AppData" / "Local"
+        for directory in (home_root, home_root / "JS8Call"):
+            env_paths.extend(_js8call_ini_name_candidates(directory))
+            env_paths.extend(_js8call_named_ini_files(directory))
         return _unique_paths(env_paths)
     linux_directories = (
         user_home / ".config",

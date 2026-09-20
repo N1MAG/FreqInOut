@@ -95,11 +95,11 @@ SOFTWARE_EDITOR_TASKS: dict[str, dict[str, SoftwareEditorTask]] = {
             F("fldigi_log_path", "FLDigi log folder", "path", browse=True),
             F("fldigi_checkin_dir", "Check-in folder", "path", browse=True),
         )),
-        "flmsg": T("FLMsg", "FLMsg is normally shared; this radio selects the message folder used by its workflow.", (
+        "flmsg": T("FLMsg", "The FLMsg application may be shared; this radio keeps its own native NBEMS workspace and message source.", (
             F("path_flmsg", "FLMsg application", "path", browse=True),
             F("message_paths.flmsg", "ICS messages folder", "path", browse=True),
         )),
-        "flamp_signing": T("FLAmp & Signing", "Configure FLAmp and its receive folder. Signing identities are managed centrally.", (
+        "flamp_signing": T("FLAmp & Signing", "Review the FLAmp application and native receive source. A shared source is labeled honestly; signing identities are managed centrally.", (
             F("path_flamp", "FLAmp application", "path", browse=True),
             F("message_paths.flamp", "FLAMP receive folder", "path", browse=True),
         ), action="message_signing", action_label="Manage signing identities"),
@@ -238,6 +238,7 @@ class SoftwareTaskEditor(QWidget):
         self._state: dict[str, Any] = {}
         self._dirty = False
         self._field_widgets: dict[str, QWidget] = {}
+        self._canonical_identity_managed = False
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -260,6 +261,11 @@ class SoftwareTaskEditor(QWidget):
         self.status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         self.status_label.setAccessibleName("Software task status")
         root.addWidget(self.status_label)
+        self.identity_notice_label = QLabel()
+        self.identity_notice_label.setWordWrap(True)
+        self.identity_notice_label.setAccessibleName("Canonical software identity editing route")
+        self.identity_notice_label.hide()
+        root.addWidget(self.identity_notice_label)
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
@@ -399,6 +405,42 @@ class SoftwareTaskEditor(QWidget):
         self.save_button.setVisible(has_editable_fields)
         self.save_button.setEnabled(self._radio_id is not None and has_editable_fields)
         self._refresh_dirty_label()
+
+    def set_canonical_identity_managed(
+        self,
+        managed: bool,
+        *,
+        identity_key: str = "",
+    ) -> None:
+        """Keep the task projection read-only when a canonical bundle exists.
+
+        The guided instance assistant is the sole editor for a canonical
+        identity because it can update the application row, manifest, launch
+        projection, and identity generation atomically.  Allowing this compact
+        legacy field projection to save independently would create split state.
+        """
+
+        self._canonical_identity_managed = bool(managed)
+        self.form_widget.setEnabled(not self._canonical_identity_managed)
+        self.identity_notice_label.setVisible(self._canonical_identity_managed)
+        if self._canonical_identity_managed:
+            self.identity_notice_label.setText(
+                f"This is the same saved {self._radio_name or 'radio'} software instance reviewed in Add Radio. "
+                "Review it here; use Add software instance… / Replace instance to change "
+                "identity, paths, endpoints, or launch details as one safe transaction."
+            )
+            self.identity_notice_label.setToolTip("")
+            self.discover_button.hide()
+            self.save_button.hide()
+            self.dirty_label.hide()
+        else:
+            task = task_definition(self._family_key, self._task_key)
+            has_editable_fields = bool(
+                task and any(field.kind != "readonly" for field in task.fields)
+            )
+            self.dirty_label.setVisible(has_editable_fields)
+            self.save_button.setVisible(has_editable_fields)
+            self.save_button.setEnabled(self._radio_id is not None and has_editable_fields)
 
     def _add_field(self, field: SoftwareEditorField) -> None:
         value = _value_at(self._state, field.key)

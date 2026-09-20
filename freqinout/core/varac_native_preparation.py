@@ -158,6 +158,9 @@ def prepare_varac_native_configuration(
         else new_member.launch_command[0]
     )
     member_root = new_member.vara_target_runtime_folder.parent
+    managed_directories = tuple(plan.managed_directories)
+    prepared_incoming = managed_directories[0] if managed_directories else member_root / "incoming"
+    prepared_outbox = managed_directories[1] if len(managed_directories) > 1 else member_root / "outbox"
     vara_values = new_member.changes.get("VARAHF_CONFIG", {})
     apply_warning = (
         " VarAC or VARA is currently running; close both applications before final Save so FIO can apply the reviewed files safely."
@@ -185,10 +188,8 @@ def prepare_varac_native_configuration(
         "varac_ini_path": str(new_member.target_path),
         "configuration_path": str(new_member.target_path),
         "storage_path": str(plan.shared_db_path),
-        "secondary_storage_path": str(
-            intent.get("secondary_storage_path") or member_root / "incoming"
-        ),
-        "outbox_path": str(intent.get("outbox_path") or member_root / "outbox"),
+        "secondary_storage_path": str(prepared_incoming),
+        "outbox_path": str(prepared_outbox),
         "bbs_path": str(plan.shared_bbs_path),
         "bbs_archive_path": str(plan.shared_bbs_archive_path),
         "cluster_bbs_path": str(plan.shared_bbs_path),
@@ -357,17 +358,13 @@ def _build_plan(
     elif sender_choice not in {"", "none"}:
         raise ValueError("Choose No email gateway, existing member, or new member before preparing.")
 
-    roots = _minimal_roots(
-        managed_root,
-        source_ini_path.parent,
-        source_executable.parent,
-        source_vara_root,
-        Path(shared_db).expanduser().parent,
-        shared_bbs,
-        shared_bbs_archive,
+    incoming_path, outbox_path = _member_mailbox_paths(
+        draft,
+        profiles=profiles,
+        existing_profile=existing_profile,
+        managed_member_root=managed_member_root,
+        member_label=new_label,
     )
-    incoming_path = Path(str(draft.get("secondary_storage_path") or managed_member_root / "incoming")).expanduser()
-    outbox_path = Path(str(draft.get("outbox_path") or managed_member_root / "outbox")).expanduser()
     if _paths_overlap(incoming_path, outbox_path):
         raise ValueError("VarAC incoming and outbox folders must be distinct node-local paths.")
     for local_label, local_path in (("incoming", incoming_path), ("outbox", outbox_path)):
@@ -380,6 +377,17 @@ def _build_plan(
         shared_bbs, shared_bbs_archive
     ):
         raise ValueError("The VarAC BBS archive cannot contain or replace the shared BBS folder.")
+    roots = _minimal_roots(
+        managed_root,
+        source_ini_path.parent,
+        source_executable.parent,
+        source_vara_root,
+        Path(shared_db).expanduser().parent,
+        shared_bbs,
+        shared_bbs_archive,
+        incoming_path,
+        outbox_path,
+    )
     return build_varac_native_cluster_plan(
         VarACNativeClusterRequest(
             version=version,
@@ -627,6 +635,141 @@ def _required_file(value: Any, label: str) -> Path:
 def _slug(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
     return slug or "varac-member"
+
+
+def _member_mailbox_paths(
+    draft: Mapping[str, Any],
+    *,
+    profiles: Sequence[Mapping[str, Any]],
+    existing_profile: Mapping[str, Any] | None,
+    managed_member_root: Path,
+    member_label: str,
+) -> tuple[Path, Path]:
+    """Derive distinct member mailboxes beside the reviewed station mailboxes.
+
+    A new cluster member should stay in the operator's established VarAC data
+    area when the existing member provides that evidence.  These paths remain
+    node-local; only their parent location is inherited.  Explicit reviewed
+    values always win, and a station with no mailbox evidence retains the
+    conservative FIO-managed-root fallback.
+    """
+
+    explicit_incoming = _reviewed_path_override(draft, "secondary_storage_path")
+    explicit_outbox = _reviewed_path_override(draft, "outbox_path")
+    existing_incoming = str(
+        (existing_profile or {}).get("varac_incoming_path")
+        or (existing_profile or {}).get("varac_incoming_dir")
+        or ""
+    ).strip()
+    existing_outbox = str((existing_profile or {}).get("varac_outbox_dir") or "").strip()
+    has_reviewed_mailbox_parent = bool(existing_incoming or existing_outbox)
+
+    incoming_parent = (
+        Path(existing_incoming).expanduser().parent
+        if existing_incoming
+        else Path(existing_outbox).expanduser().parent
+        if existing_outbox
+        else managed_member_root
+    )
+    outbox_parent = (
+        Path(existing_outbox).expanduser().parent
+        if existing_outbox
+        else Path(existing_incoming).expanduser().parent
+        if existing_incoming
+        else managed_member_root
+    )
+    label = _filesystem_label(member_label)
+    occupied = _profile_mailbox_paths(profiles)
+
+    if not explicit_incoming and not explicit_outbox and has_reviewed_mailbox_parent:
+        return _next_available_mailbox_pair(
+            incoming_parent,
+            outbox_parent,
+            label,
+            occupied,
+        )
+
+    if explicit_incoming:
+        incoming = Path(explicit_incoming).expanduser()
+    elif has_reviewed_mailbox_parent:
+        incoming = _next_available_mailbox_path(incoming_parent, label, "In", occupied)
+    else:
+        incoming = managed_member_root / "incoming"
+    occupied.append(incoming)
+    if explicit_outbox:
+        outbox = Path(explicit_outbox).expanduser()
+    elif has_reviewed_mailbox_parent:
+        outbox = _next_available_mailbox_path(outbox_parent, label, "Out", occupied)
+    else:
+        outbox = managed_member_root / "outbox"
+    return incoming, outbox
+
+
+def _filesystem_label(value: str) -> str:
+    label = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "-", str(value or "").strip())
+    label = re.sub(r"\s+", "-", label).strip(" .-")
+    return label or "VarAC-Member"
+
+
+def _reviewed_path_override(draft: Mapping[str, Any], key: str) -> str:
+    """Return an operator correction, not a value published by an older plan."""
+
+    value = str(draft.get(key) or "").strip()
+    presentation = draft.get("varac_native_presentation")
+    generated = (
+        str(presentation.get(key) or "").strip()
+        if isinstance(presentation, Mapping)
+        else ""
+    )
+    return "" if value and generated and value == generated else value
+
+
+def _profile_mailbox_paths(profiles: Sequence[Mapping[str, Any]]) -> list[Path]:
+    paths: list[Path] = []
+    for profile in profiles:
+        for key in ("varac_incoming_path", "varac_incoming_dir", "varac_outbox_dir"):
+            value = str(profile.get(key) or "").strip()
+            if value:
+                candidate = Path(value).expanduser()
+                if candidate not in paths:
+                    paths.append(candidate)
+    return paths
+
+
+def _next_available_mailbox_path(
+    parent: Path,
+    label: str,
+    suffix: str,
+    occupied: Sequence[Path],
+) -> Path:
+    attempt = 1
+    while True:
+        numbered = label if attempt == 1 else f"{label}-{attempt}"
+        candidate = Path(parent).expanduser() / f"{numbered}_{suffix}"
+        if not any(_paths_overlap(candidate, current) for current in occupied):
+            return candidate
+        attempt += 1
+
+
+def _next_available_mailbox_pair(
+    incoming_parent: Path,
+    outbox_parent: Path,
+    label: str,
+    occupied: Sequence[Path],
+) -> tuple[Path, Path]:
+    attempt = 1
+    while True:
+        numbered = label if attempt == 1 else f"{label}-{attempt}"
+        incoming = Path(incoming_parent).expanduser() / f"{numbered}_In"
+        outbox = Path(outbox_parent).expanduser() / f"{numbered}_Out"
+        candidates = (incoming, outbox)
+        if not _paths_overlap(incoming, outbox) and not any(
+            _paths_overlap(candidate, current)
+            for candidate in candidates
+            for current in occupied
+        ):
+            return candidates
+        attempt += 1
 
 
 def _minimal_roots(*paths: Path) -> tuple[Path, ...]:

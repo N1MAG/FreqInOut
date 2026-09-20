@@ -132,7 +132,11 @@ def test_unsaved_radio_owner_uses_authoritative_assistant_without_fake_radio_id(
         assert assistant.radio_combo.isEnabled() is False
         assert "inactive setup draft" in assistant.radio_combo.currentText()
         assert "radio_required" not in {finding.code for finding in assistant.validation()}
-        assert draft.payload()["owner_draft_key"] == "guided-radio-draft-7"
+        payload = draft.payload()
+        assert payload["owner_draft_key"] == "guided-radio-draft-7"
+        assert payload["application_system_key"].startswith("js8call-instance-")
+        assert payload["instance_key"] == f"js8call:{payload['application_system_key']}"
+        assert payload["draft_instance_key"] not in payload["instance_key"]
     finally:
         assistant.deleteLater()
         app.processEvents()

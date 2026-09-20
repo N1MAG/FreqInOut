@@ -13,6 +13,22 @@ production-shaped gates also pass. Release remains blocked on the repeated
 operator-assisted live route in
 `guided_radio_software_configuration_spec.md`.
 
+GRS-13 in `guided_radio_software_configuration_spec.md` is the controlling
+contract for application-native directory placement, existing-station
+adaptation, radio/station ownership, operating-group context/ACL subjects,
+canonical persistence,
+FLMsg/FLAmp multi-instance behavior, message intake/publication, NAS use, and
+stable launch. Earlier MIS language that conflicts with GRS-13 is superseded.
+GRS-13.4 specifically requires a selected Fast Light component's executable,
+native resources, launch facts, ownership, and radio binding to survive Add
+Radio Final Save and reload here as one exact bundle. Software Administration
+must never show blank FLMsg/FLAmp fields or draft-private FLDigi paths when the
+reviewed Add Radio recipe contained their final values.
+The selected component set is persisted separately from discovery evidence:
+finding an executable cannot select an application, and failure to find a
+selected executable retains that component as launch-pending with one recovery
+action rather than deleting it from this workspace.
+
 Governing delivery contract: `project_delivery_rules.md`
 
 Governing product/UI contract: `multirig_product_ui_contract.md`
@@ -31,6 +47,18 @@ sequencing, prepared-plan presentation, and its conditional VarAC-arrangement
 matrix. Both surfaces use the same inventory, proposal, assistant, and atomic
 persistence core. An Add Radio handoff arrives here with its prepared immutable
 plan intact; it does not restart as a blank administration task.
+
+Identity parity is literal, not merely similar presentation. Add Radio's
+embedded software editor and Review carry every selected receiver/SDR++,
+JS8Call, Fast Light component, VarAC/VARA component, FIO Spotter binding,
+external JS8Spotter identity, and CommStat service/binding ID. After final Save,
+standalone Software Administration must show those same IDs, owners, paths,
+endpoints, structured launch facts, and fingerprint after reload. Its compact
+task fields are read-only when backed by a canonical identity; **Add software
+instance… / Replace instance** is the authoritative edit route and updates the
+application row, manifest, launch projection, radio binding, and canonical
+generation in one transaction. A compact task Save must never patch one of
+those projections independently.
 
 ## Product Outcome
 
@@ -56,10 +84,11 @@ The operator must be able to understand, before applying anything:
 
 This work is additive and non-destructive. Discovery never writes. Importing an
 existing instance never rewrites its external configuration. `FIO-managed`
-means FIO owns the durable instance identity and launch recipe; it does not mean
-FIO owns a third-party application's native settings. This assistant invokes no
-external configuration writer. Any future writer requires an explicit review,
-backup, apply, and readback-verification contract.
+means FIO stewards the qualified durable identity, native layout, launch recipe,
+monitoring, and reconciliation without hiding operator data or creating FIO
+lock-in. Draft work invokes no external writer. Final Save may invoke only the
+same application-qualified, reviewed, backup/readback/rollback-capable native
+transaction used by Add Radio under GRS-13.
 
 ## Supported Instance Families
 
@@ -83,9 +112,13 @@ not silently attribute one shared file source to multiple radios.
 
 ### Fast Light
 
-A Fast Light instance is a radio-scoped workflow containing FLRig and FLDigi,
-with FLMsg and FLAmp shared by default unless the operator chooses advanced
-radio-specific paths. A distinct instance requires:
+A Fast Light instance is a radio-scoped workflow containing FLRig and FLDigi.
+The installed FLMsg and FLAmp executables may be station-shared, but their
+runtime/data identity is not implicitly shared. Managed multi-radio FLMsg uses
+a radio-scoped native NBEMS root by default. FLAmp uses a radio-scoped native
+receive identity only when the exact platform/version recipe or an adopted
+existing launcher proves isolation; otherwise its shared/operator-managed
+limitation is explicit. A distinct instance requires:
 
 - unique FLRig and FLDigi control endpoints;
 - distinct native profile/config roots where supported;
@@ -127,7 +160,10 @@ reviewed persistence remains the only mutation boundary.
 
 FIO Spotter is built into FIO. Its station MCF catalog is resolved by FIO and is
 not an external software instance, per-radio launch item, or normal-flow folder
-choice.
+choice. FIO Spotter FLAmp Q and the FIO BBS are station-scoped publication
+services over the canonical Station Message Library. Operating groups may be
+recorded as receipt/filter metadata and used as access-policy subjects, but do
+not own either publication service, its index, or its content.
 
 CommStat is a station-shared service by default. One durable CommStat process
 identity may have multiple bindings, each naming an exact radio-owned JS8
@@ -135,11 +171,17 @@ instance/endpoint and capability scope. Adding a radio creates a binding rather
 than another CommStat process. The launch planner starts the shared identity
 once and never deduplicates distinct radio bindings by process name alone.
 
-## Durable Instance Manifest
+## Durable Canonical Identity And Manifest Projection
 
-Existing application-specific tables remain authoritative for operational
-settings and radio links. An additive software-instance manifest records the
-cross-application lifecycle evidence that those tables do not share:
+One prepared `AtomicInstanceBundle` per selected family becomes one persisted
+`SoftwareIdentityRecord` per selected family inside the radio's generation-
+fenced canonical identity set. That set is authoritative for identity,
+resources, native layout, components, bindings, and launch. Existing
+application-specific tables, radio links, group/service bindings, software-
+instance manifests, and launch rows are transactional projections keyed by the
+canonical bundle/component identities and fingerprint. They are not alternate
+`SoftwareInstanceBundle` authorities. The canonical record and its manifest
+projection together carry cross-application lifecycle evidence:
 
 - `instance_key`: stable FIO identity, never derived from row position;
 - `family_key` and linked application `system_key`;
@@ -152,11 +194,23 @@ cross-application lifecycle evidence that those tables do not share:
 - verification state, summary, evidence, and timestamps;
 - bounded family-specific metadata.
 
-The manifest does not duplicate the radio assignment. The radio profile's
-existing application link remains the source of truth. New runtime instances
+No projection is an independent source of truth. Radio assignment remains an
+explicit required projection for a radio-scoped runtime. New runtime instances
 cannot be created without an owning radio. Historical, imported, replaced, or
 disassociated records may remain unassigned for recovery, but are inactive and
-are not part of the normal creation path.
+are not part of the normal creation path. A missing or mismatched projection is
+`Needs attention` and blocks the affected launch rather than being reconstructed
+from legacy defaults or an adjacent record.
+
+The mapping is exhaustive: Receiver/SDR++, JS8Call, the selected FLRig/FLDigi/
+FLMsg/FLAmp components beneath Fast Light, VarAC/VARA, FIO Spotter, external
+JS8Spotter, and CommStat must all appear after reload with their original
+canonical IDs and fingerprint. `sdrpp` maps explicitly to the Receiver family;
+`external_js8spotter` maps explicitly to External JS8Spotter. FIO Spotter is an
+explicit built-in component/binding. CommStat is the single
+`commstat:station` process identity plus a distinct radio endpoint binding.
+Software Administration may group these for readability, but may not omit,
+rename, infer, duplicate, or independently save them.
 
 All manifest JSON is bounded, versioned, normalized, and free of credentials.
 Additive schema assurance creates missing columns/tables without transforming or
@@ -225,11 +279,12 @@ are first-class resource claims even though they are not TCP ports.
 
 Before Save, the review page lists every durable value and external action.
 
-Validation occurs before mutation. FIO then saves the application record,
-manifest, radio link, optional Cluster VarAC membership, and launch-bundle
-identity as one atomic database operation. A failure rolls the complete change
-back. The current assistant does not modify external files. Any future supported
-external writer must use this staged plan:
+Validation occurs before mutation. FIO then applies any qualified reviewed
+native action and saves the canonical bundle, application projections,
+manifest, radio/group/service bindings, optional Cluster VarAC membership, and
+launch components as one rollback-capable transaction. Every projection is
+reloaded and compared with the accepted bundle before success. Draft Save never
+modifies external files. A supported final native writer uses this staged plan:
 
 1. validate and preview;
 2. back up the explicit target;

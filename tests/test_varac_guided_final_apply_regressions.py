@@ -95,3 +95,125 @@ def test_changed_durable_inventory_before_final_mutation_routes_back_to_review()
     assert state["reviewed"] is reviewed
     assert state["written"] is False
     assert state["retry"] == {"retry_draft": reviewed, "initial_step": "review"}
+
+
+def test_add_radio_queues_plan_builder_only_after_guided_transaction_exits() -> None:
+    events: list[object] = []
+
+    @contextmanager
+    def transaction():
+        events.append("enter")
+        try:
+            yield SimpleNamespace(complete=lambda: events.append("complete"))
+        finally:
+            events.append("exit")
+
+    host = SimpleNamespace()
+    host._varac_native_session_from_guided_profile = SettingsTab._varac_native_session_from_guided_profile
+    host._guided_radio_review_is_current = lambda _payload: True
+    host._complete_add_device_profile_in_transaction = lambda *_args, **_kwargs: (
+        events.append("persist") or True
+    )
+    host._refresh_multi_radio_tables = lambda: events.append("refresh")
+    host._rollback_guided_native_config = lambda _result: events.append("rollback-native")
+    host._rollback_varac_native_session = lambda _session: events.append("rollback-varac")
+    host._complete_varac_native_session = lambda _session: events.append("complete-varac")
+    host._queue_plan_manager_after_guided_profile_save = (
+        lambda profile, **kwargs: events.append(
+            ("queue", dict(profile), kwargs.get("schedule_choice"))
+        )
+    )
+    host._last_persisted_device_profile = {"id": 41, "name": "FT-710"}
+    host.multi_radio_store = SimpleNamespace(guided_save_transaction=transaction)
+
+    SettingsTab._complete_add_device_profile(
+        host,
+        {
+            "guided_open_plan_manager_after_save": True,
+            "guided_schedule_choice": "daily_plus_nets",
+        },
+    )
+
+    assert events == [
+        "enter",
+        "persist",
+        "complete",
+        "exit",
+        ("queue", {"id": 41, "name": "FT-710"}, "daily_plus_nets"),
+    ]
+
+
+def test_failed_add_radio_save_never_queues_plan_builder() -> None:
+    events: list[str] = []
+
+    @contextmanager
+    def transaction():
+        events.append("enter")
+        try:
+            yield SimpleNamespace(complete=lambda: events.append("complete"))
+        finally:
+            events.append("exit")
+
+    host = SimpleNamespace()
+    host._varac_native_session_from_guided_profile = SettingsTab._varac_native_session_from_guided_profile
+    host._guided_radio_review_is_current = lambda _payload: True
+    host._complete_add_device_profile_in_transaction = lambda *_args, **_kwargs: False
+    host._refresh_multi_radio_tables = lambda: events.append("refresh")
+    host._rollback_guided_native_config = lambda _result: None
+    host._rollback_varac_native_session = lambda _session: None
+    host._queue_plan_manager_after_guided_profile_save = lambda *_args, **_kwargs: events.append("queue")
+    host.multi_radio_store = SimpleNamespace(guided_save_transaction=transaction)
+
+    SettingsTab._complete_add_device_profile(
+        host,
+        {"guided_open_plan_manager_after_save": True},
+    )
+
+    assert events == ["enter", "exit", "refresh"]
+
+
+def test_edit_radio_queues_plan_builder_only_after_guided_transaction_exits() -> None:
+    events: list[object] = []
+
+    @contextmanager
+    def transaction():
+        events.append("enter")
+        try:
+            yield SimpleNamespace(complete=lambda: events.append("complete"))
+        finally:
+            events.append("exit")
+
+    host = SimpleNamespace()
+    host._varac_native_session_from_guided_profile = SettingsTab._varac_native_session_from_guided_profile
+    host._guided_radio_review_is_current = lambda _payload: True
+    host._complete_edit_device_profile_in_transaction = lambda *_args, **_kwargs: (
+        events.append("persist") or True
+    )
+    host._refresh_multi_radio_tables = lambda: events.append("refresh")
+    host._rollback_guided_native_config = lambda _result: events.append("rollback-native")
+    host._rollback_varac_native_session = lambda _session: events.append("rollback-varac")
+    host._complete_varac_native_session = lambda _session: events.append("complete-varac")
+    host._queue_plan_manager_after_guided_profile_save = (
+        lambda profile, **kwargs: events.append(
+            ("queue", dict(profile), kwargs.get("schedule_choice"))
+        )
+    )
+    host._last_persisted_device_profile = {"id": 42, "name": "FTDX-10"}
+    host.multi_radio_store = SimpleNamespace(guided_save_transaction=transaction)
+
+    SettingsTab._complete_edit_device_profile(
+        host,
+        {"id": 42},
+        {
+            "guided_open_plan_manager_after_save": True,
+            "guided_schedule_choice": "daily_plus_nets",
+        },
+    )
+
+    assert events == [
+        "enter",
+        "persist",
+        "complete",
+        "exit",
+        ("queue", {"id": 42, "name": "FTDX-10"}, "daily_plus_nets"),
+    ]

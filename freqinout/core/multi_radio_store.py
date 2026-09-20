@@ -785,6 +785,52 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             "CREATE INDEX IF NOT EXISTS idx_software_manifests_verification ON software_instance_manifests(verification_state)",
         ),
     },
+    "radio_software_identity_sets": {
+        "ddl": """
+        CREATE TABLE IF NOT EXISTS radio_software_identity_sets (
+            radio_profile_id INTEGER PRIMARY KEY,
+            schema_version INTEGER NOT NULL DEFAULT 1,
+            generation INTEGER NOT NULL DEFAULT 0,
+            updated_utc TEXT NOT NULL,
+            FOREIGN KEY(radio_profile_id) REFERENCES device_profiles(id) ON DELETE CASCADE
+        )
+        """,
+        "columns": {
+            "schema_version": "INTEGER NOT NULL DEFAULT 1",
+            "generation": "INTEGER NOT NULL DEFAULT 0",
+            "updated_utc": "TEXT NOT NULL DEFAULT ''",
+        },
+        "indexes": (),
+    },
+    "radio_software_identity_records": {
+        "ddl": """
+        CREATE TABLE IF NOT EXISTS radio_software_identity_records (
+            radio_profile_id INTEGER NOT NULL,
+            family_key TEXT NOT NULL,
+            identity_key TEXT NOT NULL,
+            bundle_id TEXT NOT NULL,
+            display_order INTEGER NOT NULL DEFAULT 0,
+            fingerprint TEXT NOT NULL,
+            record_json TEXT NOT NULL,
+            updated_utc TEXT NOT NULL,
+            PRIMARY KEY(radio_profile_id, family_key),
+            UNIQUE(radio_profile_id, identity_key),
+            FOREIGN KEY(radio_profile_id) REFERENCES device_profiles(id) ON DELETE CASCADE
+        )
+        """,
+        "columns": {
+            "identity_key": "TEXT NOT NULL DEFAULT ''",
+            "bundle_id": "TEXT NOT NULL DEFAULT ''",
+            "display_order": "INTEGER NOT NULL DEFAULT 0",
+            "fingerprint": "TEXT NOT NULL DEFAULT ''",
+            "record_json": "TEXT NOT NULL DEFAULT '{}'",
+            "updated_utc": "TEXT NOT NULL DEFAULT ''",
+        },
+        "indexes": (
+            "CREATE INDEX IF NOT EXISTS idx_radio_software_identity_order ON radio_software_identity_records(radio_profile_id, display_order)",
+            "CREATE INDEX IF NOT EXISTS idx_radio_software_identity_bundle ON radio_software_identity_records(bundle_id)",
+        ),
+    },
     "operating_profiles": {
         "ddl": """
         CREATE TABLE IF NOT EXISTS operating_profiles (
@@ -3691,6 +3737,7 @@ def _sync_station_shared_commstat_binding_conn(
         (radio_id, now_iso),
     )
     readiness = {
+        "kind": "station_process",
         "execution_scope": "station_shared_utility",
         "bound_js8_instance_id": int(js8_instance_id),
         "bound_js8_host": str(js8_row.get("host", "127.0.0.1") or "127.0.0.1"),
@@ -6195,6 +6242,39 @@ class MultiRadioStore:
                 conn.rollback()
                 raise
 
+    def get_radio_launch_bundle(self, radio_profile_id: int) -> Dict[str, Any]:
+        """Return one exact persisted structured launch bundle."""
+
+        radio_id = int(radio_profile_id)
+        with self._connect() as conn:
+            bundle = conn.execute(
+                "SELECT * FROM radio_launch_bundles WHERE radio_profile_id=?",
+                (radio_id,),
+            ).fetchone()
+            rows = conn.execute(
+                "SELECT * FROM radio_launch_bundle_items WHERE radio_profile_id=? "
+                "ORDER BY display_order, instance_key",
+                (radio_id,),
+            ).fetchall()
+        if bundle is None:
+            return {"radio_profile_id": radio_id, "generation": 0, "items": []}
+        items: List[Dict[str, Any]] = []
+        for raw in rows:
+            item = dict(raw)
+            for source, target, fallback in (
+                ("dependencies_json", "dependencies", []),
+                ("readiness_json", "readiness", {}),
+            ):
+                try:
+                    parsed = json.loads(str(item.get(source, "") or ""))
+                except (TypeError, ValueError):
+                    parsed = fallback
+                item[target] = parsed
+            items.append(item)
+        result = dict(bundle)
+        result["items"] = items
+        return result
+
     def get_all_kv_settings(self) -> Dict[str, Any]:
         with self._connect() as conn:
             return _load_kv_settings(conn)
@@ -6361,10 +6441,15 @@ class MultiRadioStore:
             )
         default_use_js8spotter = (existing or {}).get("use_js8spotter")
         if default_use_js8spotter is None:
-            default_use_js8spotter = js8_instance_id is not None or bool(payload.get("spotter_launch_path"))
+            # FIO Spotter is an explicit capability selection.  A JS8Call
+            # assignment or a discovered companion path is evidence for the
+            # chooser, not permission to select the service for the operator.
+            default_use_js8spotter = False
         default_use_commstat = (existing or {}).get("use_commstat")
         if default_use_commstat is None:
-            default_use_commstat = js8_instance_id is not None or bool(payload.get("commstat_launch_path"))
+            # CommStat is likewise explicit.  Do not infer station-service
+            # ownership merely because this radio has a JS8 endpoint.
+            default_use_commstat = False
         default_use_varac = (existing or {}).get("use_varac")
         if default_use_varac is None:
             default_use_varac = varac_node_id is not None
@@ -6908,7 +6993,7 @@ class MultiRadioStore:
             return _resolve_device_profile_links_conn(conn, row)
 
     def list_operating_profiles(self) -> List[Dict[str, Any]]:
-        with self._connect() as conn:
+        with self._connect_readonly() as conn:
             rows = conn.execute("SELECT * FROM operating_profiles ORDER BY id ASC").fetchall()
             return [dict(row) for row in rows]
 
@@ -7493,6 +7578,575 @@ class MultiRadioStore:
             )
             conn.commit()
 
+    def list_radio_software_identity_records(
+        self,
+        radio_profile_id: Optional[int] = None,
+    ) -> tuple[Any, ...]:
+        """Load the exact GRS-13 identity records without legacy reconstruction."""
+
+        from freqinout.core.software_identity_bundle import identity_record_from_mapping
+
+        parameters: tuple[Any, ...] = ()
+        where = ""
+        if radio_profile_id is not None:
+            where = " WHERE radio_profile_id=?"
+            parameters = (int(radio_profile_id),)
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM radio_software_identity_records"
+                + where
+                + " ORDER BY radio_profile_id, display_order, family_key",
+                parameters,
+            ).fetchall()
+        records: List[Any] = []
+        for raw in rows:
+            row = dict(raw)
+            try:
+                payload = json.loads(str(row.get("record_json", "") or ""))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Stored software identity record is not valid JSON.") from exc
+            if not isinstance(payload, Mapping):
+                raise ValueError("Stored software identity record must be a JSON object.")
+            record = identity_record_from_mapping(payload)
+            if (
+                str(row.get("family_key", "") or "") != record.family_key
+                or str(row.get("identity_key", "") or "") != record.identity_key
+                or str(row.get("bundle_id", "") or "") != record.bundle_id
+                or str(row.get("fingerprint", "") or "") != record.fingerprint
+            ):
+                raise ValueError("Stored software identity projection does not match its canonical record.")
+            records.append(record)
+        return tuple(records)
+
+    def radio_software_identity_generation(self, radio_profile_id: int) -> int:
+        """Return the committed canonical identity generation for one radio."""
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT generation FROM radio_software_identity_sets WHERE radio_profile_id=?",
+                (int(radio_profile_id),),
+            ).fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def validate_radio_software_identity_projections(
+        self,
+        radio_profile_id: int,
+    ) -> Dict[str, tuple[str, ...]]:
+        """Compare canonical identities with their persisted app/launch projections.
+
+        This is a bounded settings-database read.  It does not inspect the
+        filesystem, start a process, or contact an endpoint.  A mismatch is
+        evidence for ``Needs attention``; it never rewrites either side.
+        """
+
+        from freqinout.core.software_identity_bundle import identity_record_from_mapping
+
+        radio_id = int(radio_profile_id)
+
+        def _json(value: object, fallback: object) -> object:
+            try:
+                parsed = json.loads(str(value or ""))
+            except (TypeError, ValueError):
+                return fallback
+            return parsed
+
+        def _strings(value: object) -> set[str]:
+            found: set[str] = set()
+            if isinstance(value, Mapping):
+                for item in value.values():
+                    found.update(_strings(item))
+            elif isinstance(value, (tuple, list)):
+                for item in value:
+                    found.update(_strings(item))
+            elif value not in (None, ""):
+                found.add(str(value))
+            return found
+
+        with self._connect_readonly() as conn:
+            profile_row = _record_by_id(conn, "device_profiles", radio_id)
+            if profile_row is None:
+                return {"radio": ("radio profile is missing",)}
+            profile = _resolve_device_profile_links_conn(conn, profile_row)
+            identity_rows = conn.execute(
+                "SELECT family_key, record_json FROM radio_software_identity_records "
+                "WHERE radio_profile_id=? ORDER BY display_order, family_key",
+                (radio_id,),
+            ).fetchall()
+            identity_set_row = conn.execute(
+                "SELECT generation FROM radio_software_identity_sets WHERE radio_profile_id=?",
+                (radio_id,),
+            ).fetchone()
+            manifest_rows = [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM software_instance_manifests ORDER BY instance_key"
+                ).fetchall()
+            ]
+            launch_rows: list[Dict[str, Any]] = []
+            for raw in conn.execute(
+                "SELECT * FROM radio_launch_bundle_items WHERE radio_profile_id=? "
+                "ORDER BY display_order, instance_key",
+                (radio_id,),
+            ).fetchall():
+                row = dict(raw)
+                row["dependencies"] = _json(row.get("dependencies_json"), [])
+                row["readiness"] = _json(row.get("readiness_json"), {})
+                launch_rows.append(row)
+
+        manifest_by_key = {
+            str(row.get("instance_key") or ""): row for row in manifest_rows
+        }
+        issues_by_family: Dict[str, tuple[str, ...]] = {}
+        selected_flags = {
+            "js8call": bool(int(profile.get("use_js8call", 0) or 0)),
+            "fast_light": any(
+                bool(int(profile.get(key, 0) or 0))
+                for key in ("use_flrig", "use_fldigi", "use_flmsg", "use_flamp")
+            ),
+            "varac": bool(int(profile.get("use_varac", 0) or 0)),
+            "fio_spotter": bool(int(profile.get("use_js8spotter", 0) or 0)),
+            "commstat": bool(int(profile.get("use_commstat", 0) or 0)),
+            "external_js8spotter": bool(str(profile.get("spotter_launch_path", "") or "").strip()),
+            "sdrpp": str(profile.get("device_class", "") or "").strip().lower() == "observer",
+        }
+        if identity_set_row is not None and int(identity_set_row[0] or 0) > 0:
+            persisted_families = {str(row[0] or "") for row in identity_rows}
+            for selected_family, selected in selected_flags.items():
+                if selected and selected_family not in persisted_families:
+                    issues_by_family[selected_family] = (
+                        "canonical identity record is missing",
+                    )
+        for raw in identity_rows:
+            family = str(raw[0] or "")
+            try:
+                record = identity_record_from_mapping(json.loads(str(raw[1] or "{}")))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                issues_by_family[family or "unknown"] = ("canonical identity JSON is invalid",)
+                continue
+            family_issues: list[str] = []
+            if not selected_flags.get(record.family_key, True):
+                family_issues.append("radio selection no longer includes this identity")
+            if record.family_key in {"js8call", "fast_light", "varac"}:
+                manifest = manifest_by_key.get(record.bundle_id)
+                if manifest is None:
+                    family_issues.append("software instance manifest is missing")
+                elif str(manifest.get("family_key") or "") != record.family_key:
+                    family_issues.append("software instance manifest family differs")
+            else:
+                manifest = None
+            if manifest is not None:
+                canonical_executable_tokens = {
+                    str(token)
+                    for component in record.components
+                    for token in component.argv
+                    if str(token).strip()
+                }
+                manifest_executable = str(manifest.get("executable_path") or "").strip()
+                if (
+                    manifest_executable
+                    and manifest_executable not in canonical_executable_tokens
+                ):
+                    family_issues.append("application executable differs from its manifest projection")
+                manifest_ports = _json(manifest.get("ports_json"), [])
+                manifest_ports = manifest_ports if isinstance(manifest_ports, list) else []
+
+                def _endpoint_key(value: Mapping[str, Any]) -> tuple[str, str, int]:
+                    try:
+                        port = int(value.get("port") or 0)
+                    except (TypeError, ValueError):
+                        port = 0
+                    return (
+                        re.sub(
+                            r"[^a-z0-9]+",
+                            "-",
+                            str(
+                                value.get("endpoint_key")
+                                or value.get("name")
+                                or ""
+                            ).strip().casefold(),
+                        ).strip("-"),
+                        str(value.get("host") or "127.0.0.1").strip(),
+                        port,
+                    )
+
+                canonical_endpoints = {
+                    _endpoint_key(item) for item in record.endpoints if isinstance(item, Mapping)
+                }
+                projected_endpoints = {
+                    _endpoint_key(item) for item in manifest_ports if isinstance(item, Mapping)
+                }
+                if canonical_endpoints != projected_endpoints:
+                    family_issues.append("application endpoints differ from its manifest projection")
+            component_executable_fields = {
+                "js8call": {"js8call": profile.get("js8_install_path")},
+                "fast_light": {
+                    "flrig": profile.get("flrig_path"),
+                    "fldigi": profile.get("fldigi_path"),
+                    "flmsg": profile.get("flmsg_path"),
+                    "flamp": profile.get("flamp_path"),
+                },
+                "external_js8spotter": {
+                    "external-js8spotter": profile.get("spotter_launch_path")
+                },
+            }.get(record.family_key, {})
+            for component in record.components:
+                if component.component_id not in component_executable_fields:
+                    continue
+                expected_app_executable = str(
+                    component_executable_fields.get(component.component_id) or ""
+                ).strip()
+                canonical_executable = str(component.argv[0] if component.argv else "").strip()
+                if expected_app_executable != canonical_executable:
+                    family_issues.append(
+                        f"application component {component.component_id} executable differs"
+                    )
+            configuration_path = str(record.paths.get("configuration_path", "") or "")
+            data_path = str(record.paths.get("data_path", "") or "")
+            manifest_resource_values: Dict[str, str] = {}
+            if manifest is not None:
+                raw_manifest_resources = _json(
+                    manifest.get("resource_claims_json"),
+                    [],
+                )
+                if isinstance(raw_manifest_resources, list):
+                    manifest_resource_values = {
+                        str(item.get("kind") or "").strip(): str(
+                            item.get("value") or ""
+                        ).strip()
+                        for item in raw_manifest_resources
+                        if isinstance(item, Mapping)
+                        and str(item.get("kind") or "").strip()
+                        and str(item.get("value") or "").strip()
+                    }
+            family_projection_fields = {
+                "js8call": {
+                    "configuration path": (
+                        profile.get("js8_profile_path"),
+                        (manifest or {}).get("configuration_path"),
+                    ),
+                    "data path": (
+                        profile.get("js8_message_storage_root"),
+                        (manifest or {}).get("data_root"),
+                    ),
+                    "message paths": (
+                        profile.get("js8_directed_path"),
+                        profile.get("js8_all_path"),
+                        profile.get("js8_inbox_path"),
+                        profile.get("js8_save_dir"),
+                        profile.get("js8_forms_path"),
+                    ),
+                },
+                "fast_light": {
+                    "configuration path": ((manifest or {}).get("configuration_path"),),
+                    "data path": (
+                        profile.get("fldigi_log_path"),
+                        (manifest or {}).get("data_root"),
+                    ),
+                    "message paths": (
+                        profile.get("fldigi_checkin_dir"),
+                        profile.get("flmsg_message_path"),
+                        profile.get("flamp_message_path"),
+                        manifest_resource_values.get("flmsg_root"),
+                        manifest_resource_values.get("flmsg_messages"),
+                        manifest_resource_values.get("flmsg_templates"),
+                        manifest_resource_values.get("flmsg_auto"),
+                        manifest_resource_values.get("flamp_receive"),
+                        manifest_resource_values.get("flamp_outgoing"),
+                    ),
+                },
+                "varac": {
+                    "configuration path": (
+                        profile.get("varac_ini_path"),
+                        (manifest or {}).get("configuration_path"),
+                    ),
+                    "data path": (
+                        profile.get("varac_db_path"),
+                        (manifest or {}).get("data_root"),
+                    ),
+                    "message paths": (
+                        profile.get("varac_incoming_path"),
+                        profile.get("varac_outbox_dir"),
+                        profile.get("varac_bbs_dir"),
+                        profile.get("varac_bbs_archive_dir"),
+                    ),
+                },
+            }.get(record.family_key, {})
+            for label, canonical_value in (
+                ("configuration path", configuration_path),
+                ("data path", data_path),
+            ):
+                if not canonical_value:
+                    continue
+                projected_values = tuple(
+                    str(value)
+                    for value in family_projection_fields.get(label, ())
+                    if str(value or "").strip()
+                )
+                if not projected_values:
+                    family_issues.append(f"{label} is missing from persisted application data")
+                elif any(value != canonical_value for value in projected_values):
+                    family_issues.append(f"{label} differs from persisted application data")
+            persisted_message_paths = {
+                str(value)
+                for value in family_projection_fields.get("message paths", ())
+                if str(value or "").strip()
+            }
+            for path in record.paths.get("message_paths", ()) or ():
+                if str(path) and str(path) not in persisted_message_paths:
+                    family_issues.append("message path differs from persisted application data")
+                    break
+            for component in record.components:
+                if not component.argv or not str(component.argv[0]).strip():
+                    if not (
+                        bool(component.launch.get("operator_starts", False))
+                        or bool(component.launch.get("built_in", False))
+                        or record.scope == "built_in"
+                    ):
+                        family_issues.append(
+                            f"launch component {component.component_id} executable is missing"
+                        )
+                    continue
+                normalized_id = component.component_id.casefold().replace("_", "-")
+                candidates = [
+                    row
+                    for row in launch_rows
+                    if str(row.get("instance_key") or "").casefold().endswith(
+                        ":" + normalized_id
+                    )
+                    or str(row.get("app_name") or "").casefold().replace(" ", "-")
+                    == normalized_id
+                    or (
+                        record.family_key == "commstat"
+                        and str(row.get("instance_key") or "") == _COMMSTAT_SHARED_INSTANCE_KEY
+                    )
+                    or (
+                        record.family_key == "sdrpp"
+                        and str(row.get("instance_key") or "").startswith("receiver:")
+                    )
+                ]
+                if len(candidates) != 1:
+                    family_issues.append(
+                        f"launch component {component.component_id} is missing or duplicated"
+                    )
+                    continue
+                launch_row = candidates[0]
+                readiness = launch_row.get("readiness")
+                readiness = readiness if isinstance(readiness, Mapping) else {}
+                executable = str(
+                    readiness.get("executable")
+                    or launch_row.get("path_override")
+                    or launch_row.get("command_override")
+                    or ""
+                ).strip()
+                if component.argv[0] and component.argv[0] != executable:
+                    family_issues.append(
+                        f"launch component {component.component_id} executable differs"
+                    )
+                launch_arguments = tuple(
+                    str(item) for item in readiness.get("launch_arguments", ()) or ()
+                )
+                if tuple(component.argv[1:]) != launch_arguments:
+                    family_issues.append(
+                        f"launch component {component.component_id} arguments differ"
+                    )
+                working_directory = str(readiness.get("working_directory") or "").strip()
+                if component.cwd != working_directory:
+                    family_issues.append(
+                        f"launch component {component.component_id} working directory differs"
+                    )
+                persisted_environment = readiness.get("environment", {})
+                if not isinstance(persisted_environment, Mapping):
+                    persisted_environment = {}
+                expected_environment = {
+                    str(key): str(value) for key, value in component.env.items()
+                }
+                actual_environment = {
+                    str(key): str(value) for key, value in persisted_environment.items()
+                }
+                if expected_environment != actual_environment:
+                    family_issues.append(
+                        f"launch component {component.component_id} environment differs"
+                    )
+                expected_dependencies = tuple(
+                    str(item).strip().casefold().replace("_", "-")
+                    for item in component.dependencies
+                    if str(item).strip()
+                )
+                cross_family = record.launch.get("cross_family_dependencies", {})
+                cross_family = cross_family if isinstance(cross_family, Mapping) else {}
+                cross_items = cross_family.get(component.component_id, ())
+                cross_items = cross_items if isinstance(cross_items, (tuple, list)) else ()
+                expected_dependencies += tuple(
+                    str(item.get("family_key") or "").strip().casefold().replace("_", "-")
+                    for item in cross_items
+                    if isinstance(item, Mapping) and str(item.get("family_key") or "").strip()
+                )
+                actual_dependencies = tuple(
+                    str(item).strip().casefold().replace("_", "-")
+                    for item in launch_row.get("dependencies", ()) or ()
+                    if str(item).strip()
+                )
+                if expected_dependencies != actual_dependencies:
+                    family_issues.append(
+                        f"launch component {component.component_id} dependencies differ"
+                    )
+                expected_launch = dict(component.launch)
+                for canonical_key, row_key in (
+                    ("at_startup", "launch_at_startup"),
+                    ("monitor_health", "monitor_health"),
+                ):
+                    if canonical_key in expected_launch and bool(expected_launch[canonical_key]) != bool(
+                        launch_row.get(row_key)
+                    ):
+                        family_issues.append(
+                            f"launch component {component.component_id} policy differs"
+                        )
+                        break
+                for key, expected_value in component.readiness.items():
+                    if key not in readiness or str(readiness.get(key)) != str(expected_value):
+                        family_issues.append(
+                            f"launch component {component.component_id} readiness differs"
+                        )
+                        break
+            if family_issues:
+                issues_by_family[record.family_key] = tuple(dict.fromkeys(family_issues))
+        return issues_by_family
+
+    def save_radio_software_identity_records(
+        self,
+        radio_profile_id: int,
+        records: Iterable[Any],
+        *,
+        expected_generation: Optional[int] = None,
+    ) -> tuple[Any, ...]:
+        """Atomically replace one radio's complete canonical identity set.
+
+        This method participates in ``guided_save_transaction`` when one is
+        active.  No family row is independently patched: omission means the
+        family is no longer selected, and a stale generation rejects the whole
+        replacement.
+        """
+
+        from freqinout.core.software_identity_bundle import (
+            identity_record_from_mapping,
+            identity_record_to_mapping,
+            validate_identity_parity,
+        )
+
+        radio_id = int(radio_profile_id)
+        normalized = tuple(
+            identity_record_from_mapping(identity_record_to_mapping(record))
+            for record in records
+        )
+        family_keys = [record.family_key for record in normalized]
+        identity_keys = [record.identity_key for record in normalized]
+        if len(set(family_keys)) != len(family_keys):
+            raise ValueError("Duplicate software family in one canonical radio identity set.")
+        if len(set(identity_keys)) != len(identity_keys):
+            raise ValueError("Duplicate software identity key in one canonical radio identity set.")
+
+        now_iso = _utc_now_iso()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                profile_row = conn.execute(
+                    "SELECT system_key FROM device_profiles WHERE id=?",
+                    (radio_id,),
+                ).fetchone()
+                if profile_row is None:
+                    raise KeyError(f"Unknown radio profile id: {radio_id}")
+                radio_key = str(profile_row[0] or "").strip()
+                normalized_radio_key = _normalize_system_key(radio_key, "radio")
+                station_families = {"fio_spotter", "commstat"}
+                for record in normalized:
+                    if (
+                        record.family_key not in station_families
+                        and _normalize_system_key(record.owner, "owner") != normalized_radio_key
+                    ):
+                        raise ValueError(
+                            "Radio-scoped software identity owner does not match the target radio."
+                        )
+                    mismatched_bindings = [
+                        binding.binding_id
+                        for binding in record.bindings
+                        if binding.radio_key
+                        and _normalize_system_key(binding.radio_key, "binding")
+                        != normalized_radio_key
+                    ]
+                    if mismatched_bindings:
+                        raise ValueError(
+                            "Software identity binding does not match the target radio: "
+                            + ", ".join(mismatched_bindings)
+                        )
+                generation_row = conn.execute(
+                    "SELECT generation FROM radio_software_identity_sets WHERE radio_profile_id=?",
+                    (radio_id,),
+                ).fetchone()
+                current_generation = int(generation_row[0]) if generation_row is not None else 0
+                if (
+                    expected_generation is not None
+                    and int(expected_generation) != current_generation
+                ):
+                    raise ValueError(
+                        "The software identity draft has a stale generation; refresh and review it again."
+                    )
+                next_generation = current_generation + 1
+                conn.execute(
+                    """
+                    INSERT INTO radio_software_identity_sets
+                        (radio_profile_id, schema_version, generation, updated_utc)
+                    VALUES (?, 1, ?, ?)
+                    ON CONFLICT(radio_profile_id) DO UPDATE SET
+                        schema_version=1,
+                        generation=excluded.generation,
+                        updated_utc=excluded.updated_utc
+                    """,
+                    (radio_id, next_generation, now_iso),
+                )
+                conn.execute(
+                    "DELETE FROM radio_software_identity_records WHERE radio_profile_id=?",
+                    (radio_id,),
+                )
+                for display_order, record in enumerate(normalized):
+                    payload = identity_record_to_mapping(record)
+                    conn.execute(
+                        """
+                        INSERT INTO radio_software_identity_records (
+                            radio_profile_id, family_key, identity_key, bundle_id,
+                            display_order, fingerprint, record_json, updated_utc
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            radio_id,
+                            record.family_key,
+                            record.identity_key,
+                            record.bundle_id,
+                            display_order,
+                            record.fingerprint,
+                            json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                            now_iso,
+                        ),
+                    )
+                rows = conn.execute(
+                    "SELECT record_json FROM radio_software_identity_records "
+                    "WHERE radio_profile_id=? ORDER BY display_order, family_key",
+                    (radio_id,),
+                ).fetchall()
+                reloaded = tuple(
+                    identity_record_from_mapping(json.loads(str(row[0])))
+                    for row in rows
+                )
+                parity_issues = validate_identity_parity(normalized, reloaded)
+                if parity_issues:
+                    raise ValueError(
+                        "Canonical software identity readback failed: " + "; ".join(parity_issues)
+                    )
+                conn.commit()
+                return reloaded
+            except Exception:
+                conn.rollback()
+                raise
+
     def adopt_software_instance(
         self,
         *,
@@ -7693,16 +8347,76 @@ class MultiRadioStore:
                         for item in requested_manifest.get("resource_claims", ()) or ()
                         if isinstance(item, Mapping)
                     }
+                    recipe = requested_evidence.get("launch_recipe", {})
+                    if isinstance(recipe, Mapping):
+                        recipe_claim_specs = {
+                            "flrig": (("flrig_configuration", "configuration_roots", 0),),
+                            "fldigi": (
+                                ("fldigi_configuration", "configuration_roots", 0),
+                                ("fldigi_logs", "data_roots", 0),
+                                ("fldigi_checkins", "data_roots", 1),
+                            ),
+                            "flmsg": (
+                                ("flmsg_root", "configuration_roots", 0),
+                                ("flmsg_messages", "data_roots", 0),
+                                ("flmsg_templates", "data_roots", 1),
+                                ("flmsg_auto", "data_roots", 2),
+                            ),
+                            "flamp": (
+                                ("flamp_receive", "data_roots", 0),
+                                ("flamp_outgoing", "data_roots", 1),
+                            ),
+                        }
+                        for raw_component in recipe.get("components", ()) or ():
+                            if not isinstance(raw_component, Mapping):
+                                continue
+                            component_key = str(
+                                raw_component.get("component_key") or ""
+                            ).strip().lower()
+                            executable = str(raw_component.get("executable") or "").strip()
+                            if executable and component_key in {"flmsg", "flamp"}:
+                                requested_resources.setdefault(
+                                    f"{component_key}_application",
+                                    executable,
+                                )
+                            for kind, root_key, index in recipe_claim_specs.get(component_key, ()):
+                                roots = raw_component.get(root_key, ()) or ()
+                                value = str(roots[index] if index < len(roots) else "").strip()
+                                if value:
+                                    requested_resources.setdefault(kind, value)
+                    exclusive_kinds = {
+                        "flrig_configuration",
+                        "fldigi_configuration",
+                        "fldigi_logs",
+                        "fldigi_checkins",
+                        "flmsg_root",
+                        "flmsg_messages",
+                        "flmsg_templates",
+                        "flmsg_auto",
+                    }
+                    requested_manifest["resource_claims"] = [
+                        {
+                            "kind": kind,
+                            "value": value,
+                            "exclusive": kind in exclusive_kinds,
+                        }
+                        for kind, value in requested_resources.items()
+                        if kind and value
+                    ]
                     flmsg_path = requested_resources.get("flmsg_application", "")
                     flamp_path = requested_resources.get("flamp_application", "")
+                    flmsg_message_path = requested_resources.get("flmsg_messages", "")
+                    flamp_message_path = requested_resources.get("flamp_receive", "")
                     updates = {
                         "fast_light_config_id": int(saved_app["id"]),
-                        "use_flrig": 0 if observer_profile else 1,
-                        "use_fldigi": 1,
+                        "use_flrig": 0 if observer_profile else (1 if str(saved_app.get("flrig_path") or "").strip() else 0),
+                        "use_fldigi": 1 if str(saved_app.get("fldigi_path") or "").strip() else 0,
                         "use_flmsg": 1 if flmsg_path else 0,
                         "use_flamp": 1 if flamp_path else 0,
                         "flmsg_path": flmsg_path,
+                        "flmsg_message_path": flmsg_message_path,
                         "flamp_path": flamp_path,
+                        "flamp_message_path": flamp_message_path,
                         "flrig_host": str(saved_app.get("flrig_host", "127.0.0.1") or "127.0.0.1"),
                         "flrig_port": int(saved_app.get("flrig_port", 12345) or 12345),
                         "fldigi_host": str(saved_app.get("fldigi_host", "127.0.0.1") or "127.0.0.1"),
@@ -8369,12 +9083,16 @@ class MultiRadioStore:
                         "operator_starts": bool(component.get("operator_starts", False)),
                     }
                 )
-                instance_key = f"{manifest_key}:varac"
+                if "launch_at_startup" in component:
+                    readiness["component_launch_at_startup"] = bool(
+                        component.get("launch_at_startup", False)
+                    )
+                instance_key = f"{manifest_key}:{component_key}"
                 recipe_rows.append(
                     (
                         instance_key,
-                        "VarAC",
-                        40,
+                        "VARA" if component_key == "vara" else "VarAC",
+                        35 if component_key == "vara" else 40,
                         "",
                         executable,
                         [str(value) for value in component.get("dependencies", ()) or ()],
@@ -8403,6 +9121,15 @@ class MultiRadioStore:
                         "launch_arguments": [
                             str(value) for value in component.get("arguments", ()) or ()
                         ],
+                        "environment": {
+                            str(key): str(value)
+                            for key, value in (
+                                component.get("environment", {})
+                                if isinstance(component.get("environment", {}), Mapping)
+                                else {}
+                            ).items()
+                            if str(key).strip()
+                        },
                         "effective_command": [
                             str(value) for value in component.get("effective_command", ()) or ()
                         ],
@@ -8425,6 +9152,10 @@ class MultiRadioStore:
                         "operator_starts": bool(component.get("operator_starts", False)),
                     }
                 )
+                if "launch_at_startup" in component:
+                    readiness["component_launch_at_startup"] = bool(
+                        component.get("launch_at_startup", False)
+                    )
                 if scope == RECEIVE_ONLY_EXECUTION_SCOPE:
                     readiness.update(
                         {
@@ -8557,6 +9288,10 @@ class MultiRadioStore:
                 ),
             )
         for instance_key, app_name, order, command_override, path_override, dependencies, readiness in rows:
+            component_autostart = bool(
+                readiness.get("component_launch_at_startup", launch_at_startup)
+            )
+            operator_starts = bool(readiness.get("operator_starts", False))
             conn.execute(
                 """
                 INSERT INTO radio_launch_bundle_items (
@@ -8579,7 +9314,7 @@ class MultiRadioStore:
                     instance_key,
                     app_name,
                     int(order),
-                    1 if launch_at_startup else 0,
+                    1 if launch_at_startup and component_autostart and not operator_starts else 0,
                     command_override,
                     path_override,
                     json.dumps(dependencies, sort_keys=True),
@@ -8588,6 +9323,48 @@ class MultiRadioStore:
                 ),
             )
         if family_key == "js8call":
+            spotter_path = str(saved_app.get("spotter_launch_path", "") or "").strip()
+            if spotter_path:
+                conn.execute(
+                    """
+                    INSERT INTO radio_launch_bundle_items (
+                        radio_profile_id, instance_key, app_name, display_order, enabled,
+                        launch_at_startup, monitor_health, command_override, path_override,
+                        dependencies_json, readiness_json, updated_utc
+                    ) VALUES (?, ?, 'JS8Spotter', 55, 1, ?, 1, '', ?, ?, ?, ?)
+                    ON CONFLICT(radio_profile_id, instance_key) DO UPDATE SET
+                        app_name=excluded.app_name,
+                        display_order=excluded.display_order,
+                        enabled=1,
+                        launch_at_startup=excluded.launch_at_startup,
+                        monitor_health=1,
+                        command_override='',
+                        path_override=excluded.path_override,
+                        dependencies_json=excluded.dependencies_json,
+                        readiness_json=excluded.readiness_json,
+                        updated_utc=excluded.updated_utc
+                    """,
+                    (
+                        int(radio_profile_id),
+                        f"{manifest_key}:external-js8spotter",
+                        1
+                        if bool(raw_evidence.get("external_spotter_launch_at_startup", False))
+                        else 0,
+                        spotter_path,
+                        json.dumps(["JS8Call"]),
+                        json.dumps(
+                            {
+                                "kind": "operator_confirmed",
+                                "execution_scope": "standard",
+                                "operator_starts": False,
+                                "host": str(saved_app.get("host", "127.0.0.1") or "127.0.0.1"),
+                                "port": int(saved_app.get("port", 2442) or 2442),
+                            },
+                            sort_keys=True,
+                        ),
+                        now_iso,
+                    ),
+                )
             _sync_station_shared_commstat_binding_conn(
                 conn,
                 radio_profile_id=int(radio_profile_id),

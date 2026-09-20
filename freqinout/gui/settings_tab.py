@@ -162,6 +162,11 @@ from freqinout.core.guided_radio_autofill import (
     next_default_instance_port,
 )
 from freqinout.core.guided_radio_software_model import RadioRole, SoftwareFamily
+from freqinout.core.software_identity_bundle import (
+    build_guided_identity_records,
+    identity_record_from_mapping,
+    identity_record_to_mapping,
+)
 from freqinout.core.guided_software_discovery import (
     DiscoveryRequest,
     GuidedSoftwareDiscoveryCoordinator,
@@ -9899,6 +9904,8 @@ class SettingsTab(QWidget):
         if bool(int(profile.get("use_commstat", 0) or 0)):
             return "commstat"
         if bool(int(profile.get("use_js8spotter", 0) or 0)):
+            return "fio_spotter"
+        if str(profile.get("spotter_launch_path", "") or "").strip():
             return "external_spotter"
         return "js8call"
 
@@ -10025,6 +10032,10 @@ class SettingsTab(QWidget):
                 status_text=status_text,
                 shared_radio_names=shared_names,
             )
+            editor.set_canonical_identity_managed(
+                bool(assignment and assignment.canonical_identity_key),
+                identity_key=(assignment.canonical_identity_key if assignment else ""),
+            )
             editor.set_dirty(bool(radio_id and (radio_id, family_key) in self._software_dirty_families))
             self._software_task_editors[key] = editor
             workspace.register_task_editor(family_key, task_key, editor, radio_id=radio_id)
@@ -10032,6 +10043,10 @@ class SettingsTab(QWidget):
             editor.set_state(
                 state,
                 dirty=bool(radio_id and (radio_id, family_key) in self._software_dirty_families),
+            )
+            editor.set_canonical_identity_managed(
+                bool(assignment and assignment.canonical_identity_key),
+                identity_key=(assignment.canonical_identity_key if assignment else ""),
             )
         workspace.set_editor_widget(editor)
         self._sync_current_section_scroll_size()
@@ -10206,6 +10221,18 @@ class SettingsTab(QWidget):
         if ident <= 0 or not isinstance(profile, dict) or not family_state_keys(family_key):
             QMessageBox.information(self, "Software Administration", "Select one configured radio and software family to save.")
             return
+        canonical_assignment = self._software_family_assignment(family_key, ident)
+        if canonical_assignment is not None and str(
+            getattr(canonical_assignment, "canonical_identity_key", "") or ""
+        ).strip():
+            QMessageBox.information(
+                self,
+                "Canonical software identity",
+                "This software was configured by Add Radio as one complete identity. "
+                "Use Add software instance… / Replace instance so FIO can update the application, "
+                "profile, endpoints, launch recipe, and Software Administration record together.",
+            )
+            return
         if not self._confirm_shared_software_save(family_key, ident):
             return
         draft = self._software_editor_state(ident)
@@ -10240,6 +10267,22 @@ class SettingsTab(QWidget):
     def _save_all_software_family_drafts(self) -> None:
         dirty = tuple(sorted(self._software_dirty_families))
         if not dirty:
+            return
+        canonical_dirty = tuple(
+            (ident, family_key)
+            for ident, family_key in dirty
+            if (
+                (assignment := self._software_family_assignment(family_key, ident)) is not None
+                and str(getattr(assignment, "canonical_identity_key", "") or "").strip()
+            )
+        )
+        if canonical_dirty:
+            QMessageBox.information(
+                self,
+                "Canonical software identity",
+                "One or more drafts belong to complete Add Radio identities. Use Add software "
+                "instance… / Replace instance for those radios so no partial projection is saved.",
+            )
             return
         for ident, family_key in dirty:
             if not self._confirm_shared_software_save(family_key, ident):
@@ -10355,11 +10398,28 @@ class SettingsTab(QWidget):
         if response != QMessageBox.Yes:
             return
         try:
-            result = self.multi_radio_store.disassociate_software_instance(
-                family_key=family,
-                radio_profile_id=radio_id,
-                expected_current_instance_id=expected_id,
+            identity_generation = self.multi_radio_store.radio_software_identity_generation(
+                radio_id
             )
+            retained_identity_records = tuple(
+                record
+                for record in self.multi_radio_store.list_radio_software_identity_records(
+                    radio_id
+                )
+                if record.family_key != family
+            )
+            with self.multi_radio_store.guided_save_transaction() as transaction:
+                result = self.multi_radio_store.disassociate_software_instance(
+                    family_key=family,
+                    radio_profile_id=radio_id,
+                    expected_current_instance_id=expected_id,
+                )
+                self.multi_radio_store.save_radio_software_identity_records(
+                    radio_id,
+                    retained_identity_records,
+                    expected_generation=identity_generation,
+                )
+                transaction.complete()
         except (ValueError, KeyError) as exc:
             QMessageBox.warning(self, "Disassociate software", str(exc))
             return
@@ -10573,6 +10633,12 @@ class SettingsTab(QWidget):
                         "fldigi_checkins": "secondary_storage_path",
                         "flmsg_application": "flmsg_application_path",
                         "flamp_application": "flamp_application_path",
+                        "flmsg_root": "flmsg_native_root",
+                        "flmsg_messages": "flmsg_message_path",
+                        "flmsg_templates": "flmsg_templates_path",
+                        "flmsg_auto": "flmsg_auto_path",
+                        "flamp_receive": "flamp_receive_path",
+                        "flamp_outgoing": "flamp_outgoing_path",
                         "varac_incoming": "secondary_storage_path",
                         "varac_outbox": "outbox_path",
                         "rig_name": "rig_name",
@@ -11012,6 +11078,25 @@ class SettingsTab(QWidget):
             }
             cluster_instance_number = int(payload.get("cluster_instance_number") or 0) or None
 
+        # Capture the canonical generation and complete retained set before
+        # opening the write transaction.  The instance assistant is the one
+        # Software Administration route allowed to change an Add Radio
+        # identity; a concurrent edit must reject the whole transaction.
+        try:
+            identity_generation = self.multi_radio_store.radio_software_identity_generation(
+                radio_id
+            )
+            retained_identity_records = list(
+                self.multi_radio_store.list_radio_software_identity_records(radio_id)
+            )
+        except Exception:
+            log.exception("Failed loading the canonical software identity before instance save.")
+            workspace.complete_instance_add(
+                success=False,
+                message="The canonical software identity could not be loaded. Nothing was saved.",
+            )
+            return
+
         try:
             with self.multi_radio_store.guided_save_transaction() as transaction:
                 if observer_mode and family == "js8call":
@@ -11066,6 +11151,55 @@ class SettingsTab(QWidget):
                         )
                 if varac_session is not None:
                     mark_varac_native_fio_committed(self.multi_radio_store, varac_session)
+                saved_for_identity = (
+                    result.get("radio")
+                    if isinstance(result, Mapping)
+                    and isinstance(result.get("radio"), Mapping)
+                    else profile
+                )
+                replacement_record = build_guided_identity_records(
+                    saved_for_identity,
+                    {family: payload},
+                    (family,),
+                )[0]
+                next_identity_records = [
+                    record
+                    for record in retained_identity_records
+                    if record.family_key != family
+                ]
+                next_identity_records.append(replacement_record)
+                # CommStat is a station process with a radio-specific JS8
+                # binding.  Updating JS8 must update that binding in the same
+                # canonical generation, never leave a stale endpoint behind.
+                if family == "js8call":
+                    js8_endpoint = (
+                        dict(replacement_record.endpoints[0])
+                        if replacement_record.endpoints
+                        else {}
+                    )
+                    rewritten = []
+                    for record in next_identity_records:
+                        if record.family_key != "commstat":
+                            rewritten.append(record)
+                            continue
+                        mapped = dict(identity_record_to_mapping(record))
+                        mapped["bindings"] = [
+                            {
+                                **dict(binding),
+                                "endpoint": js8_endpoint,
+                            }
+                            if str(binding.get("kind") or "") == "radio-js8-endpoint"
+                            else dict(binding)
+                            for binding in mapped.get("bindings", ())
+                            if isinstance(binding, Mapping)
+                        ]
+                        rewritten.append(identity_record_from_mapping(mapped))
+                    next_identity_records = rewritten
+                self.multi_radio_store.save_radio_software_identity_records(
+                    radio_id,
+                    tuple(next_identity_records),
+                    expected_generation=identity_generation,
+                )
                 transaction.complete()
         except (ValueError, KeyError) as exc:
             self._rollback_guided_native_config(native_result)
@@ -17594,12 +17728,32 @@ class SettingsTab(QWidget):
             fast_light_configs = tuple(self.multi_radio_store.list_fast_light_configs())
             varac_nodes = tuple(self.multi_radio_store.list_varac_nodes())
             manifests = tuple(self.multi_radio_store.list_software_instance_manifests())
+            identity_records = tuple(
+                self.multi_radio_store.list_radio_software_identity_records()
+            )
+            identity_projection_issues: Dict[tuple[int, str], tuple[str, ...]] = {}
+            identity_radio_ids = {
+                int(profile.get("id", 0) or 0)
+                for profile in self.device_profiles
+                if int(profile.get("id", 0) or 0) > 0
+            }
+            for identity_radio_id in identity_radio_ids:
+                for identity_family, issues in (
+                    self.multi_radio_store.validate_radio_software_identity_projections(
+                        identity_radio_id
+                    ).items()
+                ):
+                    identity_projection_issues[(identity_radio_id, identity_family)] = tuple(
+                        str(issue) for issue in issues
+                    )
             snapshot = build_software_administration_snapshot(
                 tuple(self.device_profiles),
                 js8_instances=js8_instances,
                 fast_light_configs=fast_light_configs,
                 varac_nodes=varac_nodes,
                 instance_manifests=manifests,
+                identity_records=identity_records,
+                identity_projection_issues=identity_projection_issues,
             )
         except Exception:
             log.exception("Failed building the software administration snapshot.")
@@ -17608,6 +17762,8 @@ class SettingsTab(QWidget):
             fast_light_configs = ()
             varac_nodes = ()
             manifests = ()
+            identity_records = ()
+            identity_projection_issues = {}
         self._software_administration_snapshot = snapshot
         workspace = getattr(self, "software_administration_workspace", None)
         if isinstance(workspace, SoftwareAdministrationWorkspace):
@@ -24806,6 +24962,20 @@ class SettingsTab(QWidget):
     ) -> Optional[Dict[str, Any]]:
         dlg = QDialog(self)
         profile_seed: Mapping[str, Any] = retry_draft or existing or {}
+        guided_identity_radio_key = str(
+            profile_seed.get("system_key") or f"guided-radio-{uuid.uuid4().hex}"
+        ).strip()
+        try:
+            guided_identity_generation = (
+                self.multi_radio_store.radio_software_identity_generation(
+                    int(profile_seed.get("id", 0) or 0)
+                )
+                if int(profile_seed.get("id", 0) or 0) > 0
+                else 0
+            )
+        except Exception:
+            log.exception("Failed loading the guided software identity generation.")
+            guided_identity_generation = 0
         retry_software_drafts = profile_seed.get("guided_software_instance_drafts", {})
         if isinstance(retry_software_drafts, Mapping):
             setattr(
@@ -27447,6 +27617,13 @@ class SettingsTab(QWidget):
                         == "fio"
                     ),
                 )
+                if family == "fast_light":
+                    draft.update(
+                        use_flrig=bool(use_flrig_chk.isChecked()),
+                        use_fldigi=bool(use_fldigi_chk.isChecked()),
+                        use_flmsg=bool(use_flmsg_chk.isChecked()),
+                        use_flamp=bool(use_flamp_chk.isChecked()),
+                    )
                 if family == "fast_light" and radio_role == "observer":
                     draft.update(application_path="", port=0)
                 resolution = resolve_guided_launch_recipe(
@@ -28038,6 +28215,13 @@ class SettingsTab(QWidget):
                     "owner_label": radio_draft_label,
                     "radio_role": radio_role,
                 }
+                if family == "fast_light":
+                    seed_context.update(
+                        use_flrig=bool(use_flrig_chk.isChecked()),
+                        use_fldigi=bool(use_fldigi_chk.isChecked()),
+                        use_flmsg=bool(use_flmsg_chk.isChecked()),
+                        use_flamp=bool(use_flamp_chk.isChecked()),
+                    )
                 retained_family = (
                     dict(retained[family])
                     if isinstance(retained.get(family), Mapping)
@@ -29366,6 +29550,7 @@ class SettingsTab(QWidget):
             draft_id = int((profile_seed or {}).get("id", 0) or -1)
             return {
                 "id": draft_id,
+                "system_key": guided_identity_radio_key,
                 "name": name_edit.text().strip() or str(model_choice.get("display_name", "") or "").strip() or "Radio",
                 "radio_catalog_id": str(model_choice.get("catalog_id", "") or ""),
                 "radio_manufacturer": str(model_choice.get("manufacturer", "") or ""),
@@ -30957,6 +31142,78 @@ class SettingsTab(QWidget):
                 for family_key in software_family_titles
                 if _guided_software_family_selected(family_key)
             ]
+            canonical_selected_families = [
+                "external_js8spotter" if family_key == "external_spotter" else family_key
+                for family_key in selected_family_keys
+                if family_key != "receiver"
+            ]
+            identity_profile = _draft_radio_profile()
+            if observer_mode:
+                canonical_selected_families.insert(0, "sdrpp")
+                receiver_name = str(
+                    receiver_application_combo.currentData()
+                    or receiver_application_combo.currentText()
+                    or "SDR++"
+                ).strip()
+                receiver_items = build_receiver_launch_items(
+                    identity_profile,
+                    [
+                        {
+                            "name": receiver_name,
+                            "launch_path_override": receiver_launch_path_edit.text().strip(),
+                            "startup": bool(receiver_launch_enabled_chk.isChecked()),
+                        }
+                    ],
+                )
+                receiver_item = dict(receiver_items[0]) if receiver_items else {}
+                identity_profile["receiver_launch_item"] = {
+                    **receiver_item,
+                    "path_override": receiver_item.get("launch_path_override", ""),
+                    "launch_at_startup": receiver_item.get("startup", False),
+                    "readiness": receiver_item.get("readiness_policy", {}),
+                }
+                identity_profile["receiver_launch_enabled"] = bool(
+                    receiver_launch_enabled_chk.isChecked()
+                )
+            identity_review_lines: List[str] = []
+            try:
+                identity_drafts = {
+                    str(family): dict(value)
+                    for family, value in dict(retained_for_review or {}).items()
+                    if isinstance(value, Mapping)
+                }
+                if "js8call" in identity_drafts:
+                    identity_drafts["js8call"][
+                        "external_spotter_launch_at_startup"
+                    ] = bool(
+                        use_external_js8spotter_chk.isChecked()
+                        and str(
+                            software_launch_policy_combos["external_spotter"].currentData()
+                            or ""
+                        ).strip().lower()
+                        == "fio"
+                    )
+                guided_identity_records = build_guided_identity_records(
+                    identity_profile,
+                    identity_drafts,
+                    tuple(canonical_selected_families),
+                )
+                setattr(dlg, "_guided_software_identity_records", guided_identity_records)
+                for identity in guided_identity_records:
+                    component_text = ", ".join(
+                        component.component_id for component in identity.components
+                    ) or "binding only"
+                    identity_review_lines.append(
+                        f"{software_family_titles.get(identity.family_key, identity.family_key)} identity "
+                        f"{identity.bundle_id}; components: {component_text}; fingerprint: "
+                        f"{identity.fingerprint[:12]}."
+                    )
+            except (TypeError, ValueError) as exc:
+                setattr(dlg, "_guided_software_identity_records", ())
+                if software_plan_prepared:
+                    identity_review_lines.append(
+                        "Canonical software identity needs review before Save: " + str(exc)
+                    )
             responsibility_lines: List[str] = []
             launch_plan_lines: List[str] = []
             family_launch_targets = {
@@ -31040,6 +31297,7 @@ class SettingsTab(QWidget):
                 )
             if not responsibility_lines:
                 responsibility_lines.append("No software capability selected.")
+            responsibility_lines.extend(identity_review_lines)
             varac_stop_before_save = bool(
                 use_varac_chk.isChecked()
                 and native_for_review.get("apply_requires_stopped_process")
@@ -32508,11 +32766,23 @@ class SettingsTab(QWidget):
                     for family in ("js8call", "fast_light", "varac")
                     if _guided_software_family_selected(family)
                 }
-                out["guided_software_instance_drafts"] = {
+                saved_guided_drafts = {
                     family: dict(value)
                     for family, value in retained_software_drafts.items()
                     if family in selected_families and isinstance(value, Mapping)
                 }
+                if "js8call" in saved_guided_drafts:
+                    saved_guided_drafts["js8call"][
+                        "external_spotter_launch_at_startup"
+                    ] = bool(
+                        use_external_js8spotter_chk.isChecked()
+                        and str(
+                            software_launch_policy_combos["external_spotter"].currentData()
+                            or ""
+                        ).strip().lower()
+                        == "fio"
+                    )
+                out["guided_software_instance_drafts"] = saved_guided_drafts
             out["guided_external_app_config_plan"] = _current_guided_app_config_plan()
             try:
                 guided_plan_id = int(schedule_plan_combo.currentData() or 0)
@@ -32540,6 +32810,10 @@ class SettingsTab(QWidget):
                 guided_instance_inventory_snapshot.fingerprint or ""
             )
             out["guided_inventory_retry_step"] = "software"
+            # This is the generation the operator reviewed when Add/Edit Radio
+            # opened.  Final persistence must reject a concurrent identity
+            # change instead of silently replacing it.
+            out["guided_software_identity_generation"] = guided_identity_generation
             dlg.accept()
 
         buttons.accepted.connect(_save)
@@ -32931,6 +33205,24 @@ class SettingsTab(QWidget):
             log.debug("Failed opening Plan Builder after guided radio setup.", exc_info=True)
         return False
 
+    def _queue_plan_manager_after_guided_profile_save(
+        self,
+        device_profile: Optional[Mapping[str, Any]] = None,
+        *,
+        schedule_choice: str = "",
+    ) -> None:
+        """Open Plan Builder on the next UI turn, after guided Save commits."""
+
+        saved_profile = dict(device_profile or {})
+        saved_choice = str(schedule_choice or "").strip()
+        QTimer.singleShot(
+            0,
+            lambda: self._open_plan_manager_after_guided_profile_save(
+                saved_profile,
+                schedule_choice=saved_choice,
+            ),
+        )
+
     def _assign_guided_operating_profile_after_save(
         self,
         device_profile: Mapping[str, Any],
@@ -32981,6 +33273,8 @@ class SettingsTab(QWidget):
         self,
         device_profile: Mapping[str, Any],
         drafts: Mapping[str, Any],
+        *,
+        expected_identity_generation: int = 0,
     ) -> bool:
         """Persist reviewed family drafts through the atomic store boundary.
 
@@ -32994,6 +33288,11 @@ class SettingsTab(QWidget):
         radio_id = int(device_profile.get("id", 0) or 0)
         if radio_id <= 0:
             return False
+        identity_drafts: Dict[str, Dict[str, Any]] = {
+            str(key): dict(value)
+            for key, value in drafts.items()
+            if isinstance(value, Mapping)
+        }
         observer_mode = str(device_profile.get("device_class", "") or "").strip().lower() == "observer"
         for family in ("js8call", "fast_light", "varac"):
             raw = drafts.get(family)
@@ -33006,7 +33305,11 @@ class SettingsTab(QWidget):
             instance_name = str(draft.get("instance_name") or f"{device_profile.get('name', 'Radio')} {family}").strip()
             imported_id = int(draft.get("imported_id") or 0) or None
             imported_system_key = str(draft.get("imported_system_key") or "").strip()
-            system_key = imported_system_key or self._software_instance_system_key(family, instance_name)
+            system_key = (
+                imported_system_key
+                or str(draft.get("application_system_key") or "").strip()
+                or self._software_instance_system_key(family, instance_name)
+            )
             imported_manifest: Dict[str, Any] | None = None
             if imported_id is not None:
                 existing_app = {
@@ -33071,6 +33374,17 @@ class SettingsTab(QWidget):
                     "storage_mode": "rig_scoped" if data_root else "unverified",
                 }
             elif family == "fast_light":
+                launch_recipe = draft.get("launch_recipe")
+                launch_components = (
+                    launch_recipe.get("components", ())
+                    if isinstance(launch_recipe, Mapping)
+                    else ()
+                )
+                component_by_key = {
+                    str(item.get("component_key") or "").strip().lower(): dict(item)
+                    for item in launch_components or ()
+                    if isinstance(item, Mapping)
+                }
                 application_values = {
                     "system_key": system_key,
                     "name": instance_name,
@@ -33117,6 +33431,10 @@ class SettingsTab(QWidget):
                 "application_variant": str(draft.get("variant") or "").strip(),
                 "application_version": str(draft.get("version") or "").strip(),
             }
+            if family == "js8call":
+                evidence["external_spotter_launch_at_startup"] = bool(
+                    draft.get("external_spotter_launch_at_startup", False)
+                )
             launch_recipe = draft.get("launch_recipe")
             if isinstance(launch_recipe, Mapping):
                 evidence["launch_recipe"] = dict(launch_recipe)
@@ -33133,10 +33451,72 @@ class SettingsTab(QWidget):
                         "advanced_tx_acknowledged": bool(draft.get("advanced_tx_acknowledged", False)),
                     }
                 )
+            resource_claims = [
+                dict(item)
+                for item in draft.get("resource_claims", ()) or ()
+                if isinstance(item, Mapping)
+            ]
+            if family == "fast_light":
+                # Detailed review may round-trip through the generic assistant,
+                # whose editable fields intentionally omit derived child paths.
+                # Rehydrate those authoritative claims from the exact reviewed
+                # component recipe instead of losing them at Save.
+                claim_specs = {
+                    "flrig": (("flrig_configuration", "configuration_roots", 0, True),),
+                    "fldigi": (
+                        ("fldigi_configuration", "configuration_roots", 0, True),
+                        ("fldigi_logs", "data_roots", 0, True),
+                        ("fldigi_checkins", "data_roots", 1, True),
+                    ),
+                    "flmsg": (
+                        ("flmsg_root", "configuration_roots", 0, True),
+                        ("flmsg_messages", "data_roots", 0, True),
+                        ("flmsg_templates", "data_roots", 1, True),
+                        ("flmsg_auto", "data_roots", 2, True),
+                    ),
+                    "flamp": (
+                        ("flamp_receive", "data_roots", 0, False),
+                        ("flamp_outgoing", "data_roots", 1, False),
+                    ),
+                }
+                by_kind = {
+                    str(item.get("kind") or "").strip(): dict(item)
+                    for item in resource_claims
+                    if str(item.get("kind") or "").strip()
+                }
+                for component_key, component in component_by_key.items():
+                    executable = str(component.get("executable") or "").strip()
+                    if executable and component_key in {"flmsg", "flamp"}:
+                        by_kind[f"{component_key}_application"] = {
+                            "kind": f"{component_key}_application",
+                            "value": executable,
+                            "exclusive": False,
+                        }
+                    for kind, root_key, index, exclusive in claim_specs.get(component_key, ()):
+                        roots = component.get(root_key, ()) or ()
+                        value = str(roots[index] if index < len(roots) else "").strip()
+                        if value:
+                            by_kind[kind] = {
+                                "kind": kind,
+                                "value": value,
+                                "exclusive": exclusive,
+                            }
+                resource_claims = list(by_kind.values())
+            management_mode = str(draft.get("management_mode") or "").strip().lower()
+            if not management_mode:
+                ownership = str(draft.get("ownership") or "").strip().lower()
+                draft_mode = str(draft.get("mode") or "").strip().lower()
+                management_mode = (
+                    "fio_managed"
+                    if ownership == "fio-managed" or draft_mode == "managed"
+                    else "remote"
+                    if ownership == "remote" or draft_mode == "remote"
+                    else "operator"
+                )
             manifest_values = {
                 **dict(imported_manifest or {}),
                 "instance_key": f"{family}:{system_key}",
-                "management_mode": str(draft.get("management_mode") or "operator"),
+                "management_mode": management_mode,
                 "provenance": str(draft.get("provenance") or draft.get("mode") or "manual"),
                 "executable_path": (
                     str(draft.get("secondary_application_path") or "").strip()
@@ -33150,7 +33530,7 @@ class SettingsTab(QWidget):
                 "host": str(draft.get("host") or "127.0.0.1").strip() or "127.0.0.1",
                 "ports": list(draft.get("ports") or ()),
                 "resource_claims": [
-                    *list(draft.get("resource_claims") or ()),
+                    *resource_claims,
                     *(
                         [{"kind": "working_directory", "value": str(draft.get("working_directory") or "").strip(), "exclusive": True}]
                         if str(draft.get("working_directory") or "").strip()
@@ -33325,6 +33705,80 @@ class SettingsTab(QWidget):
             adopted = result.get("radio") if isinstance(result, Mapping) else None
             if isinstance(adopted, Mapping):
                 self._last_persisted_device_profile = dict(adopted)
+            if isinstance(result, Mapping):
+                saved_manifest = result.get("manifest")
+                saved_application = result.get("application")
+                identity_draft = identity_drafts.setdefault(family, dict(draft))
+                if isinstance(saved_manifest, Mapping):
+                    identity_draft["instance_key"] = str(
+                        saved_manifest.get("instance_key") or ""
+                    ).strip()
+                    identity_draft["management_mode"] = str(
+                        saved_manifest.get("management_mode") or management_mode
+                    ).strip()
+                    identity_draft["resource_claims"] = list(
+                        saved_manifest.get("resource_claims") or resource_claims
+                    )
+                if isinstance(saved_application, Mapping):
+                    identity_draft["application_system_key"] = str(
+                        saved_application.get("system_key") or system_key
+                    ).strip()
+        final_profile = dict(
+            getattr(self, "_last_persisted_device_profile", None) or device_profile
+        )
+        selected_identity_families: List[str] = []
+        if str(final_profile.get("device_class", "") or "").strip().lower() == "observer":
+            receiver_bundle = self.multi_radio_store.get_radio_launch_bundle(radio_id)
+            receiver_item = next(
+                (
+                    dict(item)
+                    for item in receiver_bundle.get("items", ())
+                    if isinstance(item, Mapping)
+                    and str(item.get("instance_key", "") or "").startswith("receiver:")
+                ),
+                {},
+            )
+            final_profile["receiver_launch_item"] = receiver_item
+            final_profile["receiver_launch_enabled"] = bool(
+                receiver_bundle.get("launch_enabled", False)
+            )
+            selected_identity_families.append("sdrpp")
+        if bool(int(final_profile.get("use_js8call", 0) or 0)):
+            selected_identity_families.append("js8call")
+        if any(
+            bool(int(final_profile.get(flag, 0) or 0))
+            for flag in ("use_flrig", "use_fldigi", "use_flmsg", "use_flamp")
+        ):
+            selected_identity_families.append("fast_light")
+        if bool(int(final_profile.get("use_varac", 0) or 0)):
+            selected_identity_families.append("varac")
+        if bool(int(final_profile.get("use_js8spotter", 0) or 0)):
+            selected_identity_families.append("fio_spotter")
+        if str(final_profile.get("spotter_launch_path", "") or "").strip():
+            selected_identity_families.append("external_js8spotter")
+        if bool(int(final_profile.get("use_commstat", 0) or 0)):
+            selected_identity_families.append("commstat")
+        try:
+            identity_records = build_guided_identity_records(
+                final_profile,
+                identity_drafts,
+                tuple(selected_identity_families),
+            )
+            self.multi_radio_store.save_radio_software_identity_records(
+                radio_id,
+                identity_records,
+                expected_generation=max(0, int(expected_identity_generation or 0)),
+            )
+        except Exception as exc:
+            log.exception("Failed persisting the canonical guided software identity set.")
+            QMessageBox.warning(
+                self,
+                "Software Identity Review",
+                "FIO could not verify that Add Radio and Software Administration describe the same "
+                "software identities. Nothing was saved; review the software step and try again. "
+                f"{exc}",
+            )
+            return False
         return True
 
     @staticmethod
@@ -33369,6 +33823,14 @@ class SettingsTab(QWidget):
                     "fldigi_host": prior("fldigi_host", ""),
                     "fldigi_port": prior("fldigi_port", ""),
                     "fldigi_path": prior("fldigi_path", ""),
+                    "fldigi_log_path": prior("fldigi_log_path", ""),
+                    "fldigi_checkin_dir": prior("fldigi_checkin_dir", ""),
+                    "use_flmsg": prior("use_flmsg", False),
+                    "flmsg_path": prior("flmsg_path", ""),
+                    "flmsg_message_path": prior("flmsg_message_path", ""),
+                    "use_flamp": prior("use_flamp", False),
+                    "flamp_path": prior("flamp_path", ""),
+                    "flamp_message_path": prior("flamp_message_path", ""),
                 }
             )
         if isinstance(drafts.get("varac"), Mapping):
@@ -34150,6 +34612,16 @@ class SettingsTab(QWidget):
                 if member.wine_prefix
                 else {}
             )
+            vara_executable_path = str(
+                member.vara_target_runtime_folder
+                / result.plan.capability.main_executable_relative_path
+            )
+            vara_argv = (
+                ("wine", vara_executable_path)
+                if result.plan.platform == "linux-wine"
+                else (vara_executable_path,)
+            )
+            launch_at_startup = bool(updated_varac.get("launch_at_startup", False))
             updated_varac.update(
                 {
                     "_varac_native_external_session": result,
@@ -34169,15 +34641,29 @@ class SettingsTab(QWidget):
                         "status": "qualified_managed",
                         "components": (
                             {
+                                "component_key": "vara",
+                                "executable": vara_argv[0],
+                                "arguments": vara_argv[1:],
+                                "effective_command": vara_argv,
+                                "working_directory": str(member.vara_target_runtime_folder),
+                                "environment": launch_environment,
+                                "dependencies": (),
+                                "execution_scope": "standard",
+                                "operator_starts": False,
+                                "launch_at_startup": launch_at_startup,
+                                "readiness": {"kind": "process"},
+                            },
+                            {
                                 "component_key": "varac",
                                 "executable": launch_argv[0],
                                 "arguments": launch_argv[1:],
                                 "effective_command": launch_argv,
                                 "working_directory": member.working_directory,
                                 "environment": launch_environment,
-                                "dependencies": (),
+                                "dependencies": ("vara",),
                                 "execution_scope": "standard",
                                 "operator_starts": False,
+                                "launch_at_startup": launch_at_startup,
                                 "readiness": {"kind": "process"},
                             },
                         ),
@@ -34264,6 +34750,12 @@ class SettingsTab(QWidget):
                     initial_step=retry_step,
                 )
             return
+        open_plan_manager_after_commit = bool(
+            created.get("guided_open_plan_manager_after_save", False)
+        ) and int(created.get("guided_frequency_plan_id", 0) or 0) <= 0
+        schedule_choice_after_commit = str(
+            created.get("guided_schedule_choice", "") or ""
+        ).strip()
         succeeded = False
         try:
             with self.multi_radio_store.guided_save_transaction() as transaction:
@@ -34291,8 +34783,15 @@ class SettingsTab(QWidget):
             self._refresh_multi_radio_tables()
             if varac_session is not None:
                 self._rollback_varac_native_session(varac_session)
-        elif varac_session is not None:
-            self._complete_varac_native_session(varac_session)
+        else:
+            if varac_session is not None:
+                self._complete_varac_native_session(varac_session)
+            if open_plan_manager_after_commit:
+                saved = getattr(self, "_last_persisted_device_profile", None) or {}
+                self._queue_plan_manager_after_guided_profile_save(
+                    saved,
+                    schedule_choice=schedule_choice_after_commit,
+                )
 
     def _complete_add_device_profile_in_transaction(
         self,
@@ -34305,6 +34804,9 @@ class SettingsTab(QWidget):
         guided_operating_profile_id = int(created.pop("guided_operating_profile_id", 0) or 0)
         guided_js8_instance_draft = created.pop("guided_js8_instance_draft", None)
         guided_software_instance_drafts = created.pop("guided_software_instance_drafts", {})
+        guided_identity_generation = int(
+            created.pop("guided_software_identity_generation", 0) or 0
+        )
         if not isinstance(guided_software_instance_drafts, Mapping):
             guided_software_instance_drafts = {}
         guided_software_instance_drafts = self._annotate_guided_drafts_with_native_result(
@@ -34313,8 +34815,8 @@ class SettingsTab(QWidget):
         )
         if isinstance(guided_software_instance_drafts.get("js8call"), Mapping):
             guided_js8_instance_draft = None
-        open_plan_manager = bool(created.pop("guided_open_plan_manager_after_save", False))
-        schedule_choice = str(created.pop("guided_schedule_choice", "") or "").strip()
+        created.pop("guided_open_plan_manager_after_save", False)
+        created.pop("guided_schedule_choice", "")
         blank_before_save = not bool(self.multi_radio_store.list_device_profiles())
         created = self._defer_guided_family_fields_to_atomic_adoption(
             created,
@@ -34341,7 +34843,11 @@ class SettingsTab(QWidget):
                 self._rollback_guided_native_config(native_result)
                 return False
             saved = getattr(self, "_last_persisted_device_profile", None) or saved
-            if not self._adopt_guided_software_drafts(saved, guided_software_instance_drafts):
+            if not self._adopt_guided_software_drafts(
+                saved,
+                guided_software_instance_drafts,
+                expected_identity_generation=guided_identity_generation,
+            ):
                 self._rollback_guided_native_config(native_result)
                 return False
             saved = getattr(self, "_last_persisted_device_profile", None) or saved
@@ -34369,8 +34875,6 @@ class SettingsTab(QWidget):
                 ):
                     self._rollback_guided_native_config(native_result)
                     return False
-            elif open_plan_manager:
-                self._open_plan_manager_after_guided_profile_save(saved, schedule_choice=schedule_choice)
             self._refresh_multi_radio_tables()
             self._emit_device_profiles_changed()
             return True
@@ -34380,7 +34884,11 @@ class SettingsTab(QWidget):
         ):
             self._rollback_guided_native_config(native_result)
             return False
-        if not self._adopt_guided_software_drafts(saved, guided_software_instance_drafts):
+        if not self._adopt_guided_software_drafts(
+            saved,
+            guided_software_instance_drafts,
+            expected_identity_generation=guided_identity_generation,
+        ):
             self._rollback_guided_native_config(native_result)
             return False
         saved = getattr(self, "_last_persisted_device_profile", None) or saved
@@ -34408,8 +34916,6 @@ class SettingsTab(QWidget):
             ):
                 self._rollback_guided_native_config(native_result)
                 return False
-        elif open_plan_manager:
-            self._open_plan_manager_after_guided_profile_save(saved, schedule_choice=schedule_choice)
         return True
 
     def _edit_device_profile(self) -> None:
@@ -34507,6 +35013,12 @@ class SettingsTab(QWidget):
                     retry_draft=updated,
                 )
             return
+        open_plan_manager_after_commit = bool(
+            updated.get("guided_open_plan_manager_after_save", False)
+        ) and int(updated.get("guided_frequency_plan_id", 0) or 0) <= 0
+        schedule_choice_after_commit = str(
+            updated.get("guided_schedule_choice", "") or ""
+        ).strip()
         succeeded = False
         try:
             with self.multi_radio_store.guided_save_transaction() as transaction:
@@ -34535,8 +35047,15 @@ class SettingsTab(QWidget):
             self._refresh_multi_radio_tables()
             if varac_session is not None:
                 self._rollback_varac_native_session(varac_session)
-        elif varac_session is not None:
-            self._complete_varac_native_session(varac_session)
+        else:
+            if varac_session is not None:
+                self._complete_varac_native_session(varac_session)
+            if open_plan_manager_after_commit:
+                saved = getattr(self, "_last_persisted_device_profile", None) or {}
+                self._queue_plan_manager_after_guided_profile_save(
+                    saved,
+                    schedule_choice=schedule_choice_after_commit,
+                )
 
     def _complete_edit_device_profile_in_transaction(
         self,
@@ -34550,6 +35069,9 @@ class SettingsTab(QWidget):
         guided_operating_profile_id = int(updated.pop("guided_operating_profile_id", 0) or 0)
         guided_js8_instance_draft = updated.pop("guided_js8_instance_draft", None)
         guided_software_instance_drafts = updated.pop("guided_software_instance_drafts", {})
+        guided_identity_generation = int(
+            updated.pop("guided_software_identity_generation", 0) or 0
+        )
         if not isinstance(guided_software_instance_drafts, Mapping):
             guided_software_instance_drafts = {}
         guided_software_instance_drafts = self._annotate_guided_drafts_with_native_result(
@@ -34558,8 +35080,8 @@ class SettingsTab(QWidget):
         )
         if isinstance(guided_software_instance_drafts.get("js8call"), Mapping):
             guided_js8_instance_draft = None
-        open_plan_manager = bool(updated.pop("guided_open_plan_manager_after_save", False))
-        schedule_choice = str(updated.pop("guided_schedule_choice", "") or "").strip()
+        updated.pop("guided_open_plan_manager_after_save", False)
+        updated.pop("guided_schedule_choice", "")
         updated = self._defer_guided_family_fields_to_atomic_adoption(
             updated,
             guided_software_instance_drafts,
@@ -34582,7 +35104,11 @@ class SettingsTab(QWidget):
                 self._rollback_guided_native_config(native_result)
                 return False
             saved = getattr(self, "_last_persisted_device_profile", None) or saved
-            if not self._adopt_guided_software_drafts(saved, guided_software_instance_drafts):
+            if not self._adopt_guided_software_drafts(
+                saved,
+                guided_software_instance_drafts,
+                expected_identity_generation=guided_identity_generation,
+            ):
                 self._rollback_guided_native_config(native_result)
                 return False
             saved = getattr(self, "_last_persisted_device_profile", None) or saved
@@ -34592,8 +35118,6 @@ class SettingsTab(QWidget):
                 ):
                     self._rollback_guided_native_config(native_result)
                     return False
-            elif open_plan_manager:
-                self._open_plan_manager_after_guided_profile_save(saved, schedule_choice=schedule_choice)
             return True
         if not self._assign_guided_operating_profile_after_save(
             saved,
@@ -34601,7 +35125,11 @@ class SettingsTab(QWidget):
         ):
             self._rollback_guided_native_config(native_result)
             return False
-        if not self._adopt_guided_software_drafts(saved, guided_software_instance_drafts):
+        if not self._adopt_guided_software_drafts(
+            saved,
+            guided_software_instance_drafts,
+            expected_identity_generation=guided_identity_generation,
+        ):
             self._rollback_guided_native_config(native_result)
             return False
         saved = getattr(self, "_last_persisted_device_profile", None) or saved
@@ -34611,8 +35139,6 @@ class SettingsTab(QWidget):
             ):
                 self._rollback_guided_native_config(native_result)
                 return False
-        elif open_plan_manager:
-            self._open_plan_manager_after_guided_profile_save(saved, schedule_choice=schedule_choice)
         return True
 
     def _set_active_selected_device_profile(self) -> None:

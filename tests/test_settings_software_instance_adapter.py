@@ -41,6 +41,8 @@ class _Store:
         self.js8_rows = [{"id": 11, "name": "Saved JS8", "profile_path": "/saved/js8.ini"}]
         self.fast_rows = [{"id": 12, "name": "Saved Fast", "flrig_port": 12345}]
         self.varac_rows = [{"id": 13, "name": "Saved VarAC", "ini_path": "/saved/VarAC.ini"}]
+        self.identity_generation = 0
+        self.identity_records: list[object] = []
 
     class _Transaction:
         def __enter__(self):
@@ -66,6 +68,20 @@ class _Store:
 
     def list_varac_clusters(self):
         return []
+
+    def radio_software_identity_generation(self, _radio_profile_id):
+        return self.identity_generation
+
+    def list_radio_software_identity_records(self, _radio_profile_id):
+        return tuple(self.identity_records)
+
+    def save_radio_software_identity_records(
+        self, _radio_profile_id, records, *, expected_generation=None
+    ):
+        assert expected_generation == self.identity_generation
+        self.identity_records = list(records)
+        self.identity_generation += 1
+        return tuple(records)
 
     def adopt_software_instance(self, **kwargs):
         self.adoptions.append(kwargs)

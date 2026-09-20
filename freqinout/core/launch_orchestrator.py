@@ -289,6 +289,33 @@ class LaunchOrchestrator(QObject):
         bundle_override: Optional[Mapping[str, Any]] = None,
     ) -> LaunchPlan:
         profiles = self.multi_radio_store.list_runtime_active_device_profiles()
+        launchable_profiles = []
+        for profile in profiles:
+            radio_id = int(profile.get("id", 0) or 0)
+            projection_issues = (
+                self.multi_radio_store.validate_radio_software_identity_projections(radio_id)
+                if radio_id > 0
+                and self.multi_radio_store.radio_software_identity_generation(radio_id) > 0
+                else {}
+            )
+            if projection_issues:
+                detail = "; ".join(
+                    f"{family}: {', '.join(issues)}"
+                    for family, issues in sorted(projection_issues.items())
+                )
+                if scope_radio_id is not None and radio_id == int(scope_radio_id):
+                    raise ValueError(
+                        "Launch is blocked because the saved software identity and its "
+                        f"application/launch projection differ. {detail}"
+                    )
+                log.warning(
+                    "Skipped startup launch for radio %s because canonical software parity needs review: %s",
+                    radio_id,
+                    detail,
+                )
+                continue
+            launchable_profiles.append(profile)
+        profiles = launchable_profiles
         blockers = self.multi_radio_store.varac_native_launch_blockers()
         if blockers:
             blocked_targets = {

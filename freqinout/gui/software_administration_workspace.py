@@ -316,7 +316,8 @@ class SoftwareAdministrationWorkspace(QWidget):
             floor=30,
         )
         for strip in (self.family_strip, self.radio_strip, self.task_strip):
-            strip.setMaximumHeight(strip_height)
+            strip.setProperty("fioChipRowHeight", int(strip_height))
+            self._sync_horizontal_strip_height(strip)
         self.unassigned_label.setVisible(not compact)
         self.assign_button.setVisible(not compact or not selected_radio)
         # Adding an instance remains available in compact mode; the guided
@@ -338,8 +339,29 @@ class SoftwareAdministrationWorkspace(QWidget):
         layout.setSpacing(6)
         layout.addStretch(1)
         scroll.setWidget(content)
-        scroll.setMaximumHeight(52)
+        # The scrollbar occupies layout height on Linux/Windows styles.  Keep
+        # it in a separate lane below the chips instead of allowing a compact
+        # Settings viewport to squeeze it over the selected button.
+        scroll.horizontalScrollBar().rangeChanged.connect(
+            lambda _minimum, _maximum, target=scroll: self._sync_horizontal_strip_height(target)
+        )
+        scroll.setProperty("fioChipRowHeight", 34)
+        self._sync_horizontal_strip_height(scroll)
         return scroll, layout
+
+    @staticmethod
+    def _sync_horizontal_strip_height(scroll: QScrollArea) -> None:
+        """Reserve a non-overlapping lane whenever a chip row overflows."""
+
+        chip_height = max(30, int(scroll.property("fioChipRowHeight") or 0))
+        bar = scroll.horizontalScrollBar()
+        overflow = bar.maximum() > bar.minimum()
+        scrollbar_height = max(14, bar.sizeHint().height()) if overflow else 0
+        total_height = chip_height + scrollbar_height + 4
+        if scroll.minimumHeight() != total_height:
+            scroll.setMinimumHeight(total_height)
+        if scroll.maximumHeight() != total_height:
+            scroll.setMaximumHeight(total_height)
 
     @staticmethod
     def _clear_layout(layout: QHBoxLayout | QVBoxLayout) -> None:
@@ -1060,6 +1082,7 @@ class SoftwareAdministrationWorkspace(QWidget):
                 "fio_managed": "FIO-managed launch",
                 "operator": "Operator-managed",
                 "remote": "Remote",
+                "built_in": "Built into FIO",
             }.get(assignment.management_mode, assignment.management_mode.replace("_", " ").title())
             detail_parts = [part for part in (ownership_label, assignment.endpoint_summary) if part]
             if assignment.configuration_summary:
@@ -1068,6 +1091,14 @@ class SoftwareAdministrationWorkspace(QWidget):
                 )
             if assignment.data_summary:
                 detail_parts.append(f"Data: {self._compact_resource_name(assignment.data_summary)}")
+            if assignment.canonical_component_ids:
+                detail_parts.append(
+                    "Components: " + ", ".join(assignment.canonical_component_ids)
+                )
+            if assignment.canonical_binding_ids:
+                detail_parts.append(
+                    "Bindings: " + ", ".join(assignment.canonical_binding_ids)
+                )
             detail = ("\nInstance details: " + " · ".join(detail_parts)) if detail_parts else ""
             self.context_banner.setText(
                 f"Editing {family.title} for {assignment.radio_name} — Instance: {instance}. "
@@ -1079,6 +1110,16 @@ class SoftwareAdministrationWorkspace(QWidget):
                     for part in (
                         f"Configuration: {assignment.configuration_summary}" if assignment.configuration_summary else "",
                         f"Data / storage: {assignment.data_summary}" if assignment.data_summary else "",
+                        f"Canonical fingerprint: {assignment.canonical_fingerprint}" if assignment.canonical_fingerprint else "",
+                        (
+                            "Canonical parity requires review: "
+                            + (
+                                assignment.canonical_parity_detail
+                                or "the saved identity and its application/launch projection differ"
+                            )
+                            if assignment.canonical_parity_state in {"missing", "needs_attention"}
+                            else ""
+                        ),
                     )
                     if part
                 )

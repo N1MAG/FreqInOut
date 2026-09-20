@@ -36,6 +36,13 @@ class RadioSoftwareAssignment:
     endpoint_summary: str = ""
     configuration_summary: str = ""
     data_summary: str = ""
+    canonical_bundle_id: str = ""
+    canonical_identity_key: str = ""
+    canonical_fingerprint: str = ""
+    canonical_component_ids: tuple[str, ...] = ()
+    canonical_binding_ids: tuple[str, ...] = ()
+    canonical_parity_state: str = ""
+    canonical_parity_detail: str = ""
 
     @property
     def is_shared(self) -> bool:
@@ -80,6 +87,7 @@ _FAMILY_DEFINITIONS: tuple[tuple[str, str, str], ...] = (
     ("commstat", "CommStat", "External CommStat application and JS8 transport mapping."),
     ("external_spotter", "External Spotter", "Optional external Spotter application and forms."),
     ("fio_spotter", "FIO Spotter", "Built-in rules, Expect queries, watches, forms, and activity."),
+    ("receiver", "Receiver Software", "Receive-only application and control adapter."),
 )
 
 
@@ -140,6 +148,12 @@ def _readiness_text(
 
 
 def _family_link(profile: Mapping[str, Any], family_key: str) -> tuple[bool, Optional[int]]:
+    if family_key == "receiver":
+        is_observer = _text(profile.get("device_class") or profile.get("radio_role")).casefold() in {
+            "observer", "receive_only", "receive-only", "sdr"
+        }
+        configured = bool(_text(profile.get("sdr_application")) or _text(profile.get("sdr_adapter")))
+        return is_observer and configured, None
     if family_key == "js8call":
         return _enabled(profile.get("use_js8call")), _integer(profile.get("js8_instance_id"))
     if family_key == "fast_light":
@@ -153,10 +167,10 @@ def _family_link(profile: Mapping[str, Any], family_key: str) -> tuple[bool, Opt
     if family_key == "commstat":
         return _enabled(profile.get("use_commstat")), _integer(profile.get("js8_instance_id"))
     if family_key == "fio_spotter":
-        # Built-in FIO Spotter uses the radio's JS8 transport; the historical
-        # ``use_js8spotter`` flag refers to the optional external application.
+        # FIO Spotter is an explicit built-in capability selection. Its JS8
+        # transport binding is provenance, not evidence that it was selected.
         instance_id = _integer(profile.get("js8_instance_id"))
-        return _enabled(profile.get("use_js8call")) or instance_id is not None, instance_id
+        return _enabled(profile.get("use_js8spotter")), instance_id
     return False, _integer(profile.get("js8_instance_id"))
 
 
@@ -193,6 +207,8 @@ def build_software_administration_snapshot(
     varac_nodes: Sequence[Any] = (),
     instance_manifests: Sequence[Any] = (),
     readiness_by_radio: Optional[Mapping[Any, Any]] = None,
+    identity_records: Sequence[Any] = (),
+    identity_projection_issues: Optional[Mapping[tuple[int, str], Sequence[str]]] = None,
 ) -> SoftwareAdministrationSnapshot:
     """Build a deterministic reverse index from already-loaded configuration rows."""
 
@@ -208,6 +224,7 @@ def build_software_administration_snapshot(
         )
     )
     indexes = {
+        "receiver": {},
         "js8call": _instance_index(js8_instances),
         "fast_light": _instance_index(fast_light_configs),
         "varac": _instance_index(varac_nodes),
@@ -225,6 +242,46 @@ def build_software_administration_snapshot(
         if key[0] and key[1]:
             manifest_index[key] = row
 
+    # Canonical records carry the exact durable identity. Normalize through
+    # the public record/mapping codec, then index only by explicit owner or
+    # explicit station-service radio binding. Never infer an identity from a
+    # display label, adjacent legacy row, or native path.
+    from freqinout.core.software_identity_bundle import (
+        SoftwareIdentityRecord,
+        identity_record_from_mapping,
+        identity_record_to_mapping,
+    )
+
+    canonical_by_family_radio: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    canonical_radio_keys: set[str] = set()
+    for raw in identity_records:
+        if isinstance(raw, SoftwareIdentityRecord):
+            record = raw
+        elif isinstance(raw, Mapping):
+            record = identity_record_from_mapping(raw)
+        else:
+            continue
+        mapped = identity_record_to_mapping(record)
+        family_key = _text(mapped.get("family_key")).casefold()
+        if family_key == "external_js8spotter":
+            family_key = "external_spotter"
+        elif family_key == "sdrpp":
+            family_key = "receiver"
+        if family_key not in {key for key, _title, _description in _FAMILY_DEFINITIONS}:
+            continue
+        owner = _text(mapped.get("owner"))
+        if family_key in {"fio_spotter", "commstat"}:
+            radio_keys = {
+                _text(binding.get("radio_key"))
+                for binding in (mapped.get("bindings") or ())
+                if isinstance(binding, Mapping) and _text(binding.get("radio_key"))
+            }
+        else:
+            radio_keys = {owner} if owner else set()
+        for radio_key in radio_keys:
+            canonical_radio_keys.add(radio_key)
+            canonical_by_family_radio.setdefault((family_key, radio_key), []).append(mapped)
+
     family_assignments: dict[str, list[RadioSoftwareAssignment]] = {
         key: [] for key, _title, _description in _FAMILY_DEFINITIONS
     }
@@ -236,9 +293,11 @@ def build_software_administration_snapshot(
             continue
         radio_name = _text(profile.get("name")) or f"Radio {radio_id}"
         radio_enabled = _enabled(profile.get("enabled"), True)
+        radio_key = _text(profile.get("system_key") or profile.get("radio_key") or profile.get("id"))
 
         for family_key in family_assignments:
             software_enabled, instance_id = _family_link(profile, family_key)
+            canonical_matches = canonical_by_family_radio.get((family_key, radio_key), [])
             instance_row = indexes[family_key].get(instance_id or -1)
             manifest_family = (
                 "js8call"
@@ -251,6 +310,8 @@ def build_software_administration_snapshot(
 
             if family_key == "external_spotter":
                 software_enabled = bool(instance_row and _text(instance_row.get("spotter_launch_path")))
+            if canonical_matches:
+                software_enabled = True
 
             # Retain disabled linked application instances so the workspace can
             # explain the assignment instead of making it disappear.
@@ -284,6 +345,29 @@ def build_software_administration_snapshot(
                     port = _integer(item.get("port"))
                     if host and port:
                         endpoint_parts.append(f"{name}: {host}:{port}")
+            canonical = canonical_matches[0] if len(canonical_matches) == 1 else {}
+            if len(canonical_matches) > 1:
+                canonical_parity_state = "needs_attention"
+            elif canonical:
+                canonical_parity_state = "verified"
+            elif radio_key in canonical_radio_keys and software_enabled:
+                canonical_parity_state = "missing"
+            else:
+                canonical_parity_state = ""
+            canonical_family_key = {
+                "receiver": "sdrpp",
+                "external_spotter": "external_js8spotter",
+            }.get(family_key, family_key)
+            projection_issues = tuple(
+                (identity_projection_issues or {}).get(
+                    (radio_id, canonical_family_key), ()
+                )
+                or ()
+            )
+            if projection_issues:
+                canonical_parity_state = "needs_attention"
+            canonical_components = canonical.get("components", ())
+            canonical_bindings = canonical.get("bindings", ())
             family_assignments[family_key].append(
                 RadioSoftwareAssignment(
                     radio_id=radio_id,
@@ -293,13 +377,17 @@ def build_software_administration_snapshot(
                     instance_id=instance_id,
                     instance_name=instance_name,
                     readiness=readiness,
-                    status_text=_status_text(
-                        radio_enabled=radio_enabled,
-                        software_enabled=software_enabled,
-                        instance_required=family_key in {"js8call", "fast_light", "varac"},
-                        instance_id=instance_id,
-                        instance_found=instance_row is not None,
-                        readiness=readiness,
+                    status_text=(
+                        "Needs attention"
+                        if canonical_parity_state in {"missing", "needs_attention"}
+                        else _status_text(
+                            radio_enabled=radio_enabled,
+                            software_enabled=software_enabled,
+                            instance_required=family_key in {"js8call", "fast_light", "varac"},
+                            instance_id=instance_id,
+                            instance_found=instance_row is not None,
+                            readiness=readiness,
+                        )
                     ),
                     manifest_instance_key=_text((manifest or {}).get("instance_key")),
                     management_mode=_text((manifest or {}).get("management_mode")),
@@ -311,6 +399,21 @@ def build_software_administration_snapshot(
                         or _text((manifest or {}).get("configuration_root"))
                     ),
                     data_summary=_text((manifest or {}).get("data_root")),
+                    canonical_bundle_id=_text(canonical.get("bundle_id")),
+                    canonical_identity_key=_text(canonical.get("identity_key")),
+                    canonical_fingerprint=_text(canonical.get("fingerprint")),
+                    canonical_component_ids=tuple(
+                        _text(item.get("component_id"))
+                        for item in canonical_components
+                        if isinstance(item, Mapping) and _text(item.get("component_id"))
+                    ),
+                    canonical_binding_ids=tuple(
+                        _text(item.get("binding_id"))
+                        for item in canonical_bindings
+                        if isinstance(item, Mapping) and _text(item.get("binding_id"))
+                    ),
+                    canonical_parity_state=canonical_parity_state,
+                    canonical_parity_detail="; ".join(str(item) for item in projection_issues),
                 )
             )
 
@@ -338,7 +441,7 @@ def build_software_administration_snapshot(
 
     families: list[SoftwareFamilySummary] = []
     for key, title, description in _FAMILY_DEFINITIONS:
-        source_key = key if key in {"js8call", "fast_light", "varac"} else "js8call"
+        source_key = key if key in indexes else "js8call"
         unassigned: list[SoftwareInstanceSummary] = []
         for instance_id, row in indexes[source_key].items():
             if instance_id in linked_ids[key]:

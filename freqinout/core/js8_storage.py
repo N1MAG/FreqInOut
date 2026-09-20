@@ -110,6 +110,21 @@ def stable_managed_rig_name(*, system_key: object, name: object = "") -> str:
     return f"fio-{slug[:28]}-{digest}"
 
 
+def native_managed_rig_name(name: object) -> str:
+    """Return an operator-readable JS8Call ``--rig-name`` stem.
+
+    Draft/system keys are deliberately not accepted here.  JS8Call makes the
+    rig name part of its native application name, settings filename, writable
+    data directory, lock name, and shared-memory identity.  Feeding an opaque
+    Add Radio transaction key into this value therefore leaks temporary state
+    into every durable application artifact.
+    """
+
+    source = re.sub(r"\s+", " ", str(name or "").strip())
+    candidate = re.sub(r"[^A-Za-z0-9_.-]+", "-", source).strip("-._")[:48]
+    return normalize_rig_name(candidate or "Radio")
+
+
 def js8_application_name(rig_name: object = "") -> str:
     normalized = normalize_rig_name(rig_name)
     return f"JS8Call - {normalized}" if normalized else "JS8Call"
@@ -154,6 +169,62 @@ def qt_data_root_candidates(
         candidates.append((Path(xdg_data_home) if xdg_data_home else user_home / ".local" / "share") / application_name)
         candidates.append(user_home / ".var" / "app" / "org.js8call.JS8Call" / "data" / application_name)
         candidates.append(user_home / "snap" / "js8call" / "common" / ".local" / "share" / application_name)
+    return _unique_paths(candidates)
+
+
+def qt_config_path_candidates(
+    *,
+    application_name: str,
+    platform: object | None = None,
+    home: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> tuple[Path, ...]:
+    """Return the native JS8Call MultiSettings paths created by Qt.
+
+    JS8Call's ``MultiSettings::settings_path`` writes
+    ``<ConfigLocation>/<applicationName>.ini``.  ``--rig-name`` changes the
+    application name before that path is resolved, so settings and writable
+    data must use the same reviewed rig identity.
+    """
+
+    system = str(platform or os.sys.platform or "").strip().casefold()
+    user_home = Path(home) if home is not None else Path.home()
+    environment = dict(os.environ if env is None else env)
+    filename = f"{application_name}.ini"
+    candidates: list[Path] = []
+    if system in {"darwin", "mac", "macos", "osx"}:
+        candidates.append(user_home / "Library" / "Preferences" / filename)
+    elif system in {"windows", "win", "win32", "cygwin"}:
+        # QStandardPaths::ConfigLocation is application-specific on Windows.
+        # JS8Call then appends <applicationName>.ini inside that directory.
+        local = environment.get("LOCALAPPDATA", "").strip()
+        if local:
+            candidates.append(Path(local) / application_name / filename)
+        candidates.append(
+            user_home / "AppData" / "Local" / application_name / filename
+        )
+        # Retain the older flat paths as discovery-only compatibility
+        # candidates; new managed writers always use the first native path.
+        if local:
+            candidates.append(Path(local) / filename)
+        candidates.append(user_home / "AppData" / "Local" / filename)
+    else:
+        xdg_config_home = environment.get("XDG_CONFIG_HOME", "").strip()
+        candidates.append(
+            (Path(xdg_config_home) if xdg_config_home else user_home / ".config")
+            / filename
+        )
+        candidates.append(
+            user_home
+            / ".var"
+            / "app"
+            / "org.js8call.JS8Call"
+            / "config"
+            / filename
+        )
+        candidates.append(
+            user_home / "snap" / "js8call" / "common" / ".config" / filename
+        )
     return _unique_paths(candidates)
 
 

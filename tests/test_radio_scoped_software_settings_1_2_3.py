@@ -1017,6 +1017,7 @@ def test_settings_frequency_plan_table_geometry_caps_to_internal_scroll(monkeypa
 
     monkeypatch.setattr(SettingsTab, "_maybe_backfill_js8_geo", lambda self: None)
     monkeypatch.setattr(SettingsTab, "_refresh_running_status", lambda self, force=False: None)
+    monkeypatch.setattr(SettingsTab, "_start_varac_native_recovery", lambda self: None)
 
     tab = SettingsTab()
     try:
@@ -1790,7 +1791,7 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "Choose software above, then let FIO prepare a complete plan." in dialog_block
     assert "Needs attention — FIO prepared what it could. Review the highlighted family before continuing." in dialog_block
     assert "Ready — FIO prepared the selected software plan. Review only the details that need attention." in dialog_block
-    assert "Discover installed software and prepare a radio-specific plan" in dialog_block
+    assert "Retry automatic preparation after a recoverable discovery failure." in dialog_block
     assert "guided_setup_autofill_review(" in dialog_block
     assert "Kept existing:" in guided_setup_source
     assert "Review before Save" in guided_setup_source
@@ -1851,7 +1852,7 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "Guided path: " in guided_setup_source
     assert "_update_guided_app_setup_plan_review()" in dialog_block
     assert "if not enabled_apps and not varac_selected:" in dialog_block
-    assert '"varac": varac_install_edit.text().strip()' in dialog_block
+    assert '"varac": str(varac_draft.get("application_path") or varac_install_edit.text()).strip()' in dialog_block
     assert "_update_detected_app_choices(install_candidates)" in dialog_block
     assert "_update_js8_profile_choices(js8_file_profiles)" in dialog_block
     assert "def _select_single_detected_choice(combo: QComboBox) -> bool:" in dialog_block
@@ -1861,7 +1862,7 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "if _app_choice_app_selected(app_id):" in dialog_block
     assert "selected_single = _select_single_detected_choice(combo)" in dialog_block
     assert "if selected_single:" in dialog_block
-    assert "_apply_detected_app_choice(app_id)" in dialog_block
+    assert "_apply_detected_app_choice(" in dialog_block
     assert "if _js8_app_selected() and existing_source:" in dialog_block
     assert 'software_source_combos["js8call"].currentData()' in dialog_block
     assert "selected_single = _select_single_detected_choice(js8_profile_choice_combo)" in dialog_block
@@ -1876,8 +1877,10 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
         dialog_block.index("def _apply_detected_app_choice")
         : dialog_block.index("def _apply_js8_profile_choice")
     ]
-    assert "if target.text().strip():" in app_choice_apply_block
-    assert "Kept existing {label} app path" in app_choice_apply_block
+    assert "changed = target.text().strip() != path_text" in app_choice_apply_block
+    assert "if changed:" in app_choice_apply_block
+    assert "target.setText(path_text)" in app_choice_apply_block
+    assert "_apply_guided_wizard_visibility(connection_group.isVisible())" in app_choice_apply_block
     js8_choice_apply_block = dialog_block[
         dialog_block.index("def _apply_js8_profile_choice")
         : dialog_block.index("def _update_app_choice_visibility")

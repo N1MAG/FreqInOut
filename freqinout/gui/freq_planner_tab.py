@@ -920,8 +920,6 @@ class FreqPlannerTab(QWidget):
         idx = self.sop_plan_source_combo.findData(selected)
         self.sop_plan_source_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.sop_plan_source_combo.blockSignals(False)
-        if self.sop_plan_source_combo.currentData() != selected:
-            self._set_selected_sop_plan_source_id(self.sop_plan_source_combo.currentData())
 
     def _refresh_source_set_controls(self) -> None:
         if not hasattr(self, "hf_daily_source_combo"):
@@ -1371,7 +1369,7 @@ class FreqPlannerTab(QWidget):
             not getattr(self, "_frequency_plan_layers_dirty", False)
             and str((selected_plan or {}).get("category") or "").strip().lower() != "sop_schedule"
         ):
-            self._apply_frequency_plan_source_refs(selected_plan)
+            self._apply_frequency_plan_source_refs(selected_plan, persist=False)
         self._update_frequency_plan_summary()
         self._refresh_plan_ingredients(plan_payload=selected_plan)
         self._update_assign_plan_action_state(plan=selected_plan)
@@ -1597,7 +1595,14 @@ class FreqPlannerTab(QWidget):
                 return ref[len(prefix) :].strip()
         return ""
 
-    def _set_source_combo_to_id(self, combo: QComboBox, selected_key: str, set_id: str) -> bool:
+    def _set_source_combo_to_id(
+        self,
+        combo: QComboBox,
+        selected_key: str,
+        set_id: str,
+        *,
+        persist: bool = True,
+    ) -> bool:
         target = str(set_id or LIVE_SOURCE_SET_ID).strip() or LIVE_SOURCE_SET_ID
         idx = combo.findData(target)
         if idx < 0:
@@ -1605,10 +1610,16 @@ class FreqPlannerTab(QWidget):
         combo.blockSignals(True)
         combo.setCurrentIndex(idx)
         combo.blockSignals(False)
-        self.settings.set(selected_key, target)
+        if persist:
+            self.settings.set(selected_key, target)
         return True
 
-    def _apply_frequency_plan_source_refs(self, plan: Optional[Mapping[str, Any]]) -> bool:
+    def _apply_frequency_plan_source_refs(
+        self,
+        plan: Optional[Mapping[str, Any]],
+        *,
+        persist: bool = True,
+    ) -> bool:
         if not plan or not hasattr(self, "hf_daily_source_combo"):
             return False
         source_refs = self._source_refs_from_plan_row(plan)
@@ -1619,11 +1630,21 @@ class FreqPlannerTab(QWidget):
         net_set_id = self._source_set_id_from_refs(source_refs, HF_NET_SOURCE_CATEGORY) or LIVE_SOURCE_SET_ID
         sop_plan_id = self._sop_plan_id_from_refs(source_refs) or LIVE_SOURCE_SET_ID
         changed = (
-            self._set_source_combo_to_id(self.hf_daily_source_combo, SELECTED_HF_DAILY_SOURCE_SET_KEY, daily_set_id)
+            self._set_source_combo_to_id(
+                self.hf_daily_source_combo,
+                SELECTED_HF_DAILY_SOURCE_SET_KEY,
+                daily_set_id,
+                persist=persist,
+            )
             or changed
         )
         changed = (
-            self._set_source_combo_to_id(self.hf_net_source_combo, SELECTED_HF_NET_SOURCE_SET_KEY, net_set_id)
+            self._set_source_combo_to_id(
+                self.hf_net_source_combo,
+                SELECTED_HF_NET_SOURCE_SET_KEY,
+                net_set_id,
+                persist=persist,
+            )
             or changed
         )
         if hasattr(self, "sop_plan_source_combo"):
@@ -1632,7 +1653,8 @@ class FreqPlannerTab(QWidget):
                 self.sop_plan_source_combo.blockSignals(True)
                 self.sop_plan_source_combo.setCurrentIndex(idx)
                 self.sop_plan_source_combo.blockSignals(False)
-                self._set_selected_sop_plan_source_id(sop_plan_id)
+                if persist:
+                    self._set_selected_sop_plan_source_id(sop_plan_id)
                 changed = True
         return changed
 
@@ -2434,6 +2456,21 @@ class FreqPlannerTab(QWidget):
                     self.plan_context_service.store.validate_frequency_plan_for_device(radio_id, plan_payload)
                 )
             return self._merge_rf_guard_validations(validations)
+        # Add Radio deliberately opens Plan Builder before the new plan has an
+        # assignment row.  Preserve that explicit handoff as the RF Guard
+        # context instead of falling through to the unrelated global/current
+        # radio (or reporting that no radio was selected).
+        try:
+            guided_radio_id = int(
+                getattr(self, "_guided_plan_handoff_device_profile_id", 0) or 0
+            )
+        except (TypeError, ValueError):
+            guided_radio_id = 0
+        if guided_radio_id > 0:
+            return self.plan_context_service.store.validate_frequency_plan_for_device(
+                guided_radio_id,
+                plan_payload,
+            )
         context = self.plan_context_service.context_for_tab("freqplanner", refresh=True)
         radio_id = self._plan_context_radio_id(context)
         if radio_id <= 0:

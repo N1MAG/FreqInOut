@@ -22,12 +22,13 @@ from freqinout.core.config_autodiscovery import find_app_candidates
 )
 def test_js8_managed_recipe_is_exact_and_uses_dedicated_identity(tmp_path, variant, version):
     storage_home = tmp_path / "home"
+    radio_name = "FT-710"
     resolution = resolve_js8_managed_recipe(
         {
             "family_key": "js8call",
             "mode": "managed",
             "draft_instance_key": "draft-js8-south",
-            "owner_label": "South Rig",
+            "owner_label": radio_name,
             "radio_role": "tx_rx",
             "variant": variant,
             "version": version,
@@ -44,16 +45,19 @@ def test_js8_managed_recipe_is_exact_and_uses_dedicated_identity(tmp_path, varia
     assert resolution.qualified
     component = resolution.components[0]
     assert component.effective_command[0] == "/opt/js8call"
-    assert component.effective_command[1] == "--rig-name"
+    assert component.effective_command[1:] == ("--rig-name", radio_name)
     assert component.profile_selector == component.effective_command[2]
-    assert component.configuration_roots == (
-        "/fio/managed-instances/draft-js8-south/js8call",
-    )
+    assert component.profile_selector == radio_name
+    assert component.configuration_roots
+    assert all("draft-js8-south" not in path for path in component.configuration_roots)
+    assert all("/fio/managed-instances" not in path for path in component.configuration_roots)
     assert component.data_roots == (
-        str(storage_home / ".local" / "share" / f"JS8Call - {component.profile_selector}"),
-        "/fio/managed-instances/draft-js8-south/js8call/save",
-        "/fio/managed-instances/draft-js8-south/js8call/forms",
+        str(storage_home / ".local" / "share" / f"JS8Call - {radio_name}"),
+        str(storage_home / ".local" / "share" / f"JS8Call - {radio_name}" / "save"),
+        str(storage_home / ".local" / "share" / f"JS8Call - {radio_name}" / "forms"),
     )
+    assert all("draft-js8-south" not in path for path in component.data_roots)
+    assert all("/fio/managed-instances" not in path for path in component.data_roots)
     assert {item["protocol"] for item in component.endpoints} == {"tcp", "udp"}
     updates = recipe_draft_updates(resolution)
     assert updates["launch_command"] == ""
@@ -61,7 +65,48 @@ def test_js8_managed_recipe_is_exact_and_uses_dedicated_identity(tmp_path, varia
     assert updates["storage_path"] != "/old/data"
 
 
-def test_managed_recipe_refuses_relative_roots_when_settings_context_is_missing():
+@pytest.mark.parametrize(
+    ("platform", "expected_root"),
+    (
+        ("linux", ".local/share/JS8Call - FT-710"),
+        ("windows", "AppData/Local/JS8Call - FT-710"),
+    ),
+)
+def test_js8_managed_recipe_uses_radio_identity_for_platform_native_data_root(
+    tmp_path, platform, expected_root
+):
+    home = tmp_path / "operator-home"
+    resolution = resolve_js8_managed_recipe(
+        {
+            "draft_instance_key": "draft-private-123",
+            "owner_label": "FT-710",
+            "variant": "js8call_2_2",
+            "version": "2.2.0",
+            "application_path": "/apps/js8call",
+            "port": 2443,
+            "udp_port": 2238,
+        },
+        managed_root="/private/fio/managed-instances",
+        platform=platform,
+        storage_home=home,
+    )
+    assert resolution.qualified
+    component = resolution.components[0]
+    assert component.profile_selector == "FT-710"
+    assert component.effective_command[1:] == ("--rig-name", "FT-710")
+    assert component.data_roots
+    assert component.data_roots[0].replace("\\", "/").endswith(expected_root)
+    for value in (
+        *component.configuration_roots,
+        *component.data_roots,
+        component.working_directory,
+        *component.effective_command,
+    ):
+        assert "draft-private-123" not in value
+        assert "/private/fio/managed-instances" not in value
+
+
+def test_managed_js8_recipe_does_not_require_an_fio_private_root():
     resolution = resolve_js8_managed_recipe(
         {
             "draft_instance_key": "draft-js8",
@@ -74,9 +119,11 @@ def test_managed_recipe_refuses_relative_roots_when_settings_context_is_missing(
         },
         managed_root="",
     )
-    assert resolution.status == "blocked_for_safety"
-    assert resolution.blocker_code == "missing_managed_root"
-    assert not resolution.components
+    assert resolution.qualified
+    component = resolution.components[0]
+    assert component.profile_selector == "Radio"
+    assert component.configuration_roots
+    assert all("draft-js8" not in value for value in (*component.configuration_roots, *component.data_roots))
 
 
 def test_unknown_js8_variant_saves_isolated_profile_with_launch_pending():
@@ -97,7 +144,8 @@ def test_unknown_js8_variant_saves_isolated_profile_with_launch_pending():
     assert resolution.persistable and not resolution.launch_ready
     assert resolution.components
     assert resolution.components[0].operator_starts is True
-    assert resolution.components[0].configuration_roots[0].endswith("/draft-future/js8call")
+    assert resolution.components[0].configuration_roots[0].endswith("/JS8Call - Future.ini")
+    assert "draft-future" not in resolution.components[0].configuration_roots[0]
     assert "--rig-name" in resolution.recovery_action
 
 
@@ -188,7 +236,8 @@ def test_missing_js8_executable_is_launch_pending_but_keeps_isolated_plan():
     assert resolution.status == "launch_pending"
     assert resolution.persistable and not resolution.launch_ready
     component = resolution.components[0]
-    assert component.configuration_roots == ("/fio/managed-instances/draft-pending/js8call",)
+    assert component.configuration_roots[0].endswith("/JS8Call - Pending-radio.ini")
+    assert "draft-pending" not in component.configuration_roots[0]
     assert component.effective_command == ()
     assert "Browse" in resolution.recovery_action
     updates = recipe_draft_updates(resolution)
@@ -218,11 +267,13 @@ def test_explicit_collision_stays_blocked_while_empty_inventory_is_not_a_block()
     assert not blocked.persistable
 
 
-def test_fast_light_generated_commands_roots_working_dirs_and_evidence_are_stable():
+def test_fast_light_generated_commands_roots_working_dirs_and_evidence_are_stable(tmp_path):
     draft = {
         "family_key": "fast_light",
         "mode": "managed",
         "draft_instance_key": "draft-fast-stable",
+        "application_system_key": "fast-light-instance-durable123456",
+        "owner_label": "Radio A",
         "radio_role": "tx_rx",
         "application_path": "/usr/bin/flrig",
         "secondary_application_path": "/usr/bin/fldigi",
@@ -230,8 +281,18 @@ def test_fast_light_generated_commands_roots_working_dirs_and_evidence_are_stabl
         "port": 12500,
         "secondary_port": 7500,
     }
-    first = resolve_fast_light_managed_recipe(draft, managed_root="/fio/managed-instances")
-    second = resolve_fast_light_managed_recipe(draft, managed_root="/fio/managed-instances")
+    first = resolve_fast_light_managed_recipe(
+        draft,
+        managed_root="/fio/managed-instances",
+        platform="linux",
+        storage_home=tmp_path,
+    )
+    second = resolve_fast_light_managed_recipe(
+        draft,
+        managed_root="/fio/managed-instances",
+        platform="linux",
+        storage_home=tmp_path,
+    )
     assert first.fingerprint == second.fingerprint
     assert [component.component_key for component in first.components] == ["flrig", "fldigi"]
     assert all(component.working_directory for component in first.components)
@@ -240,7 +301,8 @@ def test_fast_light_generated_commands_roots_working_dirs_and_evidence_are_stabl
     assert first.components[0].evidence["executable"]["path"] == "/usr/bin/flrig"
     updates = recipe_draft_updates(first)
     assert updates["launch_component_recipes"]["fldigi"]["effective_command_text"]
-    assert updates["launch_component_recipes"]["fldigi"]["working_directory"].endswith("/fldigi")
+    assert "/.fldigi/instances/Radio-A-durable" in updates["launch_component_recipes"]["fldigi"]["working_directory"]
+    assert "/fio/managed-instances" not in updates["launch_component_recipes"]["fldigi"]["working_directory"]
 
 
 def test_saved_linux_executable_identity_precedes_bounded_well_known_candidates(tmp_path, monkeypatch):
@@ -264,10 +326,12 @@ def test_saved_linux_executable_identity_precedes_bounded_well_known_candidates(
     assert candidates[1].source == "known_path"
 
 
-def test_fast_light_transceiver_recipe_orders_distinct_components():
+def test_fast_light_transceiver_recipe_orders_distinct_components(tmp_path):
     resolution = resolve_fast_light_managed_recipe(
         {
             "draft_instance_key": "draft-fast-south",
+            "application_system_key": "fast-light-instance-south123456",
+            "owner_label": "South",
             "radio_role": "tx_rx",
             "application_path": "/opt/flrig",
             "secondary_application_path": "/opt/fldigi",
@@ -279,6 +343,8 @@ def test_fast_light_transceiver_recipe_orders_distinct_components():
             "launch_at_startup": True,
         },
         managed_root="/fio/managed-instances",
+        platform="linux",
+        storage_home=tmp_path,
     )
     assert resolution.qualified
     assert [item.component_key for item in resolution.components] == [
@@ -288,12 +354,74 @@ def test_fast_light_transceiver_recipe_orders_distinct_components():
         "flamp",
     ]
     assert resolution.components[1].dependencies == ("flrig",)
-    assert resolution.components[2].execution_scope == "station_shared_utility"
+    assert resolution.components[2].execution_scope == "standard"
+    assert resolution.components[2].arguments[0] == "--flmsg-dir"
+    assert resolution.components[3].execution_scope == "station_shared_utility"
+    assert resolution.components[3].operator_starts is True
     assert resolution.components[0].configuration_roots != resolution.components[1].configuration_roots
     updates = recipe_draft_updates(resolution)
-    assert updates["configuration_path"].endswith("/flrig")
-    assert updates["secondary_configuration_path"].endswith("/fldigi")
-    assert updates["storage_path"].endswith("/fldigi/logs")
+    assert "/.flrig/instances/South-south123" in updates["configuration_path"]
+    assert "/.fldigi/instances/South-south123" in updates["secondary_configuration_path"]
+    assert updates["storage_path"].endswith("/logs")
+    assert updates["flmsg_message_path"].endswith("/ICS/messages")
+    assert updates["flamp_receive_path"].endswith("/.nbems/FLAMP/rx")
+
+
+def test_fast_light_recipe_uses_explicit_component_selection_not_discovery_side_effects(tmp_path):
+    resolution = resolve_fast_light_managed_recipe(
+        {
+            "draft_instance_key": "draft-fast-selection",
+            "application_system_key": "fast-light-ft-710-11223344",
+            "owner_label": "FT-710",
+            "application_path": "/opt/flrig",
+            "secondary_application_path": "/opt/fldigi",
+            # Discovery can find these applications even though this radio's
+            # stack does not select them.
+            "flmsg_application_path": "/opt/flmsg",
+            "flamp_application_path": "/opt/flamp",
+            "use_flmsg": False,
+            "use_flamp": False,
+            "host": "127.0.0.1",
+            "port": 12346,
+            "secondary_port": 7363,
+        },
+        managed_root=str(tmp_path / "private"),
+        platform="linux",
+        storage_home=tmp_path / "home",
+    )
+
+    assert resolution.persistable
+    assert [component.component_key for component in resolution.components] == [
+        "flrig",
+        "fldigi",
+    ]
+
+
+def test_fast_light_selected_component_without_discovery_is_saved_launch_pending(tmp_path):
+    resolution = resolve_fast_light_managed_recipe(
+        {
+            "draft_instance_key": "draft-fast-missing-flmsg",
+            "application_system_key": "fast-light-ft-710-55667788",
+            "owner_label": "FT-710",
+            "application_path": "/opt/flrig",
+            "secondary_application_path": "/opt/fldigi",
+            "use_flmsg": True,
+            "use_flamp": False,
+            "host": "127.0.0.1",
+            "port": 12346,
+            "secondary_port": 7363,
+        },
+        managed_root=str(tmp_path / "private"),
+        platform="linux",
+        storage_home=tmp_path / "home",
+    )
+
+    assert resolution.status == "launch_pending"
+    assert resolution.persistable
+    flmsg = next(component for component in resolution.components if component.component_key == "flmsg")
+    assert flmsg.executable == ""
+    assert flmsg.operator_starts is True
+    assert "FLMsg" in resolution.recovery_action
 
 
 def test_fast_light_observer_recipe_has_no_flrig_or_transmit_scope():
@@ -319,16 +447,21 @@ def test_atomic_store_projects_qualified_recipe_to_component_launch_rows(tmp_pat
     resolution = resolve_fast_light_managed_recipe(
         {
             "draft_instance_key": "draft-fast-a",
+            "application_system_key": "fast-light-instance-radioa12345",
+            "owner_label": "Radio A",
             "radio_role": "tx_rx",
             "application_path": "/opt/flrig",
             "secondary_application_path": "/opt/fldigi",
             "flmsg_application_path": "/opt/flmsg",
+            "flamp_application_path": "/opt/flamp",
             "host": "127.0.0.1",
             "port": 12346,
             "secondary_port": 7363,
             "launch_at_startup": True,
         },
         managed_root=str(tmp_path / "managed-instances"),
+        platform="linux",
+        storage_home=tmp_path / "home",
     )
     updates = recipe_draft_updates(resolution)
     result = store.adopt_software_instance(
@@ -363,10 +496,26 @@ def test_atomic_store_projects_qualified_recipe_to_component_launch_rows(tmp_pat
             "FROM radio_launch_bundle_items WHERE radio_profile_id=? ORDER BY display_order",
             (radio["id"],),
         ).fetchall()
-    assert [row[0] for row in rows] == ["FLRig", "FLDigi", "FLMsg"]
-    assert [row[1] for row in rows] == ["/opt/flrig", "/opt/fldigi", "/opt/flmsg"]
+    assert [row[0] for row in rows] == ["FLRig", "FLDigi", "FLMsg", "FLAmp"]
+    assert [row[1] for row in rows] == ["/opt/flrig", "/opt/fldigi", "/opt/flmsg", "/opt/flamp"]
     assert json.loads(rows[1][2]) == ["flrig"]
     assert json.loads(rows[1][3])["launch_arguments"][0] == "--config-dir"
+    saved_radio = store.get_device_profile(int(radio["id"]))
+    assert saved_radio["use_flmsg"] == 1
+    assert saved_radio["flmsg_path"] == "/opt/flmsg"
+    assert saved_radio["flmsg_message_path"] == updates["flmsg_message_path"]
+    assert saved_radio["use_flamp"] == 1
+    assert saved_radio["flamp_path"] == "/opt/flamp"
+    assert saved_radio["flamp_message_path"] == updates["flamp_receive_path"]
+    assert "draft-fast-a" not in " ".join(
+        str(value)
+        for value in (
+            saved_radio["fldigi_log_path"],
+            saved_radio["fldigi_checkin_dir"],
+            saved_radio["flmsg_message_path"],
+            saved_radio["flamp_message_path"],
+        )
+    )
 
 
 @pytest.mark.parametrize(

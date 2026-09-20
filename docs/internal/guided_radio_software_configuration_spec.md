@@ -8,8 +8,12 @@ passed, but operator testing exposed an incomplete projection and transaction
 contract. GRS-10 is therefore the corrected controlling specification for a
 single cross-service prepared bundle, platform-correct launch identity, and a
 non-mutating draft boundary. Its automated implementation gate passed on
-2026-09-18. Operator-
-assisted live release qualification remains **open and blocked**. No existing application
+2026-09-18. GRS-13 is the current controlling specification for
+application-native storage, existing-station adaptation, unified Add Radio and
+Software Administration persistence, safe station message/publication
+services, NAS policy, and stable multi-instance launch. Its implementation gate is **open** pending
+maintainer review and implementation. Operator-assisted live release
+qualification remains **open and blocked**. No existing application
 configuration may be replaced, relinked, cloned, cleaned up, or reused through
 this flow until the exact operation is explicitly chosen and its gate passes.
 
@@ -163,8 +167,10 @@ Each radio-scoped software family uses exactly one of these sources:
   or already-configured candidate; its identity bundle is imported unchanged.
 - **Connect manually or remotely:** the operator supplies an endpoint, command,
   and paths that FIO cannot discover locally.
-- **Use a shared station tool:** permitted only for applications defined as
-  station-shared, such as FLMsg or FLAmp by default.
+- **Use an explicit shared service:** permitted only for a deliberately shared
+  station or operating-group component with a durable owner, bindings,
+  concurrency policy, and qualified launch/storage contract. A shared
+  executable alone does not make FLMsg or FLAmp runtime state shared.
 - **Built into FIO:** a capability mapping, not an external launch item, such as
   FIO Spotter.
 
@@ -176,7 +182,7 @@ these operator-facing labels consistently:
 | Create a distinct instance | **Create a new FIO-managed instance** |
 | Use an existing instance | **Use an existing instance unchanged** |
 | Connect manually or remotely | **Set up manually or connect remotely** |
-| Use a shared station tool | **Use station-shared `<service>`** |
+| Use an explicit shared service | **Use station-shared `<service>`** |
 | Built into FIO | **Included with FIO** |
 
 For a normal managed family, the visible identity is `Instance for: <radio
@@ -632,9 +638,10 @@ operator step and keeps the instance unverified.
 Fast Light receives the same create/import/manual lifecycle as JS8Call.
 
 A transceiver Fast Light family contains radio-scoped FLRig and FLDigi
-instances, their explicit control relationship, and station-shared FLMsg and
-FLAmp tools by default. Advanced setup may give FLMsg/FLAmp radio-specific paths
-where operational attribution requires them.
+instances and their explicit control relationship. FLMsg and FLAmp installations
+may be shared, but managed multi-radio runtime/data identity follows GRS-13:
+FLMsg is radio-scoped by default, and FLAmp is radio-scoped only through a
+qualified or adopted isolation recipe.
 
 An observer Fast Light family is receive-safe by construction:
 
@@ -689,9 +696,9 @@ is not the default for `Create a distinct instance`.
 Preparation resolves and summarizes the FLRig/FLDigi configuration roots,
 FLDigi log and check-in roots, endpoints, dependency order, commands, and launch
 policy before any Files or correction surface appears. The qualified normal
-path asks for no custom command or raw profile folder. FLMsg and FLAmp remain
-station-shared unless the operator explicitly selects Advanced radio-specific
-ownership.
+path asks for no custom command or raw profile folder. It derives the
+radio-scoped FLMsg NBEMS/auto roots and either a qualified radio-scoped FLAmp
+identity or an accurately labeled shared/operator-managed limitation.
 
 The transceiver-only Advanced option is labeled **Allow FIO to initiate Fast
 Light transmissions**. Its explanation is: `Off by default. Needed only for
@@ -699,18 +706,15 @@ FIO-requested PTT, macros, queues, or automatic send; it does not affect
 ordinary manual FLDigi use.` It remains subject to FIO Behavior, RF Guard, and
 final preflight. The option never appears for a receive-only SDR.
 
-Fast Light persistence distinguishes three identities:
-
-1. station-shared FLMsg/FLAmp executable and default message-root identity;
-2. each radio's Fast Light workflow and its use of those shared tools; and
-3. an Advanced radio-specific FLMsg/FLAmp instance with exclusive paths and its
-   own launch identity.
-
-Shared roots are recorded deliberately as non-exclusive. Radio-specific roots,
-FLRig/FLDigi endpoints, native profile roots, attributable logs, and check-in
-paths are collision-checked resource claims. FLRig precedes its linked FLDigi;
-FLMsg or FLAmp depends on FLDigi only when the selected integration requires it.
-No dependency is invented for an independent receive-only file workflow.
+Fast Light persistence distinguishes the station-shared installation from each
+radio's runtime/data identities and from any explicitly shared station/group
+service. Radio-scoped FLMsg roots, qualified FLAmp roots, FLRig/FLDigi
+endpoints, native profiles, attributable logs, and check-in paths are
+collision-checked resource claims. Deliberately shared resources carry an
+explicit scope and owner rather than a non-exclusive path guess. FLRig precedes
+its linked FLDigi; FLMsg or FLAmp depends on FLDigi only when the selected
+integration requires it. No dependency is invented for an independent
+receive-only file workflow.
 
 ### VarAC And VarAC Cluster
 
@@ -1572,6 +1576,10 @@ passes. GRS-6.1 does not claim that dedicated JS8/Fast Light native roots and
 qualified launch recipes are complete; those are the GRS-6.2 exit gate.
 
 #### GRS-6.2 Exit Evidence — JS8 And Fast Light Recipes
+
+Historical note: GRS-13 supersedes the managed-root placement and generic
+station-shared FLMsg/FLAmp policy recorded in this 2026-09-17 evidence. The
+test result remains historical evidence only.
 
 Passed 2026-09-17. Add Radio and Software Administration now resolve managed
 software from FIO's configuration-owned `managed-instances` root rather than
@@ -3297,3 +3305,882 @@ guided software, native preparation/writer/transaction, and save suite passed
 **230 tests**. The Software Administration assistant/persistence/layout suite
 passed **141 tests**. Changed Python compilation and `git diff --check` pass.
 No schema or migration is introduced.
+
+### GRS-12.3 — Existing VarAC Data-Root Inheritance And Post-Commit Planner Handoff
+
+The binding production route is `Settings > Radios > Add Radio`: create or join
+a native-managed VarAC cluster, select **Open scheduler** for Daily + Nets, and
+complete final Save. Two independent defects were observed:
+
+- FIO placed the new member's incoming and outbox folders below
+  `.freqinout/managed-instances` even though the reviewed existing VarAC member
+  already established an operator-owned VarAC data area; and
+- Add Radio synchronously constructed Plan Builder while its
+  `BEGIN IMMEDIATE` guided-save transaction was still open. Plan Builder's
+  passive source projection attempted a Settings write, waited about five
+  seconds on that transaction, then failed with `database is locked` on the UI
+  thread.
+
+For Create Cluster and Join Cluster, new incoming/outbox values are FIO-derived
+facts, not repeated operator questions. The derivation order is:
+
+1. retain a path the operator actually corrected after opening Advanced;
+2. otherwise, when the reviewed source member has incoming/outbox evidence,
+   inherit the corresponding parent directory and generate distinct,
+   filesystem-safe `<radio-name>_In` and `<radio-name>_Out` children;
+3. use the known sibling's parent for a missing incoming or outbox counterpart;
+4. the 2026-09-19 implementation originally retained a conservative per-radio
+   private managed-root fallback when no evidence existed. GRS-13 supersedes
+   that fallback with one visible operator-selected VarAC data-area base.
+
+All profile mailbox claims participate in deterministic collision avoidance.
+FIO adds a stable numeric suffix rather than reusing or nesting another
+member's directory. Incoming, outbox, BBS, and BBS archive remain four distinct
+resources; BBS and archive stay cluster-shared while incoming/outbox stay
+member-local. The reviewed exact mailbox targets, including stable Wine
+directory-alias destinations, are included in the immutable native plan and
+the existing no-damage writer checks. Existing directories or contents are
+never moved, renamed, cleared, or deleted. A value published by an older native
+preparation is generated evidence, not an operator override; re-prepare must
+replace it when better reviewed source evidence is available.
+
+Guided Save owns only database and native-configuration persistence. It may
+record a requested planner handoff while the transaction is open, but it must
+not navigate, construct a lazy tab, run scheduler queries, or write Settings
+until the transaction has exited successfully. After commit, Add and Edit
+Radio queue one next-event-loop Plan Builder handoff with the saved radio and
+schedule choice. Rollback or failed Save queues nothing. Plan Builder's passive
+constructor/header projection may update widgets from a saved plan but may not
+persist source selectors; only explicit operator selection or an explicit
+guided handoff may write those preferences.
+
+The regression gate must prove:
+
+- create- and join-cluster preparation inherit the reviewed mailbox parent on
+  Windows-shaped and Linux/Wine paths;
+- generated names are distinct and deterministic, actual Advanced corrections
+  win, and an earlier FIO-generated managed-root value is re-derived;
+- stable Wine Desktop aliases retain exact resolved-target safety, while broken
+  or retargeted aliases remain blocked;
+- Add and Edit Radio queue Plan Builder only after successful transaction exit,
+  and any failed/rolled-back Save performs no navigation;
+- passive Plan Builder source projection performs zero Settings writes; and
+- the applicable native preparation/writer/transaction, guided-radio,
+  planner, compilation, and diff-hygiene suites pass.
+
+No schema or migration is introduced. Live Windows and Linux/Wine operator
+qualification of the complete cluster Save and Daily + Nets handoff remains an
+external release gate.
+
+Implementation ownership and automated evidence:
+
+- primary `gpt-5.6-sol`, high reasoning: evidence diagnosis, architecture,
+  implementation, delegated-audit review, specification/work-log
+  reconciliation, and final gate;
+- `gpt-5.6-terra`, medium reasoning: read-only scheduler transition and CPU
+  audit; and
+- `gpt-5.6-luna`, low reasoning: read-only VarAC placement and no-damage audit.
+
+The focused correction suite passed **18 tests**. The full applicable
+guided-radio, Add Radio, planner, Software Administration, native
+preparation/writer/transaction, and VNC partition passed **288 tests**.
+Changed Python compilation and `git diff --check` pass.
+
+## GRS-13 — Application-Native Storage, Unified Administration, And Stable Multi-Instance Launch
+
+Status: controlling specification accepted. The GRS-13.1 canonical identity,
+GRS-13.2 layout, GRS-13.3 JS8Call native-identity parity, and GRS-13.4 Fast
+Light native-bundle parity/planner-handoff slices are implemented with
+automated coverage; the wider native-writer, Station Message
+Library, publication/NAS, and live Windows/Linux-Wine GRS-13 exit gates remain open. This section unifies
+Add Radio and Software Administration for every supported software family. It
+supersedes earlier language that:
+
+- makes `.freqinout/managed-instances` the normal or final location for native
+  third-party profiles, messages, databases, queues, inboxes, outboxes, or
+  operator content;
+- treats FLMsg or FLAmp as generically station-shared merely because their
+  executable is shared;
+- permits Add Radio, Software Administration, persistence, or Launch Control to
+  reconstruct different representations of one software instance; or
+- makes a radio link, family row, or launch manifest an independent source of
+  truth rather than a projection of one canonical bundle.
+
+Earlier implementation evidence remains historical evidence. New preparation,
+save, reload, launch, reconciliation, and migration work must satisfy GRS-13.
+The existing no-damage, qualified-writer, structured-command, rollback, RF
+Guard, receive-only, concurrency, and responsive-UI contracts remain binding.
+
+### Operator Mental Model
+
+FIO presents five different things without conflating them:
+
+1. **Installed application:** a normally station-shared executable or
+   installation, such as one FLMsg, FLAmp, FLDigi, JS8Call, or VarAC install.
+2. **Radio software instance:** the profile, data roots, endpoints, launch
+   identity, and process components used by one radio. Concurrent instances are
+   distinct even when they use the same executable.
+3. **Station Message Library:** the canonical station-owned collection of
+   completed received/imported content. Each receipt retains immutable
+   radio/application/source provenance plus operating-group context metadata.
+4. **Station publication service:** FIO Spotter FLAmp Q and the FIO BBS are
+   station-scoped services over selected canonical messages. Each service has
+   independent per-item publication state, access rules, audit, index, and
+   eligible response-radio bindings.
+5. **Operating-group context:** an operating group is receipt/routing metadata,
+   a user filter, and a possible access-policy subject. It does not own the
+   message, publication service, service index, native profile, endpoint, or
+   response process.
+
+The concise operator rule is:
+
+> Application instances belong to radios. Received content belongs in the
+> station message library. FIO Spotter FLAmp Q and FIO BBS are station services.
+> Operating groups describe context and may grant or deny access.
+
+Two radios in the same or different operating groups keep separate application
+state, endpoints, receive locations, and launch identities while contributing
+completed content to the same canonical station library. Library views may
+filter by radio, software, operating-group context, sender, recipient, or access
+policy. Identical content may be deduplicated without erasing any radio receipt
+event or its historical group context.
+
+Every path, endpoint, resource claim, launch component, canonical message, and
+service binding carries exactly one scope and owner ID. Operating-group context
+and ACL subjects are separate metadata, not ownership:
+
+| Scope | Owns | Must not own implicitly |
+| --- | --- | --- |
+| Radio | native profile/data identity, endpoints, private logs, receive sources, member inbox/outbox, CAT/PTT authority, radio-scoped process | another radio's profile, endpoints, runtime state, or publication service |
+| Operating group | group definition, membership, receipt-context label, saved filter, and access-policy subject | message ownership, publication service/index, radio CAT/PTT authority, native profiles, or endpoints |
+| Station | canonical message library, FIO Spotter FLAmp Q, FIO BBS, installations, explicitly shared processes, catalogs, archive/synchronization and publication policy | loss of per-radio receipt provenance or implicit transmit authority |
+
+Matching paths, executable names, ports, display names, or operating-group
+membership never imply shared ownership.
+
+### Managed Without Lock-In
+
+`Managed by FIO` means that FIO prepares, validates, records, launches,
+monitors, and reconciles a qualified configuration. It does not mean that FIO
+hides operator files in an FIO-private location or may delete them.
+
+Native application files and operator content remain in application-standard,
+existing operator-established, or explicitly selected locations. FIO's private
+configuration root may contain only FIO databases, bounded caches, indexes,
+logs, journals, recovery evidence, and other replaceable/internal metadata.
+The only copy of a native profile, received message, attachment, archive, Q
+file, BBS file, or operator-created content must never exist solely below the
+FIO private configuration root.
+
+FIO establishes one visible local **Station Message Library**. It adopts an
+existing operator library when selected; otherwise it proposes a recognizable
+folder in the platform's ordinary user documents/data area and asks once for
+confirmation. Radio provenance and operating-group views are metadata and
+indexes over that library, not hidden duplicate directory trees.
+
+Removing a radio, disassociating software, disabling launch, or uninstalling
+FIO never deletes, moves, renames, clears, or makes inaccessible a third-party
+profile or operator file. Deletion or migration is a separate, explicit,
+reviewed operation outside Add Radio. A managed workspace may include a small
+human-readable inventory explaining its radio, application, paths, and launch
+selector, but that inventory is not required to use the application without
+FIO.
+
+### Native Directory Selection And Existing-Station Adaptation
+
+Discovery occurs before any directory proposal. It inventories bounded known
+application locations, saved FIO bundles, application launchers/shortcuts,
+supported selectors, and existing multi-instance conventions without writing.
+Each candidate is classified as one of:
+
+- **Use existing instance unchanged**;
+- **Create a distinct sibling instance**;
+- **Clone as distinct** through a separately qualified reviewed operation;
+- **Connect manually or remotely**;
+- **Use an explicit station service**; or
+- **Diagnostic only** because identity or ownership is incomplete.
+
+For every newly created native path, FIO applies this precedence:
+
+1. an explicit operator-selected and reviewed native directory;
+2. the complete verified layout of an explicitly adopted existing instance;
+3. the application's qualified platform-standard native location and naming
+   behavior, including a profile or rig selector that causes the application to
+   create its own standard path;
+4. the verified parent and naming convention of a compatible existing sibling,
+   with a new stable collision-free child; and
+5. when no trustworthy convention exists, one visible operator-selected
+   **Radio Software Data Folder**, prefilled from the platform's ordinary user
+   documents/data area and remembered as station policy.
+
+There is no `.freqinout/managed-instances` fallback for native application or
+operator data. If FIO cannot qualify a native location, it preserves the
+prepared bundle as `Needs choice` or `Saved; launch setup pending` and asks one
+concise location question. It does not invent an opaque location.
+
+A compatible sibling supplies only its application/platform/version convention
+and parent. It never supplies another instance's child path, endpoint, profile,
+message root, database, selector, environment, or launch identity. New child
+names use the immutable instance key for collision resistance while displaying
+the operator's radio name. A later radio rename changes the display label only;
+paths, selectors, ports, and launch identity remain stable unless the operator
+performs a separate reviewed relocation/rename.
+
+Existing single- and multi-instance installations are first-class:
+
+- adoption stores the complete observed bundle unchanged and source-locks it;
+- an established multi-radio parent/naming convention is reused for a new
+  sibling after compatibility and collision checks;
+- existing folders, files, launchers, shortcuts, ports, and process
+  environments are never normalized or silently replaced;
+- discovery ambiguity produces a clear choice, not a best-guess assignment;
+  and
+- a shared legacy receive root is labeled **Station-shared; radio attribution
+  may be limited** rather than falsely assigned to a radio.
+
+Review shows the selected base, every derived child, why FIO chose it, whether
+FIO manages or only watches it, and that no existing file changes before final
+Save.
+
+### Family-Specific Native Layout Contracts
+
+#### JS8Call family
+
+FIO uses the exact application/version-qualified rig or profile selector and
+the native standard data location that selector creates. A distinct instance
+has one stable rig name, settings path, application-data root, SaveDir/forms
+root, API/UDP endpoints, structured command, working directory/environment,
+and radio assignment. Those facts share one immutable instance key and persist
+unchanged through Software Administration and Launch Control. FIO never pairs a
+new API port with an existing profile or stores a draft-key path while launching
+a final-key selector.
+
+For stock JS8Call, Improved, and Subspace variants that follow the upstream
+multi-settings contract, the reviewed radio-derived rig name is the single
+human-facing native identity. FIO passes that value with `--rig-name`. JS8Call
+then uses `JS8Call - <rig name>` as its Qt application name; FIO must therefore
+derive the settings file and writable application-data root from that same
+application name and the platform's Qt standard locations. Examples are
+`~/Library/Preferences/JS8Call - FT-710.ini` plus
+`~/Library/Application Support/JS8Call - FT-710/` on macOS,
+`~/.config/JS8Call - FT-710.ini` plus
+`~/.local/share/JS8Call - FT-710/` on conventional Linux, and the
+corresponding Qt local configuration/data locations on Windows. `DIRECTED.TXT`,
+`ALL.TXT`, `inbox.db3`, Save, and forms resources are children of or explicitly
+linked to that native application-data identity. A qualified adopted instance
+retains its observed native locations unchanged.
+
+`--rig-name` and `--config` are not interchangeable. `--rig-name` selects the
+distinct application name, lock, settings file, and data identity. `--config`
+selects an alternate MultiSettings profile inside that already-selected
+settings file. The normal distinct-instance recipe uses `--rig-name <radio>`
+and writes the reviewed values to that file's active `Configuration` group; it
+must not write only `MultiSettings/<radio>` and then omit `--config`, because
+those prepared values would be inactive. FIO never writes the new radio's
+values into the detected default `JS8Call.ini`; that path is source evidence
+only. An explicit alternate-profile workflow must persist and launch with both
+selectors and is a separately qualified recipe.
+
+The Add Radio transaction key and draft instance key are internal concurrency
+identifiers only. They must never appear in `--rig-name`, a JS8Call application
+name, settings filename, application-data directory, message path, Software
+Administration title/body, or launch summary. When the draft is created, FIO
+also allocates one separate durable application key. That durable key is shared
+by the application row, manifest, launch projection, and canonical identity
+record, while the operator-readable radio-derived rig name independently drives
+JS8Call's native paths. Final Save may not recompute either identity. A radio
+rename preserves both until the operator performs a separate reviewed native
+identity rename/relocation.
+
+Software Administration displays the radio/instance label and native JS8Call
+resources. Opaque application, canonical, fingerprint, and transaction keys
+remain available to diagnostics but are not normal user instructions. Existing
+rows created by an older release with a draft-derived rig name are reported as
+`Needs attention`; FIO does not silently rename or move their files. The
+operator uses the reviewed **Replace instance** recovery transaction to adopt
+or create the correct native identity without changing another JS8Call
+instance.
+
+#### Fast Light core
+
+An installation/executable may be station-shared; radio runtime state is not.
+Each managed radio receives distinct qualified FLRig and FLDigi configuration
+roots, endpoints, logs/check-in paths, audio/control bindings, component keys,
+and structured launch recipes. FLRig and FLDigi use their documented selectors
+and remain paired to the same radio. A shared binary never causes process-name
+deduplication of radio-scoped components.
+
+For a new managed instance, the final native roots are derived before Review
+from the final radio label plus the immutable durable application key. The
+transaction-only `draft-fast_light-*` key and the FIO private configuration or
+runtime root are forbidden in every final FLRig/FLDigi/NBEMS path. With no
+reviewed station override, Unix/macOS use distinct children below the native
+`~/.flrig`, `~/.fldigi`, and `~/.nbems` conventions; Windows uses the qualified
+equivalent native application/NBEMS locations. An established reviewed native
+base takes precedence. Final Save must not recompute these roots.
+
+Selecting a Fast Light component is a persistence requirement, not merely a UI
+checkbox. If FLRig, FLDigi, FLMsg, or FLAmp is selected and its reviewed
+executable is available, Final Save atomically writes all of the following or
+writes none of them: component selection flag, executable, native resources,
+endpoint/arguments/dependencies, application row, manifest claims, launch row,
+canonical identity record, and Software Administration projection. A launch
+recipe that knows an executable while the saved radio row is blank is a failed
+transaction and must never be reported as Ready.
+
+Selection and discovery are separate inputs. The explicit component selection
+is authoritative; a discovered FLMsg or FLAmp executable must not add that
+unselected component to the radio. Conversely, a selected component whose
+executable cannot yet be qualified remains present in the canonical bundle as
+`Saved; launch setup pending`, with its application-standard derived resources
+and one Browse/recovery action. Discovery failure may not silently erase the
+selection or the component identity.
+
+#### FLMsg
+
+For managed multi-radio operation, FLMsg data is radio-scoped by default even
+though the executable is normally shared. FIO uses the application's supported
+`--flmsg-dir` for one complete radio-specific NBEMS root and uses matching
+FLMsg/FLDigi `--auto-dir` values for that radio's `WRAP/auto` workflow. The
+bundle persists, at minimum, the root plus `ICS/messages`, `ICS/templates`, and
+`WRAP/auto` resources. FIO derives these from the native convention; the normal
+flow does not ask the operator to type each child path.
+
+FLDigi and FLMsg persist the same reviewed `WRAP/auto` path. FLDigi launches
+with `--auto-dir <radio WRAP/auto>` and FLMsg launches with
+`--flmsg-dir <radio NBEMS root> --auto-dir <radio WRAP/auto>`. Software
+Administration must show the exact saved executable and `ICS/messages` source
+that those arguments select; it may not show a blank field, an unrelated
+station default, or a draft-only path.
+
+An intentionally shared FLMsg workspace is an explicit advanced choice with a
+declared station owner, concurrency policy, radio bindings, and limited
+attribution. Operating groups may appear in its message ACLs but do not own the
+workspace. Sharing an executable never shares its NBEMS root.
+
+#### FLAmp
+
+Each concurrent FLDigi/FLAmp pair has distinct, persisted XML-RPC and ARQ
+endpoint pairs, component keys, dependencies, and launch identity. FIO stores
+the exact native receive source and an explicit outgoing staging/queue resource;
+it never derives a transmit directory merely by replacing `rx` with `tx`.
+
+Because supported FLAmp versions do not expose a universally qualified
+FLMsg-style native-root selector, FIO claims radio-specific native storage only
+when the exact platform/version launch recipe or an adopted existing launcher
+proves that isolation. Existing working multi-instance launch environments are
+adopted unchanged. Without such evidence, FIO offers an operator-managed
+station-shared or one-at-a-time process and labels receive attribution limits;
+it does not fabricate per-radio isolation. Qualified configuration/queue
+scripts may select explicit outbound files but are not evidence that native
+receive state is isolated.
+
+When FLAmp is selected without qualified per-radio isolation, FIO still
+persists the discovered executable and the reviewed application-standard
+station receive/outgoing sources so message intake and administration are not
+blank. It labels the process/source as station-shared with limited radio
+attribution, stores those claims as non-exclusive, and does not silently enable
+radio-scoped startup. This is a truthful usable configuration, not a reason to
+discard the component during Final Save.
+
+### GRS-13.4 — Fast Light Projection And Planner Handoff Invariant
+
+The authoritative Fast Light bundle is prepared once and projected everywhere.
+The component recipe is the recovery source for derived paths when the generic
+details assistant intentionally hides them. Final Save rehydrates manifest
+claims from that reviewed recipe before the database transaction and then
+reads the saved application/manifest identities back into the canonical record.
+The bundle records the explicit selected-component set independently from the
+discovered executable evidence; projections may not reconstruct selection from
+whether a path happens to be blank or nonblank.
+Consequently, Add Radio Review, the linked Fast Light row, Software
+Administration, Launch Control, and canonical parity validation must agree on:
+
+- the durable manifest/bundle key and `fio_managed` ownership;
+- FLRig/FLDigi executables, distinct native configuration roots and XML-RPC
+  endpoints;
+- FLDigi log and NBEMS auto/check-in sources;
+- FLMsg executable, NBEMS root, messages, templates, auto path, arguments and
+  dependency;
+- FLAmp executable, truthful shared/isolated classification, receive/outgoing
+  sources, startup policy and dependency; and
+- every structured component command, working directory, readiness fact and
+  resource claim.
+
+The save adapter may not default a `mode=managed` or `ownership=fio-managed`
+draft to an operator-managed manifest. The persistence boundary must infer the
+explicit management mode and preserve it on reload.
+
+When Add Radio saves a radio and hands the user to Plan Builder before a plan
+assignment exists, the just-saved radio ID is the explicit RF Guard context.
+Plan save/review validates against that radio and must not display the generic
+"No radio context" warning. The same retained ID is passed to the subsequent
+Assign Schedule action.
+
+Legacy rows containing draft-private native paths, blank selected components,
+or split ownership remain readable and `Needs attention`; FIO does not silently
+move or overwrite their external data. **Replace instance** is the reviewed
+recovery route. New Final Save and Replace transactions must satisfy this
+invariant without requiring a migration of unrelated existing rows.
+
+#### VarAC and VARA
+
+GRS-10's install-adjacent unique VarAC INI and structured Windows/Wine launch
+contract remains authoritative. Member-local incoming/outbox and runtime paths
+follow an explicitly selected or reviewed existing VarAC/VaraFiles parent;
+cluster BBS/database resources follow their declared cluster ownership. A new
+member uses distinct stable children beside the established operator layout.
+If no standard or existing layout can be qualified, FIO asks once for the
+VarAC data-area base folder; it does not fall back to `.freqinout`.
+
+#### FIO Spotter and CommStat
+
+FIO Spotter remains a built-in station service. Its FLAmp Q publication catalog
+and the FIO BBS are station-scoped over the canonical Station Message Library.
+CommStat remains one explicit station process with per-radio JS8 endpoint
+bindings. None creates duplicate radio-owned executables or changes message
+ownership merely because it observes or serves content.
+
+### Local, Removable, And Network Storage
+
+Every persisted storage resource records its normalized path, scope/owner,
+read/write capability, storage class (`local`, `removable`, or `network`),
+filesystem/mount identity when available, verification evidence, mutation and
+retention policy, and local-cache/synchronization policy where applicable.
+
+The safe default is local-first:
+
+- mutable native profiles, databases, lock files, partial receive state,
+  autosend queues, active inbox/outbox, and application runtime state stay on a
+  qualified local filesystem;
+- completed-message archives, station publication content/index replicas, BBS
+  content, FLAmp Q content, templates/reference material, exports, and backups
+  may use a reviewed NAS or removable location; and
+- an application/version may use network-backed mutable state only through an
+  explicit qualified recipe that proves its locking, atomicity, availability,
+  and recovery semantics.
+
+A reachable mount is not proof that mutable application state is safe. Network
+credentials remain owned by the operating system and are never stored in the
+bundle. Changed mount identity, resolved target, or permissions makes the
+affected resource stale and prevents automated writes until reviewed; FIO
+never silently remaps it.
+
+Reception and radio operation never wait on a NAS. FIO first accepts completed
+content into a visible local station message library, then synchronizes or
+publishes asynchronously using checksums, temporary-file-plus-atomic-rename
+where the filesystem supports it, bounded retries, and idempotent records. A
+NAS outage shows `Synchronization delayed`, retains queued work locally, and
+keeps the last known-good local Q/BBS publication available. It does not freeze
+the UI, drop the native receive event, clear an index, or block an unrelated
+radio.
+
+### Safe Message Intake, Presentation, And Delivery
+
+Native application folders are sources, not the sole FIO message database.
+FIO watches each declared source read-only unless a qualified recipe explicitly
+owns an outbound handoff. A source scan:
+
+1. rejects path escape and unexpected symbolic-link traversal;
+2. waits for a regular file's size and modification evidence to stabilize;
+3. applies bounded size/type handling and calculates a content hash;
+4. imports or copies the completed content atomically into the visible local
+   station message library;
+5. records radio, software instance, source path, operating-group context,
+   content identity, size, times, parse state, and authentication/signature
+   evidence; and
+6. never deletes or moves the native source automatically.
+
+The Messages UI reads canonical imported records rather than trusting a live
+mutable source file. It escapes untrusted text and filenames, sanitizes rendered
+markup, does not execute attachments, and presents unknown/binary content as an
+attachment. A changed file is a new revision. Repeated observation of identical
+content is idempotent while preserving every distinct receipt/provenance event.
+
+FIO-owned outgoing work uses a radio-scoped local outbox and an explicit
+destination resource. Handoff to FLMsg, FLAmp, VarAC, BBS, or another service
+uses a temporary file and atomic promotion where supported, records the result,
+and never uses a receive folder as an inferred transmit queue. Any send,
+automatic forwarding, queue enqueue, or purge binds to a transceiver-owned
+preflight context and applicable RF Guard; receive-only radios may decode and
+import but never gain transmit authority through a file path.
+
+### Station Message Library And Access-Controlled FLAmp Q/BBS Publication
+
+Receipt, publication, authorization, and response transport are separate
+decisions:
+
+1. traffic lands in the designated native location for the receiving
+   radio/application instance;
+2. FIO validates and imports the completed item into the canonical station
+   message library with immutable receipt provenance;
+3. the operator or an explicit automation rule publishes that canonical item
+   to FIO Spotter FLAmp Q, FIO BBS, both, or neither;
+4. each station service evaluates its own per-item access policy; and
+5. an authorized request is assigned to exactly one eligible response radio and
+   passes that radio's readiness, RF Guard, activity, and transmit preflight.
+
+Newly received content is private and unpublished by default. Publication does
+not move, duplicate, or transfer ownership of the canonical message. One
+canonical item may have independent FLAmp Q and FIO BBS publication entries,
+public names, retention, expiration, and access rules.
+
+An access policy may include explicit callsigns, trusted operators, station
+roles, one or more operating groups, all authenticated stations, an explicitly
+selected public audience, expiration, and explicit deny/exclusion rules. Group
+membership is only one authorization subject. A message received while radio A
+was operating with group A may be shared with group B, several groups, named
+callsigns, or another permitted audience without changing its receipt
+provenance or copying it into group-owned storage. Group reassignment changes
+prospective filtering/policy evaluation only; it never rewrites history.
+Access is default-deny, explicit deny takes precedence over allow, and every
+policy decision records the requester identity, matched rule, service, item,
+time, and result.
+
+FIO Messages shows receiving radio/application, receipt context, validation,
+and independent publication states. The operator can select one or more
+canonical messages and choose `Publish to FLAmp Q`, `Publish to FIO BBS`,
+`Publish to both`, or `Remove publication`, then review each service's access
+rules. Automatic publication is opt-in, bounded, auditable, and uses the same
+policy engine.
+
+FIO Spotter FLAmp Q and FIO BBS never serve arbitrary live receive folders,
+generic global `message_paths.flamp`, or an operator filesystem tree. Each
+serves only complete, validated canonical records with an active publication
+entry. Each station service maintains a separate policy, audit log, and
+generation-fenced local index keyed by stable content identity plus an
+unambiguous public name, not by a mutable source path.
+
+Publication and withdrawal indexes are atomically replaced after successful
+validation. An incomplete file, failed NAS synchronization, or failed refresh
+cannot erase the last known-good local index. A withdrawal becomes a durable
+pending operation until every required local index is updated; the UI must not
+claim that access was removed while a stale serving index can still answer.
+Canonical content and receipt provenance remain after unpublish.
+
+Response-radio selection is station-service policy over explicit eligible radio
+bindings, not operating-group ownership. An active-responder lease/preference
+selects one radio for a request and prevents duplicate replies. Authorization
+does not itself grant a transport, frequency, PTT, or automatic-send right.
+
+The **FIO BBS** described here is distinct from a native VarAC cluster BBS.
+VarAC BBS/database/archive paths remain VarAC cluster-owned native resources.
+Changing them does not relocate or reconfigure the FIO BBS publication catalog,
+and FIO BBS ACL/index changes do not rewrite VarAC native configuration.
+
+### One Canonical Bundle And Complete Persistence
+
+Automatic preparation produces one immutable `AtomicInstanceBundle` per
+selected family. Successful final Save persists one versioned canonical
+`SoftwareIdentityRecord` per selected family, with stable bundle/component/
+binding IDs and a complete fingerprint, in one generation-fenced radio identity
+set. The application rows, manifests, and launch rows remain required verified
+projections of that identity set.
+This canonical bundle is the source of truth. Device profiles, family-specific
+rows, cluster/membership rows, message-source rows, operating-group context and
+ACL-subject bindings, station publication/ACL rows, storage-resource rows, and
+launch manifests are deterministic projections, not competing authorities.
+
+#### Mandatory Add Radio / Software Administration identity parity
+
+Every software family, application component, built-in binding, and shared-
+service binding that Add Radio selects, discovers, prepares, or reviews must be
+present in Add Radio's embedded Software Administration editor and Review before
+final Save, then in standalone Software Administration immediately after Save
+and after restart/reload. A new unsaved radio is never materialized as a
+standalone Settings row merely to satisfy this rule. Both embedded and
+standalone surfaces project the same generation-fenced canonical draft/bundle;
+they are not permitted to create parallel records.
+
+This is an exhaustive rule, not an example list. The required canonical
+projection for each selectable Add Radio capability is:
+
+| Add Radio selection | Canonical family record | Required nested identities visible in Software Administration |
+| --- | --- | --- |
+| Receiver application / SDR++ | `sdrpp` | receiver component, receive-only scope, exact executable/argv/cwd/environment/dependencies/readiness, radio binding |
+| JS8Call | `js8call` | JS8 application component, rig/profile selector, settings/data/message paths, API/UDP endpoints, radio binding |
+| Fast Light | `fast_light` | every selected FLRig, FLDigi, FLMsg, and FLAmp component; none may be inferred from another component |
+| VarAC | `varac` | VarAC and VARA components, node/cluster bindings, INI/database/runtime/incoming/outbox/BBS/archive resources, ports, dependencies |
+| FIO Spotter | `fio_spotter` | explicit `fio-spotter` built-in component and built-in radio binding; selection is never inferred from JS8Call |
+| External JS8Spotter | `external_js8spotter` | external process component, executable/recipe, JS8 endpoint dependency, and radio binding |
+| CommStat | `commstat` | one `commstat:station` process identity plus the selected radio's distinct JS8 endpoint binding; never a duplicate process identity |
+
+The canonical family key may differ from a human-facing label, but it must be
+mapped explicitly and losslessly (`sdrpp` to **Receiver application** and
+`external_js8spotter` to **External JS8Spotter**). Fast Light remains one
+atomic family record whose selected children are individually persisted
+components. Station-owned services remain explicit records with radio-specific
+bindings. A checkbox, display label, or neighboring family is never sufficient
+evidence that an identity exists.
+
+For each selected identity, both surfaces must expose or carry the exact same:
+
+- canonical bundle ID and immutable component or binding ID;
+- family and component kind, including distinct FLRig, FLDigi, FLMsg, FLAmp,
+  VARA, FIO Spotter binding, and CommStat endpoint-binding identities;
+- radio/station owner, execution scope, management/source mode, completion
+  policy, provenance, and verification state;
+- native configuration, data, message, queue, database, archive, and storage-
+  resource paths with the same normalized values and ownership;
+- endpoints, selectors, executable, structured argument vector, working
+  directory, environment, dependencies, launch policy, and readiness policy;
+- desired/native evidence and the same complete parity fingerprint.
+
+The UI may group these identities differently for the task at hand. It may not
+omit one, duplicate one, append a surface-specific identity name, silently
+rename one, independently edit one projection, or reconstruct one from a
+neighboring family, radio, legacy default, display label, or filesystem guess.
+FIO Spotter is an explicit built-in station-service binding; it is not implied
+merely by the presence of JS8Call. CommStat is one explicit station process
+with a distinct per-radio JS8 endpoint binding; it is not a second JS8Call
+instance. Each radio identity set references the same durable
+`commstat:station` process ID and contributes only its own endpoint binding;
+repetition of that reference in per-radio canonical sets never authorizes or
+creates another CommStat process or launch identity. Fast Light may have one
+family summary, but FLRig, FLDigi, FLMsg, and
+FLAmp remain individually identified canonical components beneath it.
+
+An edit from Add Radio or Software Administration's **Add software instance… /
+Replace instance** assistant updates the same draft generation and invalidates
+older discovery/preparation results. Canonical-backed compact task fields in
+Software Administration are a read-only projection; they must not offer an
+independent partial Save. This is deliberate: identity, paths, endpoints,
+manifest, and launch recipe are changed together through the instance assistant
+or not at all. Final Save from either authoritative assistant uses the same
+transaction. The committed radio links, compatibility rows, manifests, launch
+rows, and Software Administration summaries are projections of that transaction
+and must reload to the identical parity fingerprint. A missing, extra,
+duplicate, stale, or mismatched identity is `Needs attention`; the affected
+launch is blocked, and FIO offers reconciliation without changing an existing
+native configuration automatically.
+
+`Save as draft` persists no active radio link and performs no native write, but
+it must retain the complete canonical identities so Add Radio's embedded
+Software Administration editor can resume the same draft without value-by-
+value copying. A saved inactive radio draft may then appear in standalone
+Software Administration, still carrying the same identity IDs and fingerprint.
+
+The final transaction writes and reload-verifies every required projection.
+Projection parity includes:
+
+- radio, operating-group, family, instance, and component identities;
+- source/adoption mode, ownership, scope, and completion policy;
+- normalized and resolved native paths plus storage classification;
+- endpoints, selectors, executable, structured `argv[]`, working directory,
+  environment, dependency order, launch/readiness policy, and execution scope;
+- message sources/destinations, operating-group context/ACL-subject bindings,
+  station Q/BBS publication and access-policy resources, and
+  retention/synchronization policy;
+- desired/native fingerprints, writer/recovery evidence, and verification
+  state.
+
+Add Radio, Software Administration, Connections, Review, Health, Messages,
+Spotter, scheduler, Launch Control, startup, and reconciliation load the same
+canonical bundle or one verified projection carrying its bundle/component ID
+and fingerprint. No consumer reconstructs missing fields from legacy defaults,
+adjacent records, display text, or filesystem guesses. Missing or mismatched
+projection is `Needs attention` and launch-blocking for the affected component;
+it is never silently repaired from another radio's row.
+
+Draft preparation and `Save as draft` are non-mutating. Final Save from either
+entry surface invokes the same qualified rollback-capable native/FIO
+transaction. The accepted bundle is applied once, persisted once, and published
+once. Cancel, stale generation, source drift, injected writer failure, database
+failure, or projection readback failure restores the prior native and FIO state
+and leaves no active orphan.
+
+### Stable Multi-Instance Launch
+
+Each external process identity has one persisted component manifest containing
+its stable component key, executable, exact `argv[]`, working directory,
+environment, dependencies, execution scope, radio/group/station owner,
+readiness target, and resource claims. Display command text is rendered from
+that vector and is never reparsed.
+
+Process-name or executable-path deduplication is forbidden. Deduplication is
+permitted only when the components carry the same intentionally shared durable
+component key and compatible scope/bindings. Separate radio components launch
+separately even when they use the same binary. Manual launch and startup use
+the same persisted recipe. Reload, radio rename, UI navigation, or a later
+discovery pass cannot change the selector, paths, endpoints, or arguments.
+
+Launch order and readiness are component-specific. A slow or failed component
+stays within its endpoint lane and cannot delay another radio. Readiness proves
+only the declared process/service evidence; it does not infer radio control,
+message attribution, or transmit authority.
+
+### Unified Add Radio And Software Administration Experience
+
+Add Radio remains the normal radio-first flow. Its Software step:
+
+1. shows selected capabilities and required source/topology decisions;
+2. discovers existing application/native-layout evidence asynchronously;
+3. proposes adoption or a distinct sibling using the directory policy above;
+4. prepares the complete bundle automatically;
+5. shows one concise card per family with status, ownership, radio scope,
+   operating-group context where relevant, location summary, launch policy, and
+   one recovery action; and
+6. continues without opening Software Administration when the bundle is ready
+   or ready with a non-safety warning.
+
+Software Administration is the same bundle editor entered software-first or as
+an exception/review route. It never starts with a blank generic Files page when
+preparation can derive values, never loses a prepared Add Radio value, and never
+asks for recipe-owned child paths or commands. Its normal summary separates:
+
+- **Application installation** — normally shared executable/install;
+- **Radio workspace** — profile, data, endpoints, receive/outgoing resources;
+- **Messages and publication** — station library intake, FLAmp Q/FIO BBS
+  publication state, access policy, and eligible response radios;
+- **Operating-group context** — receipt/filter metadata and available ACL
+  subjects, not service ownership;
+- **Station storage** — archive/NAS synchronization; and
+- **FIO action** — manage, watch unchanged, publish, synchronize, or operator
+  starts.
+
+Generated values are read-only with `Why` and `Show details`. Advanced permits
+an intentional correction or manual source. A corrected value changes the
+canonical draft and triggers one generation-fenced reprepare; it never patches
+one projection independently.
+
+Both surfaces use identical labels, readiness severity, review text, and Save
+semantics. A successful Software Administration `Save as draft` returns the
+complete non-mutating bundle to Add Radio. Standalone Software Administration
+final Save invokes the same final transaction and persists the same bundle.
+
+The division of responsibility remains visible and concise:
+
+| Operator decides | FIO derives and performs when qualified |
+| --- | --- |
+| radio name, role, and FIO Behavior | stable internal identity and radio-scoped capability limits |
+| use existing unchanged, create distinct, manual/remote, or explicit shared service | bounded discovery, compatible sibling selection, native directory proposal, and collision checks |
+| operating-group membership/context | receipt provenance, saved filters, and ACL-subject resolution without service ownership |
+| publication to FLAmp Q, FIO BBS, both, or neither; audience and expiration | station-scoped publication entries, policy evaluation, audit, indexes, and one eligible response-radio route |
+| VarAC standalone/create/join topology and genuine ambiguous source choice | member paths, ports, native files, structured launch, dependencies, and rollback plan |
+| optional NAS/archive destination and retention policy | local-first spool, verification, asynchronous synchronization, and last-known-good service cache |
+| explicit transmit/automation authority | RF-safe launch/send capabilities and final preflight enforcement |
+
+The normal route never asks the operator to invent ports, child directories,
+settings filenames, database paths, command arguments, working directories, or
+dependency order that a qualified recipe can derive.
+
+### GRS-13 Acceptance Matrix And Exit Gate
+
+Implementation is not complete until automated fixtures cross:
+
+- Windows and Linux/Wine;
+- existing single-instance, established external multi-instance, and fresh
+  station inventories;
+- create distinct sibling, adopt unchanged, manual/remote, replace, and
+  explicit shared-service operations;
+- two radios in the same operating group and two radios in different groups;
+- local storage, NAS online, NAS offline during preparation, and NAS loss during
+  service; and
+- final Save, cancel, injected native failure, injected database failure,
+  restart/reload, display rename, and exact launch round-trip.
+
+The integrated gate requires all of the following:
+
+1. Existing native bundles and files remain byte-for-byte unchanged unless the
+   final reviewed plan explicitly names a qualified mutation. New siblings use
+   the established native parent/convention without reusing any exclusive
+   child resource.
+2. No native application or operator-content path is created below the FIO
+   private configuration root. Existing standard/native paths and intentional
+   operator/NAS choices survive prepare, draft save, final save, reload, and
+   launch.
+3. Receiver/SDR++, JS8Call, FLRig, FLDigi, FLMsg, FLAmp, VarAC/VARA,
+   FIO Spotter, external JS8Spotter, and CommStat
+   each round-trip their complete canonical identities through every required
+   projection. No draft key, stale path, loose command, or adjacent-radio value
+   appears after save.
+4. Two concurrent radio instances use distinct qualified profiles, endpoints,
+   processes, message sources, and launch components. Shared binaries do not
+   collapse them. Explicit station services launch once and retain all intended
+   radio and access-policy bindings.
+5. FLMsg launches with one qualified radio-specific NBEMS/auto directory pair.
+   FLAmp launches only with qualified isolation and exact endpoint pairs;
+   otherwise the UI accurately presents shared/operator-managed limitations.
+6. Messages retain radio, instance, and receipt-context provenance;
+   unsafe/partial files are not presented as complete; duplicate content is
+   idempotent without erasing distinct receipts; no source file is moved or
+   deleted.
+7. FIO Spotter FLAmp Q and FIO BBS are station-scoped and serve only explicit,
+   validated canonical publication entries. Cross-group access follows the
+   item's ACL rather than service ownership; unauthorized group/callsign/role
+   subjects cannot retrieve it. One station responder answers, unpublish is
+   atomic/auditable, and failed refresh or offline NAS retains a correctly
+   reported last-known-good local service state.
+8. Mutable application runtime stays local unless an exact network recipe is
+   qualified. NAS synchronization is asynchronous, bounded, restart-safe, and
+   cannot block the GUI or unrelated radio lanes.
+9. Radio rename preserves stable IDs, paths, ports, and launch commands. Cancel
+   and every injected failure preserve prior database projections, native
+   files, launch bundles, and service indexes exactly.
+10. Exact structured commands containing spaces, backslashes, selectors, and
+    platform paths survive persistence and are delivered byte-for-byte to the
+    process runner with `shell=False` or platform-equivalent safe execution.
+11. Production-shaped copied databases migrate additively and reproject only
+    through an explicit migration/reconciliation plan. The source copy remains
+    unchanged and any mismatch is reported rather than guessed.
+12. Discovery, hashing, directory classification, NAS checks, projection
+    verification, and reconciliation run on bounded workers. Add Radio and
+    Software Administration remain responsive and use one generation-fenced
+    result without duplicate scans.
+
+The implementation slice must update this specification and the work log with
+schema/migration decisions, exact model ownership, commands/counts, and any
+still-open live Windows, Linux/Wine, external-application, NAS, or radio
+qualification. No implementation claim may close this gate using UI-only or
+helper-only tests.
+
+Specification work-package ownership:
+
+- primary `gpt-6-astra`, high reasoning: product/storage architecture,
+  persistence authority, safety, integration, specification edit, and final
+  review;
+- `gpt-5.6-terra`, medium reasoning: bounded persistence and cross-spec
+  consistency audit; and
+- `gpt-5.6-luna`, medium reasoning: bounded acceptance-matrix, edge-case, and
+  follow-up publication-scope audits.
+
+GRS-13.1 implementation uses additive `radio_software_identity_sets` and
+`radio_software_identity_records` tables. There is no destructive migration and
+no automatic backfill of legacy stations. Add/Edit Radio and the authoritative
+Software Administration instance assistant capture an expected generation,
+write the complete selected identity set inside the existing guided transaction,
+and read back exact fingerprints. Settings reload compares canonical records to
+persisted application/manifest/launch projections by owning family and radio,
+never by searching unrelated rows for matching text. Application configuration,
+data, and message fields are compared only with their exact linked fields;
+launch executable, `argv[]`, working directory, environment, dependency order,
+startup/monitor policy, and readiness evidence are compared with the exact
+component launch row. Projection drift is shown as
+`Needs attention`; a scoped manual launch is rejected and station startup skips
+only the affected radio while leaving unrelated radio launch lanes available.
+Legacy compact fields cannot patch a canonical record independently.
+
+Automated GRS-13.1 coverage includes one production-shaped linked-row
+save/reload gate for receiver/SDR++, JS8Call, every selected Fast Light
+component, VarAC/VARA, FIO Spotter, external JS8Spotter, and CommStat. That gate
+persists application, manifest, exact structured launch, built-in component,
+station-process reference, and radio-binding projections, reloads the canonical
+records, and requires a clean projection validation. Additional coverage proves
+cancel/no-save, stale-generation rollback, explicit rather than JS8-inferred
+station-service selection, built-in launch handling, cross-family dependency
+handling, cross-radio owner/binding rejection, read-only validation, malformed
+or duplicate identity rejection, two-radio CommStat bindings, exact projection
+drift, scoped launch blocking, and canonical-editor read-only behavior. The
+complete GRS-13 exit gate remains open for native-directory/message-library/
+publication/NAS implementation and live external qualification.
+
+GRS-13.3 closes the JS8Call draft-identity leakage found by operator testing.
+Its acceptance gate must start with the real distinct-draft allocator, run the
+production JS8Call recipe resolver, persist the application/manifest/canonical
+projections, reload Software Administration, and build the launch projection.
+The gate requires one durable application/canonical key, an operator-readable
+radio-derived `--rig-name`, platform-native Qt settings and application-data
+paths, and no draft key or private FIO managed-instance root in any persisted
+JS8Call path or normal UI text. Helper-only fixtures with hand-authored final
+paths do not satisfy this gate. Legacy draft-derived rows remain unchanged and
+must exercise the explicit `Needs attention` recovery route.

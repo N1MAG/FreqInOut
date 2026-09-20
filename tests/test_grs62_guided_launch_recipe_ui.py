@@ -34,13 +34,13 @@ def test_qualified_js8_recipe_hides_raw_override_and_reviews_exact_component_fac
     assistant = SoftwareInstanceAssistant(
         "js8call",
         unsaved_owner_key="radio-draft-1",
-        unsaved_radio_label="Field receiver",
+        unsaved_radio_label="FT-710",
         managed_root="/managed",
         initial_draft={
             "family_key": "js8call",
             "mode": "managed",
             "draft_instance_key": "draft-js8call-abc123",
-            "instance_name": "Field receiver JS8Call",
+            "instance_name": "FT-710",
             "variant": "js8call_2_2",
             "version": "2.2.0",
             "application_path": "/apps/js8call",
@@ -62,17 +62,21 @@ def test_qualified_js8_recipe_hides_raw_override_and_reviews_exact_component_fac
         assert assistant._field_widgets["storage_path"].isHidden()
         assert assistant._field_widgets["storage_path"].isEnabled() is False
         component_text = assistant.launch_recipe_components_label.text()
-        assert "Effective command: /apps/js8call --rig-name" in component_text
-        assert "Configuration roots: /managed/draft-js8call-abc123/js8call" in component_text
+        assert "Effective command: /apps/js8call --rig-name FT-710" in component_text
+        assert "Configuration roots:" in component_text
+        assert "draft-js8call-abc123" not in component_text
+        assert "/managed" not in component_text
         assert "JS8Call API tcp://127.0.0.1:2443" in component_text
         assert "JS8Call UDP udp://127.0.0.1:2243" in component_text
 
         _show_step(assistant, 6)
         review = assistant.review_label.text()
         assert "Launch recipe" in review
-        assert "Effective command: /apps/js8call --rig-name" in review
+        assert "Effective command: /apps/js8call --rig-name FT-710" in review
         assert "Dependencies: None" in review
-        assert "/managed/draft-js8call-abc123/js8call/save" in review
+        assert "draft-js8call-abc123" not in review
+        assert "/managed" not in review
+        assert "JS8Call - FT-710" in review
         assert "Launch policy: Launch at FIO startup" in review
         assert "Advanced launch override:" not in review
     finally:
@@ -80,18 +84,18 @@ def test_qualified_js8_recipe_hides_raw_override_and_reviews_exact_component_fac
         app.processEvents()
 
 
-def test_qualified_managed_paths_are_resolved_before_files_page_is_shown() -> None:
+def test_qualified_native_js8_paths_are_resolved_before_files_page_is_shown() -> None:
     app = _app()
     assistant = SoftwareInstanceAssistant(
         "js8call",
         unsaved_owner_key="radio-draft-files",
-        unsaved_radio_label="Field receiver",
+        unsaved_radio_label="FT-710",
         managed_root="/managed",
         initial_draft={
             "family_key": "js8call",
             "mode": "managed",
             "draft_instance_key": "draft-js8call-files",
-            "instance_name": "Field receiver",
+            "instance_name": "FT-710",
             "variant": "js8call_2_2",
             "version": "2.2.0",
             "application_path": "/apps/js8call",
@@ -104,9 +108,13 @@ def test_qualified_managed_paths_are_resolved_before_files_page_is_shown() -> No
         _show_step(assistant, 4)
         draft = assistant.draft()
         assert draft.launch_recipe_status == "qualified_managed"
-        assert draft.configuration_path == "/managed/draft-js8call-files/js8call"
-        assert "fio-draft-js8call-files" in draft.storage_path
-        assert draft.storage_path != "/managed/draft-js8call-files/js8call/save"
+        assert draft.configuration_path
+        assert draft.storage_path
+        assert "draft-js8call-files" not in draft.configuration_path
+        assert "draft-js8call-files" not in draft.storage_path
+        assert "/managed" not in draft.configuration_path
+        assert "/managed" not in draft.storage_path
+        assert "JS8Call - FT-710" in draft.storage_path
         assert assistant._field_widgets["configuration_path"].isHidden()
         assert assistant._field_widgets["storage_path"].isHidden()
         assert assistant.prepared_details_button.isChecked() is False
@@ -146,7 +154,9 @@ def test_qualified_fast_light_review_preserves_component_order_and_dependencies(
         assert "Effective command: /apps/fldigi --config-dir" in review
         assert "Dependencies: flrig" in review
         assert "FLDigi XML-RPC tcp://127.0.0.1:7363" in review
-        assert "Configuration roots: /managed/draft-fast-light-def456/fast-light/fldigi" in review
+        assert "Configuration roots:" in review
+        assert "/.fldigi/instances/Main-radio-" in review
+        assert "/managed/draft-fast-light-def456" not in review
     finally:
         assistant.deleteLater()
         app.processEvents()
@@ -176,7 +186,8 @@ def test_unknown_managed_variant_keeps_isolated_profile_with_launch_pending() ->
         _show_step(assistant, 5)
         draft = assistant.draft()
         assert draft.launch_recipe_status == "launch_pending"
-        assert draft.configuration_path.endswith("/draft-js8call-future/js8call")
+        assert draft.configuration_path.endswith("/JS8Call - Future-radio.ini")
+        assert "draft-js8call-future" not in draft.configuration_path
         assert draft.storage_path
         assert assistant._field_widgets["launch_command"].isHidden() is True
         assert assistant._field_widgets["configuration_path"].isHidden() is True

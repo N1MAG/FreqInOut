@@ -535,8 +535,13 @@ class AtomicInstanceBundle:
             raise GuidedRadioSoftwareValidationError("remote management mode requires manual or remote source")
         if self.source_mode == InstanceSourceMode.SHARED_STATION_TOOL and self.execution_scope != ExecutionScope.STATION_SHARED_UTILITY:
             raise GuidedRadioSoftwareValidationError("shared station tool requires station_shared_utility scope")
-        if self.source_mode == InstanceSourceMode.SHARED_STATION_TOOL and self.family != SoftwareFamily.FAST_LIGHT:
-            raise GuidedRadioSoftwareValidationError("only Fast Light station tools may use shared station source mode")
+        if self.source_mode == InstanceSourceMode.SHARED_STATION_TOOL and self.family not in (
+            SoftwareFamily.FAST_LIGHT,
+            SoftwareFamily.COMMSTAT,
+        ):
+            raise GuidedRadioSoftwareValidationError(
+                "only Fast Light or CommStat station tools may use shared station source mode"
+            )
         if self.execution_scope == ExecutionScope.STATION_SHARED_UTILITY and self.source_mode != InstanceSourceMode.SHARED_STATION_TOOL:
             raise GuidedRadioSoftwareValidationError("station_shared_utility scope requires shared station tool source")
         if self.source_mode == InstanceSourceMode.MANUAL_OR_REMOTE and self.execution_scope not in (ExecutionScope.REMOTE, ExecutionScope.RECEIVE_ONLY, ExecutionScope.STANDARD):

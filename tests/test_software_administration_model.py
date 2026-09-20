@@ -105,6 +105,164 @@ def test_js8_family_derives_fio_external_spotter_and_commstat_roles() -> None:
     assert snapshot.family("commstat").assignments[0]
 
 
+def test_fio_spotter_is_selected_only_by_its_explicit_radio_flag() -> None:
+    profiles = [
+        _profile("radio-js8-only", "JS8 only", id=10, js8_instance_id=3, use_js8call=1),
+        _profile("radio-spotter", "Spotter", id=20, js8_instance_id=4,
+                 use_js8call=1, use_js8spotter=1),
+    ]
+    snapshot = build_software_administration_snapshot(
+        profiles,
+        js8_instances=[
+            {"id": 3, "system_key": "js8-only", "name": "JS8 only"},
+            {"id": 4, "system_key": "js8-spotter", "name": "JS8 with Spotter"},
+        ],
+    )
+
+    assignments = snapshot.family("fio_spotter").assignments
+    assert [item.radio_id for item in assignments] == [20]
+
+
+def _canonical_record(
+    family: str,
+    *,
+    owner: str,
+    bundle_id: str,
+    components: tuple[str, ...] = (),
+    bindings: tuple[tuple[str, str], ...] = (),
+) -> dict[str, object]:
+    if family == "fio_spotter":
+        components = components or ("fio-spotter",)
+    if family == "commstat" and not any(kind == "station-process" for _key, kind in bindings):
+        bindings = (("commstat:station", "station-process"), *bindings)
+    return {
+        "bundle_id": bundle_id,
+        "identity_key": f"{owner}:{family}:{bundle_id}",
+        "family_key": family,
+        "owner": owner,
+        "scope": (
+            "built_in" if family == "fio_spotter"
+            else "station_shared_utility" if family == "commstat"
+            else "standard"
+        ),
+        "source_mode": (
+            "built_into_fio" if family == "fio_spotter"
+            else "shared_station_tool" if family == "commstat"
+            else "create_distinct_instance"
+        ),
+        "management_mode": (
+            "built_in" if family == "fio_spotter"
+            else "operator" if family == "commstat"
+            else "fio_managed"
+        ),
+        "completion_policy": "required",
+        "provenance": "guided",
+        "verification": {"state": "reviewed"},
+        "paths": {"configuration_path": f"/exact/{bundle_id}"},
+        "resources": [],
+        "endpoints": [],
+        "components": [{"component_id": key} for key in components],
+        "bindings": [
+            {"binding_id": binding_id, "kind": kind, "radio_key": radio_key}
+            for binding_id, kind in bindings
+            for radio_key in (("radio-a" if kind in {"built-in-radio", "radio-js8-endpoint"} else ""),)
+        ],
+        "launch": {"argv": {key: [f"/exact/{key}"] for key in components}},
+        "readiness": {"state": "reviewed"},
+    }
+
+
+def test_canonical_fast_light_and_station_bindings_project_exact_identity_once() -> None:
+    profile = _profile(
+        "radio-a", "Alpha", id=10, js8_instance_id=3, use_js8call=1,
+        use_flrig=1, use_flamp=1, fast_light_config_id=7,
+        use_js8spotter=1, use_commstat=1,
+    )
+    records = (
+        _canonical_record(
+            "fast_light", owner="radio-a", bundle_id="fast-light:radio-a",
+            components=("flrig:radio-a", "fldigi:radio-a", "flmsg:station", "flamp:radio-a"),
+        ),
+        _canonical_record(
+            "fio_spotter", owner="station", bundle_id="fio-spotter:radio-a",
+            bindings=(("fio-spotter:radio-a", "built-in-radio"),),
+        ),
+        _canonical_record(
+            "commstat", owner="station", bundle_id="commstat:station",
+            components=("commstat",),
+            bindings=(("commstat:radio-a:js8-endpoint", "radio-js8-endpoint"),),
+        ),
+    )
+    snapshot = build_software_administration_snapshot(
+        [profile],
+        js8_instances=[{"id": 3, "system_key": "js8-a", "name": "JS8 Alpha"}],
+        fast_light_configs=[{"id": 7, "system_key": "fast-light:radio-a", "name": "Fast Alpha"}],
+        identity_records=records,
+    )
+
+    fast = snapshot.family("fast_light").assignments
+    spotter = snapshot.family("fio_spotter").assignments
+    commstat = snapshot.family("commstat").assignments
+    assert len(fast) == len(spotter) == len(commstat) == 1
+    assert fast[0].canonical_bundle_id == "fast-light:radio-a"
+    assert fast[0].canonical_fingerprint
+    assert fast[0].canonical_component_ids == (
+        "flrig:radio-a", "fldigi:radio-a", "flmsg:station", "flamp:radio-a"
+    )
+    assert fast[0].canonical_parity_state == "verified"
+    assert spotter[0].canonical_bundle_id == "fio-spotter:radio-a"
+    assert spotter[0].canonical_binding_ids == ("fio-spotter:radio-a",)
+    assert commstat[0].canonical_bundle_id == "commstat:station"
+    assert commstat[0].canonical_component_ids == ("commstat",)
+    assert commstat[0].canonical_binding_ids == (
+        "commstat:station",
+        "commstat:radio-a:js8-endpoint",
+    )
+    assert all(item.canonical_parity_state == "verified" for item in (spotter[0], commstat[0]))
+
+
+def test_canonical_external_js8spotter_maps_to_external_spotter_family() -> None:
+    profile = _profile("radio-a", "Alpha", id=10)
+    record = _canonical_record(
+        "external_js8spotter", owner="radio-a", bundle_id="external-js8spotter:radio-a",
+        components=("external-js8spotter:radio-a",),
+    )
+    snapshot = build_software_administration_snapshot([profile], identity_records=(record,))
+
+    assignments = snapshot.family("external_spotter").assignments
+    assert len(assignments) == 1
+    assert assignments[0].canonical_bundle_id == "external-js8spotter:radio-a"
+    assert assignments[0].canonical_component_ids == ("external-js8spotter:radio-a",)
+
+
+def test_receiver_software_projects_sdrpp_identity_for_observers_only() -> None:
+    observer = _profile(
+        "receiver-a", "Receiver A", id=10, device_class="observer",
+        sdr_application="SDR++", sdr_adapter="sdrpp_rigctl",
+    )
+    transceiver = _profile(
+        "radio-b", "Radio B", id=20, device_class="tx_rx",
+        sdr_application="", sdr_adapter="",
+    )
+    record = _canonical_record(
+        "sdrpp", owner="receiver-a", bundle_id="receiver:sdrpp",
+        components=("sdrpp",),
+    )
+    snapshot = build_software_administration_snapshot(
+        [observer, transceiver], identity_records=(record,)
+    )
+
+    receiver = snapshot.family("receiver")
+    assert receiver is not None
+    assert [item.radio_id for item in receiver.assignments] == [10]
+    assert receiver.assignments[0].canonical_bundle_id == "receiver:sdrpp"
+    assert receiver.assignments[0].canonical_identity_key == "receiver-a:sdrpp:receiver:sdrpp"
+    assert receiver.assignments[0].canonical_component_ids == ("sdrpp",)
+    assert receiver.assignments[0].canonical_fingerprint
+    assert receiver.assignments[0].canonical_parity_state == "verified"
+    assert receiver.unassigned_instances == ()
+
+
 def test_readiness_absence_is_neutral_and_inputs_are_not_mutated() -> None:
     profiles = [_profile("radio-a", "Alpha", id=10, js8_instance_id=3, use_js8call=1)]
     instances = [{"id": 3, "system_key": "js8-a"}]

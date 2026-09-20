@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 pytest.importorskip("PySide6")
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QApplication, QAbstractButton, QLineEdit, QScrollArea
 
 from freqinout.gui.software_administration_editor import SOFTWARE_EDITOR_TASKS, SoftwareTaskEditor
@@ -182,6 +182,31 @@ def test_all_radio_context_is_summary_ready_and_workspace_stays_bounded(theme, t
         assert workspace.task_strip.isHidden()
     finally:
         editor.deleteLater()
+        workspace.deleteLater()
+        _app().processEvents()
+
+
+def test_compact_overflow_scrollbar_has_its_own_lane_below_family_chips():
+    """Regression: the family scrollbar must not cover the selected chip."""
+
+    workspace = SoftwareAdministrationWorkspace()
+    try:
+        workspace.set_snapshot(_snapshot())
+        workspace.resize(900, 560)
+        workspace.select_context("js8call")
+        workspace.show()
+        _app().processEvents()
+
+        strip = workspace.family_strip
+        scrollbar = strip.horizontalScrollBar()
+        assert scrollbar.maximum() > scrollbar.minimum()
+        assert scrollbar.isVisible()
+        scrollbar_top = scrollbar.mapTo(strip, QPoint(0, 0)).y()
+        selected = workspace._family_buttons["js8call"]
+        selected_bottom = selected.mapTo(strip, selected.rect().bottomLeft()).y()
+        assert selected_bottom < scrollbar_top
+        assert strip.height() >= selected.height() + scrollbar.height()
+    finally:
         workspace.deleteLater()
         _app().processEvents()
 

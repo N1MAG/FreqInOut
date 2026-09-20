@@ -1523,7 +1523,8 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "dlg.setSizeGripEnabled(True)" in dialog_block
     assert "dlg.setMinimumSize(0, 0)" in dialog_block
     assert "availableGeometry().size()" in dialog_block
-    assert "def _guided_dialog_initial_size() -> QSize:" in dialog_block
+    assert "def _guided_dialog_initial_size(" in dialog_block
+    assert "preferred: QSize | None = None" in dialog_block
     assert "screen.availableGeometry().size()" in dialog_block
     assert "dlg.resize(_guided_dialog_initial_size())" in dialog_block
     assert "scroll = QScrollArea(dlg)" in dialog_block
@@ -1631,7 +1632,9 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert '"Review & Save"' in dialog_block
     assert 'save_review_label.setObjectName("guidedSaveReview")' in dialog_block
     assert "def _update_guided_save_review() -> None:" in dialog_block
-    assert "VarAC monitor/import: FIO will not control VarAC frequency" in dialog_block
+    assert "VarAC stays monitor/import only here; VarAC keeps its own frequency scheduler." in Path(
+        "freqinout/core/guided_setup.py"
+    ).read_text(encoding="utf-8")
     assert 'use_external_js8spotter_chk = QCheckBox("External JS8Spotter")' in dialog_block
     assert "Built-in FIO Spotter does not require this" in dialog_block
     assert "app_labels.append(\"FIO Spotter\")" in dialog_block
@@ -1709,9 +1712,11 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "Monitor/import only. FIO will not offer scheduler or QSY controls." in dialog_block
     assert "Manual/external control. FIO will not tune this radio until a control endpoint is selected." in dialog_block
     assert "controls scheduler and QSY actions." in dialog_block
-    assert "VarAC monitor/import: FIO will not control VarAC frequency" in dialog_block
+    assert "VarAC stays monitor/import only here; VarAC keeps its own frequency scheduler." in Path(
+        "freqinout/core/guided_setup.py"
+    ).read_text(encoding="utf-8")
     assert "Radio Apps Base Folder" in dialog_block
-    assert '_path_summary("VarAC outbox", varac_outbox_edit.text())' in dialog_block
+    assert '_path_summary("VarAC outbox", str(varac_for_review.get("outbox_path") or varac_outbox_edit.text()))' in dialog_block
     assert '_path_summary("VarAC BBS", varac_bbs_edit.text())' in dialog_block
     assert '_path_summary("VarAC BBS archive", varac_bbs_archive_edit.text())' in dialog_block
     assert "payload = _draft_radio_profile()" in dialog_block
@@ -1923,7 +1928,10 @@ def test_guided_add_radio_detected_app_review_keeps_selected_paths_visible() -> 
     assert "browse_btn.setMaximumWidth(110)" in dialog_block
     assert "selected_single = _select_single_detected_choice(combo)" in dialog_block
     assert "if selected_single:" in dialog_block
-    assert "_apply_detected_app_choice(app_id)" in dialog_block
+    assert "_apply_detected_app_choice(" in dialog_block
+    assert "app_id," in dialog_block
+    assert "reprepare=False" in dialog_block
+    assert "publish=False" in dialog_block
     assert "_sync_app_choice_combo_to_target(app_id)" in dialog_block
     assert "for app_id in app_choice_combos:" in dialog_block
     assert "if _app_choice_app_selected(app_id):" in dialog_block

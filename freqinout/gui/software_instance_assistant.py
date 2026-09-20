@@ -41,6 +41,7 @@ from freqinout.core.guided_instance_inventory import (
     build_guided_instance_inventory,
     distinct_draft_seed,
     source_identity_fingerprint,
+    stable_application_system_key,
     stable_draft_instance_key,
 )
 from freqinout.core.guided_launch_recipes import (
@@ -267,6 +268,7 @@ class SoftwareInstanceDraft:
     owner_draft_key: str = ""
     owner_label: str = ""
     draft_instance_key: str = ""
+    application_system_key: str = ""
     inventory_generation: int = 0
     inventory_fingerprint: str = ""
     source_fingerprint: str = ""
@@ -411,12 +413,16 @@ class SoftwareInstanceDraft:
                 f"{self.family_key}:{self.imported_system_key}"
                 if self.imported_system_key
                 else (
-                    f"{self.family_key}:{self.imported_id}"
-                    if self.imported_id
-                    else self.draft_instance_key
+                    f"{self.family_key}:{self.application_system_key}"
+                    if self.application_system_key
+                    else (
+                        f"{self.family_key}:{self.imported_id}"
+                        if self.imported_id
+                        else self.draft_instance_key
+                    )
                 )
             ),
-            "application_system_key": self.imported_system_key,
+            "application_system_key": self.imported_system_key or self.application_system_key,
             "host": self.host,
             "port": int(self.port or 0),
             "udp_port": int(self.udp_port or 0),
@@ -573,6 +579,7 @@ def normalize_instance_draft(value: Mapping[str, Any] | SoftwareInstanceDraft) -
         owner_draft_key=_text(row.get("owner_draft_key")),
         owner_label=_text(row.get("owner_label")),
         draft_instance_key=_text(row.get("draft_instance_key") or row.get("instance_key")),
+        application_system_key=_text(row.get("application_system_key")),
         inventory_generation=_int(row.get("inventory_generation")) or 0,
         inventory_fingerprint=_text(row.get("inventory_fingerprint")),
         source_fingerprint=source_fingerprint,
@@ -1035,6 +1042,7 @@ class SoftwareInstanceAssistant(QWidget):
         self._imported_id: Optional[int] = None
         self._imported_system_key = ""
         self._draft_instance_key = ""
+        self._application_system_key = ""
         self._inventory_fingerprint = self._inventory_snapshot.fingerprint
         self._source_fingerprint = ""
         self._source_locked = False
@@ -2294,6 +2302,7 @@ class SoftwareInstanceAssistant(QWidget):
         normalized = _text(family_key).lower()
         if normalized not in {key for key, _label in SUPPORTED_INSTANCE_FAMILIES}:
             normalized = "js8call"
+        family_changed = normalized != self._family_key
         if (
             self._launch_recipe_resolution is not None
             and self._launch_recipe_resolution.family_key != normalized
@@ -2301,8 +2310,13 @@ class SoftwareInstanceAssistant(QWidget):
         ):
             self._launch_recipe_resolution = None
         self._family_key = normalized
-        if not self._draft_instance_key:
+        if family_changed or not self._draft_instance_key:
             self._draft_instance_key = stable_draft_instance_key(
+                self._assistant_draft_owner_key,
+                normalized,
+            )
+        if family_changed or not self._application_system_key:
+            self._application_system_key = stable_application_system_key(
                 self._assistant_draft_owner_key,
                 normalized,
             )
@@ -2825,6 +2839,9 @@ class SoftwareInstanceAssistant(QWidget):
         self._imported_id = draft.imported_id
         self._imported_system_key = draft.imported_system_key
         self._draft_instance_key = draft.draft_instance_key or self._draft_instance_key
+        self._application_system_key = (
+            draft.application_system_key or self._application_system_key
+        )
         self._inventory_fingerprint = draft.inventory_fingerprint or self._inventory_snapshot.fingerprint
         self._source_fingerprint = draft.source_fingerprint
         self._source_locked = bool(draft.source_locked)
@@ -2933,6 +2950,7 @@ class SoftwareInstanceAssistant(QWidget):
             owner_draft_key=self._unsaved_owner_key,
             owner_label=self._unsaved_radio_label if self._unsaved_owner_key else "",
             draft_instance_key=self._draft_instance_key,
+            application_system_key=self._application_system_key,
             inventory_generation=int(self._inventory_snapshot.generation),
             inventory_fingerprint=self._inventory_fingerprint or self._inventory_snapshot.fingerprint,
             source_fingerprint=self._source_fingerprint,

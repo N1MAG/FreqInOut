@@ -244,6 +244,12 @@ def build_guided_external_app_config_plan(
         grid=grid,
         control_route=js8_control_route,
         radio_label=radio_label,
+        platform=str(paths.get("js8_writer_platform", "") or "") or None,
+        storage_home=(
+            Path(str(paths.get("js8_storage_home", "") or "")).expanduser()
+            if str(paths.get("js8_storage_home", "") or "").strip()
+            else None
+        ),
     )
     for plan in js8_plans:
         for directory in (plan.config_dir, plan.save_dir, plan.forms_dir):
@@ -269,7 +275,7 @@ def build_guided_external_app_config_plan(
                 app_id="js8call",
                 instance_name=plan.instance_name,
                 action_type="update_js8_multisettings",
-                target=str(plan.config_dir),
+                target=str(plan.settings_path),
                 summary=summary,
                 requires_backup=True,
                 writes_external_config=True,
@@ -277,6 +283,7 @@ def build_guided_external_app_config_plan(
                     "executable_path": plan.executable_path,
                     "profile_name": plan.profile_name,
                     "config_dir": str(plan.config_dir),
+                    "settings_path": str(plan.settings_path),
                     "save_dir": str(plan.save_dir),
                     "forms_dir": str(plan.forms_dir),
                     "directed_path": str(plan.directed_path),
@@ -287,10 +294,15 @@ def build_guided_external_app_config_plan(
                     "application_name": plan.application_name,
                     "control_route": plan.control_route,
                     "rig_summary": plan.rig_summary,
+                    "settings": dict(plan.settings),
                     "flrig_port": str(plan.flrig_port),
                     "tcp_port": str(plan.tcp_port),
                     "udp_port": str(plan.udp_port),
-                    "js8call_ini_path": str(paths.get("js8call_ini_path", "") or ""),
+                    # A distinct --rig-name owns a distinct native settings
+                    # file.  The detected/default JS8Call.ini is evidence, not
+                    # the write target for this new identity.
+                    "js8call_ini_path": str(plan.settings_path),
+                    "source_js8call_ini_path": str(paths.get("js8call_ini_path", "") or ""),
                     "writer_family": "js8call",
                     "writer_variant": str(paths.get("js8_variant_family", "") or ""),
                     "writer_version": str(paths.get("js8_variant_version", "") or ""),
@@ -298,7 +310,7 @@ def build_guided_external_app_config_plan(
                     "writer_operation": str(paths.get("js8_writer_operation", "") or "create"),
                 },
                 notes=(
-                    "JS8Call MultiSettings writes require backup of the existing JS8Call.ini before apply.",
+                    "JS8Call native settings writes require a recoverable snapshot of the exact rig-specific target before apply.",
                     *route_notes,
                 ),
             )
@@ -527,16 +539,21 @@ def _js8_multisettings_plans_by_action(plan: GuidedAppConfigPlan) -> Mapping[str
         profile_name = str(details.get("profile_name", "") or action.instance_name or "").strip()
         if not profile_name:
             continue
-        settings = {
-            "TCPEnabled": "true",
-            "AcceptTCPRequests": "true",
-            "TCPServer": "127.0.0.1",
-            "TCPServerPort": str(details.get("tcp_port", "") or ""),
-            "TCPMaxConnections": "2",
-            "UDPEnabled": "true",
-            "UDPServerPort": str(details.get("udp_port", "") or ""),
-            "SaveDir": str(details.get("save_dir", "") or ""),
-        }
+        reviewed_settings = details.get("settings")
+        settings = (
+            {str(key): str(value) for key, value in reviewed_settings.items()}
+            if isinstance(reviewed_settings, Mapping)
+            else {
+                "TCPEnabled": "true",
+                "AcceptTCPRequests": "true",
+                "TCPServer": "127.0.0.1",
+                "TCPServerPort": str(details.get("tcp_port", "") or ""),
+                "TCPMaxConnections": "2",
+                "UDPEnabled": "true",
+                "UDPServerPort": str(details.get("udp_port", "") or ""),
+                "SaveDir": str(details.get("save_dir", "") or ""),
+            }
+        )
         control_route = str(details.get("control_route", "") or "flrig").strip().lower()
         if control_route == "flrig":
             settings["Rig"] = "FLRig FLRig"
@@ -546,6 +563,7 @@ def _js8_multisettings_plans_by_action(plan: GuidedAppConfigPlan) -> Mapping[str
             instance_name=str(action.instance_name or profile_name),
             executable_path=str(details.get("executable_path", "") or ""),
             config_dir=Path(details.get("config_dir", "") or "."),
+            settings_path=Path(details.get("settings_path", "") or details.get("js8call_ini_path", "") or "."),
             save_dir=Path(details.get("save_dir", "") or "."),
             forms_dir=Path(details.get("forms_dir", "") or "."),
             directed_path=Path(details.get("directed_path", "") or "."),

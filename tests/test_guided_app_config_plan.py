@@ -45,6 +45,7 @@ def test_guided_external_app_config_apply_defaults_to_no_external_writes(tmp_pat
             "fldigi": "/Applications/RadioApps/FLDigi.app",
             "js8call": "/Applications/JS8Call.app",
             "js8call_ini_path": str(js8_ini),
+            "js8_storage_home": str(tmp_path),
         },
         callsign="n1mag",
         grid="dm79",
@@ -69,6 +70,7 @@ def test_guided_external_app_config_apply_writes_js8_only_with_explicit_backup(t
         app_paths={
             "js8call": "/Applications/JS8Call.app",
             "js8call_ini_path": str(js8_ini),
+            "js8_storage_home": str(tmp_path),
             "js8_variant_family": "js8call_2_2",
             "js8_variant_version": "2.2.0",
             "js8_writer_platform": "macos",
@@ -84,13 +86,18 @@ def test_guided_external_app_config_apply_writes_js8_only_with_explicit_backup(t
         backup_root=tmp_path / "backups",
     )
 
-    rendered = js8_ini.read_text(encoding="utf-8")
+    target = tmp_path / "Library" / "Preferences" / "JS8Call - Radio-A.ini"
+    rendered = target.read_text(encoding="utf-8")
     assert result.ok is True
     assert result.backup is not None
-    assert any(item.original_path == str(js8_ini) and item.status == "backed_up" for item in result.backup.items)
-    assert "[MultiSettings/fio-a]" in rendered
+    assert any(
+        item.original_path == str(target) and item.status in {"missing", "backed_up"}
+        for item in result.backup.items
+    )
+    assert "[Configuration]" in rendered
     assert "TCPServerPort = 2442" in rendered
-    assert "MyCall = OLD" in rendered
+    assert "MyCall = N1MAG" in rendered
+    assert js8_ini.read_text(encoding="utf-8") == "[Configuration]\nMyCall=OLD\n"
 
 
 def test_guided_external_app_config_plan_describes_fast_light_instances(tmp_path) -> None:
@@ -129,7 +136,7 @@ def test_guided_external_app_config_plan_describes_js8_profile_and_ports(tmp_pat
     js8_actions = [action for action in plan.actions if action.action_type == "update_js8_multisettings"]
 
     assert [action.instance_name for action in js8_actions] == ["fio-a", "fio-b"]
-    assert js8_actions[0].summary == "Prepare JS8Call profile fio-a with FLRig 127.0.0.1:12345 and API port 2442."
+    assert js8_actions[0].summary == "Prepare JS8Call profile Radio-A with FLRig 127.0.0.1:12345 and API port 2442."
     assert js8_actions[0].details["executable_path"] == "/apps/js8call"
     assert js8_actions[0].details["directed_path"].endswith("DIRECTED.TXT")
     assert js8_actions[0].details["directed_path"].startswith(js8_actions[0].details["application_data_root"])
@@ -137,7 +144,7 @@ def test_guided_external_app_config_plan_describes_js8_profile_and_ports(tmp_pat
     assert js8_actions[0].details["rig_name"]
     assert js8_actions[1].details["flrig_port"] == "12346"
     assert js8_actions[1].details["tcp_port"] == "2443"
-    assert "backup of the existing JS8Call.ini" in " ".join(js8_actions[0].notes)
+    assert "rig-specific target" in " ".join(js8_actions[0].notes)
 
 
 def test_guided_external_app_config_plan_keeps_varac_cluster_manual(tmp_path) -> None:

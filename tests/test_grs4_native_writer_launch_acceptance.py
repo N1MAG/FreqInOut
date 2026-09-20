@@ -28,11 +28,16 @@ def _qualified_js8_paths(ini: Path) -> dict[str, str]:
     return {
         "js8call": "/apps/js8",
         "js8call_ini_path": str(ini),
+        "js8_storage_home": str(ini.parent),
         "js8_variant_family": "js8call_2_2",
         "js8_variant_version": "2.2.0",
         "js8_writer_platform": "linux",
         "js8_writer_operation": "create",
     }
+
+
+def _managed_js8_target(root: Path) -> Path:
+    return root / ".config" / "JS8Call - Radio-A.ini"
 
 
 def _items(*, startup=True, enabled=True, name="JS8Call", command="", path="/apps/js8call", key="js8-a"):
@@ -61,7 +66,7 @@ def test_writer_plan_is_preview_only_and_external_apply_is_backup_gated(tmp_path
     ini = tmp_path / "JS8Call.ini"
     ini.write_text("[Configuration]\nMyCall=OLD\n", encoding="utf-8")
     plan = build_guided_external_app_config_plan(
-        _proposals(), config_root=tmp_path / "fio", app_paths={"js8call": "/Applications/JS8Call.app", "js8call_ini_path": str(ini)}, callsign="n1mag", grid="dm79",
+        _proposals(), config_root=tmp_path / "fio", app_paths={"js8call": "/Applications/JS8Call.app", "js8call_ini_path": str(ini), "js8_storage_home": str(tmp_path)}, callsign="n1mag", grid="dm79",
     )
     assert not (tmp_path / "fio").exists()
     result = apply_guided_external_app_config_plan(plan)
@@ -90,6 +95,7 @@ def test_backup_failure_blocks_every_external_write(monkeypatch, tmp_path):
     result = apply_guided_external_app_config_plan(plan, allow_external_writes=True, backup_root=tmp_path / "backup")
     assert any(item.status == "failed" and "Backup failed" in item.detail for item in result.items)
     assert ini.read_text(encoding="utf-8") == original
+    assert not _managed_js8_target(tmp_path).exists()
 
 
 def test_post_apply_failure_restores_backup_and_reports_rollback(monkeypatch, tmp_path):
@@ -112,6 +118,7 @@ def test_post_apply_failure_restores_backup_and_reports_rollback(monkeypatch, tm
     result = apply_guided_external_app_config_plan(plan, allow_external_writes=True, backup_root=tmp_path / "backup")
     assert result.ok is False
     assert ini.read_text(encoding="utf-8") == original
+    assert not _managed_js8_target(tmp_path).exists()
     assert any("restore" in item.detail.casefold() or item.status == "rolled_back" for item in result.items)
 
 
@@ -132,12 +139,15 @@ def test_later_persistence_failure_can_restore_a_successful_native_apply(tmp_pat
         backup_root=tmp_path / "backup",
     )
     assert applied.ok and applied.external_writes_applied
-    assert ini.read_text(encoding="utf-8") != original
+    target = _managed_js8_target(tmp_path)
+    assert ini.read_text(encoding="utf-8") == original
+    assert "MyCall = N1" in target.read_text(encoding="utf-8")
 
     restored = rollback_guided_external_app_config_apply(applied)
     assert restored.restore is not None and restored.restore.ok
     assert restored.ok is False
     assert ini.read_text(encoding="utf-8") == original
+    assert not target.exists()
     assert any(item.status == "rolled_back" for item in restored.items)
 
 
@@ -145,7 +155,7 @@ def test_unsupported_writer_falls_back_to_operator_review_without_external_mutat
     ini = tmp_path / "JS8Call.ini"
     original = "[Configuration]\nMyCall=OLD\n"
     ini.write_text(original, encoding="utf-8")
-    plan = build_guided_external_app_config_plan(_proposals(), config_root=tmp_path / "fio", app_paths={"js8call": "/apps/js8", "js8call_ini_path": str(ini)}, callsign="N1")
+    plan = build_guided_external_app_config_plan(_proposals(), config_root=tmp_path / "fio", app_paths={"js8call": "/apps/js8", "js8call_ini_path": str(ini), "js8_storage_home": str(tmp_path)}, callsign="N1")
     result = apply_guided_external_app_config_plan(plan, allow_external_writes=True, backup_root=tmp_path / "backup")
     assert ini.read_text(encoding="utf-8") == original
     assert any(item.status == "operator_action_required" for item in result.items)

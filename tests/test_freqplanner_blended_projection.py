@@ -710,7 +710,9 @@ def test_freqplanner_saved_no_nets_plan_reloads_no_nets_selection(monkeypatch, t
 
     assert tab.hf_daily_source_combo.currentData() == daily["id"]
     assert tab.hf_net_source_combo.currentData() == NO_NET_SOURCE_SET_ID
-    assert tab.settings.get(SELECTED_HF_NET_SOURCE_SET_KEY) == NO_NET_SOURCE_SET_ID
+    # Loading a saved plan is passive rendering.  The widget reflects the
+    # plan, but only a subsequent operator choice persists a preference.
+    assert tab.settings.get(SELECTED_HF_NET_SOURCE_SET_KEY) is None
 
 
 def test_freqplanner_layer_change_marks_selected_plan_modified_until_save(monkeypatch, tmp_path) -> None:
@@ -791,6 +793,43 @@ def test_freqplanner_layer_change_marks_selected_plan_modified_until_save(monkey
     assert tab.plan_mode_label.text() == "Saved"
     assert tab.save_plan_btn.text() == "Save Plan"
     assert "Layer selections changed" not in tab.save_plan_btn.toolTip()
+
+
+def test_passive_plan_source_projection_does_not_write_settings(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    QApplication.instance() or QApplication([])
+    SettingsManager()
+
+    import freqinout.gui.freq_planner_tab as planner_mod
+
+    planner_mod = importlib.reload(planner_mod)
+    tab = planner_mod.FreqPlannerTab()
+    tab.hf_daily_source_combo.addItem("Prepared Daily", "prepared-daily")
+    writes: list[tuple[object, object]] = []
+    monkeypatch.setattr(
+        tab.settings,
+        "set",
+        lambda key, value: writes.append((key, value)),
+    )
+
+    changed = tab._apply_frequency_plan_source_refs(
+        {
+            "source_refs_json": json.dumps(
+                [
+                    f"{HF_DAILY_SOURCE_CATEGORY}:prepared-daily",
+                    f"{HF_NET_SOURCE_CATEGORY}:{NO_NET_SOURCE_SET_ID}",
+                ]
+            )
+        },
+        persist=False,
+    )
+
+    assert changed
+    assert tab.hf_daily_source_combo.currentData() == "prepared-daily"
+    assert tab.hf_net_source_combo.currentData() == NO_NET_SOURCE_SET_ID
+    assert writes == []
 
 
 def test_freqplanner_saves_selected_sop_plan_layer_ref(monkeypatch, tmp_path) -> None:
@@ -1886,6 +1925,35 @@ def test_freqplanner_guided_radio_handoff_assigns_target_radio(monkeypatch, tmp_
     assert "Portable JS8 Plan" in tab.frequency_plan_action_hint_label.text()
 
 
+def test_freqplanner_guided_handoff_is_rf_guard_context_before_plan_assignment(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    app = QApplication.instance() or QApplication([])
+    SettingsManager()
+
+    import freqinout.gui.freq_planner_tab as planner_mod
+
+    planner_mod = importlib.reload(planner_mod)
+    tab = planner_mod.FreqPlannerTab()
+    tab.begin_guided_radio_plan_handoff({"id": 42, "name": "FT-710"})
+    calls = []
+    monkeypatch.setattr(
+        tab.plan_context_service.store,
+        "validate_frequency_plan_for_device",
+        lambda radio_id, payload: calls.append((radio_id, dict(payload)))
+        or {"state": "ok", "rf_guard_validation": "enforced", "device_profile_id": radio_id},
+    )
+    monkeypatch.setattr(tab, "_assigned_radio_ids_for_plan", lambda _payload: [])
+
+    payload = {"name": "New FT-710 Plan", "schedule_refs": []}
+    validation = tab._rf_guard_preflight_for_plan(payload)
+
+    assert calls == [(42, payload)]
+    assert validation["rf_guard_validation"] == "enforced"
+    assert validation["device_profile_id"] == 42
+
+
 def test_freqplanner_selecting_assigned_plan_switches_command_radio(monkeypatch, tmp_path) -> None:
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
@@ -2536,6 +2604,8 @@ def test_hf_daily_new_schedule_action_detaches_saved_selection(monkeypatch, tmp_
     tab.schedule_source_combo.setCurrentIndex(1)
     tab._editing_freqplanner_source_id = saved["id"]
     tab._refresh_freq_planner = lambda: None
+    cleared = []
+    tab._load_source_rows_into_table = lambda rows: cleared.append(list(rows))
 
     daily_mod.DailyScheduleTab._on_new_freqplanner_source_clicked(tab)
     app.processEvents()
@@ -2544,6 +2614,39 @@ def test_hf_daily_new_schedule_action_detaches_saved_selection(monkeypatch, tmp_
     assert settings.get(SELECTED_HF_DAILY_SOURCE_SET_KEY) == LIVE_SOURCE_SET_ID
     assert tab.schedule_source_combo.currentText() == ""
     assert daily_mod.DailyScheduleTab._selected_freqplanner_source_row(tab) is None
+    assert cleared == [[]]
+
+
+def test_hf_daily_new_schedule_preserves_name_entered_before_and_accepts_name_after(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    app = QApplication.instance() or QApplication([])
+    settings = SettingsManager()
+    import freqinout.gui.daily_schedule_tab as daily_mod
+
+    daily_mod = importlib.reload(daily_mod)
+    tab = daily_mod.DailyScheduleTab.__new__(daily_mod.DailyScheduleTab)
+    tab.settings = settings
+    tab.schedule_source_combo = QComboBox()
+    tab.schedule_source_combo.setEditable(True)
+    tab.schedule_source_combo.addItem("Active Daily Schedule", LIVE_SOURCE_SET_ID)
+    tab.schedule_source_combo.setCurrentIndex(0)
+    tab.schedule_source_combo.setEditText("Field Daily")
+    tab._editing_freqplanner_source_id = LIVE_SOURCE_SET_ID
+    tab._refresh_freq_planner = lambda: None
+    cleared = []
+    tab._load_source_rows_into_table = lambda rows: cleared.append(list(rows))
+
+    daily_mod.DailyScheduleTab._on_new_freqplanner_source_clicked(tab)
+    app.processEvents()
+
+    assert tab.schedule_source_combo.currentIndex() == -1
+    assert tab.schedule_source_combo.currentText() == "Field Daily"
+    assert cleared == [[]]
+
+    tab.schedule_source_combo.setEditText("Named After New")
+    assert daily_mod.DailyScheduleTab._current_freqplanner_source_name(tab) == "Named After New"
 
 
 def test_hf_daily_delete_source_schedule_removes_full_saved_schedule(monkeypatch, tmp_path) -> None:
@@ -2770,6 +2873,8 @@ def test_hf_net_new_schedule_action_detaches_saved_selection(monkeypatch, tmp_pa
     tab.schedule_source_combo.setCurrentIndex(1)
     tab._editing_freqplanner_source_id = saved["id"]
     tab._refresh_freq_planner = lambda: None
+    cleared = []
+    tab._load_source_rows_into_table = lambda rows: cleared.append(list(rows))
 
     net_mod.NetScheduleTab._on_new_freqplanner_source_clicked(tab)
     app.processEvents()
@@ -2778,6 +2883,39 @@ def test_hf_net_new_schedule_action_detaches_saved_selection(monkeypatch, tmp_pa
     assert settings.get(SELECTED_HF_NET_SOURCE_SET_KEY) == LIVE_SOURCE_SET_ID
     assert tab.schedule_source_combo.currentText() == ""
     assert net_mod.NetScheduleTab._selected_freqplanner_source_row(tab) is None
+    assert cleared == [[]]
+
+
+def test_hf_net_new_schedule_preserves_name_entered_before_and_accepts_name_after(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    app = QApplication.instance() or QApplication([])
+    settings = SettingsManager()
+    import freqinout.gui.net_schedule_tab as net_mod
+
+    net_mod = importlib.reload(net_mod)
+    tab = net_mod.NetScheduleTab.__new__(net_mod.NetScheduleTab)
+    tab.settings = settings
+    tab.schedule_source_combo = QComboBox()
+    tab.schedule_source_combo.setEditable(True)
+    tab.schedule_source_combo.addItem("Active Net Schedule", LIVE_SOURCE_SET_ID)
+    tab.schedule_source_combo.setCurrentIndex(0)
+    tab.schedule_source_combo.setEditText("Field Nets")
+    tab._editing_freqplanner_source_id = LIVE_SOURCE_SET_ID
+    tab._refresh_freq_planner = lambda: None
+    cleared = []
+    tab._load_source_rows_into_table = lambda rows: cleared.append(list(rows))
+
+    net_mod.NetScheduleTab._on_new_freqplanner_source_clicked(tab)
+    app.processEvents()
+
+    assert tab.schedule_source_combo.currentIndex() == -1
+    assert tab.schedule_source_combo.currentText() == "Field Nets"
+    assert cleared == [[]]
+
+    tab.schedule_source_combo.setEditText("Named After New")
+    assert net_mod.NetScheduleTab._current_freqplanner_source_name(tab) == "Named After New"
 
 
 def test_hf_net_save_selected_as_resources_does_not_remove_schedule_rows(monkeypatch, tmp_path) -> None:

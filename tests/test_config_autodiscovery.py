@@ -746,11 +746,25 @@ def test_default_js8call_ini_paths_are_os_specific_and_bounded(tmp_path, monkeyp
     assert tmp_path / ".config" / "JS8Call-improved.ini" in linux_paths
     assert tmp_path / ".config" / "JS8Call Subspace.ini" in linux_paths
     assert tmp_path / "AppData" / "Local" / "JS8Call" / "JS8Call.ini" in windows_paths
+    assert tmp_path / "AppData" / "Local" / "JS8Call.ini" in windows_paths
     assert tmp_path / "AppData" / "Local" / "JS8Call" / "JS8Call-improved.ini" in windows_paths
     assert tmp_path / "AppData" / "Local" / "JS8Call" / "Subspace.ini" in windows_paths
     assert all(path.is_absolute() for path in mac_paths + linux_paths + windows_paths)
     assert all("*" not in str(path) for path in mac_paths + linux_paths + windows_paths)
-    assert len(windows_paths) < 16
+    assert len(windows_paths) < 24
+
+
+def test_default_js8call_ini_paths_include_rig_named_windows_instances(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.delenv("APPDATA", raising=False)
+    config_dir = tmp_path / "AppData" / "Local"
+    config_dir.mkdir(parents=True)
+    named_ini = config_dir / "JS8Call - FT-710.ini"
+    named_ini.write_text("[Configuration]\n", encoding="utf-8")
+
+    paths = default_js8call_ini_paths(platform="Windows", home=tmp_path)
+
+    assert named_ini in paths
 
 
 def test_default_js8call_ini_paths_include_named_macos_instances(tmp_path) -> None:

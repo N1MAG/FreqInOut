@@ -198,6 +198,19 @@ def stable_draft_instance_key(owner_draft_key: object, family_key: object) -> st
     return f"draft-{family}-{digest}"
 
 
+def stable_application_system_key(owner_draft_key: object, family_key: object) -> str:
+    """Allocate the durable application key paired with one guided draft.
+
+    The key is stable across assistant navigation and Save, but remains
+    separate from the transaction-only draft key and from native application
+    names or filesystem paths.
+    """
+
+    family = _family(family_key)
+    digest = stable_draft_instance_key(owner_draft_key, family).rsplit("-", 1)[-1]
+    return f"{family}-instance-{digest}"
+
+
 def _normalized_identity(family_key: object, row: Mapping[str, Any]) -> dict[str, Any]:
     family = _family(family_key)
     aliases = {
@@ -504,12 +517,17 @@ def distinct_draft_seed(
 
     family = _family(family_key)
     evidence = dict(source or {})
+    draft_instance_key = stable_draft_instance_key(owner_draft_key, family)
     seed: dict[str, Any] = {
         "family_key": family,
         "mode": "managed",
         "ownership": "fio-managed",
         "owner_draft_key": _text(owner_draft_key),
-        "draft_instance_key": stable_draft_instance_key(owner_draft_key, family),
+        "draft_instance_key": draft_instance_key,
+        # Allocated once with the draft but durable across review and save.
+        # Unlike ``draft_instance_key`` this is the application/manifest/
+        # canonical foreign identity and is never used in a native path.
+        "application_system_key": stable_application_system_key(owner_draft_key, family),
         "inventory_fingerprint": snapshot.fingerprint,
         "source_fingerprint": "",
         "source_locked": False,
@@ -552,5 +570,6 @@ __all__ = [
     "distinct_draft_seed",
     "first_available_port",
     "source_identity_fingerprint",
+    "stable_application_system_key",
     "stable_draft_instance_key",
 ]

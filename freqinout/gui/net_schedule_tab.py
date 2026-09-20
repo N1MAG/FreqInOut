@@ -412,7 +412,7 @@ class NetScheduleTab(QWidget):
             "Select a saved HF Net schedule, or type a clear name here before Save Schedule."
         )
         self.new_source_btn = QPushButton("New Schedule")
-        self.new_source_btn.setToolTip("Start a new named HF Net schedule from the visible rows. Type a name, then Save Schedule.")
+        self.new_source_btn.setToolTip("Start a blank HF Net schedule. A name typed before or after New Schedule is retained until Save.")
         self.save_btn = QPushButton("Save Schedule")
         self.save_btn.setToolTip(
             "Save the visible rows as the selected named HF Net schedule, or create a new named schedule."
@@ -796,10 +796,20 @@ class NetScheduleTab(QWidget):
     def _on_new_freqplanner_source_clicked(self) -> None:
         if not hasattr(self, "schedule_source_combo"):
             return
+        if not self._confirm_discard_unsaved_source_load():
+            return
+        current_name = str(self.schedule_source_combo.currentText() or "").strip()
+        current_index = self.schedule_source_combo.currentIndex()
+        selected_label = (
+            str(self.schedule_source_combo.itemText(current_index) or "").strip()
+            if current_index >= 0
+            else ""
+        )
+        draft_name = current_name if current_index < 0 or current_name != selected_label else ""
         self._editing_freqplanner_source_id = LIVE_SOURCE_SET_ID
         self.schedule_source_combo.blockSignals(True)
         self.schedule_source_combo.setCurrentIndex(-1)
-        self.schedule_source_combo.setEditText("")
+        self.schedule_source_combo.setEditText(draft_name)
         self.schedule_source_combo.blockSignals(False)
         self.settings.set(SELECTED_HF_NET_SOURCE_SET_KEY, LIVE_SOURCE_SET_ID)
         try:
@@ -812,6 +822,7 @@ class NetScheduleTab(QWidget):
         if line_edit is not None:
             line_edit.setPlaceholderText("New HF Net schedule name")
             line_edit.setFocus(Qt.OtherFocusReason)
+        self._load_source_rows_into_table([])
         self._refresh_freq_planner()
 
     def open_hf_net_subscription(self, session_keys: Tuple[str, ...] | List[str] = ()) -> None:

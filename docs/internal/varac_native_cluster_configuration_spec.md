@@ -636,3 +636,54 @@ production-copy migration/reload and integrity checks, and diff hygiene passed.
 This is an automated implementation correction only. A controlled operator
 walkthrough on supported Windows and Linux/Wine VarAC/VARA installations
 remains an open release gate.
+
+## VNC-8 — Member Mailbox Placement From Reviewed Station Evidence
+
+Status: automated implementation gate passed 2026-09-19; live Windows and
+Linux/Wine qualification remains open.
+
+Incoming and outbox are member-local resources, but local does not mean that
+FIO should disregard the operator's established VarAC data root. For Create
+Cluster, the reviewed standalone member is the placement authority. For Join
+Cluster, the reviewed seed member from the selected durable cluster is the
+placement authority. FIO uses the existing member's incoming and outbox paths
+as location evidence while never reusing those exact directories.
+
+Automatic placement follows this exact policy:
+
+- if both existing member paths are known, each new path uses its corresponding
+  existing parent;
+- if only one is known, its parent supplies the established station data root
+  for both new paths;
+- the generated children are filesystem-safe `<radio-name>_In` and
+  `<radio-name>_Out` names;
+- all durable profile mailbox claims are checked, with deterministic numeric
+  suffixes used to avoid a collision; and
+- without reviewed mailbox evidence, FIO retains the per-radio managed-root
+  fallback rather than guessing from the VarAC installation or shared BBS.
+
+An operator correction made through Advanced remains authoritative. A value
+copied from the preceding prepared-plan presentation is not a correction; it
+is generated state and must be re-derived on the next preparation. This
+prevents an old `.freqinout` default from becoming sticky after FIO discovers
+better durable station evidence.
+
+The exact incoming and outbox targets join the immutable plan's managed
+directories and reviewed lexical/resolved roots. Stable Wine directory aliases
+retain the VNC-7 destination-fingerprint checks. Existing target content is
+never replaced or cleared. Final apply may create only the reviewed missing
+directories; rollback may remove only directories created by that apply and
+only while empty. BBS/archive ownership and shared-database semantics are
+unchanged.
+
+Required regression evidence covers create and join routes, same-parent and
+single-known-parent derivation, collisions, generated-value re-preparation,
+explicit correction, managed-root fallback, Linux/Wine stable aliases,
+retarget/broken-alias rejection, and existing-content preservation. No schema
+or migration is introduced.
+
+Automated final-tree evidence: **18 focused tests** and **288 tests** in the
+full applicable guided-radio, planner, Software Administration, native
+preparation/writer/transaction, and VNC partition passed. Changed Python
+compilation and diff hygiene passed. A controlled operator walkthrough remains
+required before release qualification.

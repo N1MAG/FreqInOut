@@ -8487,3 +8487,465 @@ Final evidence:
 The automated exit gate is closed. A relaunched Linux production run of the
 exact reported route is still required for external qualification; the running
 application cannot hot-load this source correction.
+
+## 2026-09-19 — GRS-12.3 VarAC data-root inheritance and planner transaction boundary
+
+Status: automated implementation gate passed; live Windows and Linux/Wine
+operator qualification remains open.
+
+Operator evidence: the prepared FT-710 VarAC cluster member showed Incoming
+and Outbox below `~/.freqinout/managed-instances/ft-710/varac-native`, while the
+reviewed existing VarAC station data was below the Wine Desktop `VaraFiles`
+area. Selecting **Open scheduler** for Daily + Nets then appeared to freeze the
+UI. In `freqinout (42).log` at local `14:14:08`, Add Radio synchronously opened
+the lazy Plan Builder during its guided `BEGIN IMMEDIATE` save transaction.
+Plan Builder construction attempted to write
+`freqplanner_selected_hf_daily_schedule_set_id`, waited `5012 ms`, raised
+`sqlite3.OperationalError: database is locked`, and made
+`main_window.set_screen` take `5039 ms`.
+
+The correction has two bounded parts:
+
+- native VarAC preparation now uses the reviewed existing member's
+  incoming/outbox parents as station location evidence and creates distinct,
+  filesystem-safe `<radio-name>_In` / `<radio-name>_Out` targets. It checks all
+  durable profile mailbox claims and applies one deterministic suffix to the
+  pair on collision. A real Advanced correction remains authoritative; a path
+  merely republished by an older native plan is re-derived. With no reviewed
+  mailbox evidence, the previous per-radio managed-root fallback remains.
+- Add/Edit Radio now records planner handoff intent inside the save but queues
+  navigation only after the transaction has exited successfully. Failed saves
+  do not navigate. Passive Plan Builder source projection updates controls
+  without writing Settings, leaving persistence to explicit operator choices
+  or the explicit post-commit guided handoff.
+
+The native writer's no-damage policy is unchanged. Incoming/outbox remain
+member-local, BBS/archive remain cluster-shared, stable Wine aliases retain
+resolved-target fingerprints, and existing content is never moved, cleared,
+or deleted. No schema or migration was introduced.
+
+Work-package ownership:
+
+- Primary `gpt-5.6-sol`, high reasoning: log/runtime diagnosis, path and
+  transaction architecture, implementation, test reconciliation, specification
+  and work-log updates, delegated-audit review, and final integration gate.
+- `gpt-5.6-terra`, medium reasoning: read-only scheduler transition and CPU
+  audit. It identified the exact in-transaction lazy-tab construction and
+  Settings write that produced the five-second UI-thread lock wait.
+- `gpt-5.6-luna`, low reasoning: read-only VarAC path/no-damage audit. It
+  identified the managed-root default, durable BBS/profile evidence, Wine alias
+  safety boundaries, and preservation tests. Both delegated packages were
+  advisory; the primary model reviewed the findings and owned all final diffs.
+
+Regression evidence:
+
+- focused VarAC preparation and post-commit planner tests: **18 passed**;
+- full applicable guided-radio, Add Radio, planner, Software Administration,
+  native preparation/writer/transaction, and VNC acceptance partition:
+  **288 passed**;
+- changed Python compilation and `git diff --check`: passed.
+
+Three stale source-structure assertions in `test_guided_setup.py` were already
+failing at baseline commit `4fec3cb`; the detached baseline reproduced the
+failures. Their assertions were updated to the existing parameterized dialog
+size helper, batched detected-app call, current VarAC guidance source, and
+prepared outbox projection without changing application behavior. The complete
+applicable partition now passes with no deselections.
+
+No production database, native VarAC/VARA file, process, endpoint, radio,
+commit, or remote was changed. The unrelated DOCX and rendered-document
+workspace changes remain untouched. External qualification must confirm the
+new member paths below the existing `VaraFiles` parent and a responsive
+post-save Daily + Nets Plan Builder handoff.
+
+## 2026-09-19 — GRS-13 unified native-storage and software-instance specification
+
+Status: specification gate ready for maintainer review; implementation and live
+qualification remain open.
+
+The maintainer clarified the required operator mental model after reviewing
+Add Radio, Software Administration, Fast Light multi-instance storage, message
+attribution, FLAmp Q/BBS stability, and established operator directory layouts:
+
+- FIO manages qualified configuration without hiding native application or
+  operator content below its private configuration root;
+- existing single- and multi-instance layouts are preserved and adapted;
+- a new instance normally follows the application's qualified standard layout
+  or becomes a distinct sibling beside an established compatible instance;
+- application instances belong to radios; completed content enters one station
+  message library; FIO Spotter FLAmp Q and FIO BBS are station-scoped
+  publication services; operating groups are receipt/filter metadata and
+  access-policy subjects;
+- mutable application state is local-first, while NAS/removable storage is an
+  explicit asynchronous publication/archive target unless an exact recipe
+  qualifies network-backed runtime state; and
+- Add Radio, Software Administration, persistence, launch, Messages, Spotter,
+  and reconciliation consume one canonical bundle and verified projections.
+
+GRS-13 was added to
+`guided_radio_software_configuration_spec.md` as the controlling cross-service
+contract. It supersedes older generic station-sharing, managed-root fallback,
+and split-persistence authority. It defines no-lock-in directory precedence,
+existing-instance adoption and sibling creation, JS8Call/Fast Light/FLMsg/
+FLAmp/VarAC family rules, safe message intake and presentation,
+access-controlled station FLAmp Q/BBS publication, NAS outage behavior,
+projection parity, exact structured launch, unified UI language, and a
+Windows/Linux-Wine production-shaped acceptance matrix.
+
+Maintainer review then corrected the initial publication scope: receipt
+locations remain radio/application-specific, but imported content belongs to
+the canonical station library. FIO Spotter FLAmp Q and FIO BBS are station
+publication services with independent per-item publication state and ACLs.
+Operating groups are provenance/filter metadata and access-policy subjects, so
+authorized sharing may cross groups without copying content or changing receipt
+history. Response-radio selection is a separate station-service routing and RF
+preflight decision. Native VarAC cluster BBS storage remains a distinct VarAC
+runtime resource and is not the FIO BBS content store.
+
+`multi_instance_software_administration_spec.md` now points to GRS-13 and
+removes conflicting claims that FLMsg/FLAmp runtime state is shared by default,
+that the radio link is an independent source of truth, or that final Software
+Administration can never invoke the qualified native transaction used by Add
+Radio.
+
+Work-package ownership:
+
+- Primary `gpt-6-astra`, high reasoning: product/storage architecture,
+  persistence authority, no-damage and NAS policy, specification edits,
+  delegated-audit review, and final consistency gate.
+- `gpt-5.6-terra`, medium reasoning: read-only persistence and cross-spec
+  consistency audit. It identified the split source-of-truth language,
+  managed-root conflict, missing scope taxonomy, and draft/final native-writer
+  contradiction.
+- `gpt-5.6-luna`, medium reasoning: read-only acceptance-matrix, edge-case, and
+  follow-up publication-scope audits. It identified the initial group-ownership
+  conflict, missing operating-group UI contract, NAS/offline behavior, FLAmp
+  Q/BBS stability, and required cross-group ACL, unpublish, Windows/Linux,
+  rename, rollback, and launch-round-trip cases.
+
+This slice changes documentation only. It introduces no schema, migration,
+code, runtime data, application file, process, endpoint, radio, commit, or
+remote mutation. The implementation exit gate and live Windows/Linux-Wine,
+external-application, NAS, and radio qualification gates remain open.
+
+Documentation verification: `git diff --check` passed; all three edited
+Markdown files passed UTF-8/readback and terminating-newline checks. No runtime
+or implementation test result is claimed by this specification-only slice.
+
+## 2026-09-20 — GRS-13.1 canonical software identity parity implementation
+
+Status: automated implementation gate passed; the wider GRS-13 native-storage,
+station-message-library, publication/NAS, and live Windows/Linux-Wine gates
+remain open.
+
+This slice implements the unambiguous Add Radio / Software Administration
+identity rule. Add Radio now commits one immutable canonical identity record for
+every selected radio application, Fast Light child, built-in binding, external
+companion, and station-service binding. Software Administration projects those
+same bundle, component, binding, and fingerprint identities. Canonical-backed
+compact fields are read-only; changes use the authoritative Add/Replace
+assistant so application rows, manifests, exact structured launch rows, and the
+canonical set move in one generation-fenced guided transaction.
+
+The migration is additive. New `radio_software_identity_sets` and
+`radio_software_identity_records` tables retain a versioned complete set per
+radio. There is no destructive migration and no automatic legacy backfill.
+Missing or mismatched projections produce `Needs attention`; manual launch is
+blocked only for the affected radio and startup skips that radio without
+blocking unrelated launch lanes. Read-only Settings/launch validation uses a
+read-only SQLite connection and performs no filesystem, process, endpoint, or
+native-application operation.
+
+The independent final audit stopped the first release candidate and the primary
+corrected five integration defects before closing the gate:
+
+- a JS8Call assignment no longer implicitly selects FIO Spotter or CommStat;
+- built-in FIO Spotter is validated as an internal component and is not required
+  to have an external executable or launch row;
+- CommStat and external JS8Spotter retain JS8Call as explicit cross-family
+  dependencies without violating an atomic family-local launch graph;
+- radio-scoped owners and all non-empty radio bindings are checked against the
+  target radio before persistence; and
+- the exact reviewed manifest key is retained by the canonical identity instead
+  of being silently normalized to a different bundle key.
+
+CommStat remains one durable `commstat:station` process identity. Each radio's
+canonical set references that same process and contributes one distinct JS8
+endpoint binding; this does not duplicate the process. FIO Spotter is an
+explicit built-in component and binding, never an inference from JS8Call.
+
+Work-package ownership:
+
+- Primary `gpt-6-astra`, high reasoning: package decomposition, architecture,
+  additive schema, concurrency and transaction boundaries, canonical model
+  integration, projection and launch enforcement, delegated-diff review,
+  specification/work-log reconciliation, acceptance gates, and final review.
+- `gpt-5.6-terra`, medium reasoning: bounded core identity/validation work and
+  independent schema/transaction/projection audit. Its audit found the implicit
+  service defaults, built-in executable false block, CommStat dependency drift,
+  cross-radio validation gap, and write-capable read path; the primary reviewed
+  and corrected each finding.
+- `gpt-5.6-luna`, medium reasoning: bounded Software Administration/UI projection
+  and focused launch-drift tests, followed by an independent UI/spec parity
+  audit. Its audit identified the missing production-shaped all-family linked-
+  row acceptance gate and CommStat wording ambiguity; both were resolved.
+
+Final automated evidence:
+
+- focused canonical identity, linked projection, launch recipe, VarAC launch,
+  and manifest suite: **73 passed**;
+- broader canonical/core/Software Administration model suite: **148 passed**;
+- guided Add Radio and Software Administration UI suite: **141 passed**;
+- complete software/launch/guided regression partition: **717 passed, 4
+  skipped**;
+- changed Python compilation and `git diff --check`: passed.
+
+The production-shaped identity gate persists and reloads linked JS8Call, all
+four selected Fast Light components, VarAC and VARA, FIO Spotter, external
+JS8Spotter, CommStat, and a separate receive-only SDR++ radio. It verifies exact
+application paths/endpoints, manifest identity, structured argv/cwd/environment/
+dependencies/readiness, station bindings, and canonical fingerprints. Dedicated
+tests also prove explicit service selection, built-in validation, cross-radio
+rejection, stale-generation rollback, read-only validation, family-specific
+drift reporting, and affected-radio-only launch blocking.
+
+No production database, native application file, process, endpoint, radio,
+commit, or remote was changed. Existing unrelated DOCX, rendered-document,
+VarAC native-writer, and planner worktree changes were preserved. Live testing
+must still qualify external application behavior on Windows and Linux/Wine; the
+wider GRS-13 native directory, canonical message library, FLAmp Q/FIO BBS
+publication, ACL, and NAS behaviors are not claimed complete by this slice.
+
+## 2026-09-20 — GRS-13.2 Software Administration chip-strip layout correction
+
+Status: automated UI gate passed; operator relaunch verification remains open.
+
+Operator evidence showed the selected Software Administration family chip
+almost completely covered by a blue horizontal scrollbar after returning from
+Add Radio. The compact-height path capped each family/radio/task strip at the
+chip height alone. When the row overflowed, the platform scrollbar consumed
+that same vertical space and obscured the controls.
+
+Each horizontal chip strip now computes its height from the scaled chip row plus
+a distinct scrollbar lane whenever overflow exists. Range changes recompute the
+lane, so font scaling, family count, radio count, task count, and window resizing
+cannot reintroduce the overlap. The correction does not alter selection,
+persistence, discovery, launch, or canonical identity behavior.
+
+Regression evidence:
+
+- constrained family-strip geometry and all-radio layout matrix: **13 passed**;
+- complete Software Administration layout, radio-first UI, and canonical UI
+  suite: **60 passed**;
+- guided setup, unified Add Radio, Software Administration model, and workspace
+  suite: **130 passed**;
+- complete software/launch/guided regression partition: **718 passed, 4
+  skipped**;
+- changed Python compilation and `git diff --check`: passed.
+
+No production database, application configuration, process, endpoint, radio,
+commit, or remote was changed. The operator must relaunch the local application
+to load the updated widget geometry.
+
+## 2026-09-20 — GRS-13.3 JS8Call native identity and active-settings correction
+
+Status: automated implementation gate passed; operator relaunch and fresh
+Add/Replace Radio verification remain open.
+
+Operator evidence showed a saved FT-710 JS8Call instance in Software
+Administration with an opaque `fio-draft-js8call-*` value embedded in the
+application-data directory and `DIRECTED.TXT` path. A read-only query of the
+active local database confirmed that the same draft-derived rig identity had
+been stored in the application row, manifest paths, and canonical projection.
+No screenshot interpretation or launch-path assumption was used to diagnose
+the defect.
+
+The integration review found three linked causes:
+
+- the production JS8 recipe derived `--rig-name`, settings, and data paths from
+  the transaction-only draft key instead of the reviewed radio identity;
+- the Software Instance Assistant did not retain the separately allocated
+  durable application key when an operator opened and returned from detailed
+  review, allowing the draft key to become the manifest/canonical identity;
+- the native writer treated `--rig-name` and JS8Call's independent `--config`
+  selector as if they were interchangeable. It targeted the detected default
+  `JS8Call.ini` and wrote `MultiSettings/<radio>` while launch supplied only
+  `--rig-name`, leaving the prepared values outside the active
+  `Configuration` group.
+
+The corrected contract allocates two intentionally different non-editable
+identities when a draft begins: an internal draft transaction key and one
+durable application key. The assistant preserves the durable key across every
+page, detailed review, payload, and Save. The application row, manifest, launch
+projection, and canonical identity use that durable key. Neither key is used as
+a JS8Call native name or shown as normal Software Administration guidance.
+
+The reviewed radio label now supplies the stable operator-readable JS8Call rig
+name. Launch uses `--rig-name <radio>`. The same resulting application name
+drives Qt-native settings and application-data paths on macOS, conventional
+Linux, and Windows; Windows uses the application-specific
+`AppData/Local/<application name>/<application name>.ini` ConfigLocation. Save,
+forms, `DIRECTED.TXT`, `ALL.TXT`, and `inbox.db3` resolve from the same native
+data identity. The old private `.freqinout/managed-instances` root is not a
+normal JS8 target.
+
+For a new distinct rig identity, the qualified writer now writes only the
+rig-specific native settings file, preserves the detected/default
+`JS8Call.ini` as source evidence, and places reviewed values in the active
+`Configuration` group. It snapshots the exact new target before apply, verifies
+readback, and removes/restores it on rollback. An alternate MultiSettings
+profile requires the separately reviewed `--config` recipe and is not inferred.
+The complete reviewed settings mapping, including callsign/grid when supplied,
+survives preview-to-worker reconstruction.
+
+Existing saved rows with draft-derived native identities are not silently
+renamed, moved, or rewritten. They remain review/recovery cases and should be
+corrected through the authoritative **Replace instance** transaction. This is
+the no-damage choice because an older identity may already own native files or
+a running process.
+
+The acceptance gate now starts with the real distinct-draft allocator, runs the
+production recipe resolver, persists the application and manifest, saves and
+reloads the canonical record, projects Software Administration, and validates
+the launch/native-writer representation. It asserts that the durable manifest
+and canonical keys match, the JS8 rig and native paths use the radio label, the
+writer modifies the active configuration of the rig-specific file, and no
+draft key or private managed root appears in persisted paths or normal UI text.
+
+Work-package ownership:
+
+- Primary high-reasoning model: architecture, JS8Call source verification,
+  native writer semantics, durable identity/persistence integration, delegated
+  diff review, specification/work-log update, and final regression review.
+- `gpt-5.6-terra`, medium reasoning: read-only production-path and canonical
+  projection audit. It found the remaining manifest/canonical split and the
+  normal-UI exposure of internal identities; the primary implemented and
+  reviewed the fixes.
+- `gpt-5.6-luna`, low reasoning: bounded JS8 recipe/UI regression assertions.
+  Its initial failing tests reproduced draft-key/native-path leakage; the
+  primary reviewed and extended them through real persistence and writer gates.
+
+Automated evidence:
+
+- focused JS8 identity, persistence, Software Administration, native writer,
+  discovery, and launch suite: **157 passed**;
+- complete guided/software/launch regression partition: **722 passed, 4
+  skipped**;
+- changed Python compilation and `git diff --check`: passed.
+
+During the first broadened test run, an older native-writer test lacked an
+injected temporary JS8 home and created the exact synthetic `Radio-A` settings
+file plus empty Save/forms directories in the operator's Library. Their fresh
+timestamps and synthetic test contents were verified; only those exact test
+artifacts were removed. The test now supplies a temporary native home. The
+focused and complete reruns left no `Radio-A` artifact outside the test
+directory.
+
+No production database, existing JS8Call identity, unrelated native file,
+process, endpoint, radio, commit, or remote was changed. Live stock/Improved/
+Subspace qualification on Windows and Linux remains required before closing
+the wider GRS-13 external-application gate.
+
+## 2026-09-20 — GRS-13.4 Fast Light native-bundle parity and planner handoff correction
+
+Status: automated slice gate passed; fresh operator Add/Replace Radio and live
+external-application verification remain open.
+
+Operator screenshots proved that the prior GRS-13 implementation did not meet
+the all-software invariant. A saved FT-710 Fast Light bundle displayed FLRig
+and FLDigi executables but blank FLMsg/FLAmp applications and message folders;
+FLDigi still used a `runtime/.../managed-instances/draft-fast_light-*` path,
+the bundle was labeled Operator-managed, and Plan Builder reported no radio
+context after the guided handoff.
+
+Read-only inspection of the active development database confirmed split
+persistence rather than a rendering defect. The launch recipe contained
+FLMsg/FLAmp executable components, while the linked device row retained
+`use_flmsg=0`, `use_flamp=0`, blank component/message paths, and draft-private
+FLDigi roots. The adapter also defaulted a managed draft's manifest to
+`operator`, and the canonical record did not reuse the exact saved manifest
+key or all message-resource projections.
+
+The corrected production path now:
+
+- derives readable collision-resistant FLRig, FLDigi, and radio NBEMS roots
+  from the final radio label plus durable application key under the
+  application-native roots, never under the FIO private/runtime root;
+- launches FLDigi and FLMsg with one persisted radio `WRAP/auto` path and
+  launches FLMsg with its complete radio NBEMS root;
+- persists FLMsg application/root/messages/templates/auto and FLAmp
+  application/receive/outgoing claims from the reviewed component recipe even
+  after the details assistant hides derived fields;
+- carries the operator's explicit FLMsg/FLAmp selections independently from
+  discovery, so a discovered but unselected utility is not added and a
+  selected utility with incomplete discovery is retained as launch-pending
+  rather than silently omitted;
+- atomically projects component flags, executables, message sources, manifest,
+  structured launch rows, FIO-managed ownership, and canonical identity;
+- treats unqualified FLAmp native state truthfully as station-shared with
+  limited attribution, retains its standard sources, and suppresses automatic
+  startup instead of fabricating per-radio isolation;
+- validates canonical Fast Light paths against both linked application fields
+  and exact manifest resources; and
+- uses the guided handoff radio ID for Plan Builder RF Guard validation before
+  a new plan has an assignment row.
+
+The end-to-end acceptance gate starts with the real distinct-draft allocator,
+resolves a four-component Fast Light recipe, calls the Settings-owned Add Radio
+adoption adapter, saves through the real store, reloads the radio, manifest,
+launch bundle, Software Administration inputs, and canonical record, and
+asserts zero projection drift. It also proves that no draft key or `.freqinout`
+path survives, FLMsg arguments are structured, and FLAmp cannot autostart when
+the recipe says the operator owns the shared process.
+
+Automated evidence:
+
+- focused Fast Light/native identity/planner partition after the final
+  selection/discovery separation: **155 passed**;
+- complete guided/software/launch/FreqPlanner regression partition:
+  **820 passed, 4 skipped**;
+- changed Python compilation and `git diff --check`: passed after final review.
+
+The monolithic all-repository process reached the unrelated Compose GUI tests
+and the Python interpreter exited with signal 11 while a live JS8 reader thread
+and Qt event-loop test were both active. The exact Compose test passes alone
+(`1 passed`), and the complete 820-test guided/software/launch/FreqPlanner
+partition passes in one process. This is recorded as test-harness process
+isolation evidence, not a product assertion failure or a waived acceptance
+failure for this slice.
+
+Work-package ownership: the primary high-reasoning model handled architecture,
+native-directory rules, atomic projection, canonical parity, planner context,
+tests, specification, and final integration review. No subagent was used for
+this correction because the current request did not authorize a new delegated
+work package. No production database, native application file, external
+process, endpoint, radio, commit, or remote was changed.
+
+## 2026-09-20 — HF Daily/HF Nets New Schedule draft semantics
+
+Status: automated gate passed; operator visual verification remains open.
+
+The HF Daily and HF Nets **New Schedule** actions previously detached the saved
+source identity but left its visible rows in place and always erased the
+editable name. That made New behave like “save the current schedule under
+another name,” regardless of whether the operator named the intended draft
+before or after clicking the action.
+
+Both editors now use the same contract. New Schedule first honors the existing
+unsaved-change confirmation, then detaches the saved source, clears the schedule
+rows, and opens an unsaved draft. A name typed before New is retained; clicking
+New first leaves a blank editable name. The name of a merely selected saved
+schedule is not copied. HF Daily presents its normal empty entry row, while HF
+Nets presents an empty table, matching each editor's established row-entry
+behavior.
+
+Automated evidence:
+
+- four direct interaction-order regressions: **4 passed**;
+- Plan Builder, HF Daily, HF Nets, and shell schedule regression partition:
+  **133 passed, 91 deselected**;
+- changed Python compilation and `git diff --check`: passed.
+
+The primary high-reasoning model handled behavior design, implementation,
+tests, specification, and integration review. No saved schedule, production
+database, application configuration, process, commit, or remote was changed.

@@ -138,6 +138,150 @@ def test_create_cluster_inherits_shared_bbs_paths_and_keeps_member_mail_paths_lo
     assert str(tmp_path / "existing-bbs") not in result.presentation["outbox_path"]
 
 
+def test_create_cluster_places_new_mailboxes_beside_reviewed_existing_mailboxes(tmp_path) -> None:
+    node, profile = _evidence(tmp_path)
+    station_data = tmp_path / "wine" / "drive_c" / "users" / "bill" / "Desktop" / "VaraFiles"
+    profile.update(
+        varac_incoming_path=str(station_data / "FTDX-10_In"),
+        varac_outbox_dir=str(station_data / "FTDX-10_Out"),
+        varac_bbs_dir=str(station_data / "BBS"),
+        varac_bbs_archive_dir=str(station_data / "BBS" / "Archive"),
+    )
+    draft = _draft()
+    draft["instance_name"] = "FT-710"
+    draft["owner_label"] = "FT-710"
+
+    result = prepare_varac_native_configuration(
+        draft,
+        varac_nodes=(node,),
+        device_profiles=(profile,),
+        varac_clusters=(),
+        varac_members=(),
+        managed_root=tmp_path / "managed",
+        generation=13,
+        platform_override="linux-wine",
+    )
+
+    assert result.ready
+    assert result.presentation["secondary_storage_path"] == str(station_data / "FT-710_In")
+    assert result.presentation["outbox_path"] == str(station_data / "FT-710_Out")
+    assert result.presentation["bbs_path"] == str(station_data / "BBS")
+
+
+def test_windows_preparation_uses_the_reviewed_member_mailbox_parent(tmp_path) -> None:
+    node, profile = _evidence(tmp_path)
+    station_data = tmp_path / "VaraFiles"
+    profile.update(
+        varac_incoming_path=str(station_data / "Existing_In"),
+        varac_outbox_dir=str(station_data / "Existing_Out"),
+    )
+    draft = _draft()
+    draft["instance_name"] = "Portable Radio"
+    draft["owner_label"] = "Portable Radio"
+
+    result = prepare_varac_native_configuration(
+        draft,
+        varac_nodes=(node,),
+        device_profiles=(profile,),
+        varac_clusters=(),
+        varac_members=(),
+        managed_root=tmp_path / "managed",
+        generation=17,
+        platform_override="windows",
+    )
+
+    assert result.ready
+    assert result.plan is not None and result.plan.platform == "windows"
+    assert result.presentation["secondary_storage_path"] == str(
+        station_data / "Portable-Radio_In"
+    )
+    assert result.presentation["outbox_path"] == str(station_data / "Portable-Radio_Out")
+
+
+def test_automatic_member_mailboxes_avoid_reviewed_profile_collisions(tmp_path) -> None:
+    node, profile = _evidence(tmp_path)
+    station_data = tmp_path / "VaraFiles"
+    profile.update(
+        varac_incoming_path=str(station_data / "FTDX-10_In"),
+        varac_outbox_dir=str(station_data / "FTDX-10_Out"),
+    )
+    occupied = {
+        "id": 8,
+        "name": "Earlier FT-710",
+        "varac_incoming_path": str(station_data / "FT-710_In"),
+        "varac_outbox_dir": str(station_data / "FT-710_Out"),
+    }
+    draft = _draft()
+    draft["instance_name"] = "FT-710"
+    draft["owner_label"] = "FT-710"
+
+    result = prepare_varac_native_configuration(
+        draft,
+        varac_nodes=(node,),
+        device_profiles=(profile, occupied),
+        varac_clusters=(),
+        varac_members=(),
+        managed_root=tmp_path / "managed",
+        generation=14,
+        platform_override="linux-wine",
+    )
+
+    assert result.ready
+    assert result.presentation["secondary_storage_path"] == str(station_data / "FT-710-2_In")
+    assert result.presentation["outbox_path"] == str(station_data / "FT-710-2_Out")
+
+
+def test_reprepare_replaces_older_generated_mailboxes_but_keeps_operator_correction(tmp_path) -> None:
+    node, profile = _evidence(tmp_path)
+    station_data = tmp_path / "VaraFiles"
+    profile.update(
+        varac_incoming_path=str(station_data / "FTDX-10_In"),
+        varac_outbox_dir=str(station_data / "FTDX-10_Out"),
+    )
+    draft = _draft()
+    old_incoming = str(tmp_path / "managed" / "new-radio" / "varac-native" / "incoming")
+    old_outbox = str(tmp_path / "managed" / "new-radio" / "varac-native" / "outbox")
+    draft.update(
+        secondary_storage_path=old_incoming,
+        outbox_path=old_outbox,
+        varac_native_presentation={
+            "secondary_storage_path": old_incoming,
+            "outbox_path": old_outbox,
+        },
+    )
+
+    regenerated = prepare_varac_native_configuration(
+        draft,
+        varac_nodes=(node,),
+        device_profiles=(profile,),
+        varac_clusters=(),
+        varac_members=(),
+        managed_root=tmp_path / "managed",
+        generation=15,
+        platform_override="linux-wine",
+    )
+    assert regenerated.ready
+    assert regenerated.presentation["secondary_storage_path"] == str(station_data / "New-Radio_In")
+    assert regenerated.presentation["outbox_path"] == str(station_data / "New-Radio_Out")
+
+    corrected = dict(draft)
+    corrected["secondary_storage_path"] = str(station_data / "Portable_In")
+    corrected_result = prepare_varac_native_configuration(
+        corrected,
+        varac_nodes=(node,),
+        device_profiles=(profile,),
+        varac_clusters=(),
+        varac_members=(),
+        managed_root=tmp_path / "managed",
+        generation=16,
+        platform_override="linux-wine",
+    )
+    assert corrected_result.ready
+    assert corrected_result.presentation["secondary_storage_path"] == str(
+        station_data / "Portable_In"
+    )
+
+
 def test_create_cluster_accepts_bbs_below_stable_wine_desktop_alias(tmp_path) -> None:
     node, profile = _evidence(tmp_path)
     host_desktop = tmp_path / "home" / "bill" / "Desktop"
@@ -149,6 +293,8 @@ def test_create_cluster_accepts_bbs_below_stable_wine_desktop_alias(tmp_path) ->
     bbs = desktop_alias / "VaraFile" / "BBS"
     archive = bbs / "Archive"
     profile.update(
+        varac_incoming_path=str(desktop_alias / "VaraFile" / "FTDX-10_In"),
+        varac_outbox_dir=str(desktop_alias / "VaraFile" / "FTDX-10_Out"),
         varac_bbs_dir=str(bbs),
         varac_bbs_archive_dir=str(archive),
     )
@@ -167,7 +313,17 @@ def test_create_cluster_accepts_bbs_below_stable_wine_desktop_alias(tmp_path) ->
     assert result.ready
     assert result.presentation["bbs_path"] == str(bbs)
     assert result.presentation["bbs_archive_path"] == str(archive)
+    assert result.presentation["secondary_storage_path"] == str(
+        desktop_alias / "VaraFile" / "New-Radio_In"
+    )
+    assert result.presentation["outbox_path"] == str(
+        desktop_alias / "VaraFile" / "New-Radio_Out"
+    )
     assert result.plan is not None
+    assert result.plan.managed_directory_resolved_paths[:2] == (
+        host_desktop / "VaraFile" / "New-Radio_In",
+        host_desktop / "VaraFile" / "New-Radio_Out",
+    )
     assert result.plan.managed_directory_resolved_paths[-2:] == (
         host_desktop / "VaraFile" / "BBS",
         host_desktop / "VaraFile" / "BBS" / "Archive",
@@ -215,6 +371,11 @@ def test_prepare_rejects_member_mailbox_overlap_with_cluster_shared_bbs(tmp_path
 
 def test_join_cluster_inherits_durable_shared_bbs_paths(tmp_path) -> None:
     node, profile = _evidence(tmp_path)
+    member_data = tmp_path / "VaraFiles"
+    profile.update(
+        varac_incoming_path=str(member_data / "Existing-Radio_In"),
+        varac_outbox_dir=str(member_data / "Existing-Radio_Out"),
+    )
     draft = _draft()
     draft.update(
         cluster_path="join_cluster",
@@ -255,6 +416,8 @@ def test_join_cluster_inherits_durable_shared_bbs_paths(tmp_path) -> None:
     assert result.presentation["bbs_archive_path"] == archive
     assert result.presentation["secondary_storage_path"] != bbs
     assert result.presentation["outbox_path"] != archive
+    assert result.presentation["secondary_storage_path"] == str(member_data / "New-Radio_In")
+    assert result.presentation["outbox_path"] == str(member_data / "New-Radio_Out")
 
 
 def test_prepare_warns_for_running_process_and_still_requires_exact_qualified_version(tmp_path) -> None:
