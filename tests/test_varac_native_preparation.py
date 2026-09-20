@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from freqinout.core.guided_instance_inventory import build_guided_instance_inventory
 from freqinout.core.guided_varac_configuration import (
     recommend_varac_arrangement_from_snapshots,
@@ -117,6 +119,101 @@ def test_prepare_existing_standalone_and_new_member_is_immutable_and_ready(tmp_p
     assert result.presentation["port"] == 8310
     assert result.presentation["secondary_port"] == 8312
     assert not result.plan.members[1].target_path.exists()
+
+
+def test_prepare_uses_fresh_numbered_runtime_when_preferred_target_exists(tmp_path) -> None:
+    node, profile = _evidence(tmp_path)
+    managed_root = tmp_path / "managed"
+    occupied = managed_root / "new-radio" / "varac-native" / "VARA"
+    occupied.mkdir(parents=True)
+    sentinel = occupied / "operator-owned.txt"
+    sentinel.write_text("preserve", encoding="utf-8")
+
+    first = prepare_varac_native_configuration(
+        _draft(),
+        varac_nodes=(node,),
+        device_profiles=(profile,),
+        varac_clusters=(),
+        varac_members=(),
+        managed_root=managed_root,
+        generation=20,
+        platform_override="linux-wine",
+    )
+    second = prepare_varac_native_configuration(
+        _draft(),
+        varac_nodes=(node,),
+        device_profiles=(profile,),
+        varac_clusters=(),
+        varac_members=(),
+        managed_root=managed_root,
+        generation=21,
+        platform_override="linux-wine",
+    )
+
+    assert first.ready and second.ready
+    assert first.plan is not None and second.plan is not None
+    expected = managed_root / "new-radio" / "varac-native" / "VARA-2"
+    assert first.plan.members[-1].vara_target_runtime_folder == expected
+    assert second.plan.members[-1].vara_target_runtime_folder == expected
+    assert first.presentation["vara_runtime_path"] == str(expected)
+    assert first.presentation["vara_ini_path"] == str(expected / "VARA.ini")
+    assert sentinel.read_text(encoding="utf-8") == "preserve"
+    assert not expected.exists()
+
+
+def test_prepare_reserves_distinct_runtime_names_for_same_radio_label(tmp_path) -> None:
+    node, profile = _evidence(tmp_path)
+    profile["name"] = "New Radio"
+    managed_root = tmp_path / "managed"
+
+    result = prepare_varac_native_configuration(
+        _draft(),
+        varac_nodes=(node,),
+        device_profiles=(profile,),
+        varac_clusters=(),
+        varac_members=(),
+        managed_root=managed_root,
+        generation=22,
+        platform_override="linux-wine",
+    )
+
+    assert result.ready
+    assert result.plan is not None
+    assert result.plan.members[0].vara_target_runtime_folder == (
+        managed_root / "new-radio" / "varac-native" / "VARA"
+    )
+    assert result.plan.members[1].vara_target_runtime_folder == (
+        managed_root / "new-radio" / "varac-native" / "VARA-2"
+    )
+
+
+def test_prepare_treats_broken_runtime_symlink_as_occupied(tmp_path) -> None:
+    node, profile = _evidence(tmp_path)
+    managed_root = tmp_path / "managed"
+    occupied = managed_root / "new-radio" / "varac-native" / "VARA"
+    occupied.parent.mkdir(parents=True)
+    try:
+        occupied.symlink_to(tmp_path / "missing-runtime", target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"Symlink creation is unavailable on this test host: {exc}")
+
+    result = prepare_varac_native_configuration(
+        _draft(),
+        varac_nodes=(node,),
+        device_profiles=(profile,),
+        varac_clusters=(),
+        varac_members=(),
+        managed_root=managed_root,
+        generation=23,
+        platform_override="linux-wine",
+    )
+
+    assert result.ready
+    assert result.plan is not None
+    assert result.plan.members[-1].vara_target_runtime_folder == (
+        managed_root / "new-radio" / "varac-native" / "VARA-2"
+    )
+    assert occupied.is_symlink()
 
 
 def test_prepare_create_cluster_recovers_unique_linked_standalone_when_ui_id_is_absent(tmp_path) -> None:

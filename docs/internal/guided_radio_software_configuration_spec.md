@@ -4298,3 +4298,51 @@ candidates, and repeated generations do not multiply identical work. The
 focused VarAC/discovery/UI route, broader guided software and Software
 Administration parity suites, changed-file compilation, and `git diff --check`
 must pass. Live Linux/Wine completion remains the external qualification gate.
+
+### GRS-14.2 — Collision-Free Managed VARA Runtime Allocation
+
+Production retry testing reached the qualified native writer but failed with
+`Managed VARA target runtime must be absent`. The writer was correctly refusing
+to replace an existing runtime; the preparation layer was incorrectly proposing
+the same fixed `varac-native/VARA` target on every attempt. A prior interrupted
+attempt, an already reviewed FIO runtime, a duplicate human-readable radio
+label, or a broken symbolic link could therefore make an otherwise safe Add
+Radio plan permanently non-actionable.
+
+The writer's no-replacement rule remains absolute. Guided preparation owns the
+collision-free name choice before it constructs the immutable plan:
+
+- each VARA runtime created for a converted standalone member or a new cluster
+  member starts with the readable preferred name `VARA` below that member's
+  radio-scoped `varac-native` directory;
+- any existing filesystem object at that path—including a directory, file, or
+  broken symbolic link—counts as occupied and is never removed, entered,
+  copied over, or treated as proof of FIO ownership;
+- preparation chooses the first unused sibling `VARA-2`, `VARA-3`, and so on,
+  and also reserves targets already assigned to another member in the same
+  plan. Two members whose display labels normalize to the same directory must
+  still receive distinct targets;
+- read-only re-preparation against unchanged filesystem evidence returns the
+  same target. If the selected target appears after review, final apply retains
+  its independent revalidation and stops before mutation; the operator can
+  prepare again to receive the next unused target;
+- the selected runtime, its `VARA.ini`, derived executable path, launch vector,
+  manifest, Add Radio review, saved application/profile data, Launch Control,
+  and Software Administration all use that one canonical selected path. No
+  later layer may reconstruct the unsuffixed default.
+
+This recovery is automatic and is not an operator path-selection question.
+The UI may explain that an occupied location was preserved and a numbered
+runtime was selected, but it must not present the writer's internal safety
+exception as a dead-end correction task. Direct writer requests that name an
+existing target remain blocked, preserving the defense against destructive
+replacement.
+
+Acceptance requires preparation tests for an occupied preferred runtime,
+repeat preparation stability, same-label members, and a broken symlink; the
+tests must prove the occupied object is unchanged and that preparation creates
+nothing. Existing native-writer tests must continue to prove that an explicit
+existing target is rejected. Focused native preparation/writer tests, the full
+guided VarAC route, final-apply/persistence tests, changed-file compilation, and
+diff hygiene must pass. No schema or production-data migration is part of this
+correction.

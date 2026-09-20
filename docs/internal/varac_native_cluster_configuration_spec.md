@@ -502,6 +502,17 @@ valid. Private storage reuse, a database owned by another cluster, or any
 unapproved overwrite remains a safety blocker. INI, incoming/outbox, working
 identity, VARA runtime, and endpoints must remain distinct.
 
+Managed VARA runtime naming is resolved before the writer plan is built. The
+preferred radio-scoped target is `VARA`; when any filesystem object already
+occupies that name, preparation selects the first absent sibling `VARA-2`,
+`VARA-3`, and so on. Broken symlinks and paths reserved by another member in
+the same plan count as occupied. This allocator is read-only and deterministic
+for unchanged evidence. It never deletes or adopts an occupied target. The
+transactional writer still rejects any target that exists at validation or
+apply time, so a race or stale plan cannot overwrite an arbitrary runtime.
+Every native path and launch projection must use the exact selected sibling;
+consumers may not reconstruct the preferred unsuffixed path.
+
 ### Draft and final transaction boundary
 
 `Save as draft` performs no external mutation. It validates and returns the

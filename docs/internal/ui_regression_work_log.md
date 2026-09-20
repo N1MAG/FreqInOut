@@ -9182,3 +9182,47 @@ database was inspected only through a copied/read-only audit path. No production
 database, VarAC/VARA or JS8Call file, external process, radio, commit, or remote
 was changed. The unrelated modified installation-guide DOCX and rendered guide
 directory were preserved and excluded.
+
+## 2026-09-20 — Collision-free managed VARA runtime retry
+
+Status: automated implementation and integration gates passed; live
+Linux/Wine and Windows Add Radio qualification remains operator-assisted.
+
+The supplied production log showed the corrected linked-node discovery reach
+native preparation, then stop because a deterministic managed VARA runtime
+already existed. The native writer's refusal to replace an arbitrary runtime
+was correct; Add Radio's preparation layer had no collision-free naming policy
+and repeatedly proposed the occupied target.
+
+Preparation now chooses the first absent readable sibling (`VARA`, `VARA-2`,
+`VARA-3`, and so on) for both a converted standalone member and the new cluster
+member. Existing directories, files, and broken symlinks are preserved and
+count as occupied. Targets reserved earlier in the same immutable plan also
+count as occupied, preventing normalized duplicate radio labels from sharing a
+runtime. The writer's independent validation and apply-time no-replacement
+checks were deliberately left unchanged.
+
+Focused evidence: native preparation and writer safety suites **35 passed**,
+including new occupied-target, stable retry, same-label, and broken-symlink
+cases. No filesystem target was created by preparation and the occupied
+sentinel remained unchanged.
+
+Integration evidence:
+
+- native preparation, writer, transaction, final apply, and launch round-trip:
+  **69 passed**;
+- VarAC arrangement and responsive assistant widgets: **52 passed**;
+- production-shaped Add Radio and operator-route UI: **26 passed**;
+- Software Administration persistence, model, and workspace: **54 passed**;
+- complete guided software, inventory, recipe, and atomic-store partition:
+  **214 passed**;
+- contextual help registry: **5 passed**;
+- changed Python compilation and `git diff --check`: passed.
+
+Architecture, safety review, implementation, specification/help/test changes,
+and integration are owned by the high-reasoning primary model. No subagent was
+used because this surgical correction did not include a new delegation request.
+No schema or data migration is required. No production database, VarAC/VARA
+file, external process, radio, commit, or remote was changed. The unrelated
+modified installation-guide DOCX and rendered guide directory remain preserved
+and excluded.

@@ -236,7 +236,7 @@ def _build_plan(
     # with one distinct INI beside that installation.  FIO-owned member data
     # (VARA, incoming and outbox) remains below the managed root.
     managed_member_root = managed_root / new_slug / "varac-native"
-    new_vara_target = managed_member_root / "VARA"
+    new_vara_target_base = managed_member_root / "VARA"
 
     existing_node: Mapping[str, Any] | None = None
     existing_profile: Mapping[str, Any] | None = None
@@ -314,6 +314,8 @@ def _build_plan(
     source_vara = parse_vara_ini_bytes(source_vara_ini, source_vara_ini.read_bytes())
     source_files = snapshot_vara_runtime_files(source_vara_root)
 
+    reserved_vara_targets: list[Path] = []
+
     occupied = _occupied_ports(nodes)
     source_ports = _source_vara_ports(source_ini, source_vara)
     occupied.update(source_ports)
@@ -327,7 +329,14 @@ def _build_plan(
         if existing_number == new_member_number:
             raise ValueError("The existing and new VarAC members need different member numbers.")
         existing_member_id = f"node:{int(existing_node.get('id') or 0)}"
-        existing_target_root = managed_root / _slug(str(existing_profile.get("name") or existing_node.get("name") or existing_member_id)) / "varac-native" / "VARA"
+        existing_target_base = managed_root / _slug(
+            str(existing_profile.get("name") or existing_node.get("name") or existing_member_id)
+        ) / "varac-native" / "VARA"
+        existing_target_root = _next_available_managed_runtime(
+            existing_target_base,
+            reserved=reserved_vara_targets,
+        )
+        reserved_vara_targets.append(existing_target_root)
         members.append(
             _member(
                 member_id=existing_member_id,
@@ -343,6 +352,10 @@ def _build_plan(
                 platform_key=platform_key,
             )
         )
+    new_vara_target = _next_available_managed_runtime(
+        new_vara_target_base,
+        reserved=reserved_vara_targets,
+    )
     members.append(
         _member(
             member_id=new_key,
@@ -691,6 +704,40 @@ def _required_file(value: Any, label: str) -> Path:
 def _slug(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
     return slug or "varac-member"
+
+
+def _next_available_managed_runtime(
+    preferred: Path,
+    *,
+    reserved: Sequence[Path] = (),
+) -> Path:
+    """Choose a fresh managed VARA runtime without weakening writer safety.
+
+    Native apply intentionally refuses to replace any existing runtime folder.
+    Preparation therefore allocates a readable sibling when the canonical name
+    is already occupied by an earlier FIO attempt or another reviewed member.
+    Broken symlinks count as occupied, and no existing path is removed or
+    reused.  Repeated read-only preparation remains stable until the filesystem
+    itself changes because it always chooses the first available name.
+    """
+
+    reserved_keys = {_lexical_runtime_key(path) for path in reserved}
+    for suffix in range(1, 10_001):
+        candidate = preferred if suffix == 1 else preferred.with_name(
+            f"{preferred.name}-{suffix}"
+        )
+        if _lexical_runtime_key(candidate) in reserved_keys:
+            continue
+        if candidate.exists() or candidate.is_symlink():
+            continue
+        return candidate
+    raise ValueError(
+        f"No unused managed VARA runtime name is available below {preferred.parent}."
+    )
+
+
+def _lexical_runtime_key(path: Path) -> str:
+    return os.path.normcase(os.path.abspath(os.fspath(Path(path).expanduser())))
 
 
 def _member_mailbox_paths(
