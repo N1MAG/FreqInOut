@@ -31340,20 +31340,25 @@ class SettingsTab(QWidget):
             identity_profile = _draft_radio_profile()
             if observer_mode:
                 canonical_selected_families.insert(0, "sdrpp")
+                # The first option deliberately means "no application
+                # launch".  Its display text is guidance, not an application
+                # identity, so never feed it to the receiver recipe builder.
                 receiver_name = str(
-                    receiver_application_combo.currentData()
-                    or receiver_application_combo.currentText()
-                    or "SDR++"
+                    receiver_application_combo.currentData() or ""
                 ).strip()
-                receiver_items = build_receiver_launch_items(
-                    identity_profile,
-                    [
-                        {
-                            "name": receiver_name,
-                            "launch_path_override": receiver_launch_path_edit.text().strip(),
-                            "startup": bool(receiver_launch_enabled_chk.isChecked()),
-                        }
-                    ],
+                receiver_items = (
+                    build_receiver_launch_items(
+                        identity_profile,
+                        [
+                            {
+                                "name": receiver_name,
+                                "launch_path_override": receiver_launch_path_edit.text().strip(),
+                                "startup": bool(receiver_launch_enabled_chk.isChecked()),
+                            }
+                        ],
+                    )
+                    if receiver_name
+                    else ()
                 )
                 receiver_item = dict(receiver_items[0]) if receiver_items else {}
                 identity_profile["receiver_launch_item"] = {
@@ -34808,7 +34813,7 @@ class SettingsTab(QWidget):
             )
             vara_executable_path = str(
                 member.vara_target_runtime_folder
-                / result.plan.capability.main_executable_relative_path
+                / member.vara_main_executable_relative_path
             )
             vara_argv = (
                 ("wine", vara_executable_path)

@@ -9112,3 +9112,73 @@ data migration was required. No production database, VarAC/VARA file, external
 process, radio, commit, or remote was changed. The unrelated modified
 installation-guide DOCX and rendered guide directory were preserved and
 excluded from this work.
+
+## 2026-09-20 — Linked VarAC topology identity and responsive discovery correction
+
+Status: automated implementation gate passed; live Linux/Wine and Windows Add
+Radio qualification remains open.
+
+Production testing after the canonical Add Radio/Software Administration parity
+slice found that `Create cluster` was visible but native preparation rejected the
+same saved standalone node as missing or ambiguous. The recovery message named a
+refresh action that the route did not provide, Software Administration appeared
+to lose the associated paths, and the attached CPU sample showed the JS8 profile
+worker still parsing a settings file after the UI discovery budget had expired.
+
+The root cause was an authority-boundary error: topology recommendation accepted
+only path-complete inventory rows. A durably radio-linked VarAC node whose paths
+needed review was therefore removed from the arrangement metadata even though
+the database link still identified it. The correction separates topology
+identity from application qualification. A linked incomplete node remains a
+named Create-cluster candidate; the native worker qualifies its paths. If UI
+metadata is absent, the worker recovers only an exact single linked standalone
+node outside any cluster. An explicit stale ID is never replaced, and multiple
+nodes require the named arrangement choice. Recovery text now points only to the
+visible VarAC arrangement.
+
+The save/reload contract was checked with a real temporary `MultiRadioStore`:
+VarAC install, INI, database, VARA runtime/INI, incoming, outbox, BBS/archive,
+and launch values survive adoption and reopen in the Software Administration
+state. The exact VARA executable relative path is now carried in each immutable
+native member plan and included in its fingerprint so final launch persistence
+cannot read that fact from the unrelated writer capability. The adjacent
+receive-only Review path was also corrected so the visible `No application
+launch` label is not treated as a receiver application identity.
+
+For responsiveness, guided JS8 settings discovery now enforces a 1 MiB candidate
+limit, reads in cancellation-checked 64 KiB chunks, checks cancellation while
+parsing both ConfigParser and QSettings layouts, and stops before later
+candidates after cancellation. This stays inside the existing background,
+generation-fenced discovery coordinator; no filesystem scan or parser was moved
+onto the UI thread.
+
+Automated evidence:
+
+- focused topology, native preparation, bounded discovery, and real-store
+  projection: **104 passed**;
+- real-widget Add Radio, VarAC operator route, Software Administration layout,
+  and final-apply gate: **71 passed**;
+- native writer/final handoff and guided-save regression gate after adjacent
+  corrections: **60 passed**;
+- broader guided inventory, save transaction, responsive assistant,
+  production-shaped audit, canonical identity, launch recipe, native
+  transaction, and Software Administration partition: **157 passed**;
+- contextual operator-help registry gate: **5 passed**;
+- changed Python compilation and `git diff --check`: passed.
+
+Work packages and models:
+
+- architecture, concurrency boundary, VarAC topology/persistence changes,
+  migration review, specification/help/work-log updates, delegated-diff review,
+  and final integration: **gpt-6-astra, high reasoning (primary)**;
+- bounded and cancellable JS8 settings discovery plus its focused tests:
+  **gpt-5.6-terra, medium reasoning**;
+- focused integration tests were completed by the primary after the requested
+  lower-cost test worker could not be started because the task's agent slots
+  were already occupied.
+
+No schema or production-data migration was required. The supplied production
+database was inspected only through a copied/read-only audit path. No production
+database, VarAC/VARA or JS8Call file, external process, radio, commit, or remote
+was changed. The unrelated modified installation-guide DOCX and rendered guide
+directory were preserved and excluded.

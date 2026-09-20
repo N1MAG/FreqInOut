@@ -342,8 +342,24 @@ def test_final_add_radio_save_applies_reviewed_varac_plan_and_hands_session_to_t
     assert saved["_varac_native_external_session"] is session
     assert "_varac_native_apply_request" not in saved
     assert tuple(saved["launch_argv"]) == latest_prepared.plan.members[-1].launch_command
-    component = saved["launch_recipe"]["components"][0]
-    assert tuple((component["executable"], *component["arguments"])) == latest_prepared.plan.members[-1].launch_command
+    components = {
+        component["component_key"]: component
+        for component in saved["launch_recipe"]["components"]
+    }
+    varac_component = components["varac"]
+    assert tuple(
+        (varac_component["executable"], *varac_component["arguments"])
+    ) == latest_prepared.plan.members[-1].launch_command
+    vara_component = components["vara"]
+    assert tuple(
+        (vara_component["executable"], *vara_component["arguments"])
+    ) == (
+        "wine",
+        str(
+            latest_prepared.plan.members[-1].vara_target_runtime_folder
+            / latest_prepared.plan.members[-1].vara_main_executable_relative_path
+        ),
+    )
     assert len(started) == 1
 
     # Generation equality is not the safety boundary.  A real intent change

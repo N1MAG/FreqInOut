@@ -14,6 +14,7 @@ import pytest
 
 from freqinout.gui import settings_tab as settings_module
 from freqinout.gui.settings_tab import SettingsTab
+from freqinout.core.multi_radio_store import MultiRadioStore
 
 
 class _Workspace:
@@ -186,6 +187,66 @@ def test_settings_adapter_maps_each_family_to_native_store_shape(
     assert workspace.completed and workspace.completed[-1][0] is True
     assert replaced == [{"id": 1, "name": "FIO-A"}]
     assert refreshed == [True]
+
+
+def test_saved_varac_paths_reload_losslessly_into_software_administration(tmp_path) -> None:
+    store = MultiRadioStore(tmp_path / "freqinout.db")
+    radio = store.save_device_profile(
+        {"system_key": "ft-710", "name": "FT-710", "enabled": 1}
+    )
+    expected = {
+        "install_path": "/home/bill/.wine/drive_c/VarAC/VarAC.exe",
+        "ini_path": "/home/bill/.wine/drive_c/VarAC/VarAC-ft-710.ini",
+        "db_path": "/home/bill/.wine/drive_c/VarAC/VarAC.db",
+        "vara_runtime_path": "/home/bill/Radio/FT-710/VARA",
+        "vara_ini_path": "/home/bill/Radio/FT-710/VARA/VARA.ini",
+        "incoming_path": "/home/bill/.wine/drive_c/users/bill/Desktop/VaraFiles/FT-710_In",
+        "outbox_path": "/home/bill/.wine/drive_c/users/bill/Desktop/VaraFiles/FT-710_Out",
+        "bbs_path": "/home/bill/.wine/drive_c/users/bill/Desktop/VaraFiles/BBS",
+        "bbs_archive_path": "/home/bill/.wine/drive_c/users/bill/Desktop/VaraFiles/BBS/Archive",
+        "launch_cmd": "wine /home/bill/.wine/drive_c/VarAC/VarAC.exe Z:\\home\\bill\\.wine\\drive_c\\VarAC\\VarAC-ft-710.ini",
+    }
+    store.adopt_software_instance(
+        family_key="varac",
+        radio_profile_id=radio["id"],
+        application_values={
+            "system_key": "varac-ft-710",
+            "name": "FT-710",
+            **expected,
+        },
+        manifest_values={
+            "instance_key": "varac:varac-ft-710",
+            "management_mode": "fio_managed",
+            "executable_path": expected["install_path"],
+            "configuration_path": expected["ini_path"],
+            "data_root": expected["db_path"],
+            "launch_command": expected["launch_cmd"],
+        },
+    )
+
+    reopened = MultiRadioStore(tmp_path / "freqinout.db")
+    saved_profile = reopened.get_device_profile(radio["id"])
+    assert saved_profile is not None
+    saved_node = reopened.get_varac_node(saved_profile["varac_node_id"])
+    assert saved_node is not None
+    assert saved_node["install_path"] == expected["install_path"]
+    assert saved_node["ini_path"] == expected["ini_path"]
+    assert saved_node["db_path"] == expected["db_path"]
+    assert saved_node["vara_runtime_path"] == expected["vara_runtime_path"]
+    assert saved_node["vara_ini_path"] == expected["vara_ini_path"]
+    assert saved_node["incoming_path"] == expected["incoming_path"]
+    assert saved_node["launch_cmd"] == expected["launch_cmd"]
+
+    state = SettingsTab._radio_software_state_from_profile(
+        SettingsTab.__new__(SettingsTab), saved_profile
+    )
+    assert state["varac_path"] == expected["install_path"]
+    assert state["varac_ini_path"] == expected["ini_path"]
+    assert state["varac_launch_cmd"] == expected["launch_cmd"]
+    assert state["message_paths"]["varac"] == expected["incoming_path"]
+    assert state["varac_outbox_dir"] == expected["outbox_path"]
+    assert state["varac_bbs_dir"] == expected["bbs_path"]
+    assert state["varac_bbs_archive_dir"] == expected["bbs_archive_path"]
 
 
 @pytest.mark.parametrize(

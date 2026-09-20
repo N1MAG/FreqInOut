@@ -210,6 +210,7 @@ def test_scan_js8_profiles_scans_profiles_once_and_disables_application_path_sca
     result = sources.scan_js8_profiles(_request("js8call", inputs={"home": str(tmp_path)}), lambda: False)
     assert result.phase is DiscoveryPhase.JS8_PROFILES
     assert calls[0][0] == "profiles"
+    assert callable(calls[0][1]["cancelled"])
     assert calls[1] == ("detect", (profile,), False)
     assert len([item for item in calls if item[0] == "profiles"]) == 1
 

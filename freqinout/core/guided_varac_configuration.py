@@ -575,10 +575,11 @@ def recommend_varac_arrangement_from_snapshots(
     """Adapt already-loaded classified store projections for guided UI.
 
     This boundary deliberately accepts projections rather than opening a
-    store or reconstructing missing VarAC paths. Only rows explicitly marked
-    ``usable_existing``/``candidate_usable`` by the GRS-7.2 classifier may
-    influence topology recommendations; diagnostic and recovery rows are
-    excluded from choices.
+    store or reconstructing missing VarAC paths. Complete, durably linked rows
+    are immediately usable. A durably linked but incomplete row still proves
+    that a topology node exists and remains selectable; native preparation owns
+    path qualification and reports the exact missing fact. Unlinked diagnostic
+    and recovery rows never influence topology.
     """
 
     def positive(value: object) -> int:
@@ -637,7 +638,12 @@ def recommend_varac_arrangement_from_snapshots(
         if not isinstance(raw, Mapping):
             continue
         classification = text(raw.get("candidate_classification")).casefold()
-        if classification != "usable_existing" or raw.get("candidate_usable") is not True:
+        linked = raw.get("linked_to_radio") is True
+        immediately_usable = (
+            classification == "usable_existing"
+            and raw.get("candidate_usable") is True
+        )
+        if not immediately_usable and not linked:
             continue
         node_id = positive(raw.get("id"))
         if node_id <= 0:
@@ -662,7 +668,9 @@ def recommend_varac_arrangement_from_snapshots(
                 "label": text(raw.get("name") or raw.get("instance_name") or node_key),
                 "device_profile_name": profile_evidence.get("device_profile_name", ""),
                 "candidate_classification": classification,
-                "candidate_usable": True,
+                "candidate_usable": immediately_usable,
+                "configuration_review_required": not immediately_usable,
+                "candidate_reasons": tuple(raw.get("candidate_reasons") or ()),
             }
         )
     usable_rows.sort(key=lambda item: (str(item["label"]).casefold(), item["node_id"]))

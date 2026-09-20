@@ -4232,3 +4232,69 @@ available for the non-blocking standalone plan, Create/Join still invokes the
 worker, a blocked native result keeps the selector visible, and a qualified
 result alone unlocks the cluster route. No schema or data migration is part of
 this correction.
+
+### GRS-14.1 — Existing-Node Identity, Complete Projection, And Responsive Discovery
+
+Operator retest of the binding route `Settings > Radios > Add Radio > Tri-Mode
+> VarAC > Create cluster` exposed a second contradiction after canonical
+Add Radio/Software Administration parity was introduced. The arrangement list
+could offer **Create cluster** while its opaque selection had no existing-node
+identity. Native preparation then reported that the standalone node was missing
+or ambiguous and told the operator to “refresh discovery,” although that route
+contained no refresh action. At the same time, the already saved VarAC paths
+were not projected into Software Administration. The attached CPU evidence
+also showed a background JS8 profile phase spending multiple seconds parsing
+one settings file while newer generations waited or timed out.
+
+Topology identity and application qualification are separate facts:
+
+- a durable `device_profiles.varac_node_id` link identifies an existing VarAC
+  node for topology even when one or more application paths still need review;
+- path completeness determines whether the native writer is qualified, not
+  whether the linked node exists;
+- when there is exactly one linked standalone node and no cluster, both the
+  arrangement metadata and the native-preparation boundary must resolve that
+  same node deterministically. The worker may recover a missing UI metadata ID
+  from that unique durable topology snapshot; it must not guess when there are
+  zero or multiple eligible standalone nodes;
+- an explicit positive node ID that no longer exists is stale evidence and
+  must fail without substituting another node;
+- ambiguous stations must present the actual standalone-node choices in the
+  arrangement control. A recovery message may name only an action that is
+  visible on the current route; it may not instruct the operator to use a
+  nonexistent refresh control.
+
+The VarAC path projection has one lossless contract. The selected existing
+node contributes its installation, INI, database, VARA runtime/INI, launch, and
+incoming facts; its linked radio contributes outbox, BBS, and archive facts.
+The prepared new member contributes its generated install-adjacent INI,
+distinct VARA runtime, node-local incoming/outbox, shared database/BBS/archive,
+working directory, ports, and structured launch vector. Add Radio Connections,
+Review, the retained canonical draft, saved application/manifest/profile rows,
+Launch Control, and Software Administration must display the same nonblank
+values after preparation and after reload. A field may be blank only when no
+reviewed or safely derived fact exists, in which case it is a warning or
+operator correction—not silently discarded topology.
+
+Discovery remains background-only and generation-fenced, but background work
+must also be bounded. JS8 settings readers must read no more than a documented
+maximum candidate size, check cancellation between candidates, and skip an
+oversized or unreadable candidate as diagnostic evidence. A timed-out phase is
+single-flight as required by GRS-12.2; newer generations reuse it rather than
+starting another parser. UI publication consumes one immutable result and does
+not synchronously repeat the full Software/Review rebuild for the same state.
+
+Acceptance requires production-shaped, real-store tests rather than only
+hand-authored final mappings. The fixture must contain one linked standalone
+VarAC node and no cluster, pass through inventory classification and topology
+recommendation, intentionally omit the UI-carried node ID at the native
+boundary, and still prepare the same unique node with populated canonical
+paths. Companion cases must prove that a stale positive ID and multiple
+standalone nodes remain blocked. Persistence coverage must reload the linked
+radio and Software Administration projection and compare every VarAC path and
+launch fact. Discovery coverage must prove normal JS8 settings still parse,
+oversized candidates are bounded/skipped, cancellation stops between
+candidates, and repeated generations do not multiply identical work. The
+focused VarAC/discovery/UI route, broader guided software and Software
+Administration parity suites, changed-file compilation, and `git diff --check`
+must pass. Live Linux/Wine completion remains the external qualification gate.

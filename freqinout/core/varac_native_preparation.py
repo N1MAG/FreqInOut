@@ -244,8 +244,17 @@ def _build_plan(
     operation = "create-member"
     if arrangement == "create_cluster":
         node_id = _positive_int(draft.get("existing_standalone_node_id"))
-        existing_node = _unique(nodes, "id", node_id, "existing standalone VarAC node")
-        existing_profile = _profile_for_node(profiles, node_id)
+        if node_id:
+            existing_node = _unique(nodes, "id", node_id, "selected standalone VarAC node")
+        else:
+            existing_node, existing_profile = _unique_linked_standalone(
+                nodes,
+                profiles,
+                memberships,
+            )
+            node_id = _positive_int(existing_node.get("id"))
+        if existing_profile is None:
+            existing_profile = _profile_for_node(profiles, node_id)
         shared_db = str(draft.get("cluster_shared_database") or existing_node.get("db_path") or "").strip()
         if not shared_db:
             raise ValueError("The existing standalone VarAC database is unknown; choose a shared database before preparing.")
@@ -607,8 +616,55 @@ def _positive_int(value: Any) -> int:
 def _unique(rows: Sequence[Mapping[str, Any]], key: str, value: Any, label: str) -> Mapping[str, Any]:
     matches = [row for row in rows if str(row.get(key) or "") == str(value or "")]
     if len(matches) != 1:
-        raise ValueError(f"The {label} is missing or ambiguous; refresh discovery and choose it again.")
+        raise ValueError(f"The {label} is no longer available. Return to the VarAC arrangement and choose it again.")
     return matches[0]
+
+
+def _unique_linked_standalone(
+    nodes: Sequence[Mapping[str, Any]],
+    profiles: Sequence[Mapping[str, Any]],
+    memberships: Sequence[Mapping[str, Any]],
+) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    """Recover one durable standalone topology identity when UI metadata is absent.
+
+    Application completeness is intentionally not considered here.  A linked
+    node remains topology evidence even when native preparation later needs to
+    explain a missing path.  This fallback is safe only for exactly one linked,
+    enabled node outside every current cluster membership.
+    """
+
+    member_profile_ids = {
+        _positive_int(row.get("device_profile_id"))
+        for row in memberships
+        if _positive_int(row.get("device_profile_id"))
+        and int(row.get("enabled", 1) or 0) == 1
+    }
+    profiles_by_node: dict[int, list[Mapping[str, Any]]] = {}
+    for profile in profiles:
+        profile_id = _positive_int(profile.get("id"))
+        node_id = _positive_int(profile.get("varac_node_id"))
+        if not node_id or profile_id in member_profile_ids:
+            continue
+        profiles_by_node.setdefault(node_id, []).append(profile)
+
+    candidates: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
+    for node in nodes:
+        node_id = _positive_int(node.get("id"))
+        if not node_id or int(node.get("enabled", 1) or 0) != 1:
+            continue
+        linked_profiles = profiles_by_node.get(node_id, ())
+        if len(linked_profiles) == 1:
+            candidates.append((node, linked_profiles[0]))
+
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        raise ValueError(
+            "No linked standalone VarAC node is available. Review the VarAC arrangement or its saved radio assignment."
+        )
+    raise ValueError(
+        "More than one standalone VarAC node is available. Choose the node in the VarAC arrangement before preparing."
+    )
 
 
 def _profile_for_node(profiles: Sequence[Mapping[str, Any]], node_id: int) -> Mapping[str, Any]:

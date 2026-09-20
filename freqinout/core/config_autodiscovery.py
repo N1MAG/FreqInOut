@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import configparser
+import io
 import os
 import platform as platform_module
 import shutil
@@ -63,6 +64,16 @@ JS8CALL_COMMAND_NAMES: Tuple[str, ...] = (
     "js8call-subspace",
     "subspace",
 )
+
+# Settings files are normally only a few KiB.  Keep guided discovery from
+# retaining a worker on an accidentally selected log, sparse file, or corrupt
+# settings file after its UI budget has elapsed.
+MAX_JS8CALL_SETTINGS_BYTES = 1024 * 1024
+_JS8CALL_SETTINGS_READ_CHUNK_BYTES = 64 * 1024
+
+
+class _JS8CallSettingsReadCancelled(Exception):
+    """Internal sentinel used to abandon a bounded settings read."""
 
 
 @dataclass(frozen=True)
@@ -504,18 +515,32 @@ def build_lab_radio_proposals(
     return tuple(radios)
 
 
-def read_js8call_multisettings(ini_path: Path) -> Tuple[JS8CallConfigProfile, ...]:
+def read_js8call_multisettings(
+    ini_path: Path,
+    *,
+    cancelled: Optional[Callable[[], bool]] = None,
+) -> Tuple[JS8CallConfigProfile, ...]:
+    """Read one normal-sized JS8Call settings file without blocking cancellation.
+
+    This is used by the guided-discovery worker, whose UI timeout cannot kill a
+    Python parser already running.  Bound both the bytes read and the parser's
+    input so a malformed or misidentified file cannot keep that worker busy.
+    """
+
     path = Path(ini_path)
-    if not path.is_file():
+    contents = _read_bounded_js8call_settings(path, cancelled=cancelled)
+    if contents is None:
         return ()
 
     parser = configparser.ConfigParser(interpolation=None)
     parser.optionxform = str
     profiles = []
     try:
-        parser.read(path, encoding="utf-8")
+        parser.read_file(_cancel_aware_js8call_lines(contents, cancelled))
+    except _JS8CallSettingsReadCancelled:
+        return ()
     except configparser.Error:
-        return _read_js8call_qsettings(path)
+        return _read_js8call_qsettings_text(contents, cancelled=cancelled)
 
     root_settings = _selected_js8_settings(parser.defaults())
     if parser.has_section("Configuration"):
@@ -531,7 +556,9 @@ def read_js8call_multisettings(ini_path: Path) -> Tuple[JS8CallConfigProfile, ..
         settings = _selected_js8_settings(dict(parser.items(section)))
         if settings:
             profiles.append(JS8CallConfigProfile(name=name, settings=settings))
-    qsettings_profiles = _read_js8call_qsettings(path)
+    if _js8call_settings_cancelled(cancelled):
+        return ()
+    qsettings_profiles = _read_js8call_qsettings_text(contents, cancelled=cancelled)
     if not profiles:
         return qsettings_profiles
     merged = {profile.name.strip().casefold(): profile for profile in profiles}
@@ -554,15 +581,72 @@ def read_js8call_multisettings(ini_path: Path) -> Tuple[JS8CallConfigProfile, ..
     return tuple(ordered)
 
 
-def _read_js8call_qsettings(ini_path: Path) -> Tuple[JS8CallConfigProfile, ...]:
+def _read_bounded_js8call_settings(
+    path: Path,
+    *,
+    cancelled: Optional[Callable[[], bool]],
+) -> Optional[str]:
+    if _js8call_settings_cancelled(cancelled) or not path.is_file():
+        return None
     try:
-        lines = Path(ini_path).read_text(encoding="utf-8", errors="ignore").splitlines()
+        if path.stat().st_size > MAX_JS8CALL_SETTINGS_BYTES:
+            return None
+        chunks = []
+        total = 0
+        with path.open("rb") as stream:
+            while True:
+                if _js8call_settings_cancelled(cancelled):
+                    return None
+                chunk = stream.read(
+                    min(
+                        _JS8CALL_SETTINGS_READ_CHUNK_BYTES,
+                        MAX_JS8CALL_SETTINGS_BYTES + 1 - total,
+                    )
+                )
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > MAX_JS8CALL_SETTINGS_BYTES:
+                    return None
     except OSError:
-        return ()
+        return None
+    if _js8call_settings_cancelled(cancelled):
+        return None
+    return b"".join(chunks).decode("utf-8", errors="ignore")
+
+
+def _js8call_settings_cancelled(cancelled: Optional[Callable[[], bool]]) -> bool:
+    if cancelled is None:
+        return False
+    try:
+        return bool(cancelled())
+    except Exception:
+        return True
+
+
+def _cancel_aware_js8call_lines(
+    contents: str,
+    cancelled: Optional[Callable[[], bool]],
+) -> Iterable[str]:
+    for line in io.StringIO(contents):
+        if _js8call_settings_cancelled(cancelled):
+            raise _JS8CallSettingsReadCancelled()
+        yield line
+
+
+def _read_js8call_qsettings_text(
+    contents: str,
+    *,
+    cancelled: Optional[Callable[[], bool]] = None,
+) -> Tuple[JS8CallConfigProfile, ...]:
+    lines = contents.splitlines()
 
     grouped: Dict[str, Dict[str, str]] = {}
     current_section = ""
     for raw_line in lines:
+        if _js8call_settings_cancelled(cancelled):
+            return ()
         line = raw_line.strip()
         if not line or line.startswith(("#", ";")):
             continue
@@ -728,11 +812,16 @@ def discover_js8call_file_profiles(
     ini_path: Optional[Path] = None,
     platform: Optional[str] = None,
     home: Optional[Path] = None,
+    cancelled: Optional[Callable[[], bool]] = None,
 ) -> Tuple[JS8CallFileProfile, ...]:
     ini_paths = (Path(ini_path),) if ini_path is not None else default_js8call_ini_paths(platform=platform, home=home)
     discovered = []
     for candidate_ini in _unique_paths(ini_paths):
-        profiles = read_js8call_multisettings(candidate_ini)
+        if _js8call_settings_cancelled(cancelled):
+            break
+        profiles = read_js8call_multisettings(candidate_ini, cancelled=cancelled)
+        if _js8call_settings_cancelled(cancelled):
+            break
         if not profiles:
             continue
         rig_name = rig_name_from_settings_path(candidate_ini)
@@ -748,6 +837,8 @@ def discover_js8call_file_profiles(
             if any((root / filename).is_file() for filename in ("ALL.TXT", "DIRECTED.TXT", "inbox.db3"))
         )
         for profile in profiles:
+            if _js8call_settings_cancelled(cancelled):
+                break
             save_dir_text = str(profile.settings.get("SaveDir", "") or "").strip()
             tcp_server_port = str(profile.settings.get("TCPServerPort", "") or "").strip()
             save_dir = Path(os.path.expandvars(os.path.expanduser(save_dir_text))) if save_dir_text else None
@@ -779,6 +870,8 @@ def discover_js8call_file_profiles(
                     storage_mode="unverified",
                 )
             )
+        if _js8call_settings_cancelled(cancelled):
+            break
     return tuple(discovered)
 
 

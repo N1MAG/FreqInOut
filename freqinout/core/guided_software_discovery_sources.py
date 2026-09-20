@@ -159,6 +159,7 @@ def scan_js8_profiles(request: DiscoveryRequest, cancelled: Callable[[], bool]) 
     profiles = discover_js8call_file_profiles(
         platform=str(request.inputs.get("platform") or "") or None,
         home=Path(home_text) if home_text else None,
+        cancelled=cancelled,
     )[:_MAX_PROFILE_EVIDENCE]
     if cancelled():
         return PhaseDiscoveryResult(DiscoveryPhase.JS8_PROFILES)

@@ -287,6 +287,8 @@ class VarACNativeMemberPlan:
     expected_vara_target_exists: bool
     expected_vara_target_digest: str
     vara_changes: Mapping[str, Mapping[str, str]]
+    vara_main_executable_relative_path: str
+    vara_monitor_executable_relative_path: str
     vara_runtime_files: Tuple[VarARuntimeFileSource, ...]
 
 
@@ -459,6 +461,8 @@ def build_varac_native_cluster_plan(
             expected_vara_target_exists=member.vara_runtime.target.exists,
             expected_vara_target_digest=member.vara_runtime.target.digest,
             vara_changes=_frozen_mapping(member.vara_runtime.settings),
+            vara_main_executable_relative_path=member.vara_runtime.main_executable_relative_path,
+            vara_monitor_executable_relative_path=member.vara_runtime.monitor_executable_relative_path,
             vara_runtime_files=tuple(member.vara_runtime.files),
         )
         for member in members
@@ -502,6 +506,8 @@ def build_varac_native_cluster_plan(
                         str(section): dict(fields)
                         for section, fields in member.vara_changes.items()
                     },
+                    "vara_main_executable_relative_path": member.vara_main_executable_relative_path,
+                    "vara_monitor_executable_relative_path": member.vara_monitor_executable_relative_path,
                     "vara_runtime_files": [
                         {
                             "relative_path": item.relative_path,

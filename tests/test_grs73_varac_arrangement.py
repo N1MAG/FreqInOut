@@ -123,6 +123,54 @@ def test_snapshot_adapter_emits_display_ready_ids_and_exact_single_standalone_co
     assert len(result["standalone_candidates"]) == 1
 
 
+def test_snapshot_adapter_keeps_durably_linked_incomplete_node_as_topology_evidence():
+    result = recommend_varac_arrangement_from_snapshots(
+        (
+            {
+                "id": 41,
+                "system_key": "ftdx-10-varac",
+                "name": "FTDX-10 VarAC",
+                "candidate_classification": "diagnostic_only",
+                "candidate_usable": False,
+                "linked_to_radio": True,
+                "candidate_reasons": ("missing VarAC INI path",),
+            },
+        ),
+        (),
+        (),
+        ({"id": 7, "name": "FTDX-10", "varac_node_id": 41},),
+        new_radio_label="New Radio",
+    )
+
+    assert result["recommended_existing_node_id"] == 41
+    assert result["recommended_existing_device_profile_id"] == 7
+    candidate = tuple(result["standalone_candidates"])[0]
+    assert candidate["candidate_usable"] is False
+    assert candidate["configuration_review_required"] is True
+    assert candidate["candidate_reasons"] == ("missing VarAC INI path",)
+
+
+def test_snapshot_adapter_does_not_promote_unlinked_incomplete_node():
+    result = recommend_varac_arrangement_from_snapshots(
+        (
+            {
+                "id": 41,
+                "system_key": "legacy-varac",
+                "name": "Legacy diagnostic",
+                "candidate_classification": "diagnostic_only",
+                "candidate_usable": False,
+                "linked_to_radio": False,
+            },
+        ),
+        (),
+        (),
+        new_radio_label="New Radio",
+    )
+
+    assert result["recommended_existing_node_id"] is None
+    assert result["standalone_candidates"] == ()
+
+
 def test_snapshot_adapter_generates_collision_free_first_cluster_identity():
     result = recommend_varac_arrangement_from_snapshots(
         (),

@@ -147,6 +147,19 @@ detail. It does not imply that ordinary single-instance VarAC requires cluster
 mode. It must detect duplicate node paths, launch identities, and cluster
 instance numbers before saving.
 
+A durable radio-to-node link is topology identity even when that node still has
+an incomplete path set. Add Radio must therefore keep the named node available
+for `Create a cluster`; path completeness is evaluated by the native preparation
+service after the topology choice. When UI metadata is lost, the preparation
+boundary may recover the node only when the saved snapshot contains exactly one
+linked standalone node and no cluster. It must not replace an explicitly stale
+node ID or guess among multiple nodes. The selected node's install, INI,
+database, VARA runtime, launch, incoming, outbox, BBS, and archive facts and the
+new member's prepared counterparts are one lossless projection. Add Radio,
+canonical persistence, Launch Control, and Software Administration must show the
+same values after reload; Software Administration may not reopen as a blank
+parallel configuration.
+
 The conditional arrangement matrix in
 `guided_radio_software_configuration_spec.md` is authoritative. A fresh station
 may preselect standalone. When standalone node(s) exist but no cluster exists,

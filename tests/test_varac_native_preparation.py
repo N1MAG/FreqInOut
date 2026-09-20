@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from freqinout.core.guided_instance_inventory import build_guided_instance_inventory
+from freqinout.core.guided_varac_configuration import (
+    recommend_varac_arrangement_from_snapshots,
+)
+from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.varac_native_preparation import (
     native_draft_fingerprint,
     prepare_varac_native_configuration,
@@ -112,6 +117,157 @@ def test_prepare_existing_standalone_and_new_member_is_immutable_and_ready(tmp_p
     assert result.presentation["port"] == 8310
     assert result.presentation["secondary_port"] == 8312
     assert not result.plan.members[1].target_path.exists()
+
+
+def test_prepare_create_cluster_recovers_unique_linked_standalone_when_ui_id_is_absent(tmp_path) -> None:
+    node, profile = _evidence(tmp_path)
+    draft = _draft()
+    draft.pop("existing_standalone_node_id")
+
+    result = prepare_varac_native_configuration(
+        draft,
+        varac_nodes=(node,),
+        device_profiles=(profile,),
+        varac_clusters=(),
+        varac_members=(),
+        managed_root=tmp_path / "managed",
+        generation=8,
+        platform_override="linux-wine",
+    )
+
+    assert result.ready
+    assert result.plan is not None
+    assert result.plan.members[0].member_id == "node:11"
+    assert result.plan.members[0].target_path == Path(node["ini_path"])
+    assert result.presentation["configuration_path"] == str(
+        Path(node["install_path"]) / "VarAC-new-radio.ini"
+    )
+    assert result.presentation["storage_path"] == node["db_path"]
+
+
+def test_prepare_create_cluster_does_not_replace_explicit_stale_node_id(tmp_path) -> None:
+    node, profile = _evidence(tmp_path)
+    draft = _draft()
+    draft["existing_standalone_node_id"] = 999
+
+    result = prepare_varac_native_configuration(
+        draft,
+        varac_nodes=(node,),
+        device_profiles=(profile,),
+        varac_clusters=(),
+        varac_members=(),
+        managed_root=tmp_path / "managed",
+        generation=9,
+        platform_override="linux-wine",
+    )
+
+    assert not result.ready
+    assert "no longer available" in result.error
+    assert "refresh discovery" not in result.error.casefold()
+
+
+def test_prepare_create_cluster_requires_choice_when_multiple_linked_standalones_exist(tmp_path) -> None:
+    first_node, first_profile = _evidence(tmp_path)
+    second_root = tmp_path / "SecondVarAC"
+    second_root.mkdir()
+    second_ini = second_root / "VarAC.ini"
+    second_ini.write_bytes(Path(first_node["ini_path"]).read_bytes())
+    second_node = {
+        **first_node,
+        "id": 12,
+        "name": "Second VarAC",
+        "install_path": str(second_root),
+        "ini_path": str(second_ini),
+    }
+    second_profile = {
+        **first_profile,
+        "id": 6,
+        "name": "Second Radio",
+        "varac_node_id": 12,
+    }
+    draft = _draft()
+    draft.pop("existing_standalone_node_id")
+
+    result = prepare_varac_native_configuration(
+        draft,
+        varac_nodes=(first_node, second_node),
+        device_profiles=(first_profile, second_profile),
+        varac_clusters=(),
+        varac_members=(),
+        managed_root=tmp_path / "managed",
+        generation=10,
+        platform_override="linux-wine",
+    )
+
+    assert not result.ready
+    assert "More than one standalone VarAC node" in result.error
+    assert "Choose the node in the VarAC arrangement" in result.error
+
+
+def test_real_store_incomplete_linked_node_reaches_native_preparation_without_ui_id(tmp_path) -> None:
+    evidence_node, _evidence_profile = _evidence(tmp_path)
+    store = MultiRadioStore(tmp_path / "freqinout.db")
+    radio = store.save_device_profile(
+        {"system_key": "existing-radio", "name": "Existing Radio", "enabled": 1}
+    )
+    adoption = store.adopt_software_instance(
+        family_key="varac",
+        radio_profile_id=radio["id"],
+        application_values={
+            "system_key": "existing-varac",
+            "name": "Existing VarAC",
+            "install_path": evidence_node["install_path"],
+            "ini_path": evidence_node["ini_path"],
+            "db_path": evidence_node["db_path"],
+            "vara_runtime_path": evidence_node["vara_runtime_path"],
+            # Deliberately incomplete for inventory classification. The durable
+            # radio link still proves topology; native preparation owns path
+            # qualification and derives the new member's mailbox paths.
+            "incoming_path": "",
+        },
+        manifest_values={"instance_key": "varac:existing-varac"},
+    )
+    saved_node_id = int(adoption["application"]["id"])
+    profiles = store.list_device_profiles()
+    snapshot = build_guided_instance_inventory(
+        {"varac": store.list_varac_nodes()},
+        linked_ids_by_family={"varac": {saved_node_id}},
+    )
+    classified = snapshot.rows_for("varac")[0]
+    assert classified["candidate_usable"] is False
+    assert classified["linked_to_radio"] is True
+
+    arrangement = recommend_varac_arrangement_from_snapshots(
+        snapshot.rows_for("varac"),
+        store.list_varac_clusters(),
+        store.list_varac_cluster_members(),
+        profiles,
+        new_radio_label="New Radio",
+    )
+    assert arrangement["recommended_existing_node_id"] == saved_node_id
+
+    draft = _draft()
+    draft.pop("existing_standalone_node_id")
+    result = prepare_varac_native_configuration(
+        draft,
+        varac_nodes=store.list_varac_nodes(),
+        device_profiles=profiles,
+        varac_clusters=store.list_varac_clusters(),
+        varac_members=store.list_varac_cluster_members(),
+        managed_root=tmp_path / "managed",
+        generation=11,
+        platform_override="linux-wine",
+    )
+
+    assert result.ready
+    assert result.plan is not None
+    assert result.plan.members[0].member_id == f"node:{saved_node_id}"
+    assert result.presentation["application_path"]
+    assert result.presentation["configuration_path"]
+    assert result.presentation["storage_path"]
+    assert result.presentation["secondary_storage_path"]
+    assert result.presentation["outbox_path"]
+    assert result.presentation["launch_command"]
 
 
 def test_create_cluster_inherits_shared_bbs_paths_and_keeps_member_mail_paths_local(tmp_path) -> None:

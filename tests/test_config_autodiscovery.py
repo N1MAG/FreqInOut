@@ -8,6 +8,7 @@ import pytest
 
 from freqinout.core.config_autodiscovery import (
     JS8CallFileProfile,
+    MAX_JS8CALL_SETTINGS_BYTES,
     app_search_paths_with_radio_apps_base,
     build_autoconfig_proposal,
     build_lab_radio_proposals,
@@ -437,6 +438,55 @@ def test_js8call_multisettings_reader_extracts_operator_relevant_keys(tmp_path) 
     assert fio_a["Rig"] == "FLRig FLRig"
     assert fio_a["CATNetworkPort"] == "127.0.0.1:12345"
     assert fio_a["TCPServerPort"] == "2442"
+
+
+def test_js8call_multisettings_reader_rejects_oversized_file_before_parsing(tmp_path) -> None:
+    ini_path = tmp_path / "JS8Call.ini"
+    ini_path.write_bytes(b"[Configuration]\nMyCall=N1MAG\n" + (b"# padding\n" * ((MAX_JS8CALL_SETTINGS_BYTES // 10) + 1)))
+
+    assert ini_path.stat().st_size > MAX_JS8CALL_SETTINGS_BYTES
+    assert read_js8call_multisettings(ini_path) == ()
+
+
+def test_js8call_multisettings_reader_honors_cancellation_before_read(tmp_path) -> None:
+    ini_path = tmp_path / "JS8Call.ini"
+    ini_path.write_text("[Configuration]\nMyCall=N1MAG\n", encoding="utf-8")
+
+    assert read_js8call_multisettings(ini_path, cancelled=lambda: True) == ()
+
+
+def test_js8call_file_profile_discovery_stops_before_next_candidate_when_cancelled(
+    monkeypatch, tmp_path
+) -> None:
+    first = tmp_path / "first.ini"
+    second = tmp_path / "second.ini"
+    first.write_text("[Configuration]\nMyCall=N1MAG\n", encoding="utf-8")
+    second.write_text("[Configuration]\nMyCall=W1AW\n", encoding="utf-8")
+    opened: list[Path] = []
+    cancellation_requested = False
+
+    def fake_reader(path, *, cancelled=None):
+        nonlocal cancellation_requested
+        opened.append(Path(path))
+        cancellation_requested = True
+        return ()
+
+    monkeypatch.setattr(
+        "freqinout.core.config_autodiscovery.default_js8call_ini_paths",
+        lambda **_kwargs: (first, second),
+    )
+    monkeypatch.setattr(
+        "freqinout.core.config_autodiscovery.read_js8call_multisettings",
+        fake_reader,
+    )
+
+    profiles = discover_js8call_file_profiles(
+        home=tmp_path,
+        cancelled=lambda: cancellation_requested,
+    )
+
+    assert profiles == ()
+    assert opened == [first]
 
 
 def test_js8call_multisettings_reader_handles_qsettings_escaped_keys(tmp_path) -> None:
