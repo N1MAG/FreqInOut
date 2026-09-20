@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -177,14 +178,22 @@ def _build_expect_reply_text(
     *,
     target_group: object = "",
     requesting_callsign: object = "",
+    relay_path: object = "",
     db_path: Optional[str | Path] = None,
 ) -> tuple[str, str]:
     target = _reply_target(target_group=target_group, requesting_callsign=requesting_callsign)
     payload = _target_neutral_response_text(evaluation.response_text, target)
+    route = str(relay_path or "").strip().upper().strip(">")
+    if route and any(
+        re.fullmatch(r"[A-Z0-9/]+", part) is None
+        for part in route.split(">")
+    ):
+        return "", "invalid JS8 relay path"
+    addressed_target = f"{route}>{target}" if route and target else target
     if not target:
         return payload, "no target available"
     if not payload:
-        return target, "empty payload"
+        return addressed_target, "empty payload"
     sign_detail = ""
     body = payload
     if bool(evaluation.msg_auth_sign_enabled):
@@ -211,7 +220,7 @@ def _build_expect_reply_text(
                 sign_detail = f"MsgAuth signing enabled, no key for {target}; sent unsigned"
         else:
             sign_detail = "MsgAuth signing enabled, no signing callsign; sent unsigned"
-    return " ".join(part for part in (target, body) if part).strip(), sign_detail
+    return " ".join(part for part in (addressed_target, body) if part).strip(), sign_detail
 
 
 def dispatch_expect_auto_reply(
@@ -224,6 +233,7 @@ def dispatch_expect_auto_reply(
     source_js8_instance_id: object = "",
     requesting_callsign: object = "",
     target_group: object = "",
+    relay_path: object = "",
     db_path: Optional[str | Path] = None,
     timeout_s: float = 0.8,
     claim_event_key: str = "",
@@ -290,6 +300,7 @@ def dispatch_expect_auto_reply(
         evaluation,
         target_group=target_group,
         requesting_callsign=requesting_callsign,
+        relay_path=relay_path,
         db_path=db_path,
     )
     if not response_text:

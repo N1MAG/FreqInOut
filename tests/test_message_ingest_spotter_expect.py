@@ -253,7 +253,7 @@ def test_js8_next_msg_backlog_preserves_source_context(monkeypatch, tmp_path: Pa
     assert row == ("K1BBB", "42", "js8:fio-b", "8", "fio-b", str(inbox))
 
 
-def test_spotter_directed_ingest_adds_source_and_expect_audit(monkeypatch, tmp_path: Path) -> None:
+def test_spotter_directed_form_ingest_does_not_trigger_expect_reply(monkeypatch, tmp_path: Path) -> None:
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
     directed = tmp_path / "DIRECTED.TXT"
@@ -301,10 +301,7 @@ def test_spotter_directed_ingest_adds_source_and_expect_audit(monkeypatch, tmp_p
     audit = list_expect_runtime_audit(db_path=db_path)
 
     assert rows == [("N0CALL", "@MAGNET", "304", "7", "fio-a")]
-    assert len(audit) == 1
-    assert audit[0]["decision"] == "reply-ready"
-    assert audit[0]["source_radio_id"] == "7"
-    assert audit[0]["source_js8_instance_id"] == "fio-a"
+    assert audit == []
     assert settings.get("spotter_directed_offset_radio_7", 0) > 0
     observations = list_observations(db_path, source_family="spotter")
     assert len(observations) == 1
@@ -361,7 +358,7 @@ def test_spotter_directed_ingest_mirrors_condition_alert_observation(monkeypatch
     assert alerts[0].urgency == "LEVEL 4"
 
 
-def test_spotter_js8_event_ingest_adds_source_and_expect_audit(monkeypatch, tmp_path: Path) -> None:
+def test_spotter_js8_form_event_does_not_trigger_expect_reply(monkeypatch, tmp_path: Path) -> None:
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
     settings = SettingsManager()
@@ -408,8 +405,7 @@ def test_spotter_js8_event_ingest_adds_source_and_expect_audit(monkeypatch, tmp_
 
     assert imported == 1
     assert rows == [("N0CALL", "@MAGNET", "304", "8", "fio-b")]
-    assert audit[0]["decision"] == "reply-ready"
-    assert audit[0]["event_id"].startswith("js8-api:8:fio-b")
+    assert audit == []
     assert list_expect_dispatch_audit(db_path=db_path) == []
     observations = list_observations(db_path, source_family="spotter")
     assert len(observations) == 1
@@ -610,6 +606,7 @@ def test_spotter_js8_event_expect_dispatch_sends_only_when_runtime_enabled(monke
         return client
 
     try:
+        utc_text, _utc_ts = _current_utc_parts()
         imported = MessageIngestor(
             settings,
             expect_dispatch_client_factory=client_factory,
@@ -618,12 +615,12 @@ def test_spotter_js8_event_expect_dispatch_sends_only_when_runtime_enabled(monke
             [
                 {
                     "type": "RX.DIRECTED",
-                    "value": "@MAGNET F!304 11111111 #HHJL *DE* N0CALL",
+                    "value": "N0CALL: @MAGNET E? F!304 \u2662",
                     "params": {
                         "FROM": "N0CALL",
                         "TO": "@MAGNET",
-                        "TEXT": "@MAGNET F!304 11111111 #HHJL *DE* N0CALL",
-                        "UTC": "2026-08-08 12:34:56",
+                        "TEXT": "E? F!304",
+                        "UTC": utc_text,
                     },
                 }
             ],
@@ -631,7 +628,7 @@ def test_spotter_js8_event_expect_dispatch_sends_only_when_runtime_enabled(monke
             js8_instance_id="fio-b",
         )
 
-        assert imported == 1
+        assert imported == 0
         assert requested_sources == [("8", "fio-b")]
         assert selected["value"] == ""
         request_types = [row["type"] for row in server.received]
@@ -643,6 +640,194 @@ def test_spotter_js8_event_expect_dispatch_sends_only_when_runtime_enabled(monke
         assert dispatch[0]["decision"] == "sent"
         assert dispatch[0]["source_radio_id"] == "8"
         assert dispatch[0]["source_js8_instance_id"] == "fio-b"
+    finally:
+        client.stop()
+        server.stop()
+
+
+def test_fixed_expect_directed_parser_recovers_relay_origin_and_reverse_path(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    utc_text, utc_ts = _current_utc_parts()
+    line = (
+        f"{utc_text}\t7078000\t0\t-10\t"
+        "W8UFO: W8UFO: W5TTA> E? F!701C *DE* WM8Q \u2662\n"
+    )
+
+    parsed = MessageIngestor(SettingsManager())._parse_fixed_expect_directed_line(line)
+
+    assert parsed is not None
+    assert parsed["expect_key"] == "F!701C"
+    assert parsed["from_call"] == "WM8Q"
+    assert parsed["to_call"] == "W5TTA"
+    assert parsed["relay_path"] == "W8UFO"
+    assert parsed["utc_ts"] == int(utc_ts)
+
+
+def test_fixed_expect_parser_rejects_unstructured_text_before_query(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    utc_text, _utc_ts = _current_utc_parts()
+    ingestor = MessageIngestor(SettingsManager())
+    line = (
+        f"{utc_text}\t7078000\t0\t-10\t"
+        "W8UFO: W5TTA HELLO E? F!701C *DE* WM8Q \u2662\n"
+    )
+    event = {
+        "type": "RX.DIRECTED",
+        "params": {
+            "FROM": "W8UFO",
+            "TO": "W5TTA",
+            "TEXT": "HELLO E? F!701C *DE* WM8Q",
+            "UTC": utc_text,
+        },
+    }
+
+    assert ingestor._parse_fixed_expect_directed_line(line) is None
+    assert ingestor._parse_fixed_expect_js8_event(event) is None
+
+
+def test_relayed_fixed_expect_authorizes_origin_and_sends_js8_native_reverse_route(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    settings = SettingsManager()
+    db_path = cfg_root / "config" / "freqinout_nets.db"
+    response = "F!701C 100 ST[TX] GR[EM12JV] #ISF0"
+    save_expect_entry(
+        {
+            "source_radio_id": "8",
+            "source_scope": "radio",
+            "js8_instance_id": "fio-b",
+            "expect_key": "F!701C",
+            "response_text": response,
+            "allowed_callsigns": ["WM8Q"],
+            "blocked_callsigns": ["W8UFO"],
+            "enabled": True,
+            "auto_reply_enabled": True,
+            "unattended_auto_reply_enabled": True,
+        },
+        db_path=db_path,
+    )
+    server = _safe_server()
+    client = JS8ApiClient(server.endpoint, auto_reconnect=False, timeout_s=1.0)
+    requested_sources: list[tuple[str, str]] = []
+
+    def client_factory(radio_id: str, js8_instance_id: str) -> JS8ApiClient:
+        requested_sources.append((radio_id, js8_instance_id))
+        return client
+
+    utc_text, _utc_ts = _current_utc_parts()
+    directed = tmp_path / "DIRECTED.TXT"
+    directed.write_text(
+        f"{utc_text}\t7078000\t0\t-10\t"
+        "W8UFO: W8UFO: W5TTA> E? F!701C *DE* WM8Q \u2662\n",
+        encoding="utf-8",
+    )
+    try:
+        imported = MessageIngestor(
+            settings,
+            expect_dispatch_client_factory=client_factory,
+            expect_auto_reply_enabled=True,
+        ).ingest_spotter_from_directed(
+            directed_path=directed,
+            source_radio_id=8,
+            js8_instance_id="fio-b",
+            offset_key="spotter_directed_offset_radio_8",
+        )
+
+        assert imported == 0
+        assert requested_sources == [("8", "fio-b")]
+        assert server.received[-1]["type"] == "TX.SEND_MESSAGE"
+        assert server.received[-1]["value"] == f"W8UFO>WM8Q {response}"
+        runtime = list_expect_runtime_audit(db_path=db_path)
+        assert runtime[0]["requesting_callsign"] == "WM8Q"
+        assert runtime[0]["decision"] == "reply-ready"
+        dispatch = list_expect_dispatch_audit(db_path=db_path)
+        assert dispatch[0]["requesting_callsign"] == "WM8Q"
+        assert dispatch[0]["transmitted_text"] == f"W8UFO>WM8Q {response}"
+    finally:
+        client.stop()
+        server.stop()
+
+
+def test_fixed_expect_live_and_directed_adapters_share_one_durable_request_claim(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    settings = SettingsManager()
+    db_path = cfg_root / "config" / "freqinout_nets.db"
+    save_expect_entry(
+        {
+            "source_radio_id": "8",
+            "source_scope": "radio",
+            "js8_instance_id": "fio-b",
+            "expect_key": "F!701C",
+            "response_text": "F!701C 100 ST[TX] GR[EM12JV] #ISF0",
+            "allowed_callsigns": ["WM8Q"],
+            "enabled": True,
+            "auto_reply_enabled": True,
+            "unattended_auto_reply_enabled": True,
+            "max_replies": 2,
+        },
+        db_path=db_path,
+    )
+    server = _safe_server()
+    client = JS8ApiClient(server.endpoint, auto_reconnect=False, timeout_s=1.0)
+    utc_text, _utc_ts = _current_utc_parts()
+    event = {
+        "type": "RX.DIRECTED",
+        "value": "W8UFO: W5TTA> E? F!701C *DE* WM8Q \u2662",
+        "params": {
+            "FROM": "W8UFO",
+            "TO": "W5TTA",
+            "TEXT": "E? F!701C *DE* WM8Q",
+            "UTC": utc_text,
+        },
+    }
+    directed = tmp_path / "DIRECTED.TXT"
+    directed.write_text(
+        f"{utc_text}\t7078000\t0\t-10\t"
+        "W8UFO: W8UFO: W5TTA> E? F!701C *DE* WM8Q \u2662\n",
+        encoding="utf-8",
+    )
+
+    def client_factory(_radio_id: str, _js8_instance_id: str) -> JS8ApiClient:
+        return client
+
+    ingestor = MessageIngestor(
+        settings,
+        expect_dispatch_client_factory=client_factory,
+        expect_auto_reply_enabled=True,
+    )
+    try:
+        ingestor.ingest_spotter_from_js8_events(
+            [event], source_radio_id=8, js8_instance_id="fio-b"
+        )
+        ingestor.ingest_spotter_from_directed(
+            directed_path=directed,
+            source_radio_id=8,
+            js8_instance_id="fio-b",
+            offset_key="spotter_directed_offset_radio_8",
+        )
+
+        sends = [row for row in server.received if row["type"] == "TX.SEND_MESSAGE"]
+        assert [row["value"] for row in sends] == [
+            "W8UFO>WM8Q F!701C 100 ST[TX] GR[EM12JV] #ISF0"
+        ]
+        dispatch = list_expect_dispatch_audit(db_path=db_path)
+        assert {row["decision"] for row in dispatch} == {"sent", "held"}
+        assert any("durable claim" in str(row["reason"]) for row in dispatch)
     finally:
         client.stop()
         server.stop()
@@ -668,16 +853,17 @@ def test_spotter_js8_event_expect_dispatch_audits_runtime_hold_without_client(mo
         db_path=db_path,
     )
 
+    utc_text, _utc_ts = _current_utc_parts()
     imported = MessageIngestor(settings, expect_auto_reply_enabled=True).ingest_spotter_from_js8_events(
         [
             {
                 "type": "RX.DIRECTED",
-                "value": "@MAGNET F!304 11111111 #HHJL *DE* N0CALL",
+                "value": "N0CALL: @MAGNET E? F!304 \u2662",
                 "params": {
                     "FROM": "N0CALL",
                     "TO": "@MAGNET",
-                    "TEXT": "@MAGNET F!304 11111111 #HHJL *DE* N0CALL",
-                    "UTC": "2026-08-08 12:34:56",
+                    "TEXT": "E? F!304",
+                    "UTC": utc_text,
                 },
             }
         ],
@@ -685,7 +871,7 @@ def test_spotter_js8_event_expect_dispatch_audits_runtime_hold_without_client(mo
         js8_instance_id="fio-b",
     )
 
-    assert imported == 1
+    assert imported == 0
     dispatch = list_expect_dispatch_audit(db_path=db_path)
     assert dispatch[0]["decision"] == "held"
     assert "No JS8 client factory" in dispatch[0]["reason"]
@@ -792,7 +978,7 @@ def test_spotter_live_then_directed_same_source_does_not_duplicate_or_reevaluate
     audit = list_expect_runtime_audit(db_path=db_path)
 
     assert rows == [("N0CALL", "@MAGNET", "304", "#HHJL", "8", "fio-b")]
-    assert len(audit) == 1
+    assert audit == []
 
 
 def test_spotter_directed_visible_and_background_offsets_share_idempotence(

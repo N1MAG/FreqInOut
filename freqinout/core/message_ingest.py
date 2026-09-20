@@ -15,6 +15,7 @@ from freqinout.core.js8_expect_dispatcher import dispatch_expect_auto_reply, rec
 from freqinout.core.group_utils import normalize_group_name
 from freqinout.core.operator_identity import callsigns_for_operator, canonical_callsign, ensure_operator_identity_schema, resolve_operator_identity
 from freqinout.core.js8_spotter_forms import (
+    FORM_ID_PATTERN,
     FORM_TOKEN_RE,
     MAPPER_SETTINGS_KEY,
     form_id_enabled,
@@ -65,6 +66,15 @@ SPOTTER_STATUS_FORM_ID = "304"  # Kept for compatibility with older tests/caller
 SPOTTER_STATUS_FORMS = {"104", "301", "304", "701B", "701C"}
 SPOTTER_PROMPT_RE = re.compile(r"([A-Z0-9]{2})\[(.*?)\]\s*", re.IGNORECASE)
 SPOTTER_TOKEN_RE = re.compile(r"\s*#[A-Z0-9]{3,}\s*", re.IGNORECASE)
+FIXED_EXPECT_QUERY_RE = re.compile(
+    rf"(?:^|\s)E\?\s+(?P<expect_key>F!{FORM_ID_PATTERN})"
+    r"(?P<provenance>(?:\s+\*DE\*\s+[A-Z0-9/]+)*)\s*$",
+    re.IGNORECASE,
+)
+FIXED_EXPECT_ADDRESS_PREFIX_RE = re.compile(
+    r"^(?:[A-Z0-9/]+\s*:\s*)+(?P<target>@?[A-Z0-9/]+)\s*[>:]?\s*$",
+    re.IGNORECASE,
+)
 
 
 def parse_js8_api_utc(value: object) -> tuple[str, float]:
@@ -424,6 +434,19 @@ class MessageIngestor:
                     if not line:
                         break
                     last_pos = fh.tell()
+                    fixed_expect = self._parse_fixed_expect_directed_line(line)
+                    if fixed_expect:
+                        target = str(fixed_expect.get("to_call") or "").strip().upper()
+                        if not (directed_callsigns or directed_groups) or self._directed_js8_target_matches(
+                            target, directed_callsigns, directed_groups
+                        ):
+                            if evaluate_expect:
+                                self._handle_fixed_expect_query(
+                                    fixed_expect,
+                                    source_radio_id=source_radio_id,
+                                    js8_instance_id=js8_instance_id,
+                                )
+                        continue
                     dynamic = self._parse_dynamic_directed_line(line)
                     if dynamic:
                         if evaluate_expect:
@@ -515,27 +538,6 @@ class MessageIngestor:
                         conn.commit()
                         conn.close()
                         imported += 1
-                        if evaluate_expect:
-                            try:
-                                event_id = f"directed:{str(source_radio_id or '')}:{str(js8_instance_id or '')}:{int(parsed.get('utc_ts') or 0)}:{from_call}:{form_id}:{token or raw_form[:24]}"
-                                evaluation = evaluate_expect_request(
-                                    expect_key=f"F!{form_id}",
-                                    requesting_callsign=from_call,
-                                    target_group=str(parsed.get("to_call") or ""),
-                                    source_radio_id=source_radio_id,
-                                    js8_instance_id=js8_instance_id,
-                                    event_id=event_id,
-                                )
-                                self._maybe_dispatch_expect_auto_reply(
-                                    evaluation,
-                                    event_id=event_id,
-                                    source_radio_id=source_radio_id,
-                                    source_js8_instance_id=js8_instance_id,
-                                    requesting_callsign=from_call,
-                                    target_group=str(parsed.get("to_call") or ""),
-                                )
-                            except Exception as exc:
-                                log.debug("MessageIngest: Expect evaluation failed for F!%s from %s: %s", form_id, from_call, exc)
                         continue
                     message_row = self._parse_directed_js8_message_line(
                         line,
@@ -639,6 +641,19 @@ class MessageIngestor:
         imported = 0
         directed_callsigns, directed_groups = self._directed_js8_recipients()
         for event in list(messages or []):
+            fixed_expect = self._parse_fixed_expect_js8_event(event)
+            if fixed_expect:
+                target = str(fixed_expect.get("to_call") or "").strip().upper()
+                if not (directed_callsigns or directed_groups) or self._directed_js8_target_matches(
+                    target, directed_callsigns, directed_groups
+                ):
+                    if evaluate_expect:
+                        self._handle_fixed_expect_query(
+                            fixed_expect,
+                            source_radio_id=source_radio_id,
+                            js8_instance_id=js8_instance_id,
+                        )
+                continue
             dynamic = self._parse_dynamic_js8_event(event)
             if dynamic:
                 if evaluate_expect:
@@ -732,27 +747,6 @@ class MessageIngestor:
                     log.debug("MessageIngest: JS8 event Spotter insert failed: %s", exc)
                     continue
                 imported += 1
-                if evaluate_expect:
-                    try:
-                        event_id = f"js8-api:{str(source_radio_id or '')}:{str(js8_instance_id or '')}:{int(parsed.get('utc_ts') or 0)}:{from_call}:{form_id}:{token or raw_form[:24]}"
-                        evaluation = evaluate_expect_request(
-                            expect_key=f"F!{form_id}",
-                            requesting_callsign=from_call,
-                            target_group=str(parsed.get("to_call") or ""),
-                            source_radio_id=source_radio_id,
-                            js8_instance_id=js8_instance_id,
-                            event_id=event_id,
-                        )
-                        self._maybe_dispatch_expect_auto_reply(
-                            evaluation,
-                            event_id=event_id,
-                            source_radio_id=source_radio_id,
-                            source_js8_instance_id=js8_instance_id,
-                            requesting_callsign=from_call,
-                            target_group=str(parsed.get("to_call") or ""),
-                        )
-                    except Exception as exc:
-                        log.debug("MessageIngest: JS8 event Expect evaluation failed for F!%s from %s: %s", form_id, from_call, exc)
                 continue
             message_row = self._parse_directed_js8_message_event(
                 event,
@@ -850,6 +844,7 @@ class MessageIngestor:
         db_path: Optional[Path] = None,
         claim_event_key: str = "",
         claim_q_id: str = "",
+        relay_path: object = "",
     ) -> None:
         if evaluation.decision != "reply-ready":
             return
@@ -945,6 +940,7 @@ class MessageIngestor:
                 claim_event_key=claim_event_key,
                 claim_q_id=claim_q_id,
                 claim_already_acquired=claim is not None,
+                relay_path=relay_path,
             )
             log.info(
                 "FIO Spotter Expect: dispatch decision=%s key=%s from=%s radio=%s js8=%s reason=%s",
@@ -1146,6 +1142,220 @@ class MessageIngestor:
             return exists
         except Exception:
             return False
+
+    @staticmethod
+    def _fixed_expect_match(text: object) -> Optional[re.Match[str]]:
+        cleaned = str(text or "").strip()
+        if cleaned.endswith("\u2662"):
+            cleaned = cleaned[:-1].rstrip()
+        return FIXED_EXPECT_QUERY_RE.search(cleaned)
+
+    @staticmethod
+    def _expect_address_prefix(text: str, end: int) -> tuple[str, str]:
+        prefix = str(text or "")[:end].strip()
+        match = FIXED_EXPECT_ADDRESS_PREFIX_RE.fullmatch(prefix)
+        if match is None:
+            return "", ""
+        sender_match = re.match(r"\s*([A-Z0-9/]+)\s*:", prefix, flags=re.IGNORECASE)
+        sender = sender_match.group(1).upper() if sender_match else ""
+        return sender, match.group("target").upper()
+
+    @staticmethod
+    def _fixed_expect_identity(
+        *, immediate_sender: object, provenance_text: object
+    ) -> tuple[str, str]:
+        immediate = str(immediate_sender or "").strip().upper().lstrip("@")
+        provenance = [
+            value.upper()
+            for value in re.findall(
+                r"\*DE\*\s*([A-Z0-9/]+)",
+                str(provenance_text or ""),
+                re.IGNORECASE,
+            )
+        ]
+        origin = provenance[0] if provenance else immediate
+        hops: list[str] = []
+        if provenance and immediate and immediate != origin:
+            hops.append(immediate)
+        for hop in reversed(provenance[1:]):
+            if hop != origin and hop not in hops:
+                hops.append(hop)
+        return origin, ">".join(hops)
+
+    def _parse_fixed_expect_directed_line(self, line: str) -> Optional[Dict[str, Any]]:
+        if not line or not line.rstrip().endswith("\u2662"):
+            return None
+        parts = [part for part in line.strip().split("\t") if part]
+        if len(parts) < 5:
+            parts = re.split(r"\s+", line.strip(), maxsplit=4)
+        if len(parts) < 5:
+            return None
+        try:
+            timestamp = datetime.datetime.strptime(str(parts[0])[:19], "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=datetime.timezone.utc
+            )
+        except Exception:
+            return None
+        message = str(parts[4] or "").strip()
+        match = self._fixed_expect_match(message)
+        if match is None:
+            return None
+        immediate, target = self._expect_address_prefix(message, match.start())
+        origin, relay_path = self._fixed_expect_identity(
+            immediate_sender=immediate,
+            provenance_text=match.group("provenance"),
+        )
+        if not origin or not target:
+            return None
+        return {
+            "expect_key": normalize_form_code(match.group("expect_key")),
+            "from_call": origin,
+            "to_call": target,
+            "relay_path": relay_path,
+            "utc_ts": timestamp.timestamp(),
+            "event_seed": message,
+        }
+
+    def _parse_fixed_expect_js8_event(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not isinstance(event, dict):
+            return None
+        event_type = str(event.get("type") or "").strip().upper()
+        if event_type and event_type != "RX.DIRECTED":
+            return None
+        params = event.get("params") if isinstance(event.get("params"), dict) else {}
+        text = ""
+        match: Optional[re.Match[str]] = None
+        for candidate in (params.get("TEXT"), event.get("value")):
+            candidate_text = str(candidate or "").strip()
+            candidate_match = self._fixed_expect_match(candidate_text)
+            if candidate_match is not None:
+                text = candidate_text
+                match = candidate_match
+                break
+        if match is None:
+            return None
+        immediate = str(params.get("FROM") or "").strip().upper()
+        target = str(params.get("TO") or "").strip().upper()
+        prefix = text[: match.start()].strip()
+        if prefix:
+            prefix_sender, prefix_target = self._expect_address_prefix(text, match.start())
+            if not prefix_target:
+                bare_target = re.fullmatch(r"(@?[A-Z0-9/]+)\s*[>:]?", prefix, flags=re.IGNORECASE)
+                prefix_target = bare_target.group(1).upper() if bare_target else ""
+            if not prefix_target or (target and prefix_target != target):
+                return None
+            if not immediate:
+                immediate = prefix_sender
+            if not target:
+                target = prefix_target
+        origin, relay_path = self._fixed_expect_identity(
+            immediate_sender=immediate,
+            provenance_text=match.group("provenance"),
+        )
+        if not origin or not target:
+            return None
+        _utc_text, utc_ts = parse_js8_api_utc(params.get("UTC") or event.get("time"))
+        if utc_ts <= 0:
+            utc_ts = time.time()
+        stable = str(params.get("ID") or params.get("MSG_ID") or event.get("id") or "").strip()
+        return {
+            "expect_key": normalize_form_code(match.group("expect_key")),
+            "from_call": origin,
+            "to_call": target,
+            "relay_path": relay_path,
+            "utc_ts": utc_ts,
+            "event_seed": stable or text,
+        }
+
+    def _fixed_expect_hold(
+        self,
+        *,
+        expect_key: str,
+        reason: str,
+        event_id: str,
+        source_radio_id: object,
+        js8_instance_id: object,
+        from_call: str,
+        target: str,
+        db_path: Optional[Path],
+    ) -> None:
+        record_expect_dispatch_hold(
+            evaluation=ExpectEvaluationResult(decision="held", reason=reason, expect_key=expect_key),
+            reason=reason,
+            event_id=event_id,
+            source_radio_id=source_radio_id,
+            source_js8_instance_id=js8_instance_id,
+            requesting_callsign=from_call,
+            target_group=target if target.startswith("@") else "",
+            db_path=db_path,
+        )
+
+    def _handle_fixed_expect_query(
+        self,
+        parsed: Mapping[str, Any],
+        *,
+        source_radio_id: object,
+        js8_instance_id: object,
+    ) -> None:
+        expect_key = str(parsed.get("expect_key") or "").strip().upper()
+        from_call = str(parsed.get("from_call") or "").strip().upper()
+        target = str(parsed.get("to_call") or "").strip().upper()
+        relay_path = str(parsed.get("relay_path") or "").strip().upper()
+        received_ts = float(parsed.get("utc_ts") or time.time())
+        event_id = (
+            "fixed-expect:"
+            f"{str(source_radio_id or '').strip()}:{str(js8_instance_id or '').strip().lower()}:"
+            f"{int(received_ts)}:{from_call}:{target}:{expect_key}"
+        )
+        db_path = self._db_path()
+        if not expect_key or not from_call or not target:
+            return
+        request_age = time.time() - received_ts
+        if request_age > DYNAMIC_EXPECT_REQUEST_MAX_AGE_SECONDS or request_age < -120:
+            self._fixed_expect_hold(
+                expect_key=expect_key,
+                reason="Fixed Expect request is outside the safe live-request window.",
+                event_id=event_id,
+                source_radio_id=source_radio_id,
+                js8_instance_id=js8_instance_id,
+                from_call=from_call,
+                target=target,
+                db_path=db_path,
+            )
+            return
+        if not str(source_radio_id or "").strip() or not str(js8_instance_id or "").strip():
+            self._fixed_expect_hold(
+                expect_key=expect_key,
+                reason="Fixed Expect request is missing a concrete source radio/JS8 instance.",
+                event_id=event_id,
+                source_radio_id=source_radio_id,
+                js8_instance_id=js8_instance_id,
+                from_call=from_call,
+                target=target,
+                db_path=db_path,
+            )
+            return
+        evaluation = evaluate_expect_request(
+            expect_key=expect_key,
+            requesting_callsign=from_call,
+            target_group=target if target.startswith("@") else "",
+            source_radio_id=source_radio_id,
+            js8_instance_id=js8_instance_id,
+            event_id=event_id,
+            db_path=db_path,
+        )
+        self._maybe_dispatch_expect_auto_reply(
+            evaluation,
+            event_id=event_id,
+            source_radio_id=source_radio_id,
+            source_js8_instance_id=js8_instance_id,
+            requesting_callsign=from_call,
+            target_group=target if target.startswith("@") else "",
+            db_path=db_path,
+            claim_event_key=event_id,
+            claim_q_id=expect_key,
+            relay_path=relay_path,
+        )
 
     def _parse_dynamic_directed_line(self, line: str) -> Optional[Dict[str, Any]]:
         if not line or not line.rstrip().endswith("\u2662"):

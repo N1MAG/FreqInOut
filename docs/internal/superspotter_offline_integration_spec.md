@@ -121,6 +121,46 @@ The full parser, confidence, indexed lookup, group opt-in, durable dedupe,
 cooldown, endpoint serialization, and acceptance matrix are defined in the
 production-remediation Slice 3 contract.
 
+## Fixed MCForm Expect Request And Relay Contract
+
+A saved fixed-form response is invoked only by an exact directed
+`E? F!<form-id>` request. Receiving a completed `F!<form-id> ...` MCForm is
+traffic ingestion, not a request to transmit; it must never evaluate or dispatch
+an Expect reply. This distinction is mandatory to prevent response loops.
+
+For a direct request, access policy is evaluated against the JS8 sender and the
+reply uses the JS8 instance/radio that received the request. For a JS8 relay,
+the immediate RF sender is a transport hop, while the first callsign after
+`*DE*` is the original requester and therefore the access-policy subject. Any
+additional `*DE*` callsigns describe earlier relay hops. FIO reconstructs the
+reverse path in the same order as JS8Call: immediate sender, prior hops in
+reverse provenance order, then originator.
+
+Example received `DIRECTED.TXT` record:
+
+`W8UFO: W8UFO: W5TTA> E? F!701C *DE* WM8Q ♢`
+
+The semantic identities are local recipient `W5TTA`, immediate relay
+`W8UFO`, and requesting originator `WM8Q`. FIO evaluates the `F!701C` rule for
+`WM8Q` and submits this exact shape through JS8Call's `TX.SEND_MESSAGE` API:
+
+`W8UFO>WM8Q F!701C 100 ST[TX] GR[EM12JV] #ISF0`
+
+FIO does not prepend `W5TTA:` and does not forward RF frames itself. JS8Call
+adds the local sender identity, interprets `W8UFO>` as its native relay command,
+and forwards toward `WM8Q`. A stale selected JS8 target is still cleared and
+verified by the shared guarded-send transaction before the explicit relay text
+is queued.
+
+Fixed requests are accepted from both source-scoped live `RX.DIRECTED` events
+and the corresponding `DIRECTED.TXT` record. Only exact, completed requests
+inside the safe live-request window qualify. The durable request identity
+includes receiving radio, JS8 instance, receive second, originator, local/group
+target, and Expect key so the same RF request observed through both adapters
+cannot transmit twice. Unknown, unauthorized, stale, malformed, source-less,
+paused, busy, or otherwise unsafe requests remain non-transmitting and retain
+the existing runtime/dispatch audit behavior.
+
 Expect allowlists accept the JS8Spotter-compatible `*` token for any caller.
 Blocked callers retain precedence. An operator can instead authorize all
 trusted Operator History identities or only trusted identities associated with

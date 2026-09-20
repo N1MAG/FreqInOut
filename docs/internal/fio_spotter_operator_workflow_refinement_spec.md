@@ -171,6 +171,15 @@ Expect service pause, endpoint/source match, cooldown, maximum reply count,
 durable claim/dedupe, selected-target clearing, JS8 busy/PTT state, RF Guard,
 schedule ownership, and send preflight remain cumulative.
 
+The runtime trigger is an exact directed `E? F!<form-id>` query, never an
+ordinary received `F!<form-id> ...` response. A completed form remains inbox,
+Spotter, status, and observation traffic and cannot trigger a reply. For a
+relayed query, Expect presents and audits the `*DE*` originator as the requester;
+the intermediate station is relay transport, not an authorization identity.
+The reply history records the exact JS8-native reverse-route text submitted by
+FIO (for example `W8UFO>WM8Q F!701C ...`). JS8Call, not FIO, performs the relay
+forwarding and supplies the local station prefix.
+
 ### Legacy compatibility
 
 The existing `enabled`, `auto_reply_enabled`, and

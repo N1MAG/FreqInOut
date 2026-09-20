@@ -8949,3 +8949,54 @@ Automated evidence:
 The primary high-reasoning model handled behavior design, implementation,
 tests, specification, and integration review. No saved schedule, production
 database, application configuration, process, commit, or remote was changed.
+
+## 2026-09-20 — Fixed FIOSpotter Expect request and JS8 relay reply correction
+
+Status: automated exit gate passed; live two-station RF relay verification
+remains external qualification.
+
+Operator evidence showed that the relayed request
+`W8UFO: W8UFO: W5TTA> E? F!701C *DE* WM8Q ♢` did not trigger the saved
+Expect response. Review found the fixed-form flow attached to the wrong event:
+both Spotter parsers deliberately discarded `E? F!` queries, while completed
+`F!` form traffic was evaluated as if it were a request. That prevented the
+reported response and introduced a reply-loop hazard.
+
+The corrected flow now parses exact fixed `E? F!<form-id>` requests before form
+traffic, rejects unstructured leading text and stale/replayed requests, and
+never evaluates a completed `F!` payload for reply. It accepts source-scoped
+live `RX.DIRECTED` and `DIRECTED.TXT` observations, shares one durable request
+identity across those adapters, and preserves the existing pause, caller/group
+policy, source, reply-limit, cooldown, selected-target, guarded-send, and audit
+gates.
+
+JS8Call source review established that relay transport has no separate API
+parameter. FIO must authorize the first `*DE*` callsign (`WM8Q`), reconstruct
+the JS8-native reverse route (`W8UFO>WM8Q`), clear/verify stale selected-target
+state, and submit the exact explicit text through `TX.SEND_MESSAGE`. FIO does
+not add the local `W5TTA:` prefix or forward RF frames itself. The exact
+regression transmits
+`W8UFO>WM8Q F!701C 100 ST[TX] GR[EM12JV] #ISF0`; JS8Call owns forwarding and
+local sender presentation.
+
+Work-package ownership:
+
+- primary high-reasoning model: protocol architecture, JS8Call source
+  comparison, parser/dispatch implementation, safety/dedupe decisions,
+  delegated-diff review, specifications, and final integration review;
+- `gpt-5.6-terra` (high): independent read-only JS8Call relay-grammar/source
+  audit;
+- `gpt-5.6-luna` (medium): focused read-only Expect test and compatibility-risk
+  audit.
+
+Acceptance evidence:
+
+- exact parser/relay/direct/dedupe/form-loop focused partition: **50 passed**;
+- broader Spotter, Expect, JS8 send/policy, MCForm, archive/import, and message-
+  ingest partition: **223 passed**;
+- changed Python compilation and `git diff --check`: passed.
+
+No schema or production-data migration was required. No production database,
+JS8Call settings/profile, native application file, external process, radio,
+commit, or remote was changed. The unrelated modified installation-guide DOCX
+and rendered guide directory were preserved and excluded from this work.
