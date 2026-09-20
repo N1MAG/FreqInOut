@@ -4,7 +4,7 @@ from collections.abc import Callable, Iterable, Mapping
 import threading
 
 from freqinout.core.mesh.adapter_base import MeshAdapter
-from freqinout.core.mesh.meshcore_adapter import MeshCoreBleAdapter
+from freqinout.core.mesh.meshcore_adapter import MeshCoreBleAdapter, MeshCorePythonAdapter
 from freqinout.core.mesh.meshtastic_adapter import MeshConnectionError, MeshtasticLocalAdapter
 from freqinout.core.mesh.models import (
     MeshAdapterEvent,
@@ -14,7 +14,7 @@ from freqinout.core.mesh.models import (
     MeshMessage,
     MeshNode,
 )
-from freqinout.core.mesh.settings import MeshConnectionConfig
+from freqinout.core.mesh.settings import MeshConnectionConfig, MeshConnectionType, mesh_transport_capability
 
 MeshEventListener = Callable[[MeshAdapterEvent], None]
 MeshAdapterFactory = Callable[[MeshConnectionConfig], MeshAdapter]
@@ -22,10 +22,15 @@ MeshAdapterFactory = Callable[[MeshConnectionConfig], MeshAdapter]
 
 def default_mesh_adapter_factory(config: MeshConnectionConfig) -> MeshAdapter:
     protocol = config.protocol.strip().lower()
+    capability = mesh_transport_capability(protocol, config.connection_type)
+    if not capability.supported:
+        raise MeshConnectionError(capability.reason)
     if protocol == "meshtastic":
         return MeshtasticLocalAdapter(config)
     if protocol == "meshcore":
-        return MeshCoreBleAdapter(config)
+        if config.connection_type is MeshConnectionType.BLE:
+            return MeshCoreBleAdapter(config)
+        return MeshCorePythonAdapter(config)
     raise MeshConnectionError(f"{config.protocol or 'Mesh'} adapters are configured for a later implementation slice.")
 
 

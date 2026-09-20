@@ -172,7 +172,13 @@ def normalize_meshcore_node(
     if lat == 0 and lon == 0:
         lat = None
         lon = None
-    name = _single_line(raw.get("name") or raw.get("advName") or raw.get("longName") or raw.get("long_name"))
+    name = _single_line(
+        raw.get("name")
+        or raw.get("advName")
+        or raw.get("adv_name")
+        or raw.get("longName")
+        or raw.get("long_name")
+    )
     short_name = _single_line(raw.get("shortName") or raw.get("short_name"))
     callsign = _single_line(raw.get("callsign") or raw.get("callSign") or _callsign_from_name(name))
     hop_count = _meshcore_path_len_to_hops(raw.get("hop_count") or raw.get("hopCount") or raw.get("outPathLen") or raw.get("pathLen"))
@@ -420,7 +426,9 @@ def _normalize_contact_message(
         return None
     sender_time = _coerce_int(value.get("senderTimestamp", value.get("sender_timestamp")))
     rx_time = _timestamp_from_seconds(sender_time) or received_at or utc_now()
-    prefix = _hex_bytes(value.get("pubKeyPrefix", value.get("pub_key_prefix")))
+    prefix = _hex_bytes(
+        value.get("pubKeyPrefix", value.get("pub_key_prefix", value.get("pubkey_prefix")))
+    )
     hop_count = meshcore_companion_path_len_to_hops(value.get("pathLen", value.get("path_len")))
     return MeshMessage(
         adapter_id=adapter_id,

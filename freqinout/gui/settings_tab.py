@@ -290,6 +290,10 @@ from freqinout.core.mesh import (
     update_automatic_connection_name,
     validate_mesh_connection_config,
 )
+from freqinout.core.mesh.settings import (
+    mesh_transport_capability,
+    supported_mesh_connection_types,
+)
 from freqinout.core.js8_expect_store import (
     delete_expect_entry,
     delete_expect_allow_policy,
@@ -6419,14 +6423,7 @@ class SettingsTab(QWidget):
         mesh_source_layout.addWidget(self.mesh_source_role_edit)
         mesh_form.addRow("Source:", mesh_source_row)
         self.mesh_connection_type_combo = QComboBox()
-        for label, value in (
-            ("TCP / WiFi", MeshConnectionType.TCP.value),
-            ("USB Serial", MeshConnectionType.SERIAL.value),
-            ("Bluetooth LE", MeshConnectionType.BLE.value),
-            ("HTTP API", MeshConnectionType.HTTP.value),
-            ("MQTT Bridge", MeshConnectionType.MQTT.value),
-        ):
-            self.mesh_connection_type_combo.addItem(label, value)
+        self._populate_mesh_transport_choices("meshtastic")
         self.mesh_connection_type_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         mesh_form.addRow("Connection:", self.mesh_connection_type_combo)
 
@@ -6534,8 +6531,12 @@ class SettingsTab(QWidget):
         self.mesh_store_messages_chk.setToolTip("Store received mesh text in FIO's message pipeline.")
         self.mesh_map_positions_chk = QCheckBox("Map")
         self.mesh_map_positions_chk.setToolTip("Use node position data for map context when available.")
-        self.mesh_send_enabled_chk = QCheckBox("Allow Send")
-        self.mesh_send_enabled_chk.setToolTip("Keep off until you intentionally want FIO to transmit through this mesh connection.")
+        self.mesh_send_enabled_chk = QCheckBox("Receive only (sending is not available)")
+        self.mesh_send_enabled_chk.setToolTip(
+            "This FIO release receives mesh traffic only. Sending remains unavailable until its completion, policy, and audit contract is implemented."
+        )
+        self.mesh_send_enabled_chk.setChecked(False)
+        self.mesh_send_enabled_chk.setEnabled(False)
         self.mesh_reticulum_bridge_chk = QCheckBox("Reticulum Bridge")
         self.mesh_reticulum_bridge_chk.setToolTip("Future bridge policy placeholder. Off by default.")
         for checkbox in (
@@ -6624,6 +6625,7 @@ class SettingsTab(QWidget):
         self._mesh_ble_scan_timer.timeout.connect(self._refresh_mesh_ble_scan_progress)
 
         self.mesh_protocol_combo.currentIndexChanged.connect(self._on_mesh_protocol_changed)
+        self.mesh_connection_type_combo.currentIndexChanged.connect(self._on_mesh_connection_type_changed)
         self.mesh_connection_name_edit.textEdited.connect(self._on_mesh_connection_name_edited)
 
         for widget in (
@@ -12712,9 +12714,10 @@ class SettingsTab(QWidget):
                 if hasattr(self, "mesh_mqtt_topic_root_edit")
                 else ""
             ),
-            send_enabled=bool(
-                hasattr(self, "mesh_send_enabled_chk") and self.mesh_send_enabled_chk.isChecked()
-            ),
+            # Outbound mesh has no completion-aware implementation yet.  Keep a
+            # historical value round-trippable but never treat it as live UI
+            # authority or let it enable sending.
+            send_enabled=bool(getattr(self, "_mesh_legacy_send_enabled", False)),
             store_messages_enabled=bool(
                 hasattr(self, "mesh_store_messages_chk") and self.mesh_store_messages_chk.isChecked()
             ),
@@ -12787,6 +12790,11 @@ class SettingsTab(QWidget):
             self.mesh_adapter_id_edit.setText("" if is_new_connection else config.adapter_id)
             self.mesh_source_radio_id_edit.setText(config.source_radio_id)
             self.mesh_source_role_edit.setText(config.source_role)
+            self._populate_mesh_transport_choices(
+                config.protocol,
+                selected=config.connection_type,
+                preserve_legacy=True,
+            )
             self._set_combo_data_if_present(
                 self.mesh_connection_type_combo,
                 config.connection_type.value,
@@ -12796,6 +12804,11 @@ class SettingsTab(QWidget):
             self.mesh_tcp_port_spin.setValue(config.tcp_port)
             self._refresh_mesh_serial_ports(selected=config.serial_port)
             self.mesh_serial_baud_spin.setValue(config.serial_baud)
+            self._mesh_preserve_legacy_serial_baud = bool(
+                config.protocol.strip().lower() == "meshtastic"
+                and config.connection_type is MeshConnectionType.SERIAL
+                and config.serial_baud != 115200
+            )
             self.mesh_ble_device_id_edit.setText(config.ble_device_id)
             self.mesh_ble_device_name_edit.setText(config.ble_device_name)
             self.mesh_ble_timeout_spin.setValue(config.ble_scan_timeout_sec)
@@ -12803,7 +12816,7 @@ class SettingsTab(QWidget):
             self.mesh_mqtt_enabled_chk.setChecked(config.mqtt_enabled)
             self.mesh_mqtt_broker_edit.setText(config.mqtt_broker)
             self.mesh_mqtt_topic_root_edit.setText(config.mqtt_topic_root)
-            self.mesh_send_enabled_chk.setChecked(config.send_enabled)
+            self._set_mesh_receive_only_ui(config)
             self.mesh_store_messages_chk.setChecked(config.store_messages_enabled)
             self.mesh_map_positions_chk.setChecked(config.map_positions_enabled)
             self.mesh_reticulum_bridge_chk.setChecked(config.bridge_to_reticulum_enabled)
@@ -13370,6 +13383,72 @@ class SettingsTab(QWidget):
             details.append(f"Device ID: {address}")
         return " · ".join(details) if details else "Discovered MeshCore BLE device"
 
+    @staticmethod
+    def _mesh_transport_label(connection_type: MeshConnectionType) -> str:
+        return {
+            MeshConnectionType.TCP: "TCP / WiFi",
+            MeshConnectionType.SERIAL: "USB Serial",
+            MeshConnectionType.BLE: "Bluetooth LE",
+            MeshConnectionType.HTTP: "HTTP API",
+            MeshConnectionType.MQTT: "MQTT Bridge",
+        }[connection_type]
+
+    def _populate_mesh_transport_choices(
+        self,
+        protocol: object,
+        *,
+        selected: MeshConnectionType | object | None = None,
+        preserve_legacy: bool = False,
+    ) -> None:
+        """Show only usable choices, while keeping a legacy selection reviewable.
+
+        HTTP/MQTT were historically persisted even though FIO has no adapter for
+        them.  A saved record is evidence and must not be silently rewritten,
+        but it is not an option for a newly chosen connection.
+        """
+
+        combo = getattr(self, "mesh_connection_type_combo", None)
+        if not isinstance(combo, QComboBox):
+            return
+        protocol_name = str(protocol or "meshtastic").strip().lower() or "meshtastic"
+        current = (
+            selected
+            if isinstance(selected, MeshConnectionType)
+            else MeshConnectionType.from_value(
+                selected if selected is not None else self._combo_data_text(combo, MeshConnectionType.TCP.value)
+            )
+        )
+        supported = supported_mesh_connection_types(protocol_name)
+        include_legacy = preserve_legacy and not mesh_transport_capability(protocol_name, current).supported
+        target = current if current in supported or include_legacy else (supported[0] if supported else current)
+
+        blocker = QSignalBlocker(combo)
+        combo.clear()
+        for connection_type in supported:
+            combo.addItem(self._mesh_transport_label(connection_type), connection_type.value)
+        if include_legacy:
+            capability = mesh_transport_capability(protocol_name, current)
+            combo.addItem(
+                f"{self._mesh_transport_label(current)} — unavailable (saved legacy)",
+                current.value,
+            )
+            combo.setItemData(combo.count() - 1, capability.reason, Qt.ToolTipRole)
+        self._set_combo_data_if_present(combo, target.value, fallback=(supported[0].value if supported else target.value))
+        del blocker
+
+    def _set_mesh_receive_only_ui(self, config: MeshConnectionConfig | None = None) -> None:
+        """Keep the retired send setting inert without erasing a legacy value."""
+
+        checkbox = getattr(self, "mesh_send_enabled_chk", None)
+        if not isinstance(checkbox, QCheckBox):
+            return
+        if config is not None:
+            self._mesh_legacy_send_enabled = bool(config.send_enabled)
+        checkbox_blocker = QSignalBlocker(checkbox)
+        checkbox.setChecked(False)
+        checkbox.setEnabled(False)
+        del checkbox_blocker
+
     def _on_mesh_connection_name_edited(self, _text: str) -> None:
         """A textEdited signal represents an operator edit, unlike loading saved settings."""
 
@@ -13381,6 +13460,8 @@ class SettingsTab(QWidget):
         if not isinstance(edit, QLineEdit):
             return
         protocol = self._combo_data_text(self.mesh_protocol_combo, "meshtastic")
+        self._mesh_preserve_legacy_serial_baud = False
+        self._populate_mesh_transport_choices(protocol, preserve_legacy=False)
         current_name = edit.text().strip()
         is_auto = bool(getattr(self, "_mesh_connection_name_auto", connection_name_is_automatic(current_name)))
         updated = update_automatic_connection_name(
@@ -13398,6 +13479,12 @@ class SettingsTab(QWidget):
         self._refresh_mesh_connection_visibility()
         self._refresh_mesh_config_status()
         self._queue_mesh_section_fit_refresh()
+
+    def _on_mesh_connection_type_changed(self, _index: int) -> None:
+        # The official Meshtastic SerialInterface is fixed at 115200.  A
+        # legacy value remains reviewable after load, but choosing Serial again
+        # is an explicit operator decision to use the qualified default.
+        self._mesh_preserve_legacy_serial_baud = False
 
     def _queue_mesh_section_fit_refresh(self) -> None:
         if bool(getattr(self, "_mesh_section_fit_refresh_pending", False)):
@@ -13880,6 +13967,19 @@ class SettingsTab(QWidget):
             self._combo_data_text(self.mesh_connection_type_combo, MeshConnectionType.TCP.value)
         )
         protocol = self._combo_data_text(self.mesh_protocol_combo, "meshtastic").strip().lower()
+        serial_baud = getattr(self, "mesh_serial_baud_spin", None)
+        if isinstance(serial_baud, QSpinBox):
+            meshtastic_serial = protocol == "meshtastic" and selected is MeshConnectionType.SERIAL
+            if meshtastic_serial and not bool(getattr(self, "_mesh_preserve_legacy_serial_baud", False)):
+                blocker = QSignalBlocker(serial_baud)
+                serial_baud.setValue(115200)
+                del blocker
+            serial_baud.setEnabled(not meshtastic_serial)
+            serial_baud.setToolTip(
+                "Meshtastic USB serial uses the fixed official 115200 baud rate."
+                if meshtastic_serial
+                else "Serial baud rate used by this MeshCore connection."
+            )
         row_map = {
             MeshConnectionType.TCP: getattr(self, "mesh_tcp_row", None),
             MeshConnectionType.SERIAL: getattr(self, "mesh_serial_row", None),
@@ -13949,7 +14049,6 @@ class SettingsTab(QWidget):
         if last_error:
             label.setText(last_error)
             return
-        send_text = "send allowed" if config.send_enabled else "receive-only"
         data_targets = []
         if config.store_messages_enabled:
             data_targets.append("Inbox")
@@ -13958,13 +14057,13 @@ class SettingsTab(QWidget):
         target_text = ", ".join(data_targets) if data_targets else "no data views"
         if config.protocol.strip().lower() == "meshcore" and config.connection_type is MeshConnectionType.BLE:
             label.setText(
-                f"Receives: {target_text} · Sending: {'On' if config.send_enabled else 'Off'} · "
+                f"Receives: {target_text} · Receive only · "
                 "Pairing is requested only when the computer and device require it."
             )
             return
         label.setText(
             f"Ready to configure {config.protocol.title()} over {config.connection_type.value.upper()} "
-            f"for {target_text}; {send_text}."
+            f"for {target_text}; receive only."
         )
 
     def _refresh_mesh_connection_indicator(self, config: MeshConnectionConfig) -> None:
@@ -14145,8 +14244,7 @@ class SettingsTab(QWidget):
         issues = validate_mesh_connection_config(config)
         if issues:
             return f"{config.protocol.title()} needs setup"
-        send_text = "send on" if config.send_enabled else "receive-only"
-        return f"{config.protocol.title()} {config.connection_type.value.upper()} {send_text}"
+        return f"{config.protocol.title()} {config.connection_type.value.upper()} receive only"
 
     def _summary_js8_settings(self) -> str:
         profile = "set" if hasattr(self, "js8_profile_edit") and self.js8_profile_edit.text().strip() else "missing"

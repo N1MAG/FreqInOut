@@ -72,10 +72,18 @@ from freqinout.core.mesh.models import MeshAdapterEvent, MeshHealthSnapshot, Mes
 from freqinout.core.mesh.settings import (
     discover_serial_ports,
     load_saved_mesh_connection_configs,
+    mesh_transport_capability,
     serialize_mesh_connection_library,
+    supported_mesh_connection_types,
 )
 from freqinout.core.mesh.meshtastic_adapter import MeshConnectionError, MeshtasticLocalAdapter
-from freqinout.core.mesh.meshcore_adapter import MeshCoreBleAdapter, MeshCoreBleCompanionClient, _AsyncioLoopRunner
+from freqinout.core.mesh.meshcore_adapter import (
+    MeshCoreBleAdapter,
+    MeshCoreBleCompanionClient,
+    MeshCorePythonAdapter,
+    _AsyncioLoopRunner,
+)
+from freqinout.core.mesh.manager import default_mesh_adapter_factory
 from freqinout.core.controlfreq_awareness import is_awareness_traffic_observation
 from freqinout.core.message_inbox_filters import mesh_row_is_inbox_message
 from freqinout.core.observation_store import list_observations
@@ -92,6 +100,25 @@ def test_usb_ble_and_tcp_config_validation_is_explicit() -> None:
     assert [issue.field for issue in validate_mesh_connection_config(serial_config)] == ["serial_port"]
     assert [issue.field for issue in validate_mesh_connection_config(ble_config)] == ["ble_device"]
     assert [issue.field for issue in validate_mesh_connection_config(tcp_config)] == ["tcp_host"]
+
+
+def test_mesh_transport_capability_matrix_is_truthful_and_python_aware() -> None:
+    expected = (MeshConnectionType.TCP, MeshConnectionType.SERIAL, MeshConnectionType.BLE)
+    assert supported_mesh_connection_types("meshtastic") == expected
+    assert supported_mesh_connection_types("meshcore", python_version=(3, 11)) == expected
+    assert supported_mesh_connection_types("meshcore", python_version=(3, 9)) == (MeshConnectionType.BLE,)
+    assert not mesh_transport_capability("meshtastic", MeshConnectionType.HTTP).supported
+    assert not mesh_transport_capability("meshcore", MeshConnectionType.MQTT).supported
+
+    legacy = MeshConnectionConfig(
+        protocol="meshcore",
+        enabled=True,
+        connection_type=MeshConnectionType.HTTP,
+        http_base_url="http://mesh.invalid",
+    )
+    issues = validate_mesh_connection_config(legacy)
+    assert issues[0].field == "connection_type"
+    assert "not" in issues[0].message.lower()
 
 
 def test_settings_mapping_uses_meshtastic_prefix_and_safe_defaults() -> None:
@@ -535,7 +562,10 @@ def test_mesh_source_family_labels_are_user_facing() -> None:
     assert source_short_label("meshcore") == "MCR"
 
 
-def test_meshtastic_adapter_does_not_require_package_until_connect() -> None:
+def test_meshtastic_adapter_does_not_require_package_until_connect(monkeypatch: pytest.MonkeyPatch) -> None:
+    import freqinout.core.mesh.meshtastic_adapter as meshtastic_adapter
+
+    monkeypatch.setattr(meshtastic_adapter, "meshtastic_python_available", lambda: False)
     adapter = MeshtasticLocalAdapter(MeshConnectionConfig(enabled=True, tcp_host="127.0.0.1"))
 
     with pytest.raises(MeshConnectionError, match="Meshtastic Python package"):
@@ -559,7 +589,7 @@ def test_meshcore_ble_adapter_does_not_require_bleak_until_connect(monkeypatch: 
         adapter.connect()
 
 
-def test_meshcore_adapter_requires_ble_connection_type() -> None:
+def test_meshcore_ble_adapter_requires_ble_connection_type() -> None:
     adapter = MeshCoreBleAdapter(
         MeshConnectionConfig(protocol="meshcore", enabled=True, connection_type=MeshConnectionType.TCP, tcp_host="127.0.0.1")
     )
@@ -1719,14 +1749,231 @@ def test_meshtastic_tcp_connect_is_lazy_and_mockable(monkeypatch: pytest.MonkeyP
     monkeypatch.setitem(sys.modules, "meshtastic", meshtastic)
     monkeypatch.setitem(sys.modules, "meshtastic.tcp_interface", tcp_module)
 
-    adapter = MeshtasticLocalAdapter(MeshConnectionConfig(enabled=True, tcp_host="192.0.2.10"))
+    adapter = MeshtasticLocalAdapter(
+        MeshConnectionConfig(enabled=True, tcp_host="192.0.2.10", tcp_port=4555)
+    )
     adapter.connect()
 
-    assert captured == {"hostname": "192.0.2.10"}
+    assert captured == {"hostname": "192.0.2.10", "portNumber": 4555}
     assert adapter.health().connected is True
 
     adapter.disconnect()
     assert captured["closed"] is True
+
+
+@pytest.mark.parametrize(
+    ("connection_type", "expected_module", "expected_class", "expected_kwargs"),
+    (
+        (
+            MeshConnectionType.SERIAL,
+            "meshtastic.serial_interface",
+            "SerialInterface",
+            {"devPath": "/dev/tty-mesh"},
+        ),
+        (
+            MeshConnectionType.BLE,
+            "meshtastic.ble_interface",
+            "BLEInterface",
+            {"address": "AA:BB:CC:DD:EE:FF"},
+        ),
+        (
+            MeshConnectionType.TCP,
+            "meshtastic.tcp_interface",
+            "TCPInterface",
+            {"hostname": "192.0.2.10", "portNumber": 4555},
+        ),
+    ),
+)
+def test_meshtastic_transport_dispatch_matches_official_client_api(
+    connection_type: MeshConnectionType,
+    expected_module: str,
+    expected_class: str,
+    expected_kwargs: dict[str, object],
+) -> None:
+    config = MeshConnectionConfig(
+        enabled=True,
+        connection_type=connection_type,
+        serial_port="/dev/tty-mesh",
+        ble_device_id="AA:BB:CC:DD:EE:FF",
+        tcp_host="192.0.2.10",
+        tcp_port=4555,
+    )
+    module, class_name, kwargs, _positional = MeshtasticLocalAdapter(config)._interface_spec()
+
+    assert module == expected_module
+    assert class_name == expected_class
+    assert kwargs == expected_kwargs
+
+
+def test_meshcore_factory_routes_ble_serial_and_tcp_to_qualified_adapters() -> None:
+    ble = default_mesh_adapter_factory(
+        MeshConnectionConfig(
+            protocol="meshcore",
+            connection_type=MeshConnectionType.BLE,
+            ble_device_name="MeshCore Field",
+        )
+    )
+    serial = default_mesh_adapter_factory(
+        MeshConnectionConfig(
+            protocol="meshcore",
+            connection_type=MeshConnectionType.SERIAL,
+            serial_port="/dev/tty-test",
+        )
+    )
+    tcp = default_mesh_adapter_factory(
+        MeshConnectionConfig(
+            protocol="meshcore",
+            connection_type=MeshConnectionType.TCP,
+            tcp_host="192.0.2.4",
+        )
+    )
+
+    assert isinstance(ble, MeshCoreBleAdapter)
+    assert isinstance(serial, MeshCorePythonAdapter)
+    assert isinstance(tcp, MeshCorePythonAdapter)
+
+
+def test_meshcore_python_adapter_reports_missing_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
+    import freqinout.core.mesh.meshcore_adapter as meshcore_adapter
+
+    monkeypatch.setattr(meshcore_adapter, "meshcore_python_available", lambda: False)
+    adapter = MeshCorePythonAdapter(
+        MeshConnectionConfig(
+            protocol="meshcore",
+            enabled=True,
+            connection_type=MeshConnectionType.SERIAL,
+            serial_port="/dev/tty-test",
+        )
+    )
+
+    with pytest.raises(MeshConnectionError, match="package 'meshcore'"):
+        adapter.connect()
+
+
+def test_meshcore_python_serial_session_fetches_and_normalizes_messages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = types.ModuleType("meshcore")
+    callbacks: dict[object, object] = {}
+    captured: dict[str, object] = {}
+
+    class FakeEventType:
+        CHANNEL_MSG_RECV = object()
+        CONTACT_MSG_RECV = object()
+
+    class FakeCommands:
+        async def get_channel(self, channel_idx: int) -> object:
+            if channel_idx == 1:
+                return types.SimpleNamespace(
+                    type=types.SimpleNamespace(name="CHANNEL_INFO"),
+                    payload={"channel_idx": 1, "channel_name": "Field", "channel_secret": bytes(16)},
+                )
+            return types.SimpleNamespace(type=types.SimpleNamespace(name="ERROR"), payload={})
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.is_connected = True
+            self.commands = FakeCommands()
+            self.contacts = {
+                "aabb": {"public_key": "aabbccdd", "adv_name": "Field Node", "last_advert": 10}
+            }
+
+        def subscribe(self, event_type: object, callback: object) -> object:
+            callbacks[event_type] = callback
+            return callback
+
+        def unsubscribe(self, subscription: object) -> None:
+            captured.setdefault("unsubscribed", []).append(subscription)
+
+        async def start_auto_message_fetching(self) -> None:
+            captured["auto_fetch_started"] = True
+            callback = callbacks[FakeEventType.CHANNEL_MSG_RECV]
+            callback(
+                types.SimpleNamespace(
+                    payload={
+                        "channel_idx": 1,
+                        "path_len": 0,
+                        "sender_timestamp": 100,
+                        "text": "mesh report",
+                    }
+                )
+            )
+
+        async def stop_auto_message_fetching(self) -> None:
+            captured["auto_fetch_stopped"] = True
+
+        async def ensure_contacts(self, follow: bool = False) -> bool:
+            captured["contacts_follow"] = follow
+            return True
+
+        async def disconnect(self) -> None:
+            self.is_connected = False
+            captured["disconnected"] = True
+
+    class FakeMeshCore:
+        @classmethod
+        async def create_serial(cls, *args: object, **kwargs: object) -> object:
+            captured["factory_args"] = args
+            captured["factory_kwargs"] = kwargs
+            return FakeClient()
+
+    module.MeshCore = FakeMeshCore
+    module.EventType = FakeEventType
+    monkeypatch.setitem(sys.modules, "meshcore", module)
+
+    adapter = MeshCorePythonAdapter(
+        MeshConnectionConfig(
+            protocol="meshcore",
+            enabled=True,
+            connection_type=MeshConnectionType.SERIAL,
+            serial_port="/dev/tty-test",
+            serial_baud=57600,
+        )
+    )
+    adapter.connect()
+    channels = adapter.list_channels()
+    nodes = adapter.list_nodes()
+    events = list(adapter.receive_events())
+    adapter.disconnect()
+
+    assert captured["factory_args"] == ("/dev/tty-test", 57600)
+    assert captured["factory_kwargs"] == {"auto_reconnect": False, "default_timeout": 5}
+    assert captured["auto_fetch_started"] is True
+    assert channels[0].name == "Field"
+    assert nodes[0].long_name == "Field Node"
+    assert events[0].message is not None
+    assert events[0].message.text == "mesh report"
+    assert captured["auto_fetch_stopped"] is True
+    assert captured["disconnected"] is True
+
+
+def test_meshcore_python_tcp_none_result_is_actionable(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = types.ModuleType("meshcore")
+
+    class FakeEventType:
+        CHANNEL_MSG_RECV = object()
+        CONTACT_MSG_RECV = object()
+
+    class FakeMeshCore:
+        @classmethod
+        async def create_tcp(cls, *args: object, **kwargs: object) -> None:
+            return None
+
+    module.MeshCore = FakeMeshCore
+    module.EventType = FakeEventType
+    monkeypatch.setitem(sys.modules, "meshcore", module)
+    adapter = MeshCorePythonAdapter(
+        MeshConnectionConfig(
+            protocol="meshcore",
+            enabled=True,
+            connection_type=MeshConnectionType.TCP,
+            tcp_host="192.0.2.9",
+            tcp_port=4000,
+        )
+    )
+
+    with pytest.raises(MeshConnectionError, match="Companion handshake"):
+        adapter.connect()
 
 
 def test_meshtastic_receive_events_are_drained_once() -> None:

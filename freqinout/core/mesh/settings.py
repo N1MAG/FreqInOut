@@ -6,6 +6,7 @@ from importlib import import_module
 import json
 from pathlib import Path
 import re
+import sys
 from typing import Mapping, Sequence
 
 from freqinout.core.config_paths import get_config_dir
@@ -25,6 +26,81 @@ class MeshConnectionType(str, Enum):
             if member.value == normalized:
                 return member
         return cls.TCP
+
+
+@dataclass(frozen=True)
+class MeshTransportCapability:
+    protocol: str
+    connection_type: MeshConnectionType
+    supported: bool
+    reason: str = ""
+
+
+def mesh_transport_capability(
+    protocol: object,
+    connection_type: MeshConnectionType | object,
+    *,
+    python_version: tuple[int, int] | None = None,
+) -> MeshTransportCapability:
+    """Return the truthful runtime contract for one protocol/transport pair.
+
+    Saved configuration may contain planned transports, so this function does
+    not mutate or coerce a selection.  UI and runtime validation share this
+    matrix to avoid advertising a connection that the adapter cannot open.
+    """
+
+    normalized_protocol = str(protocol or "").strip().lower()
+    kind = (
+        connection_type
+        if isinstance(connection_type, MeshConnectionType)
+        else MeshConnectionType.from_value(connection_type)
+    )
+    if normalized_protocol == "meshtastic":
+        if kind in {MeshConnectionType.TCP, MeshConnectionType.SERIAL, MeshConnectionType.BLE}:
+            return MeshTransportCapability(normalized_protocol, kind, True)
+        return MeshTransportCapability(
+            normalized_protocol,
+            kind,
+            False,
+            "Meshtastic HTTP and MQTT connections are planned but are not implemented in this FIO release.",
+        )
+    if normalized_protocol == "meshcore":
+        if kind is MeshConnectionType.BLE:
+            return MeshTransportCapability(normalized_protocol, kind, True)
+        if kind in {MeshConnectionType.TCP, MeshConnectionType.SERIAL}:
+            version = python_version or (sys.version_info.major, sys.version_info.minor)
+            if version >= (3, 10):
+                return MeshTransportCapability(normalized_protocol, kind, True)
+            return MeshTransportCapability(
+                normalized_protocol,
+                kind,
+                False,
+                "MeshCore USB serial and TCP require Python 3.10 or newer; MeshCore Bluetooth remains available.",
+            )
+        return MeshTransportCapability(
+            normalized_protocol,
+            kind,
+            False,
+            "MeshCore HTTP is not a Companion transport and MeshCore MQTT is not implemented in this FIO release.",
+        )
+    return MeshTransportCapability(
+        normalized_protocol or "mesh",
+        kind,
+        False,
+        f"{normalized_protocol.title() or 'Mesh'} connections are not implemented in this FIO release.",
+    )
+
+
+def supported_mesh_connection_types(
+    protocol: object,
+    *,
+    python_version: tuple[int, int] | None = None,
+) -> tuple[MeshConnectionType, ...]:
+    return tuple(
+        kind
+        for kind in MeshConnectionType
+        if mesh_transport_capability(protocol, kind, python_version=python_version).supported
+    )
 
 
 @dataclass(frozen=True)
@@ -193,6 +269,9 @@ def validate_mesh_connection_config(config: MeshConnectionConfig) -> tuple[MeshC
     issues: list[MeshConfigIssue] = []
     if not config.enabled:
         return ()
+    capability = mesh_transport_capability(config.protocol, config.connection_type)
+    if not capability.supported:
+        issues.append(MeshConfigIssue("connection_type", capability.reason))
     if config.connection_type is MeshConnectionType.TCP and not config.tcp_host:
         issues.append(MeshConfigIssue("tcp_host", "TCP mesh connections need a host name or IP address."))
     if config.connection_type is MeshConnectionType.SERIAL and not config.serial_port:

@@ -8,7 +8,7 @@ import time
 from concurrent.futures import CancelledError as FutureCancelledError, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from importlib import import_module, util
-from typing import Callable, Iterator
+from typing import Callable, Iterator, Mapping
 
 from freqinout.core.logger import log
 from freqinout.core.mesh.ingest_status import MESHCORE_COMPANION_DECODER_WARNING
@@ -330,6 +330,15 @@ def meshcore_ble_available() -> bool:
         return True
     try:
         return util.find_spec("bleak") is not None
+    except ValueError:
+        return False
+
+
+def meshcore_python_available() -> bool:
+    if "meshcore" in sys.modules:
+        return True
+    try:
+        return util.find_spec("meshcore") is not None
     except ValueError:
         return False
 
@@ -885,14 +894,15 @@ def _client_has_companion_receive(client: object | None) -> bool:
 
 
 class _AsyncioLoopRunner:
-    """Owns the long-lived asyncio loop used by a live BLE client."""
+    """Owns the long-lived asyncio loop used by one MeshCore client."""
 
-    def __init__(self) -> None:
+    def __init__(self, operation_label: str = "MeshCore BLE") -> None:
+        self._operation_label = str(operation_label or "MeshCore").strip()
         self._loop = asyncio.new_event_loop()
         self._ready = threading.Event()
         self._current_future: object | None = None
         self._future_lock = threading.Lock()
-        self._thread = threading.Thread(target=self._run, name="FIO MeshCore BLE", daemon=True)
+        self._thread = threading.Thread(target=self._run, name=f"FIO {self._operation_label}", daemon=True)
         self._thread.start()
         self._ready.wait(timeout=2)
 
@@ -905,7 +915,7 @@ class _AsyncioLoopRunner:
         try:
             return future.result(timeout=max(0.1, float(timeout_sec or 30.0)))
         except FutureCancelledError as exc:
-            raise MeshOperationCancelled("MeshCore BLE operation cancelled.") from exc
+            raise MeshOperationCancelled(f"{self._operation_label} operation cancelled.") from exc
         except FutureTimeoutError as exc:
             future.cancel()
             try:
@@ -913,7 +923,7 @@ class _AsyncioLoopRunner:
             except (FutureCancelledError, FutureTimeoutError):
                 pass
             raise MeshConnectionError(
-                "MeshCore BLE operation timed out. Check that the device is awake, nearby, and still paired."
+                f"{self._operation_label} operation timed out. Check the selected device and connection."
             ) from exc
         finally:
             with self._future_lock:
@@ -957,6 +967,246 @@ class _AsyncioLoopRunner:
             if pending:
                 self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
             self._loop.close()
+
+
+class MeshCorePythonCompanionClient:
+    """Normalize meshcore_py serial/TCP sessions to FIO's Companion surface."""
+
+    companion_receive_enabled = True
+
+    def __init__(self, client: object, event_type: object) -> None:
+        self._client = client
+        self._event_type = event_type
+        self._subscriptions: list[object] = []
+        self._messages: list[dict[str, object]] = []
+        self._message_lock = threading.Lock()
+        self._auto_fetch_started = False
+
+    @property
+    def is_connected(self) -> bool:
+        return bool(getattr(self._client, "is_connected", False))
+
+    async def initialize(self) -> None:
+        subscribe = getattr(self._client, "subscribe", None)
+        start_auto_fetch = getattr(self._client, "start_auto_message_fetching", None)
+        if not callable(subscribe) or not callable(start_auto_fetch):
+            raise MeshConnectionError(
+                "The installed MeshCore client cannot provide Companion receive events. Update the meshcore package."
+            )
+        channel_event = getattr(self._event_type, "CHANNEL_MSG_RECV", None)
+        contact_event = getattr(self._event_type, "CONTACT_MSG_RECV", None)
+        if channel_event is None or contact_event is None:
+            raise MeshConnectionError(
+                "The installed MeshCore client does not expose channel/contact receive events."
+            )
+        self._subscriptions.append(subscribe(channel_event, self._on_channel_message))
+        self._subscriptions.append(subscribe(contact_event, self._on_contact_message))
+        await start_auto_fetch()
+        self._auto_fetch_started = True
+
+    async def disconnect(self) -> None:
+        if self._auto_fetch_started:
+            stop_auto_fetch = getattr(self._client, "stop_auto_message_fetching", None)
+            if callable(stop_auto_fetch):
+                try:
+                    await stop_auto_fetch()
+                except Exception:
+                    pass
+            self._auto_fetch_started = False
+        unsubscribe = getattr(self._client, "unsubscribe", None)
+        if callable(unsubscribe):
+            for subscription in self._subscriptions:
+                try:
+                    unsubscribe(subscription)
+                except Exception:
+                    continue
+        self._subscriptions.clear()
+        disconnect = getattr(self._client, "disconnect", None)
+        if callable(disconnect):
+            await disconnect()
+
+    async def getChannels(
+        self,
+        on_channel: Callable[[dict[str, object]], None] | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> list[dict[str, object]]:
+        commands = getattr(self._client, "commands", None)
+        get_channel = getattr(commands, "get_channel", None)
+        if not callable(get_channel):
+            return []
+        channels: list[dict[str, object]] = []
+        for channel_idx in range(8):
+            if cancel_event is not None and cancel_event.is_set():
+                raise MeshOperationCancelled("MeshCore channel refresh cancelled.")
+            result = await get_channel(channel_idx)
+            if _meshcore_event_is_error(result):
+                continue
+            payload = getattr(result, "payload", None)
+            if not isinstance(payload, Mapping):
+                continue
+            raw = dict(payload)
+            raw.setdefault("channel_idx", channel_idx)
+            raw.setdefault("name", raw.get("channel_name"))
+            raw.setdefault("secret", raw.get("channel_secret"))
+            if _meshcore_channel_slot_is_unused(raw):
+                continue
+            channels.append(raw)
+            if on_channel is not None:
+                on_channel(raw)
+        return channels
+
+    async def getContacts(self) -> list[dict[str, object]]:
+        ensure_contacts = getattr(self._client, "ensure_contacts", None)
+        if callable(ensure_contacts):
+            await ensure_contacts(follow=True)
+        contacts = getattr(self._client, "contacts", {})
+        if not isinstance(contacts, Mapping):
+            return []
+        return [dict(value) for value in contacts.values() if isinstance(value, Mapping)]
+
+    def getWaitingMessages(self) -> list[dict[str, object]]:
+        with self._message_lock:
+            messages = list(self._messages)
+            self._messages.clear()
+        return messages
+
+    def waiting_messages_pending(self) -> bool:
+        with self._message_lock:
+            return bool(self._messages)
+
+    def raw_frames_pending(self) -> tuple[bytes, ...]:
+        return ()
+
+    def _on_channel_message(self, event: object) -> None:
+        payload = getattr(event, "payload", None)
+        if isinstance(payload, Mapping):
+            with self._message_lock:
+                self._messages.append({"channelMessage": dict(payload)})
+
+    def _on_contact_message(self, event: object) -> None:
+        payload = getattr(event, "payload", None)
+        if isinstance(payload, Mapping):
+            with self._message_lock:
+                self._messages.append({"contactMessage": dict(payload)})
+
+
+class MeshCorePythonAdapter(MeshCoreBleAdapter):
+    """MeshCore Companion adapter for official meshcore_py serial/TCP clients."""
+
+    def connect(self) -> None:
+        if not self.config.enabled:
+            raise MeshConnectionError("MeshCore adapter is disabled.")
+        if self.config.connection_type not in {MeshConnectionType.SERIAL, MeshConnectionType.TCP}:
+            raise MeshConnectionError("The official MeshCore client adapter supports USB serial and TCP only.")
+        issues = tuple(issue for issue in validate_mesh_connection_config(self.config) if issue.severity == "error")
+        if issues:
+            raise MeshConnectionError("; ".join(issue.message for issue in issues))
+        if not meshcore_python_available():
+            raise MeshConnectionError(
+                "The Python package 'meshcore' is not installed. Install the supported FIO mesh dependencies first."
+            )
+        if self._client is not None and bool(getattr(self._client, "is_connected", False)):
+            return
+        if self._client is not None:
+            self.disconnect()
+        label = f"MeshCore {self.config.connection_type.value.upper()}"
+        self._ble_loop = _AsyncioLoopRunner(label)
+        try:
+            self._ble_loop.run(self._connect_python_client(), timeout_sec=30.0)
+            self._last_error = ""
+        except (MeshOperationCancelled, MeshConnectionError) as exc:
+            self._last_error = str(exc)
+            self._stop_python_loop()
+            raise
+        except Exception as exc:
+            self._last_error = _meshcore_python_error_message(self.config, exc)
+            self._stop_python_loop()
+            raise MeshConnectionError(self._last_error) from exc
+
+    def disconnect(self) -> None:
+        client = self._client
+        self._client = None
+        try:
+            disconnect = getattr(client, "disconnect", None)
+            if callable(disconnect):
+                result = disconnect()
+                if _is_awaitable(result) and self._ble_loop is not None:
+                    self._ble_loop.run(result, timeout_sec=8.0)
+        except Exception as exc:
+            self._last_error = str(exc)
+        finally:
+            self._stop_python_loop()
+
+    def cancel_pending_operation(self) -> None:
+        runner = self._ble_loop
+        if runner is not None:
+            runner.cancel_current()
+
+    async def _connect_python_client(self) -> None:
+        module = import_module("meshcore")
+        meshcore_class = getattr(module, "MeshCore", None)
+        event_type = getattr(module, "EventType", None)
+        if meshcore_class is None or event_type is None:
+            raise MeshConnectionError("The installed meshcore package does not expose MeshCore and EventType.")
+        if self.config.connection_type is MeshConnectionType.SERIAL:
+            factory = getattr(meshcore_class, "create_serial", None)
+            args = (self.config.serial_port, self.config.serial_baud)
+        else:
+            factory = getattr(meshcore_class, "create_tcp", None)
+            args = (self.config.tcp_host, self.config.tcp_port)
+        if not callable(factory):
+            raise MeshConnectionError(
+                f"The installed meshcore package does not support {self.config.connection_type.value.upper()}."
+            )
+        client = await factory(*args, auto_reconnect=False, default_timeout=5)
+        if client is None:
+            raise MeshConnectionError(_meshcore_no_handshake_message(self.config))
+        wrapper = MeshCorePythonCompanionClient(client, event_type)
+        try:
+            await wrapper.initialize()
+        except Exception:
+            await wrapper.disconnect()
+            raise
+        self._client = wrapper
+        self._device_name = self.config.display_name
+
+    def _stop_python_loop(self) -> None:
+        runner = self._ble_loop
+        self._ble_loop = None
+        if runner is not None:
+            runner.stop()
+
+
+def _meshcore_event_is_error(event: object) -> bool:
+    event_type = getattr(event, "type", None)
+    return str(getattr(event_type, "name", event_type) or "").strip().upper() == "ERROR"
+
+
+def _meshcore_no_handshake_message(config: MeshConnectionConfig) -> str:
+    if config.connection_type is MeshConnectionType.SERIAL:
+        return (
+            "MeshCore opened the serial port but the device did not complete the Companion handshake. "
+            "Verify the port, baud rate, and Companion USB firmware mode."
+        )
+    return (
+        "MeshCore reached the TCP endpoint but the device did not complete the Companion handshake. "
+        "Verify the host, port, and Companion TCP/WiFi firmware mode."
+    )
+
+
+def _meshcore_python_error_message(config: MeshConnectionConfig, exc: BaseException) -> str:
+    detail = str(exc or "").strip()
+    if isinstance(exc, PermissionError) or "permission" in detail.casefold() or "busy" in detail.casefold():
+        return (
+            f"MeshCore could not open {config.serial_port or 'the serial port'} because it is busy or access was denied. "
+            "Close other mesh applications, check device permissions, and retry."
+        )
+    endpoint = (
+        f"{config.tcp_host}:{config.tcp_port}"
+        if config.connection_type is MeshConnectionType.TCP
+        else config.serial_port
+    )
+    return f"MeshCore {config.connection_type.value.upper()} connection to {endpoint or 'the selected device'} failed: {detail or 'unknown error'}"
 
 
 def discover_meshcore_ble_devices(

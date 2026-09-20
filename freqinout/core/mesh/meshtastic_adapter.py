@@ -335,8 +335,8 @@ class MeshtasticLocalAdapter:
             return (
                 "meshtastic.tcp_interface",
                 "TCPInterface",
-                {"hostname": self.config.tcp_host},
-                (self.config.tcp_host,),
+                {"hostname": self.config.tcp_host, "portNumber": self.config.tcp_port},
+                (self.config.tcp_host, None, False, True, self.config.tcp_port),
             )
         raise MeshConnectionError(f"Meshtastic {connection_type.value} connections are configured for a later adapter slice.")
 

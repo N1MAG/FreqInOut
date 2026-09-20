@@ -65,6 +65,103 @@ def test_mesh_connection_editor_persists_name_and_optional_source(monkeypatch, t
         app.processEvents()
 
 
+def test_mesh_transport_choices_are_protocol_aware_and_receive_only(monkeypatch, tmp_path):
+    from freqinout.core.mesh import MeshConnectionType
+    from freqinout.core.mesh.settings import supported_mesh_connection_types
+
+    app, tab = _settings_tab_or_skip(monkeypatch, tmp_path)
+    try:
+        def choices():
+            return tuple(
+                tab.mesh_connection_type_combo.itemData(index)
+                for index in range(tab.mesh_connection_type_combo.count())
+            )
+
+        assert choices() == tuple(kind.value for kind in supported_mesh_connection_types("meshtastic"))
+        assert MeshConnectionType.HTTP.value not in choices()
+        assert MeshConnectionType.MQTT.value not in choices()
+
+        tab._set_combo_data_if_present(tab.mesh_protocol_combo, "meshcore", fallback="meshtastic")
+        app.processEvents()
+        assert choices() == tuple(kind.value for kind in supported_mesh_connection_types("meshcore"))
+        assert MeshConnectionType.HTTP.value not in choices()
+        assert MeshConnectionType.MQTT.value not in choices()
+
+        tab.mesh_enabled_chk.setChecked(True)
+        tab.mesh_tcp_host_edit.setText("192.0.2.20")
+        app.processEvents()
+        assert tab.mesh_send_enabled_chk.isEnabled() is False
+        assert tab.mesh_send_enabled_chk.isChecked() is False
+        assert "receive only" in tab.mesh_send_enabled_chk.text().casefold()
+        assert "receive only" in tab._summary_mesh_settings().casefold()
+    finally:
+        tab.close()
+        tab.deleteLater()
+        app.processEvents()
+
+
+def test_saved_unsupported_mesh_transport_stays_visible_but_inert(monkeypatch, tmp_path):
+    from freqinout.core.mesh import MeshConnectionConfig, MeshConnectionType
+
+    app, tab = _settings_tab_or_skip(monkeypatch, tmp_path)
+    try:
+        legacy = MeshConnectionConfig(
+            adapter_id="legacy-http",
+            protocol="meshtastic",
+            connection_name="Older HTTP connection",
+            enabled=True,
+            connection_type=MeshConnectionType.HTTP,
+            http_base_url="http://node.local",
+            send_enabled=True,
+        )
+        tab._load_mesh_config_into_ui(legacy, saved_configs=(legacy,))
+        app.processEvents()
+
+        current = tab.mesh_connection_type_combo.currentIndex()
+        assert tab.mesh_connection_type_combo.itemData(current) == MeshConnectionType.HTTP.value
+        assert "unavailable" in tab.mesh_connection_type_combo.currentText().casefold()
+        assert "not implemented" in tab.mesh_connection_type_combo.itemData(current, 3).casefold()
+        assert tab.mesh_send_enabled_chk.isEnabled() is False
+        assert tab.mesh_send_enabled_chk.isChecked() is False
+        assert tab._mesh_config_from_ui().send_enabled is True
+        assert "Needs setup:" in tab.mesh_status_label.text()
+    finally:
+        tab.close()
+        tab.deleteLater()
+        app.processEvents()
+
+
+def test_meshtastic_serial_uses_fixed_baud_without_rewriting_legacy_view(monkeypatch, tmp_path):
+    from freqinout.core.mesh import MeshConnectionConfig, MeshConnectionType
+
+    app, tab = _settings_tab_or_skip(monkeypatch, tmp_path)
+    try:
+        legacy = MeshConnectionConfig(
+            adapter_id="legacy-serial",
+            protocol="meshtastic",
+            connection_type=MeshConnectionType.SERIAL,
+            serial_port="/dev/ttyUSB0",
+            serial_baud=57600,
+        )
+        tab._load_mesh_config_into_ui(legacy, saved_configs=(legacy,))
+        app.processEvents()
+
+        assert tab.mesh_serial_baud_spin.value() == 57600
+        assert tab.mesh_serial_baud_spin.isEnabled() is False
+        assert "fixed official 115200" in tab.mesh_serial_baud_spin.toolTip()
+
+        tab._set_combo_data_if_present(tab.mesh_connection_type_combo, "tcp", fallback="tcp")
+        tab._set_combo_data_if_present(tab.mesh_connection_type_combo, "serial", fallback="tcp")
+        app.processEvents()
+
+        assert tab.mesh_serial_baud_spin.value() == 115200
+        assert tab.mesh_serial_baud_spin.isEnabled() is False
+    finally:
+        tab.close()
+        tab.deleteLater()
+        app.processEvents()
+
+
 def test_mesh_add_device_selector_shows_explicit_new_device_row(monkeypatch, tmp_path):
     from freqinout.core.mesh import MeshConnectionConfig, MeshConnectionType, serialize_mesh_connection_library
 

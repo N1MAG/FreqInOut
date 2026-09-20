@@ -9000,3 +9000,78 @@ No schema or production-data migration was required. No production database,
 JS8Call settings/profile, native application file, external process, radio,
 commit, or remote was changed. The unrelated modified installation-guide DOCX
 and rendered guide directory were preserved and excluded from this work.
+
+## 2026-09-20 — MeshCore / Meshtastic transport truthfulness and local connection extension
+
+Status: automated implementation gate passed; representative Linux/Windows
+serial/TCP/BLE hardware qualification remains open.
+
+The Local Mesh editor previously offered TCP, USB serial, BLE, HTTP, and MQTT
+for both protocols even though only Meshtastic TCP/serial/BLE and MeshCore BLE
+had adapter code. Meshtastic was not packaged as a runtime dependency, its TCP
+adapter discarded the configured port, MeshCore TCP/serial were routed to the
+BLE-only adapter, and `Allow Send` could display an enabled capability that no
+adapter implemented.
+
+The governing mesh specification now contains an explicit protocol/transport
+matrix, dependency and Python-version rules, discovery ownership, one-session
+lifecycle/concurrency rules, failure and teardown semantics, receive-only
+truthfulness, outbound completion boundaries, and automated versus physical
+acceptance gates. The implementation:
+
+- packages the official Meshtastic 2.7 and MeshCore 2.3 client families while
+  preserving lazy imports and the MeshCore Python 3.10 floor;
+- gives UI, validation, and adapter selection one shared capability matrix;
+- passes Meshtastic's configured TCP host and port and preserves its official
+  fixed 115200 serial behavior;
+- adds MeshCore Companion serial/TCP through the official Python client on one
+  persistent adapter event loop, with the application handshake, automatic
+  waiting-message fetching, channel/contact normalization, bounded
+  cancellation/disconnect, and FIO-owned reconnect policy;
+- preserves the existing qualified FIO/Bleak MeshCore BLE path unchanged;
+- offers only TCP, USB serial, and BLE for new supported connections, while
+  retaining saved HTTP/MQTT records visibly as unavailable evidence rather than
+  coercing or deleting them; and
+- makes legacy `send_enabled` values inert and consistently presents the
+  current product as receive only.
+
+The primary integration review corrected one redundant UI refresh path, added
+official `meshcore_py` snake-case normalization, verified the exact Meshtastic
+`portNumber` API, and kept Meshtastic BLE browse out of this slice because the
+existing scan worker is correctly MeshCore/NUS-specific. Meshtastic BLE remains
+usable by exact saved device id/name through the official client's bounded
+service-filtered Connect discovery; a dedicated FIO browse list is a separate
+follow-up.
+
+Work-package ownership:
+
+- `gpt-5` primary high-reasoning model: connection architecture, lifecycle and
+  concurrency, dependency policy, official-client verification, MeshCore
+  serial/TCP adapter, normalization, specifications, delegated-diff correction,
+  and final integration review;
+- `gpt-5.6-terra` high reasoning: read-only SpotterX and mesh-client transport,
+  pairing, receive, send, and lifecycle comparison;
+- `gpt-5.6-luna` medium reasoning: read-only FIO adapter/UI/test gap audit; and
+- `gpt-5.6-terra` medium reasoning: bounded Settings capability presentation
+  and focused UI regression tests.
+
+Automated evidence:
+
+- `uv run pytest -q tests/test_mesh_client_foundation.py tests/test_mesh_connection_ui_slice1.py tests/test_mesh_slice1_lifecycle.py tests/test_mesh_slice1_reconnect_flow.py tests/test_mesh_slice1_settings_integration.py`:
+  **163 passed**;
+- `uv run pytest -q tests/test_mesh_channel_admin_slice1.py tests/test_source_connection_snapshot.py`:
+  **15 passed**;
+- changed Python compilation and `git diff --check`: passed.
+
+The monolithic all-repository process again reached the unrelated Compose GUI
+partition with a live JS8 reader thread and the Python interpreter exited with
+signal 11 in the Qt event-loop test. The exact reported Compose test passes in
+isolation (**1 passed**), and the combined mesh acceptance partition passes in
+one process (**178 passed**). This reproduces the already documented test-
+harness process-isolation failure; it is not a mesh assertion failure and no
+mesh acceptance test was waived.
+
+No schema, settings, or production-data migration was required. No device,
+native application configuration, external process, radio, commit, or remote
+was changed. The unrelated modified installation-guide DOCX and rendered guide
+directory were preserved and excluded from this work.

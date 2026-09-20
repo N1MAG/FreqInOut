@@ -1,6 +1,6 @@
 # Mesh Client Integration Spec
 
-Status: runtime foundation, responsive lifecycle, and channel administration implemented; live Linux/macOS device QA pending
+Status: runtime foundation, responsive lifecycle, channel administration, and local BLE/serial/TCP transport slice implemented; live Linux/macOS/Windows device QA pending
 Scope: local mesh connection configuration, Meshtastic/MeshCore source contracts, passive message/node ingest, future UI routing
 
 Production remediation for connection naming, responsive BLE fields,
@@ -37,6 +37,127 @@ Bring-up order should be conservative:
 4. Meshtastic HTTP protobuf API.
 5. Meshtastic MQTT, disabled by default.
 6. MeshCore Companion Protocol and MeshCore BLE/serial after Meshtastic foundation is stable.
+
+## Local Connection Service Contract (2026-09-20)
+
+This section is the implementation authority for FIO's local MeshCore and
+Meshtastic connection choices. It incorporates the proven lifecycle work in FIO
+and the transport behavior reviewed in SpotterX and
+`/Users/bill/RadioTools/Programs/mesh-client`. A connection option is not a
+placeholder: if Settings offers it as usable, the installed FIO build must have
+an adapter, a packaged dependency, configuration validation, bounded connect and
+disconnect behavior, health evidence, and receive-path tests for it.
+
+### Qualified transport matrix
+
+| Protocol | TCP / WiFi | USB serial | Bluetooth LE | HTTP API | MQTT bridge |
+| --- | --- | --- | --- | --- | --- |
+| Meshtastic | Supported through the official Python client, including the configured host **and port** | Supported through the official Python client | Supported through the official Python client; platform pairing remains OS-owned | Planned; not selectable | Planned, opt-in, and provenance-distinct; not selectable |
+| MeshCore | Supported through the official `meshcore` Python client | Supported through the official `meshcore` Python client | Supported by FIO's qualified Bleak Companion/NUS implementation | Not applicable to the local Companion service; not selectable | Planned as a distinct broker connection, not a local Companion substitute; not selectable |
+
+The transport list is protocol-aware. Existing saved HTTP or MQTT records are
+retained for forward compatibility, but Settings must label them unsupported and
+must not imply that Connect can work. A saved formerly valid mode is never
+silently changed to another transport. Newly created connections may select only
+the supported modes in the matrix.
+
+FIO packages the official Meshtastic Python client for Python 3.9-3.14 and the
+official MeshCore Python client where its supported Python floor permits it.
+MeshCore 2.x requires Python 3.10 or newer; a Python 3.9 FIO build therefore
+keeps the qualified FIO BLE path, does not advertise MeshCore serial/TCP as
+available, and explains the interpreter requirement. Optional imports remain
+lazy so a missing or damaged hardware package cannot prevent FIO startup.
+
+### Discovery and configuration ownership
+
+- MeshCore BLE uses FIO's bounded scan/select workflow and stable saved device
+  identity. It never scans continuously and never replaces a saved device
+  without an explicit operator choice. Meshtastic BLE currently accepts an
+  exact saved device id/name and lets the official client perform its bounded
+  service-filtered discovery during Connect; a dedicated FIO Meshtastic browse
+  list remains a follow-up and must not reuse the MeshCore/NUS filter.
+- USB serial offers discovered ports and permits an exact manual device path.
+  MeshCore persists and passes the selected baud rate. The official Meshtastic
+  client is fixed at 115200, so FIO shows 115200 as a protocol-owned value
+  rather than offering an ineffective baud choice. FIO does not claim a port
+  until Connect and always closes it on disconnect, cancellation, replacement,
+  and shutdown.
+- TCP accepts a host or IP plus a validated port. Both values are passed to the
+  protocol client. FIO uses bounded connection attempts and preserves the saved
+  endpoint after failure.
+- HTTP and MQTT fields may remain readable for a legacy record, but they are not
+  normal creation choices until their adapters, provenance, authentication,
+  lifecycle, and tests satisfy this same contract.
+- A connection health row names the protocol, transport, saved connection, live
+  device when known, last receive time, and actionable error. It never reports
+  `Connected` merely because configuration validation passed.
+
+### Lifecycle, concurrency, and recovery
+
+All transports retain the existing `MeshConnectionManager` and Qt worker
+boundary. Constructors, scans, serial opens, socket opens, protocol handshakes,
+message pulls, and disconnects run outside the UI thread. Only immutable health
+and event snapshots cross back to Qt.
+
+- Each adapter owns one event loop or synchronous client for its complete
+  session. Connect, receive callbacks, commands, cancellation, and disconnect
+  must use that same session owner.
+- Replacement is ordered: request cancellation, close the old native transport,
+  wait for bounded teardown, then open the replacement. A stale worker may not
+  publish as the current generation.
+- FIO owns reconnect timing. Third-party automatic reconnect is disabled unless
+  later qualification proves that it composes with FIO's single-flight,
+  generation, cancellation, and health rules.
+- MeshCore serial/TCP must perform the Companion application-start handshake and
+  start automatic message fetching. Subscribing to message events without
+  draining `MESSAGES_WAITING` is not receive support.
+- A MeshCore factory returning no device after an apparently successful open is
+  a failed Companion handshake, not a connection. Guidance distinguishes wrong
+  firmware mode, wrong baud/port, unreachable TCP endpoint, and a busy serial
+  device.
+- USB, TCP, and BLE resources must be released on every partial-connect failure.
+  A reconnect cannot race a prior close or retain an orphan reader task.
+
+### Capability truthfulness and outbound boundary
+
+This slice is receive, topology, channel-discovery, Inbox, Map, and Ops ingest.
+Neither current adapter family implements FIO's audited outbound completion
+contract. Therefore Settings must show `Receive only`; it must not offer an
+enabled `Allow Send` control or describe a saved `send_enabled` value as an
+operational capability. Legacy values remain stored but inert.
+
+A later outbound slice must add a protocol-neutral request/result contract with
+destination kind, channel index or MeshCore public-key identity, text, request
+id, acceptance time, completion or acknowledgement evidence, timeout, failure,
+retry classification, policy check, and audit record. Meshtastic broadcast and
+direct send and MeshCore channel and direct send remain distinct operations.
+Device channel create/update/remove is a separate, higher-risk capability and
+stays in the companion application until firmware-version qualification and
+secret handling are complete.
+
+### Acceptance gates
+
+Automated release evidence must cover:
+
+1. the exact protocol/transport capability matrix and legacy unsupported-record
+   preservation;
+2. Meshtastic serial, BLE, and TCP constructor dispatch, including the configured
+   TCP port;
+3. MeshCore serial and TCP factory dispatch, handshake failure, subscription,
+   automatic waiting-message fetch, event normalization, cancellation, and
+   disconnect on one persistent event loop;
+4. missing/incompatible dependency guidance without application-startup failure;
+5. protocol-aware Settings choices, field visibility, receive-only wording, and
+   no false send state;
+6. the existing MeshCore BLE scan, pairing, stale-bond, session-gate, reconnect,
+   channel, ingest, persistence, and shutdown suite with no regressions; and
+7. compile, diff hygiene, and the full focused mesh regression partition.
+
+Physical release evidence remains required for Meshtastic serial/BLE/TCP and
+MeshCore serial/TCP on representative Linux and Windows hosts, plus existing
+MeshCore BLE qualification on Linux/macOS/Windows. An automated mock proves the
+adapter contract, not radio/driver/firmware compatibility; unexercised platform
+rows remain visibly unqualified rather than being reported as verified.
 
 USB and BLE are both required field use cases, but neither should be assumed always available. FIO must never import optional hardware libraries or open a device during app startup.
 
@@ -669,7 +790,16 @@ Implemented now:
 - Meshtastic source-view contract
 - Settings `Local Mesh` panel for station-level mesh connection configuration
 - Mesh protocol selector for Meshtastic vs MeshCore provenance
-- TCP, USB serial, BLE, HTTP, and MQTT configuration fields
+- protocol-aware transport choices: Meshtastic TCP/USB serial/BLE and MeshCore
+  TCP/USB serial/BLE are supported; legacy HTTP/MQTT records remain readable but
+  those unimplemented modes are not offered for new connections
+- packaged, lazy-loaded official Meshtastic client support for TCP/USB
+  serial/BLE, including exact configured TCP-port propagation
+- packaged, lazy-loaded official MeshCore client support for Companion TCP/USB
+  serial on Python 3.10+, with one persistent adapter event loop, application
+  handshake, automatic waiting-message fetching, normalized receive events,
+  and bounded teardown; the qualified FIO Bleak path remains authoritative for
+  MeshCore BLE
 - protocol-derived saved connection names that preserve operator edits, with
   stable adapter/device id, advertised name, and optional source radio/role kept
   as separate fields
@@ -678,7 +808,8 @@ Implemented now:
 - explicit off-thread BLE discovery with immediate progress, elapsed/remaining
   state, cancellable operation ownership, and scan results that do not require a
   second checkbox interaction
-- explicit receive/map/send policy controls, with send disabled by default
+- explicit receive/map policy controls; outbound mesh send remains unavailable
+  and Settings presents the current adapters truthfully as receive-only
 - lazy USB serial-port discovery that does not require PySerial at startup
 - validation-driven setup guidance in Settings
 - non-Qt mesh connection manager for adapter lifecycle, health snapshots, and event publication
@@ -886,6 +1017,11 @@ Not implemented yet:
 
 - persisted retry countdown diagnostics in settings (runtime backoff and manual
   reconnect are implemented)
+- Meshtastic HTTP and MQTT adapters and MeshCore MQTT broker adapters; saved
+  legacy records remain preserved but cannot be activated as supported local
+  transports
+- protocol-neutral, completion-aware outbound send for Meshtastic or MeshCore;
+  legacy `send_enabled` settings remain inert until that contract is delivered
 - native channel write/remove support for MeshCore and Meshtastic adapters;
   their current capabilities intentionally direct device changes to the
   companion application
