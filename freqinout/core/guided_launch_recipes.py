@@ -52,12 +52,12 @@ def _join(root: str, *parts: str) -> str:
 
 
 def _native_identity_child(draft: Mapping[str, Any]) -> str:
-    """Return a readable, durable child name for native Fast Light data.
+    """Return the portable radio-name child for native Fast Light data.
 
-    The Add Radio transaction key is intentionally excluded.  The readable
-    radio label makes the directory recognizable outside FIO while a short
-    suffix from the separately allocated durable application key prevents two
-    same-named radios from colliding.
+    FIO's opaque draft/application keys belong in persistence and manifests,
+    never in an operator-facing application directory.  Display labels may
+    contain spaces, while the native path segment uses a conservative portable
+    spelling so it remains easy to type on Linux, macOS, and Windows.
     """
 
     label = re.sub(
@@ -65,9 +65,7 @@ def _native_identity_child(draft: Mapping[str, Any]) -> str:
         "-",
         _text(draft.get("owner_label") or draft.get("instance_name") or "Radio"),
     ).strip("-._")[:48] or "Radio"
-    durable_key = _text(draft.get("application_system_key"))
-    suffix = durable_key.rsplit("-", 1)[-1][:8] if durable_key else ""
-    return f"{label}-{suffix}" if suffix else label
+    return label
 
 
 def _fast_light_native_roots(

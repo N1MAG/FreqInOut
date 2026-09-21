@@ -301,7 +301,10 @@ def test_fast_light_generated_commands_roots_working_dirs_and_evidence_are_stabl
     assert first.components[0].evidence["executable"]["path"] == "/usr/bin/flrig"
     updates = recipe_draft_updates(first)
     assert updates["launch_component_recipes"]["fldigi"]["effective_command_text"]
-    assert "/.fldigi/instances/Radio-A-durable" in updates["launch_component_recipes"]["fldigi"]["working_directory"]
+    assert updates["launch_component_recipes"]["fldigi"]["working_directory"].endswith(
+        "/.fldigi/instances/Radio-A"
+    )
+    assert "durable123456" not in updates["launch_component_recipes"]["fldigi"]["working_directory"]
     assert "/fio/managed-instances" not in updates["launch_component_recipes"]["fldigi"]["working_directory"]
 
 
@@ -360,8 +363,10 @@ def test_fast_light_transceiver_recipe_orders_distinct_components(tmp_path):
     assert resolution.components[3].operator_starts is True
     assert resolution.components[0].configuration_roots != resolution.components[1].configuration_roots
     updates = recipe_draft_updates(resolution)
-    assert "/.flrig/instances/South-south123" in updates["configuration_path"]
-    assert "/.fldigi/instances/South-south123" in updates["secondary_configuration_path"]
+    assert updates["configuration_path"].endswith("/.flrig/instances/South")
+    assert updates["secondary_configuration_path"].endswith("/.fldigi/instances/South")
+    assert "south123" not in updates["configuration_path"]
+    assert "south123" not in updates["secondary_configuration_path"]
     assert updates["storage_path"].endswith("/logs")
     assert updates["flmsg_message_path"].endswith("/ICS/messages")
     assert updates["flamp_receive_path"].endswith("/.nbems/FLAMP/rx")

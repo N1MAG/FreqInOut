@@ -230,11 +230,17 @@ name, profile/data root, message files, and launch identity.
 
 For a managed distinct instance, FIO creates an immutable draft key when the
 operator chooses `Create a distinct instance`. The radio name supplies the
-human-facing label and a sanitized path/rig-name stem; an immutable suffix
-prevents two similarly named radios from colliding. Back/Next navigation,
+human-facing label and a sanitized path/rig-name stem. Opaque FIO draft and
+application keys remain in FIO persistence and manifests; they do not appear in
+operator-facing configuration names or application-native paths. A qualified
+family may use a documented application-required suffix, but it may not append
+an internal FIO identifier merely for convenience. Back/Next navigation,
 discovery refresh, and later display-name changes do not silently change native
 profile roots, ports, selectors, or launch identity. Renaming or relocating a
-native identity is a separate reviewed clone/migrate operation.
+native identity is a separate reviewed clone/migrate operation. If two radio
+names sanitize to the same exclusive native identity, FIO reports the collision
+and asks for a distinct meaningful radio name rather than exposing an opaque
+hash.
 
 ## Capability Matrix
 
@@ -3648,9 +3654,12 @@ and remain paired to the same radio. A shared binary never causes process-name
 deduplication of radio-scoped components.
 
 For a new managed instance, the final native roots are derived before Review
-from the final radio label plus the immutable durable application key. The
-transaction-only `draft-fast_light-*` key and the FIO private configuration or
-runtime root are forbidden in every final FLRig/FLDigi/NBEMS path. With no
+from the final radio label alone. The display name may contain spaces, while
+the native child is a portable radio-name slug using letters, digits, periods,
+underscores, and hyphens; whitespace and other separators become hyphens. The
+immutable durable application key remains in FIO persistence and is forbidden,
+along with the transaction-only `draft-fast_light-*` key and FIO private
+configuration/runtime roots, in every final FLRig/FLDigi/NBEMS path. With no
 reviewed station override, Unix/macOS use distinct children below the native
 `~/.flrig`, `~/.fldigi`, and `~/.nbems` conventions; Windows uses the qualified
 equivalent native application/NBEMS locations. An established reviewed native
@@ -3806,6 +3815,30 @@ it opens the guided Software step, and canonical identity coverage for the
 Tri-Mode + FIO Spotter + CommStat stack. The focused guided-final-apply,
 Software Administration, canonical-identity, VarAC topology, and changed-file
 hygiene gates must pass.
+
+### GRS-13.6 — Portable Native Names And Guided Step Geometry
+
+Human-facing radio and instance labels may contain spaces and normal operator
+punctuation. A qualified recipe keeps that readable display label but derives
+application-native directory/profile segments with a conservative portable
+slug. For Fast Light the slug is exactly the sanitized radio name; no draft
+key, application-system-key digest, random token, or FIO-private directory is
+appended. Thus `Field Radio 1` displays unchanged and uses `Field-Radio-1` in
+the generated FLRig, FLDigi, and radio-scoped NBEMS roots. Existing reviewed
+explicit paths are preserved; this rule governs newly prepared identities and
+reviewed replacement/migration only.
+
+The fixed Guided Add Radio header contains only purpose and step navigation.
+It remains at its natural height when the dialog is maximized; the single body
+scroll area receives the remaining space. Every Back, Next, or enabled step
+selection resets that body scroll position to the top after visibility/layout
+settles. In particular, entering Safety must show its antenna and supported-band
+controls first rather than inheriting a lower Software/Connections offset.
+
+Acceptance requires pure recipe coverage proving a spaced radio label produces
+portable radio-name-only Fast Light roots with no durable-key fragment, plus a
+real-widget geometry route proving the header has fixed vertical policy and a
+step transition resets a deliberately bottomed-out body scroll to zero.
 
 #### VarAC and VARA
 

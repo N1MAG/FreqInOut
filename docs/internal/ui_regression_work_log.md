@@ -9360,3 +9360,33 @@ coverage: **40 passed**.
 
 Broader guided discovery/model/proposal, production-shaped audit, VarAC native
 acceptance, final-apply, and real guided widget coverage: **93 passed**.
+
+## 2026-09-21 — Fast Light radio-name roots and guided step positioning
+
+Status: focused and broader automated gates passed.
+
+Production screenshots showed a newly prepared FT-710 Fast Light identity using
+`FT-710-99bc8c38` below the native FLDigi/NBEMS locations. The suffix was the
+first eight characters of FIO's durable application key. It was collision-safe
+but violated the accepted operator model: opaque FIO identities belong in the
+database/manifest, while application-native configuration should be recognizable
+and usable without FIO.
+
+New Fast Light preparation now derives its native child solely from the radio
+display name using a conservative cross-platform slug. `FT-710` remains
+`FT-710`; `Field Radio 1` becomes `Field-Radio-1`. Existing explicit reviewed
+paths remain unchanged. Duplicate exclusive roots continue through the existing
+collision safety path rather than receiving a hidden hash suffix.
+
+The Guided Add Radio step group now has fixed vertical sizing so maximizing the
+dialog gives extra space to the single scrolling body instead of the header.
+Every explicit wizard-page transition resets the body scroll to the top both
+immediately and after the visibility/layout event, ensuring Safety begins with
+antenna and supported-band controls.
+
+Focused Fast Light recipe, managed-recipe UI, and production-shaped guided
+operator widget coverage: **54 passed**.
+
+Broader Fast Light identity, canonical Add Radio/Software Administration,
+prepare-first, responsive real-widget, final-apply, and unified guided UX
+coverage: **138 passed**.

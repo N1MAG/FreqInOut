@@ -155,7 +155,8 @@ def test_qualified_fast_light_review_preserves_component_order_and_dependencies(
         assert "Dependencies: flrig" in review
         assert "FLDigi XML-RPC tcp://127.0.0.1:7363" in review
         assert "Configuration roots:" in review
-        assert "/.fldigi/instances/Main-radio-" in review
+        assert "/.fldigi/instances/Main-radio\n" in review
+        assert "def456" not in review
         assert "/managed/draft-fast-light-def456" not in review
     finally:
         assistant.deleteLater()

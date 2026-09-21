@@ -1624,6 +1624,9 @@ def test_add_radio_fixed_navigation_has_one_body_scroll_owner_and_no_horizontal_
         body.verticalScrollBar().setValue(body.verticalScrollBar().maximum())
         _app().processEvents()
         assert body.verticalScrollBar().value() == body.verticalScrollBar().maximum()
+        wizard_header = dialog.findChild(QGroupBox, "guidedSetupWizard")
+        assert wizard_header is not None
+        assert wizard_header.sizePolicy().verticalPolicy() == QSizePolicy.Fixed
         for button in (
             dialog.findChild(QPushButton, "guidedWizardBack"),
             dialog.findChild(QPushButton, "guidedWizardNext"),
@@ -1639,6 +1642,8 @@ def test_add_radio_fixed_navigation_has_one_body_scroll_owner_and_no_horizontal_
         assert next_button is not None and next_button.isEnabled()
         next_button.click()
         _app().processEvents()
+        _app().processEvents()
+        assert body.verticalScrollBar().value() == 0
         back_button = dialog.findChild(QPushButton, "guidedWizardBack")
         assert back_button is not None and back_button.isEnabled()
         dialog.reject()

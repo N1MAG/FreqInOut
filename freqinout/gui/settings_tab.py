@@ -25419,6 +25419,10 @@ class SettingsTab(QWidget):
         )
         guided_wizard_group = QGroupBox("Guided Setup")
         guided_wizard_group.setObjectName("guidedSetupWizard")
+        # This is a navigation header, not page content.  Keep it at its
+        # natural height when the dialog is maximized and give the remaining
+        # space to the single scrolling body below.
+        guided_wizard_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         guided_wizard_layout = QVBoxLayout(guided_wizard_group)
         guided_wizard_layout.setContentsMargins(10, 8, 10, 8)
         guided_wizard_layout.setSpacing(8)
@@ -30866,6 +30870,18 @@ class SettingsTab(QWidget):
                     selected_retained
                 )
             _update_dialog_visibility()
+
+            # Each wizard page starts at its beginning.  Retaining the prior
+            # page's scroll offset can hide the antenna/band controls at the
+            # top of Safety after the operator leaves the longer Software or
+            # Connections pages.  Repeat on the next event-loop turn because
+            # visibility changes can recalculate the scroll range lazily.
+            def _reset_guided_body_scroll() -> None:
+                scroll.verticalScrollBar().setValue(0)
+                scroll.horizontalScrollBar().setValue(0)
+
+            _reset_guided_body_scroll()
+            QTimer.singleShot(0, _reset_guided_body_scroll)
 
         def _guided_save_allowed() -> bool:
             if use_varac_chk.isChecked() and varac_native_preparation_in_progress:
