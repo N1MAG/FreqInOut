@@ -9690,3 +9690,43 @@ with 2 platform skips. The slow all-guided offscreen sweep was interrupted and
 the macOS PySide process faulted while handling that interruption in the GRS-74
 theme test; that exact parametrized test passes independently (**12 tests**).
 Changed Python compilation and `git diff --check` pass.
+
+## 2026-09-21 — selected-radio FLAmp row-start identity recovery
+
+Status: specified, surgically implemented, and focused regression-tested;
+Linux production operator retest remains open. No application-native files or
+unrelated operator documentation were modified.
+
+Production evidence showed that the committed FT-710 Fast Light identity had a
+qualified radio-scoped FLAmp recipe, but Launch Control's row-level **Start**
+passed an in-memory bundle override after disabling the other rows. That
+override replaced the already recovered saved bundle and therefore retained a
+stale name-only FLAmp row. With no exact argument vector, process status could
+collapse to executable-only matching and treat the running FTDX-10 FLAmp as the
+FT-710 instance; no second process was started.
+
+All in-memory bundle overrides now receive the same selected-radio canonical
+recovery as saved bundles before review or launch planning. Immutable component
+identity, executable, argument vector, working directory, dependencies,
+readiness evidence, and managed-directory authority are restored while the
+operator's enabled/startup/monitor choices remain unchanged. The executor
+rejects a radio-scoped FLMsg/FLAmp row that still lacks an exact native launch
+identity, before generic process matching. A reviewed alternate launcher can
+remain eligible only with an explicit per-instance selector and exact non-empty
+arguments. A canonical component restored because it was absent from an older
+in-memory draft remains disabled, preventing row Start from launching an
+unselected sibling. FLAmp was also added to the existing launch-preflight
+directory repair map, which may recreate only the canonical recipe's persisted
+managed directories.
+
+Delegation evidence: `flamp_launch_regression_audit` used `gpt-5.6-luna` at low
+reasoning for an independent, read-only trace of row Start, planner behavior,
+and same-name process matching. The primary agent implemented the production
+repair, specifications, tests, and final review.
+
+Acceptance evidence: the broader launch-bundle, Launch Control isolation,
+guided Fast Light recipe/UI, GRS-13 identity, managed-directory, and software
+status suites pass **149 tests** with 4 platform skips. Coverage proves override
+recovery, exact FT-710 FLAmp launch while an FTDX-10 instance is running,
+fail-closed behavior for an unrecoverable name-only row, and canonical FLAmp
+directory repair. Changed Python compilation and `git diff --check` pass.

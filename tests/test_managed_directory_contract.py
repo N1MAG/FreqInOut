@@ -62,6 +62,26 @@ def test_launch_preflight_repairs_saved_managed_flrig_working_directory(tmp_path
     assert flrig_root.is_dir()
 
 
+def test_launch_preflight_repairs_only_persisted_flamp_directories(tmp_path: Path) -> None:
+    flamp_root = tmp_path / ".nbems" / "instances" / "FT-710"
+    receive = flamp_root / "FLAMP" / "rx"
+    item = {
+        "name": "FLAmp",
+        "instance_identity": "fast-light:ft-710:flamp",
+        "readiness_policy": {
+            "configuration_roots": [str(flamp_root)],
+            "data_roots": [str(receive)],
+            "managed_directories": [str(flamp_root), str(receive)],
+        },
+    }
+
+    ready = LaunchOrchestrator._materialize_item_managed_directories(item)
+
+    assert ready == (flamp_root, receive)
+    assert flamp_root.is_dir()
+    assert receive.is_dir()
+
+
 def test_launch_preflight_never_creates_varac_or_shared_utility_paths(tmp_path: Path) -> None:
     target = tmp_path / "operator" / "VarAC"
     item = {

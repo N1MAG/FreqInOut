@@ -1019,6 +1019,194 @@ def test_canonical_identity_recovers_recipe_fields_from_damaged_saved_launch_row
     assert recovered["readiness_policy"]["managed_directories"] == ["/profiles/ft710/flrig"]
 
 
+def test_manual_bundle_override_recovers_exact_flamp_identity_before_planning() -> None:
+    arguments = (
+        "--config-dir", "/home/bill/.nbems/instances/FT-710",
+        "--arq-server-address", "127.0.0.1",
+        "--arq-server-port", "7323",
+        "--xmlrpc-server-address", "127.0.0.1",
+        "--xmlrpc-server-port", "7363",
+    )
+    component = SimpleNamespace(
+        component_id="flamp",
+        argv=("/usr/local/bin/flamp", *arguments),
+        cwd="/home/bill/.nbems/instances/FT-710",
+        env={},
+        dependencies=("fldigi",),
+        launch={"at_startup": False, "monitor_health": True},
+        readiness={"kind": "process"},
+    )
+    record = SimpleNamespace(
+        bundle_id="fast-light:ft-710",
+        family_key="fast_light",
+        scope="radio_scoped",
+        components=(component,),
+        launch={},
+    )
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator.multi_radio_store = SimpleNamespace(
+        radio_software_identity_generation=lambda _radio_id: 1,
+        list_radio_software_identity_records=lambda _radio_id: (record,),
+        get_software_instance_manifest=lambda _bundle_id: {
+            "evidence": {
+                "launch_recipe": {
+                    "components": [{
+                        "component_key": "flamp",
+                        "executable": "/usr/local/bin/flamp",
+                        "arguments": list(arguments),
+                        "working_directory": "/home/bill/.nbems/instances/FT-710",
+                        "profile_selector": "/home/bill/.nbems/instances/FT-710",
+                        "managed_directories": [
+                            "/home/bill/.nbems/instances/FT-710",
+                            "/home/bill/.nbems/instances/FT-710/FLAMP/rx",
+                        ],
+                        "evidence": {
+                            "source": "flamp_config_dir_and_endpoint_pair",
+                            "confidence": "isolated",
+                        },
+                        "execution_scope": "radio_scoped",
+                    }]
+                }
+            }
+        },
+    )
+    override = {
+        "radio_profile_id": 9,
+        "launch_enabled": True,
+        "items": [{
+            "name": "FLAmp",
+            "instance_key": "FLAmp",
+            "enabled": True,
+            "startup": True,
+            "monitor_health": False,
+            "launch_path_override": "/usr/local/bin/flamp",
+            "dependencies": [],
+            "readiness_policy": {},
+        }],
+    }
+
+    restored = orchestrator._restore_canonical_bundle_override(9, override)
+    row = restored["items"][0]
+
+    assert restored["canonical_recovery"] is True
+    assert row["instance_key"] == "fast-light:ft-710:flamp"
+    assert row["startup"] is True
+    assert row["monitor_health"] is False
+    assert row["dependencies"] == ["fldigi"]
+    assert row["readiness_policy"]["launch_arguments"] == list(arguments)
+    assert row["readiness_policy"]["profile_selector"] == "/home/bill/.nbems/instances/FT-710"
+
+
+def test_manual_override_does_not_enable_canonical_component_absent_from_draft() -> None:
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator._restore_canonical_launch_items = lambda _radio_id, items: [
+        {
+            **items[0],
+            "instance_key": "fast-light:ft-710:flamp",
+            "readiness_policy": {"launch_arguments": ["--config-dir", "/profiles/ft710"]},
+        },
+        {
+            "name": "FLDigi",
+            "instance_key": "fast-light:ft-710:fldigi",
+            "enabled": True,
+            "startup": True,
+            "readiness_policy": {"launch_arguments": ["--config-dir", "/profiles/ft710"]},
+        },
+    ]
+
+    restored = orchestrator._restore_canonical_bundle_override(
+        9,
+        {
+            "launch_enabled": True,
+            "items": [{
+                "name": "FLAmp",
+                "enabled": True,
+                "startup": True,
+                "monitor_health": False,
+            }],
+        },
+    )
+
+    flamp, fldigi = restored["items"]
+    assert flamp["enabled"] is True
+    assert flamp["startup"] is True
+    assert fldigi["enabled"] is False
+    assert fldigi["startup"] is False
+
+
+def test_selected_radio_flamp_launch_ignores_other_radio_process(monkeypatch) -> None:
+    arguments = [
+        "--config-dir", "/home/bill/.nbems/instances/FT-710",
+        "--arq-server-address", "127.0.0.1",
+        "--arq-server-port", "7323",
+        "--xmlrpc-server-address", "127.0.0.1",
+        "--xmlrpc-server-port", "7363",
+    ]
+    item = {
+        "name": "FLAmp",
+        "instance_key": "fast-light:ft-710:flamp",
+        "instance_identity": "fast-light:ft-710:flamp",
+        "radio_ids": [9],
+        "launch_path_override": "/usr/local/bin/flamp",
+        "launch_arguments": arguments,
+        "working_directory": "/home/bill/.nbems/instances/FT-710",
+        "profile_selector": "/home/bill/.nbems/instances/FT-710",
+        "dependencies": [],
+        "readiness_policy": {
+            "kind": "process",
+            "evidence": {"source": "flamp_config_dir_and_endpoint_pair"},
+        },
+        "execution_scope": "radio_scoped",
+    }
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        launch_module.subprocess,
+        "Popen",
+        lambda command, **kwargs: captured.update(command=list(command), **kwargs) or SimpleNamespace(),
+    )
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator._active = True
+    orchestrator._cancel_requested = False
+    orchestrator._queue = [item]
+    orchestrator._index = 0
+    orchestrator._results = []
+    orchestrator.status = SimpleNamespace(
+        cached_program_instance_running=lambda _name, _target, exact_args=(): (
+            tuple(exact_args)
+            == tuple(value.replace("FT-710", "FTDX-10") for value in arguments)
+        )
+    )
+    orchestrator._cached_status_for_item = lambda _item: {"running": True}
+    orchestrator._program_ready_for_sequence = lambda _item: False
+    orchestrator._materialize_item_managed_directories = lambda _item: ()
+    orchestrator._is_self_launch_command = lambda _cmd: False
+    orchestrator._infer_launch_cwd = lambda *_args: None
+    orchestrator._schedule_advance_queue = lambda _delay=0: None
+    orchestrator.dependency_status = SimpleNamespace(refresh_now=lambda **_kwargs: None)
+    orchestrator._poll_timer = SimpleNamespace(setInterval=lambda _value: None, start=lambda: None)
+
+    orchestrator._advance_queue()
+
+    assert captured["command"] == ["/usr/local/bin/flamp", *arguments]
+    assert orchestrator._current_item is item
+
+
+def test_radio_scoped_flamp_without_exact_native_identity_fails_closed() -> None:
+    item = {
+        "name": "FLAmp",
+        "instance_identity": "fast-light:ft-710:flamp",
+        "launch_arguments": [],
+        "execution_scope": "radio_scoped",
+        "operator_starts": False,
+    }
+
+    reason = LaunchOrchestrator._instance_launch_identity_blocker(item)
+
+    assert "radio-scoped launch identity is incomplete" in reason
+    assert "--config-dir" in reason
+    assert "--arq-server-port" in reason
+
+
 def test_canonical_lowercase_component_dependency_still_orders_launch_apps() -> None:
     profiles = [{"id": 9, "name": "FT-710", "runtime_active": 1}]
     fldigi = _item("FLDigi", path="/apps/fldigi", instance_key="fast:ft710:fldigi")

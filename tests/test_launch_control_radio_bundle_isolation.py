@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -150,3 +151,45 @@ def test_old_radio_table_cannot_overwrite_new_radio_cache(monkeypatch, tmp_path)
 
     assert tab._launch_items_cache[0]["startup"] is False
     assert tab._launch_items_cache[0]["monitor_health"] is True
+
+
+def test_row_start_preserves_selected_radio_identity_for_canonical_recovery() -> None:
+    captured: dict[str, object] = {}
+    tab = SettingsTab.__new__(SettingsTab)
+    tab._selected_settings_radio_profile = lambda: {"id": 9, "name": "FT-710"}
+    tab._sync_launch_cache_from_table = lambda: None
+    tab._launch_items_cache = [
+        {
+            **_item("FLAmp", startup=False, monitor=False),
+            "instance_key": "fast-light:ft-710:flamp",
+            "launch_path_override": "/usr/local/bin/flamp",
+        },
+        {
+            **_item("FLRig", startup=True, monitor=True),
+            "instance_key": "fast-light:ft-710:flrig",
+        },
+    ]
+    tab._custom_tool_items_cache = []
+    tab.settings = SimpleNamespace(set=lambda *_args: None)
+    tab.launch_orchestrator = SimpleNamespace(
+        start_radio_startup_sequence=lambda radio_id, **kwargs: (
+            captured.update(radio_id=radio_id, **kwargs) or True
+        ),
+        projection_warning_detail=lambda _radio_id: "",
+    )
+    tab._publish_launch_control_feedback = lambda **_kwargs: None
+    tab._update_launch_control_buttons = lambda: None
+
+    SettingsTab._start_launch_control_item(tab, "FLAmp")
+
+    assert captured["radio_id"] == 9
+    bundle = captured["bundle_override"]
+    assert bundle["launch_enabled"] is True
+    flamp, flrig = bundle["items"]
+    assert flamp["instance_key"] == "fast-light:ft-710:flamp"
+    assert flamp["enabled"] is True
+    assert flamp["startup"] is True
+    assert flamp["monitor_health"] is False
+    assert flrig["instance_key"] == "fast-light:ft-710:flrig"
+    assert flrig["enabled"] is False
+    assert flrig["startup"] is False

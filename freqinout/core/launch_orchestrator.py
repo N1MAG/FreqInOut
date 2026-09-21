@@ -501,6 +501,45 @@ class LaunchOrchestrator(QObject):
             bundle["canonical_recovery"] = True
         return bundle
 
+    def _restore_canonical_bundle_override(
+        self,
+        radio_profile_id: int,
+        bundle: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Apply canonical recipe recovery to an in-memory Launch Control draft.
+
+        Row-level Start and the unsaved Settings draft intentionally pass a
+        bundle override to the planner.  That override must receive the same
+        immutable recipe recovery as the saved bundle; otherwise a pre-update
+        FLAmp/FLMsg row can lose its radio selector and collapse back to
+        executable-only process matching.  Operator-owned checkboxes remain
+        untouched by :meth:`_restore_canonical_launch_items`.
+        """
+
+        restored_bundle = dict(bundle)
+        raw_items = restored_bundle.get("items", [])
+        items = [dict(item) for item in raw_items if isinstance(item, Mapping)]
+        original_names = {
+            str(item.get("name", "") or "").strip().casefold()
+            for item in items
+            if str(item.get("name", "") or "").strip()
+        }
+        restored = self._restore_canonical_launch_items(int(radio_profile_id), items)
+        # Recovery may append a canonical component that was absent from an
+        # older draft.  It is useful for review, but an in-memory row Start or
+        # startup preview must never infer that the absent component was
+        # selected.  Only rows represented in the operator's draft retain
+        # launch eligibility.
+        for item in restored:
+            name = str(item.get("name", "") or "").strip().casefold()
+            if name and name not in original_names:
+                item["enabled"] = False
+                item["startup"] = False
+        restored_bundle["items"] = restored
+        if restored != items:
+            restored_bundle["canonical_recovery"] = True
+        return restored_bundle
+
     def set_radio_launch_bundle(
         self,
         radio_profile_id: int,
@@ -585,7 +624,10 @@ class LaunchOrchestrator(QObject):
             if int(profile.get("id", 0) or 0) > 0
         }
         if scope_radio_id is not None and bundle_override is not None:
-            bundles[int(scope_radio_id)] = dict(bundle_override)
+            bundles[int(scope_radio_id)] = self._restore_canonical_bundle_override(
+                int(scope_radio_id),
+                bundle_override,
+            )
         plan = self.planner.plan_startup(
             profiles,
             bundles,
@@ -627,7 +669,10 @@ class LaunchOrchestrator(QObject):
             if int(profile.get("id", 0) or 0) > 0
         }
         if bundle_override is not None:
-            bundles[int(radio_profile_id)] = dict(bundle_override)
+            bundles[int(radio_profile_id)] = self._restore_canonical_bundle_override(
+                int(radio_profile_id),
+                bundle_override,
+            )
         plan = self.planner.plan_review(
             profiles,
             bundles,
@@ -681,6 +726,10 @@ class LaunchOrchestrator(QObject):
         # startup gate.  This method represents an explicit operator action on
         # one reviewed radio and must remain available independently.
         if self._active:
+            log.warning(
+                "LaunchOrchestrator: selected-radio launch for radio %s blocked because another sequence is active",
+                radio_profile_id,
+            )
             return False
         plan = self.preview_manual_plan(
             int(radio_profile_id),
@@ -688,6 +737,10 @@ class LaunchOrchestrator(QObject):
         )
         queue = plan.queue()
         if not queue:
+            log.warning(
+                "LaunchOrchestrator: selected-radio launch for radio %s produced no launchable recipe",
+                radio_profile_id,
+            )
             return False
         return self._start_sequence("manual", queue)
 
@@ -959,6 +1012,22 @@ class LaunchOrchestrator(QObject):
             self.sequence_progress.emit(result)
             self._schedule_advance_queue(0)
             return
+        identity_blocker = self._instance_launch_identity_blocker(queue_item)
+        if identity_blocker:
+            result = self._result_for(
+                queue_item,
+                status="failed",
+                detail=identity_blocker,
+            )
+            self._results.append(result)
+            self.sequence_progress.emit(result)
+            log.warning(
+                "LaunchOrchestrator: blocked unsafe %s launch identity: %s",
+                name,
+                identity_blocker,
+            )
+            self._schedule_advance_queue(0)
+            return
         if self._program_running(queue_item):
             same_name_identities = {
                 str(value.get("instance_identity", "") or "")
@@ -1083,12 +1152,82 @@ class LaunchOrchestrator(QObject):
             "FLRig": "flrig",
             "FLDigi": "fldigi",
             "FLMsg": "flmsg",
+            "FLAmp": "flamp",
             "JS8Call": "js8call",
         }.get(LaunchOrchestrator._queue_item_name(item), "")
         if not component_key:
             return ()
         paths = managed_directories_from_component(policy, component_key=component_key)
         return materialize_managed_directories(paths)
+
+    @staticmethod
+    def _instance_launch_identity_blocker(item: Any) -> str:
+        """Reject ambiguous multi-instance NBEMS launch identities.
+
+        FLMsg and FLAmp share installation binaries across radios.  A
+        radio-scoped row is launchable only when its native selector is part of
+        the exact argv.  Deliberately station-shared utilities and explicit
+        operator-start rows remain on their existing compatibility paths.
+        """
+
+        if not isinstance(item, Mapping):
+            return ""
+        name = LaunchOrchestrator._queue_item_name(item)
+        if name not in {"FLMsg", "FLAmp"}:
+            return ""
+        scope = str(item.get("execution_scope", "standard") or "standard").strip().lower()
+        if scope == "station_shared_utility" or bool(item.get("operator_starts", False)):
+            return ""
+        arguments = item.get("launch_arguments", ())
+        if not isinstance(arguments, (list, tuple)):
+            arguments = ()
+        values = tuple(str(value or "").strip() for value in arguments)
+
+        def _missing_value(flag: str) -> bool:
+            try:
+                index = values.index(flag)
+            except ValueError:
+                return True
+            return index + 1 >= len(values) or not values[index + 1]
+
+        required = (
+            ("--flmsg-dir",)
+            if name == "FLMsg"
+            else (
+                "--config-dir",
+                "--arq-server-address",
+                "--arq-server-port",
+                "--xmlrpc-server-address",
+                "--xmlrpc-server-port",
+            )
+        )
+        missing = tuple(flag for flag in required if _missing_value(flag))
+        if not missing:
+            return ""
+        readiness = item.get("readiness_policy", {})
+        readiness = readiness if isinstance(readiness, Mapping) else {}
+        evidence = readiness.get("evidence", {})
+        evidence = evidence if isinstance(evidence, Mapping) else {}
+        canonical_source = {
+            "FLMsg": "nbems_native_radio_root",
+            "FLAmp": "flamp_config_dir_and_endpoint_pair",
+        }[name]
+        profile_selector = str(item.get("profile_selector", "") or "").strip()
+        # An adopted, version-qualified launcher may use a different native
+        # argument grammar.  It remains safe only when it still supplies an
+        # explicit per-instance selector and a non-empty exact argv.  Canonical
+        # FIO recipes must always satisfy the current qualified grammar.
+        if (
+            values
+            and profile_selector
+            and str(evidence.get("source", "") or "").strip() != canonical_source
+        ):
+            return ""
+        return (
+            f"{name} radio-scoped launch identity is incomplete; missing "
+            + ", ".join(missing)
+            + ". Review or replace this software instance before launch."
+        )
 
     def _persist_planned_js8_storage(self, item: Any) -> None:
         """Persist launch identity without claiming runtime verification.

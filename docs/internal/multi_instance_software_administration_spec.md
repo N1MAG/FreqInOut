@@ -161,6 +161,21 @@ radio-scoped `--config-dir`, ARQ address/port, and FLDigi XML-RPC address/port
 arguments. Another radio's FLMsg or FLAmp process therefore cannot satisfy the
 selected radio's runtime identity.
 
+Saved-bundle launch, row-level **Start**, startup launch, and an unsaved Launch
+Control draft all pass through the same canonical-recipe recovery before the
+station planner. Recovery is scoped by radio and restores immutable launch
+facts without changing enabled/startup/monitor preferences. Thus a legacy
+name-only FLAmp row for the selected radio cannot fall back to executable-only
+matching and cannot be suppressed by a different radio's running FLAmp. A
+canonical component missing from the supplied draft remains disabled after
+recovery and is not inferred as selected. A
+qualified current FLAmp recipe missing any required root or endpoint argument
+fails closed with the missing fields named; it is not launched generically.
+An adopted alternate launcher remains eligible only when its reviewed recipe
+supplies a distinct instance selector and exact non-empty argument vector.
+Launch preflight may repair only the recovered recipe's recorded managed
+directories.
+
 ### Cluster VarAC
 
 Each VarAC radio uses a distinct node record with its own installation/launcher,

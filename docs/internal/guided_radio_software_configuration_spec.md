@@ -3891,6 +3891,22 @@ readiness because exact executable plus all persisted arguments are the process
 identity. Launch-at-startup follows the radio's Launch Control policy and still
 requires **Use Radio**.
 
+Every Launch Control entry point, including the row-level **Start** action and
+an unsaved in-memory Launch Control draft, must rehydrate immutable component
+recipe fields from that selected radio's committed canonical identity before
+planning. Rehydration restores the component key, executable, exact argument
+vector, working directory, dependencies, readiness evidence, and the reviewed
+managed-directory set while preserving the operator's enabled,
+launch-at-startup, and monitor checkboxes. It must not borrow a same-named
+process or recipe from another radio. A canonical component absent from the
+in-memory draft may be restored for review but remains disabled and excluded
+from that launch. A qualified FLAmp row may be launched
+only with its complete radio-scoped native argument identity; a stale row that
+cannot be rehydrated is rejected with a specific missing-identity message
+before process inspection or launch. Launch preflight may idempotently recreate
+only the persisted managed directories for that recovered recipe and never
+derives or creates a new path.
+
 An adopted existing launcher may preserve another proven platform/version
 layout unchanged. A legacy FLAmp row lacking a qualified root or explicit ARQ
 pair remains `Needs attention` and is never silently converted, shared, or
