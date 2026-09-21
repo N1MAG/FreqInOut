@@ -163,11 +163,13 @@ Runtime status and launch suppression follow the same saved identity shown in
 Software Administration. FLRig, FLDigi, and JS8Call use their persisted
 endpoint plus exact process recipe, so a process belonging to another radio
 cannot block the selected radio's launch. FLMsg uses its exact executable plus
-radio-scoped `--flmsg-dir` argument; `--auto-dir` belongs to FLDigi because the
-current FLMsg parser does not accept it. FLAmp uses its exact executable plus
-radio-scoped `--config-dir`, ARQ address/port, and FLDigi XML-RPC address/port
-arguments. Another radio's FLMsg or FLAmp process therefore cannot satisfy the
-selected radio's runtime identity.
+radio-scoped `--flmsg-dir` argument and native `-title "FLMsg — <radio name>"`;
+`--auto-dir` belongs to FLDigi because the current FLMsg parser does not accept
+it. FLAmp uses its exact executable plus radio-scoped `--config-dir`, ARQ
+address/port, FLDigi XML-RPC address/port, and native
+`-title "FLAmp — <radio name>"` arguments. Titles use the saved human radio
+name, never an internal draft/application ID. Another radio's FLMsg or FLAmp
+process therefore cannot satisfy the selected radio's runtime identity.
 
 Saved-bundle launch, row-level **Start**, startup launch, and an unsaved Launch
 Control draft all pass through the same canonical-recipe recovery before the
@@ -198,6 +200,14 @@ FIO presents **VarAC arrangement** before node, Files, connection, or cluster
 detail. It does not imply that ordinary single-instance VarAC requires cluster
 mode. It must detect duplicate node paths, launch identities, and cluster
 instance numbers before saving.
+
+VarAC's supported launch contract has no window-title argument. A managed node
+persists `VarAC — <radio name>` as presentation metadata while retaining the
+exact executable/INI vector. After a successful FIO start, a bounded
+asynchronous helper may rename only a top-level window advertising that
+process's PID on Windows or X11/XWayland under Linux/Wine. Failure is a warning,
+not a launch/readiness failure; FIO never searches by generic caption or edits
+the VarAC binary/INI to obtain a title.
 
 A durable radio-to-node link is topology identity even when that node still has
 an incomplete path set. Add Radio must therefore keep the named node available

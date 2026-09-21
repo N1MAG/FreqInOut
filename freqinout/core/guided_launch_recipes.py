@@ -69,6 +69,21 @@ def _native_identity_child(draft: Mapping[str, Any]) -> str:
     return label
 
 
+def managed_instance_window_title(application_name: object, radio_label: object) -> str:
+    """Return the operator-facing title for one radio-owned child process.
+
+    Window titles are presentation metadata, never instance selectors.  Keep
+    the radio's human label (including spaces) while removing control
+    characters that do not belong in a native title bar or process argv.
+    """
+
+    application = re.sub(r"[\x00-\x1f\x7f]+", " ", _text(application_name))
+    label = re.sub(r"[\x00-\x1f\x7f]+", " ", _text(radio_label))
+    application = " ".join(application.split())[:48] or "Application"
+    label = " ".join(label.split())[:80] or "Radio"
+    return f"{application} — {label}"
+
+
 def _fast_light_native_roots(
     draft: Mapping[str, Any],
     *,
@@ -627,6 +642,7 @@ def resolve_fast_light_managed_recipe(
         platform=platform,
         storage_home=storage_home,
     )
+    radio_label = _text(draft.get("owner_label") or draft.get("instance_name")) or "Radio"
     flrig_profile = native["flrig_root"]
     fldigi_profile = native["fldigi_root"]
     logs = native["fldigi_logs"]
@@ -739,7 +755,10 @@ def resolve_fast_light_managed_recipe(
                 # FLMsg 4.0.24 advertises --auto-dir, but its parser does not
                 # accept it.  --flmsg-dir is the supported multi-instance
                 # selector; FLDigi receives the same root plus --auto-dir.
-                arguments=("--flmsg-dir", native["flmsg_root"]),
+                arguments=(
+                    "--flmsg-dir", native["flmsg_root"],
+                    "-title", managed_instance_window_title("FLMsg", radio_label),
+                ),
                 working_directory=native["flmsg_root"],
                 dependencies=("fldigi",),
                 profile_selector=native["flmsg_root"],
@@ -762,6 +781,10 @@ def resolve_fast_light_managed_recipe(
                     "fldigi_host": host,
                     "fldigi_xmlrpc_port": fldigi_port,
                 },
+                readiness={
+                    "kind": "process",
+                    "window_title": managed_instance_window_title("FLMsg", radio_label),
+                },
                 confidence="pending" if not flmsg_path else "verified",
                 execution_scope=_scope(draft),
                 launch_at_startup=startup and bool(flmsg_path),
@@ -780,6 +803,7 @@ def resolve_fast_light_managed_recipe(
                     "--arq-server-port", str(flamp_arq_port),
                     "--xmlrpc-server-address", host,
                     "--xmlrpc-server-port", str(fldigi_port),
+                    "-title", managed_instance_window_title("FLAmp", radio_label),
                 ) if flamp_arq_port else (),
                 working_directory=native["flamp_root"],
                 dependencies=("fldigi",),
@@ -801,6 +825,7 @@ def resolve_fast_light_managed_recipe(
                     "fldigi_host": host,
                     "fldigi_xmlrpc_port": fldigi_port,
                     "fldigi_arq_port": flamp_arq_port,
+                    "window_title": managed_instance_window_title("FLAmp", radio_label),
                 },
                 evidence={
                     "source": "flamp_config_dir_and_endpoint_pair",
@@ -1024,6 +1049,7 @@ __all__ = [
     "canonical_js8_version",
     "GuidedLaunchComponent",
     "GuidedLaunchRecipeResolution",
+    "managed_instance_window_title",
     "recipe_draft_updates",
     "recipe_resolution_from_mapping",
     "resolve_fast_light_managed_recipe",

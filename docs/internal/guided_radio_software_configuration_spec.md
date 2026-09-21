@@ -3838,8 +3838,11 @@ bundle persists, at minimum, the root plus `ICS/messages`, `ICS/templates`, and
 flow does not ask the operator to type each child path.
 
 FLDigi and FLMsg persist the same reviewed NBEMS root and `WRAP/auto` path.
-FLDigi launches with both selectors; FLMsg launches only with
-`--flmsg-dir <radio NBEMS root>`. Software
+FLDigi launches with both selectors; FLMsg launches with
+`--flmsg-dir <radio NBEMS root> -title "FLMsg — <radio name>"`. The FLTK title
+argument is presentation-only: it uses the saved human radio name, never an
+opaque FIO/draft ID, and does not replace the NBEMS root as process identity.
+Software
 Administration must show the exact saved executable and `ICS/messages` source
 that those arguments select; it may not show a blank field, an unrelated
 station default, or a draft-only path.
@@ -3871,7 +3874,8 @@ endpoints, component keys, dependencies, and launch identity. The current
 qualified FLAmp contract uses one radio-scoped NBEMS root plus the structured
 arguments `--config-dir <radio NBEMS root>`, `--arq-server-address <IPv4>`,
 `--arq-server-port <radio ARQ port>`, `--xmlrpc-server-address <IPv4>`, and
-`--xmlrpc-server-port <radio FLDigi XML-RPC port>`. FLDigi receives the matching
+`--xmlrpc-server-port <radio FLDigi XML-RPC port>`, followed by the supported
+FLTK presentation argument `-title "FLAmp — <radio name>"`. FLDigi receives the matching
 ARQ address/port arguments. Because the qualified FLAmp parser accepts dotted
 IPv4 addresses rather than arbitrary host names, a managed local recipe uses a
 reviewed numeric loopback or numeric local address.
@@ -3960,12 +3964,39 @@ invariant without requiring a migration of unrelated existing rows.
 For valid Fast Light identities with legacy or incomplete FLMsg/FLAmp data,
 Software Administration MUST expose **Repair FLMsg/FLAmp components**, a
 narrower action than Replace instance. It preserves FLRig/FLDigi executable,
-native profile, endpoint, and launch identity; only additive FLDigi ARQ-pairing
-arguments needed for FLAmp may be introduced. Unrelated families and Launch
+native profile, endpoint, and launch identity; it may correct FLMsg/FLAmp's
+qualified native selectors and radio-visible title arguments, and only the
+additive FLDigi NBEMS/ARQ-pairing arguments needed by those components.
+Unrelated families and Launch
 Control preferences remain unchanged. No external application files may be
 written. One optimistic generation-checked atomic transaction merges only
 FLMsg/FLAmp canonical, manifest, and launch rows, then performs complete
 readback/parity validation and rolls back on any error.
+
+#### GRS-13.4b — Radio-visible child window identity
+
+Every FIO-managed FLMsg and FLAmp component persists the native `-title`
+argument with the saved radio display name. Add Radio, Software Administration,
+the canonical identity, manifest evidence, Launch Control, repair, and runtime
+process matching use the same argument vector. Renaming a radio is a reviewed
+identity change; an old, absent, or stale title is eligible for the narrow
+FLMsg/FLAmp component repair. A title discrepancy is recoverable presentation
+work and never authorizes FIO to borrow another radio's process or block saving
+an otherwise safe draft.
+
+VarAC 13.2.7 does not expose a qualified command-line or INI window-title
+setting. FIO therefore preserves the exact supported `VarAC.exe <member INI>`
+vector and persists `VarAC — <radio name>` as launch presentation metadata.
+After FIO starts that exact managed process, it may apply the title only to a
+top-level window advertising the returned process ID: through `SetWindowTextW`
+on Windows or `_NET_WM_PID` plus `_NET_WM_NAME` on X11/XWayland under
+Linux/Wine. The lookup is bounded and retried asynchronously while the first
+window is created. It never searches or selects by the generic `VarAC` caption,
+never rewrites the executable/INI, and never delays readiness. A compositor or
+Wayland session that denies the request produces one warning while VarAC launch
+remains valid. For an older structured managed row that predates the metadata,
+Launch Control may derive the same presentation title only when its plan has
+exactly one selected radio name; it does not mutate the stored launch identity.
 
 ### GRS-13.5 — Atomic Publication And Edit-Apps Invariant
 
@@ -4413,11 +4444,14 @@ The integrated gate requires all of the following:
    processes, message sources, and launch components. Shared binaries do not
    collapse them. Explicit station services launch once and retain all intended
    radio and access-policy bindings.
-5. FLMsg launches with only its supported radio-specific `--flmsg-dir`
-   identity while FLDigi owns the matching `--flmsg-dir`/`--auto-dir` handoff.
-   FLAmp launches with its radio-scoped `--config-dir` and exact distinct
-   ARQ/XML-RPC pairing. A second radio's process satisfies neither identity;
-   legacy incomplete rows remain visible for reviewed replacement.
+5. FLMsg launches with its supported radio-specific `--flmsg-dir` identity and
+   native `-title "FLMsg — <radio name>"`, while FLDigi owns the matching
+   `--flmsg-dir`/`--auto-dir` handoff. FLAmp launches with its radio-scoped
+   `--config-dir`, exact distinct ARQ/XML-RPC pairing, and native radio title.
+   VarAC keeps its exact structured executable/INI vector and receives only a
+   PID-scoped best-effort desktop title after start. A second radio's process
+   satisfies none of these identities; legacy incomplete rows remain visible
+   for reviewed repair or replacement.
 6. Messages retain radio, instance, and receipt-context provenance;
    unsafe/partial files are not presented as complete; duplicate content is
    idempotent without erasing distinct receipts; no source file is moved or

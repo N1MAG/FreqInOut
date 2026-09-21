@@ -224,12 +224,18 @@ def test_guided_fast_light_save_round_trips_all_native_paths_and_components(tmp_
     assert items["FLMsg"]["readiness"]["launch_arguments"] == [
         "--flmsg-dir",
         str(tmp_path / "operator-home" / ".nbems" / "instances" / "FT-710"),
+        "-title",
+        "FLMsg — FT-710",
     ]
     assert items["FLAmp"]["readiness"]["launch_arguments"][:2] == [
         "--config-dir",
         str(tmp_path / "operator-home" / ".nbems" / "instances" / "FT-710"),
     ]
     assert "--arq-server-port" in items["FLAmp"]["readiness"]["launch_arguments"]
+    assert items["FLAmp"]["readiness"]["launch_arguments"][-2:] == [
+        "-title",
+        "FLAmp — FT-710",
+    ]
     persisted = " ".join(
         (
             saved["fldigi_log_path"],
@@ -348,7 +354,10 @@ def test_converted_varac_member_is_mirrored_without_losing_other_identities(tmp_
                             "working_directory": "/opt/VarAC",
                             "environment": {"WINEPREFIX": "/home/operator/.wine"},
                             "operator_starts": False,
-                            "readiness": {"kind": "process"},
+                            "readiness": {
+                                "kind": "process",
+                                "window_title": "VarAC — FTDX-10",
+                            },
                         },),
                     }
                 },

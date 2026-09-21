@@ -199,6 +199,7 @@ from freqinout.core.varac_native_transaction import (
 )
 from freqinout.core.guided_launch_recipes import (
     canonical_js8_version,
+    managed_instance_window_title,
     recipe_draft_updates,
     resolve_guided_launch_recipe,
 )
@@ -10245,6 +10246,24 @@ class SettingsTab(QWidget):
                 return True
             profile = self._device_profile_by_id(ident) or {}
             if str(getattr(record, "management_mode", "") or "").casefold() == "fio_managed":
+                radio_name = str(profile.get("name") or "Radio").strip() or "Radio"
+
+                def _has_title(component: Any, application: str) -> bool:
+                    if component is None:
+                        return True
+                    argv = tuple(str(value) for value in component.argv)
+                    try:
+                        index = argv.index("-title")
+                    except ValueError:
+                        return False
+                    return (
+                        index + 1 < len(argv)
+                        and argv[index + 1]
+                        == managed_instance_window_title(application, radio_name)
+                    )
+
+                if not _has_title(flmsg, "FLMsg") or not _has_title(flamp, "FLAmp"):
+                    return True
                 if flmsg is not None and bool(int(profile.get("use_flmsg", 0) or 0)):
                     expected_messages = self._normalized_path_text(
                         os.path.join(str(flmsg.cwd or ""), "ICS", "messages")
@@ -33848,8 +33867,8 @@ class SettingsTab(QWidget):
             return False
         return True
 
-    @staticmethod
     def _converted_varac_member_persistence_values(
+        self,
         session: VarACNativeExternalSession,
         *,
         native_writer_key: str,
@@ -33858,6 +33877,23 @@ class SettingsTab(QWidget):
 
         member = session.plan.members[0]
         launch_argv = tuple(str(value) for value in member.launch_command)
+        radio_name = "VarAC Radio"
+        if str(member.member_id).startswith("node:"):
+            try:
+                node_id = int(str(member.member_id).split(":", 1)[1])
+                profile = next(
+                    (
+                        row
+                        for row in self.multi_radio_store.list_device_profiles()
+                        if int(row.get("varac_node_id") or 0) == node_id
+                    ),
+                    None,
+                )
+                if isinstance(profile, Mapping):
+                    radio_name = str(profile.get("name") or radio_name).strip() or radio_name
+            except (TypeError, ValueError):
+                pass
+        window_title = managed_instance_window_title("VarAC", radio_name)
         return {
             "existing_standalone_application_values": {
                 "db_path": session.plan.shared_db_path,
@@ -33898,7 +33934,10 @@ class SettingsTab(QWidget):
                                 "dependencies": (),
                                 "execution_scope": "standard",
                                 "operator_starts": False,
-                                "readiness": {"kind": "process"},
+                                "readiness": {
+                                    "kind": "process",
+                                    "window_title": window_title,
+                                },
                             },
                         ),
                     }
@@ -33928,6 +33967,9 @@ class SettingsTab(QWidget):
         launch_argv = tuple(str(value) for value in member.launch_command)
         launch_environment = (
             {"WINEPREFIX": str(member.wine_prefix)} if member.wine_prefix else {}
+        )
+        window_title = managed_instance_window_title(
+            "VarAC", str(profile.get("name") or "Radio")
         )
         draft = {
             "family_key": "varac",
@@ -33961,7 +34003,10 @@ class SettingsTab(QWidget):
                         "dependencies": (),
                         "execution_scope": "standard",
                         "operator_starts": False,
-                        "readiness": {"kind": "process"},
+                        "readiness": {
+                            "kind": "process",
+                            "window_title": window_title,
+                        },
                     },
                 ),
             },
@@ -35039,6 +35084,10 @@ class SettingsTab(QWidget):
                 if member.wine_prefix
                 else {}
             )
+            varac_window_title = managed_instance_window_title(
+                "VarAC",
+                str(draft.get("owner_label") or draft.get("instance_name") or "Radio"),
+            )
             varac_managed_directories = tuple(
                 dict.fromkeys(
                     (
@@ -35079,7 +35128,10 @@ class SettingsTab(QWidget):
                                 "dependencies": (),
                                 "execution_scope": "standard",
                                 "operator_starts": False,
-                                "readiness": {"kind": "process"},
+                                "readiness": {
+                                    "kind": "process",
+                                    "window_title": varac_window_title,
+                                },
                             },
                         ),
                         "fingerprint": result.plan.plan_fingerprint,
@@ -35418,6 +35470,15 @@ class SettingsTab(QWidget):
                 if member.wine_prefix
                 else {}
             )
+            varac_window_title = managed_instance_window_title(
+                "VarAC",
+                str(
+                    updated_varac.get("owner_label")
+                    or updated_varac.get("instance_name")
+                    or updated.get("name")
+                    or "Radio"
+                ),
+            )
             vara_executable_path = str(
                 member.vara_target_runtime_folder
                 / member.vara_main_executable_relative_path
@@ -35482,7 +35543,10 @@ class SettingsTab(QWidget):
                                 "execution_scope": "standard",
                                 "operator_starts": False,
                                 "launch_at_startup": launch_at_startup,
-                                "readiness": {"kind": "process"},
+                                "readiness": {
+                                    "kind": "process",
+                                    "window_title": varac_window_title,
+                                },
                             },
                         ),
                         "fingerprint": result.plan.plan_fingerprint,

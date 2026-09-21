@@ -94,6 +94,7 @@ def test_component_repair_visibility_detects_stale_software_admin_message_path()
     tab.device_profiles = [
         {
             "id": 72,
+            "name": "FT-710",
             "use_flmsg": 1,
             "use_flamp": 1,
             "flmsg_message_path": "/home/bill/.nbems/instances/FT-710/ICS/messages",
@@ -106,7 +107,13 @@ def test_component_repair_visibility_detects_stale_software_admin_message_path()
         components=(
             SimpleNamespace(
                 component_id="flmsg",
-                argv=("/usr/local/bin/flmsg", "--flmsg-dir", "/home/bill/.nbems/instances/FT-710"),
+                argv=(
+                    "/usr/local/bin/flmsg",
+                    "--flmsg-dir",
+                    "/home/bill/.nbems/instances/FT-710",
+                    "-title",
+                    "FLMsg — FT-710",
+                ),
                 cwd="/home/bill/.nbems/instances/FT-710",
             ),
             SimpleNamespace(
@@ -117,6 +124,8 @@ def test_component_repair_visibility_detects_stale_software_admin_message_path()
                     "/home/bill/.nbems/instances/FT-710",
                     "--arq-server-port",
                     "7323",
+                    "-title",
+                    "FLAmp — FT-710",
                 ),
                 cwd="/home/bill/.nbems/instances/FT-710",
             ),
@@ -132,3 +141,5 @@ def test_component_repair_visibility_detects_stale_software_admin_message_path()
         "/home/bill/.nbems/instances/FT-710/FLAMP/rx"
     )
     assert tab._fast_light_message_component_repair_needed(72) is False
+    record.components[0].argv = record.components[0].argv[:-2]
+    assert tab._fast_light_message_component_repair_needed(72) is True

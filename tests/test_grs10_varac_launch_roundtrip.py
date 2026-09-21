@@ -47,6 +47,7 @@ def _structured_item(*, executable: str, arguments: list[str], cwd: str, environ
             "working_directory": cwd,
             "environment": environment,
             "readiness": "process",
+            "window_title": "VarAC — Radio A",
         },
     }
 
@@ -89,6 +90,7 @@ def test_varac_structured_recipe_store_reload_planner_and_orchestrator_are_byte_
     assert saved_item["readiness_policy"]["launch_arguments"] == arguments
     assert saved_item["readiness_policy"]["working_directory"] == cwd
     assert saved_item["readiness_policy"]["environment"] == environment
+    assert saved_item["readiness_policy"]["window_title"] == "VarAC — Radio A"
 
     profile = store.get_device_profile(radio["id"])
     planned = StationLaunchPlanner().plan_startup([profile], {radio["id"]: reopened}).instances[0]
@@ -97,6 +99,7 @@ def test_varac_structured_recipe_store_reload_planner_and_orchestrator_are_byte_
     assert planned.launch_arguments == tuple(arguments)
     assert planned.working_directory == cwd
     assert dict(planned.environment) == environment
+    assert dict(planned.readiness_policy)["window_title"] == "VarAC — Radio A"
 
     orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
     command, description = orchestrator._resolve_launch_command(planned.as_queue_item())
@@ -213,6 +216,64 @@ def test_process_runner_receives_structured_varac_argv_cwd_and_environment_uncha
     assert captured["shell"] is False
     assert captured["cwd"] == cwd
     assert captured["env"]["WINEPREFIX"] == environment["WINEPREFIX"]
+
+
+def test_varac_window_title_is_pid_scoped_retried_and_never_blocks_launch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import freqinout.core.launch_orchestrator as launch_module
+
+    scheduled: list[tuple[int, object]] = []
+    attempts: list[tuple[int, str]] = []
+    outcomes = iter((False, True))
+    monkeypatch.setattr(
+        launch_module,
+        "QTimer",
+        SimpleNamespace(
+            singleShot=lambda delay, callback: scheduled.append((delay, callback))
+        ),
+    )
+    monkeypatch.setattr(
+        launch_module,
+        "set_process_window_title",
+        lambda pid, title: attempts.append((pid, title)) or next(outcomes),
+    )
+    item = _structured_item(
+        executable="wine",
+        arguments=["/opt/VarAC/VarAC.exe", r"C:\VarAC\VarAC-Radio A.ini"],
+        cwd="/opt/VarAC",
+        environment={"WINEPREFIX": "/home/bill/.wine"},
+    )
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+
+    orchestrator._schedule_process_window_title(item, SimpleNamespace(pid=4321))
+
+    assert scheduled[0][0] == 250
+    scheduled.pop(0)[1]()
+    assert attempts == [(4321, "VarAC — Radio A")]
+    assert scheduled[0][0] == 750
+    scheduled.pop(0)[1]()
+    assert attempts == [
+        (4321, "VarAC — Radio A"),
+        (4321, "VarAC — Radio A"),
+    ]
+
+
+def test_existing_structured_varac_row_derives_title_from_one_radio_context() -> None:
+    assert LaunchOrchestrator._window_title_for_item(
+        {
+            "name": "VarAC",
+            "radio_names": ["FT-710"],
+            "readiness_policy": {"structured_launch": True},
+        }
+    ) == "VarAC — FT-710"
+    assert LaunchOrchestrator._window_title_for_item(
+        {
+            "name": "VarAC",
+            "radio_names": ["FT-710", "FTDX-10"],
+            "readiness_policy": {"structured_launch": True},
+        }
+    ) == ""
 
 
 def test_varac_legacy_launch_command_remains_compatibility_fallback() -> None:

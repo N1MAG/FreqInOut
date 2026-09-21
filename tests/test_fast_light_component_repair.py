@@ -270,7 +270,14 @@ def test_legacy_flmsg_flamp_repair_is_component_scoped_and_preserves_preferences
     assert "--arq-server-port" in after_fast_components["fldigi"]["argv"]
     assert "--flmsg-dir" in after_fast_components["fldigi"]["argv"]
     assert "--auto-dir" not in after_fast_components["flmsg"]["argv"]
-    assert after_fast_components["flamp"]["argv"][-1] == "7363"
+    assert after_fast_components["flmsg"]["argv"][-2:] == [
+        "-title",
+        "FLMsg — FT-710",
+    ]
+    assert after_fast_components["flamp"]["argv"][-2:] == [
+        "-title",
+        "FLAmp — FT-710",
+    ]
     assert after_fast_components["flamp"]["cwd"] == str(home / ".nbems/instances/FT-710")
     assert store.validate_radio_software_identity_projections(int(radio["id"])).get("fast_light") is None
     saved_profile = store.get_device_profile(int(radio["id"]))

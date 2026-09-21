@@ -1,5 +1,48 @@
 # UI Regression Work Log
 
+## 2026-09-21 — Radio-visible FLMsg, FLAmp, and VarAC instance titles
+
+Observable acceptance route: create or repair two radio-managed Fast Light /
+VarAC identities, launch each radio's components through Launch Control, and
+see the radio's saved human name in the child application title without any
+change to profile roots, endpoints, dependencies, executable selection, or
+VarAC's structured executable/INI vector.
+
+FLMsg 4.0.24 and FLAmp 2.2.14 expose the FLTK `-title` option. Their canonical
+managed recipes now persist `FLMsg — <radio name>` and
+`FLAmp — <radio name>` in the exact argument vector. The narrow component
+repair detects absent/stale titles and repairs them together with the existing
+radio-specific NBEMS/endpoint identity. Opaque FIO draft and application IDs
+never appear in the title.
+
+VarAC 13.2.7 has no qualified title argument or INI key; inspection of its
+managed .NET entry/form construction confirmed the executable builds the main
+caption from fixed product/version fields. FIO therefore leaves the supported
+VarAC argv byte-exact, persists `VarAC — <radio name>` as presentation metadata,
+and after launch performs a bounded asynchronous PID-scoped title update on
+Windows (`SetWindowTextW`) or Linux/Wine under X11/XWayland
+(`_NET_WM_PID`/`_NET_WM_NAME`). Failure is logged once and never blocks launch
+or readiness. Generic-caption matching, executable patching, and invented INI
+keys are prohibited.
+
+Work packages and model ownership:
+
+- `gpt-6-astra`, high reasoning: native-contract verification, architecture,
+  implementation, delegated-audit review/correction, specifications, and final
+  integration.
+- `gpt-5.6-luna`, low reasoning: bounded read-only launch/repair/test impact
+  audit. The primary retained the useful affected-file inventory, rejected the
+  unsafe suggestion to make presentation titles launch blockers, and verified
+  VarAC independently before integration.
+
+Acceptance evidence: focused recipe/repair/Software Administration/VarAC
+round-trip suite `66 passed`; broader launch-bundle/status/managed-directory
+and GRS-6.2 suite `99 passed, 2 skipped`; process-title dispatch suite
+`3 passed`. The combined non-overlapping result is `168 passed, 2 skipped`.
+Live Windows and Linux/Wine title-bar behavior remains the external
+qualification gate because the current macOS environment cannot host either
+native VarAC route.
+
 ## 2026-09-21 — GRS-13.4a Fast Light component-scoped legacy repair
 
 The controlling specifications now define a dedicated Repair FLMsg/FLAmp

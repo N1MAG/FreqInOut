@@ -19,11 +19,13 @@ from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.dependency_status_service import get_dependency_status_service
 from freqinout.core.launch_bundle_store import LaunchBundleStore, normalize_launch_items
 from freqinout.core.js8_storage import resolve_js8_storage, variant_family_from_version
+from freqinout.core.guided_launch_recipes import managed_instance_window_title
 from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.managed_directory_contract import (
     managed_directories_from_component,
     materialize_managed_directories,
 )
+from freqinout.core.process_window_title import set_process_window_title
 from freqinout.core.station_launch_planner import LaunchPlan, StationLaunchPlanner
 
 
@@ -1102,7 +1104,14 @@ class LaunchOrchestrator(QObject):
                         if str(key).strip()
                     }
                 )
-            subprocess.Popen(cmd, shell=False, creationflags=creationflags, cwd=cwd, env=environment)
+            process = subprocess.Popen(
+                cmd,
+                shell=False,
+                creationflags=creationflags,
+                cwd=cwd,
+                env=environment,
+            )
+            self._schedule_process_window_title(queue_item, process)
             if name == "JS8Call":
                 try:
                     self._persist_planned_js8_storage(queue_item)
@@ -1131,6 +1140,70 @@ class LaunchOrchestrator(QObject):
             self._results.append(result)
             self.sequence_progress.emit(result)
             self._schedule_advance_queue(0)
+
+    @staticmethod
+    def _window_title_for_item(item: Any) -> str:
+        if not isinstance(item, Mapping):
+            return ""
+        readiness = item.get("readiness_policy", {})
+        if not isinstance(readiness, Mapping):
+            return ""
+        saved = str(readiness.get("window_title") or "").strip()
+        if saved:
+            return saved
+        if LaunchOrchestrator._queue_item_name(item) != "VarAC":
+            return ""
+        nested = readiness.get("launch_recipe")
+        recipe = nested if isinstance(nested, Mapping) else readiness
+        if not (
+            LaunchOrchestrator.is_truthy(readiness.get("structured_launch", False))
+            or "executable" in recipe
+            or "launch_executable" in recipe
+            or "launch_arguments" in recipe
+        ):
+            return ""
+        radio_names = item.get("radio_names", ())
+        if not isinstance(radio_names, (list, tuple)) or len(radio_names) != 1:
+            return ""
+        # Compatibility for already-saved structured VarAC rows: the stable
+        # selected-radio context is sufficient to derive presentation text,
+        # but never changes the executable/INI launch identity.
+        return managed_instance_window_title("VarAC", radio_names[0])
+
+    def _schedule_process_window_title(self, item: Any, process: Any) -> None:
+        """Apply a non-native title without delaying or blocking launch.
+
+        FLMsg and FLAmp consume their supported ``-title`` argument directly.
+        VarAC has no qualified title argument, so FIO retries a PID-scoped OS
+        title update while its first window is being created.  A compositor
+        may reject this presentation-only request; that never changes process
+        readiness or the launch result.
+        """
+
+        if self._queue_item_name(item) != "VarAC":
+            return
+        title = self._window_title_for_item(item)
+        try:
+            pid = int(getattr(process, "pid", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        if not title or pid <= 0:
+            return
+
+        def _attempt(remaining: int) -> None:
+            if set_process_window_title(pid, title):
+                log.info("LaunchOrchestrator: set VarAC window title to %s", title)
+                return
+            if remaining > 1:
+                QTimer.singleShot(750, lambda: _attempt(remaining - 1))
+                return
+            log.warning(
+                "LaunchOrchestrator: VarAC started, but the desktop did not permit "
+                "the requested radio title '%s'; launch remains valid.",
+                title,
+            )
+
+        QTimer.singleShot(250, lambda: _attempt(12))
 
     @staticmethod
     def _materialize_item_managed_directories(item: Any) -> tuple[Path, ...]:

@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from freqinout.core.guided_launch_recipes import (
+    managed_instance_window_title,
     recipe_resolution_from_mapping,
     recipe_draft_updates,
     resolve_fast_light_managed_recipe,
@@ -11,6 +12,12 @@ from freqinout.core.guided_launch_recipes import (
 )
 from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.config_autodiscovery import find_app_candidates
+
+
+def test_managed_window_title_uses_human_label_and_removes_controls() -> None:
+    assert managed_instance_window_title(
+        "FLAmp", "  Mountain  Ops\nRadio  "
+    ) == "FLAmp — Mountain Ops Radio"
 
 
 def test_legacy_recipe_round_trip_does_not_invent_empty_directory_authority() -> None:
@@ -387,6 +394,8 @@ def test_fast_light_transceiver_recipe_orders_distinct_components(tmp_path):
     assert resolution.components[2].arguments == (
         "--flmsg-dir",
         str(tmp_path / ".nbems" / "instances" / "South"),
+        "-title",
+        "FLMsg — South",
     )
     assert resolution.components[3].execution_scope == "standard"
     assert resolution.components[3].arguments == (
@@ -400,6 +409,8 @@ def test_fast_light_transceiver_recipe_orders_distinct_components(tmp_path):
         "127.0.0.1",
         "--xmlrpc-server-port",
         "7363",
+        "-title",
+        "FLAmp — South",
     )
     assert resolution.components[3].operator_starts is False
     assert resolution.components[3].launch_at_startup is True
@@ -451,6 +462,10 @@ def test_flmsg_and_flamp_launch_identity_isolated_for_two_radios(tmp_path):
     second = {item.component_key: item for item in recipes[1].components}
     assert first["flmsg"].arguments != second["flmsg"].arguments
     assert first["flamp"].arguments != second["flamp"].arguments
+    assert first["flmsg"].arguments[-1] == "FLMsg — FTDX-10"
+    assert second["flmsg"].arguments[-1] == "FLMsg — FT-710"
+    assert first["flamp"].arguments[-1] == "FLAmp — FTDX-10"
+    assert second["flamp"].arguments[-1] == "FLAmp — FT-710"
     assert first["flamp"].configuration_roots != second["flamp"].configuration_roots
     assert first["flamp"].launch_at_startup is second["flamp"].launch_at_startup is True
 
@@ -479,8 +494,14 @@ def test_windows_flmsg_and_flamp_use_radio_scoped_nbems_native_root(tmp_path):
     expected_root = str(tmp_path / "NBEMS.files" / "instances" / "FT-710")
 
     assert resolution.qualified
-    assert components["flmsg"].arguments == ("--flmsg-dir", expected_root)
+    assert components["flmsg"].arguments == (
+        "--flmsg-dir",
+        expected_root,
+        "-title",
+        "FLMsg — FT-710",
+    )
     assert components["flamp"].arguments[:2] == ("--config-dir", expected_root)
+    assert components["flamp"].arguments[-2:] == ("-title", "FLAmp — FT-710")
     assert components["flamp"].data_roots[0] == str(
         tmp_path / "NBEMS.files" / "instances" / "FT-710" / "FLAMP" / "rx"
     )
