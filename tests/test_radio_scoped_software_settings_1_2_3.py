@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from freqinout.core.shared_state import ActionFeedbackService
-from freqinout.gui.settings_tab import _coerce_json_mapping
+from freqinout.gui.settings_tab import SettingsTab, _coerce_json_mapping
 from freqinout.core.multi_radio_store import (
     MultiRadioStore,
     _legacy_settings_projection_from_device,
@@ -4724,11 +4724,25 @@ def test_selected_radio_apps_editor_is_visible_for_existing_radios() -> None:
     assert 'self.profile_edit_apps_btn = QPushButton("Edit Apps")' in source
     assert "self.profile_edit_apps_btn.clicked.connect(self._open_selected_radio_apps_task)" in source
     assert "def _open_selected_radio_apps_task" in source
-    assert 'self._select_radio_profile_guided_task("apps")' in source
-    assert "QTimer.singleShot(0, self._refresh_radio_profile_software_chips)" in source
-    assert "QTimer.singleShot(0, self._sync_current_section_scroll_size)" in source
+    assert 'self._edit_device_profile_at_step(dict(profile), initial_step="software")' in source
+    assert "Canonical software identities cannot be changed safely" in source
     assert 'software_chips_title = QLabel("Software Used By This Radio")' in source
     assert "App-specific settings tabs appear after the app is enabled." in source
+
+
+def test_edit_apps_reenters_canonical_guided_software_step() -> None:
+    events = []
+    profile = {"id": 12, "name": "FT-710", "device_class": "tx_rx"}
+    host = types.SimpleNamespace(
+        _selected_settings_radio_profile=lambda: profile,
+        _edit_device_profile_at_step=lambda existing, **kwargs: events.append(
+            (dict(existing), kwargs)
+        ),
+    )
+
+    SettingsTab._open_selected_radio_apps_task(host)
+
+    assert events == [(profile, {"initial_step": "software"})]
 
 
 def test_radio_profile_dashboard_sections_wrap_existing_profile_widgets() -> None:

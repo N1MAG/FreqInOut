@@ -3602,7 +3602,26 @@ def _save_software_instance_manifest_conn(
     if linked is None:
         raise ValueError("The linked application instance does not exist.")
 
-    existing = [manifest_from_mapping(row) for row in _list_software_instance_manifests_conn(conn)]
+    existing = []
+    for row in _list_software_instance_manifests_conn(conn):
+        candidate = manifest_from_mapping(row)
+        candidate_table = {
+            "js8call": "js8_instances",
+            "fast_light": "fast_light_configs",
+            "varac": "varac_nodes",
+        }[candidate.family_key]
+        if _record_by_system_key(
+            conn,
+            candidate_table,
+            candidate.application_system_key,
+        ) is None:
+            # Interrupted saves from older builds can leave FIO-only manifest
+            # evidence after their application row was rolled back or removed.
+            # Retain that evidence for diagnostics, but it has no live owner
+            # and therefore cannot reserve ports or paths against a reviewed
+            # recovery transaction.
+            continue
+        existing.append(candidate)
     conflicts = find_manifest_conflicts(manifest, existing)
     if conflicts:
         raise ValueError(conflicts[0].message)

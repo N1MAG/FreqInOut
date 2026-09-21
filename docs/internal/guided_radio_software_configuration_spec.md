@@ -3735,6 +3735,53 @@ move or overwrite their external data. **Replace instance** is the reviewed
 recovery route. New Final Save and Replace transactions must satisfy this
 invariant without requiring a migration of unrelated existing rows.
 
+### GRS-13.5 — Atomic Publication And Edit-Apps Invariant
+
+The Add Radio database transaction and the UI publication boundary are the
+same generation boundary. A reviewed save may create the radio row first as an
+internal transaction step, but no Settings consumer may reload, emit a radio-
+inventory change, rebuild Software Administration, or present that provisional
+row until all selected application rows, manifests, launch records, canonical
+software identities, station-service bindings, operating-model assignment,
+and optional VarAC cluster membership have succeeded and the outer transaction
+has committed.
+
+This rule applies equally to Add Radio and Edit Radio:
+
+- while the transaction is open, Radios, Edit Apps, Software Administration,
+  Launch Control, readiness, and runtime projections retain the last committed
+  generation;
+- after commit, FIO performs one authoritative reload and emits one inventory
+  change so every consumer sees the complete new generation;
+- after rollback, FIO performs the same authoritative reload of the retained
+  generation; it may not leave a provisional radio card, stale checkboxes, or
+  an unsaved workspace that appears to be the failed radio;
+- a Tri-Mode selection with FIO Spotter and CommStat means the committed radio
+  has canonical JS8Call, complete selected Fast Light, VarAC, FIO Spotter, and
+  CommStat identities. The VarAC topology selected in Review is part of that
+  same all-or-nothing save; and
+- a selected radio must appear in Software Administration for every selected
+  family immediately after a successful save and after restart. Absence from
+  Software Administration is proof that the save did not commit, not a
+  permissible delayed projection.
+
+**Edit Apps** is an entry point to the same guided Software step used by Add
+Radio. It is not an independent set of legacy boolean toggles. For a canonical-
+backed radio, compact software checkboxes are read-only summaries; changing the
+stack reopens the reviewed assistant and saves component selection, native
+paths, endpoints, manifests, station-service bindings, launch recipes, and
+canonical identities together. Internal persistence instructions such as
+`adopt_software_instance(..., replace_existing=True)` must never be exposed as
+operator recovery guidance.
+
+Acceptance requires a transaction-order regression proving that refresh and
+public inventory signals occur only after commit/rollback, a failed-save case
+proving no provisional radio remains visible, an Edit Apps route test proving
+it opens the guided Software step, and canonical identity coverage for the
+Tri-Mode + FIO Spotter + CommStat stack. The focused guided-final-apply,
+Software Administration, canonical-identity, VarAC topology, and changed-file
+hygiene gates must pass.
+
 #### VarAC and VARA
 
 GRS-10's install-adjacent unique VarAC INI and structured Windows/Wine launch
@@ -4395,3 +4442,40 @@ and member numbers still fail without partial rows. Focused assistant payload,
 canonical identity, VarAC arrangement, manifest persistence, native
 transaction, changed-file compilation, and diff-hygiene gates must pass. No
 schema or destructive data migration is part of this correction.
+
+### GRS-14.4 — Interrupted Cluster-Creation Resume
+
+An earlier interrupted or pre-GRS-13.5 save may leave the reviewed cluster and
+its first radio durable while the new radio was not committed. That is a
+recoverable topology, not evidence that the operator should create a duplicate
+cluster or understand the partial database state.
+
+When one existing enabled cluster has exactly one saved radio member and its
+public identity is the deterministic identity FIO would derive for that member
+plus the new radio label, Add Radio presents an explicit
+`Resume <cluster>: add <new radio> as member <n> — Recommended` choice. It uses
+the cluster's next available positive member number and the normal Join writer
+route. The selector remains unselected until the operator confirms the resume;
+FIO does not silently change topology. The ordinary standalone and distinct
+new-cluster alternatives remain available and clearly named.
+
+Matching uses durable cluster membership and radio identity, never orphan
+manifests, directory-name similarity alone, or an unlinked diagnostic node.
+Zero matches or multiple matches receive no resume recommendation. Resuming
+does not delete, rename, or replace an existing application file or FIO record;
+the final Add Radio transaction adds the reviewed member and all selected
+software identities under GRS-13.5.
+
+A manifest whose named application row no longer exists is retained as
+diagnostic evidence but has no live resource owner. It may not reserve an
+endpoint or exclusive path against a reviewed recovery transaction. Valid
+manifests linked to existing application rows retain all normal collision
+protection. Recovery does not delete the orphan record automatically.
+
+Acceptance requires snapshot and real-widget regressions for a production-
+shaped `FTDX-10 + FT-710 VarAC` cluster containing only FTDX-10. They must prove
+that FT-710 is offered as member 2 through an explicit recommended resume
+choice and that unrelated existing clusters retain the ordinary Join wording.
+Companion store coverage must prove that a retained orphan manifest cannot
+block the replacement application's reviewed endpoint or path while the orphan
+remains available for diagnostics.

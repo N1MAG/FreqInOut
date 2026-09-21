@@ -30,12 +30,25 @@ def _host(*, current: bool):
     host._present_guided_stale_review_recovery = lambda _detail: "review"
     host._add_device_profile = lambda **kwargs: state.update(retry=kwargs)
     host._refresh_multi_radio_tables = lambda: None
+    host._emit_device_profiles_changed = lambda: None
+    host._set_save_button_state = lambda *_args, **_kwargs: None
+    host._settings_dirty = False
     host._complete_add_device_profile_in_transaction = lambda *_args, **_kwargs: (
         state.update(written=True) or True
     )
     host._complete_varac_native_session = lambda _session: None
     host.multi_radio_store = SimpleNamespace(guided_save_transaction=transaction)
     return host, state
+
+
+def test_guided_transaction_suppresses_provisional_radio_and_identity_refreshes() -> None:
+    host = SimpleNamespace(_guided_save_ui_deferred=True)
+
+    # Both methods must return before touching Qt widgets or emitting a public
+    # profile change while the canonical transaction is incomplete.
+    SettingsTab._refresh_multi_radio_tables(host)
+    SettingsTab._emit_device_profiles_changed(host)
+    SettingsTab._refresh_runtime_projection_ui(host, refresh_multi_radio=True)
 
 
 def test_final_native_apply_uses_preapply_review_payload_after_readback_enrichment() -> None:
@@ -115,6 +128,9 @@ def test_add_radio_queues_plan_builder_only_after_guided_transaction_exits() -> 
         events.append("persist") or True
     )
     host._refresh_multi_radio_tables = lambda: events.append("refresh")
+    host._emit_device_profiles_changed = lambda: events.append("emit")
+    host._set_save_button_state = lambda *_args, **_kwargs: events.append("save-state")
+    host._settings_dirty = False
     host._rollback_guided_native_config = lambda _result: events.append("rollback-native")
     host._rollback_varac_native_session = lambda _session: events.append("rollback-varac")
     host._complete_varac_native_session = lambda _session: events.append("complete-varac")
@@ -139,6 +155,9 @@ def test_add_radio_queues_plan_builder_only_after_guided_transaction_exits() -> 
         "persist",
         "complete",
         "exit",
+        "refresh",
+        "emit",
+        "save-state",
         ("queue", {"id": 41, "name": "FT-710"}, "daily_plus_nets"),
     ]
 
@@ -159,6 +178,10 @@ def test_failed_add_radio_save_never_queues_plan_builder() -> None:
     host._guided_radio_review_is_current = lambda _payload: True
     host._complete_add_device_profile_in_transaction = lambda *_args, **_kwargs: False
     host._refresh_multi_radio_tables = lambda: events.append("refresh")
+    host._emit_device_profiles_changed = lambda: events.append("emit")
+    host._set_save_button_state = lambda *_args, **_kwargs: events.append("save-state")
+    host._settings_dirty = False
+    host._last_persisted_device_profile = {"id": 999, "name": "provisional"}
     host._rollback_guided_native_config = lambda _result: None
     host._rollback_varac_native_session = lambda _session: None
     host._queue_plan_manager_after_guided_profile_save = lambda *_args, **_kwargs: events.append("queue")
@@ -170,6 +193,7 @@ def test_failed_add_radio_save_never_queues_plan_builder() -> None:
     )
 
     assert events == ["enter", "exit", "refresh"]
+    assert host._last_persisted_device_profile is None
 
 
 def test_edit_radio_queues_plan_builder_only_after_guided_transaction_exits() -> None:
@@ -190,6 +214,9 @@ def test_edit_radio_queues_plan_builder_only_after_guided_transaction_exits() ->
         events.append("persist") or True
     )
     host._refresh_multi_radio_tables = lambda: events.append("refresh")
+    host._emit_device_profiles_changed = lambda: events.append("emit")
+    host._set_save_button_state = lambda *_args, **_kwargs: events.append("save-state")
+    host._settings_dirty = False
     host._rollback_guided_native_config = lambda _result: events.append("rollback-native")
     host._rollback_varac_native_session = lambda _session: events.append("rollback-varac")
     host._complete_varac_native_session = lambda _session: events.append("complete-varac")
@@ -215,5 +242,8 @@ def test_edit_radio_queues_plan_builder_only_after_guided_transaction_exits() ->
         "persist",
         "complete",
         "exit",
+        "refresh",
+        "emit",
+        "save-state",
         ("queue", {"id": 42, "name": "FTDX-10"}, "daily_plus_nets"),
     ]

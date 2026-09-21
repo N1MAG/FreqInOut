@@ -212,6 +212,49 @@ def test_one_standalone_requires_explicit_recommended_create_choice(
     _open_add_radio_dialog(monkeypatch, tmp_path, presentation, inspect)
 
 
+def test_matching_partial_cluster_is_presented_as_explicit_resume_choice(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    presentation = {
+        "default_path": "",
+        "recommended_path": "join_cluster",
+        "join_choices": (
+            {
+                "cluster_id": "varac-ftdx-10-ft-710",
+                "cluster_db_id": 11,
+                "label": "FTDX-10 + FT-710 VarAC",
+                "next_instance_number": 2,
+                "resume_recommended": True,
+            },
+        ),
+        "standalone_candidates": (),
+        "existing_setup_summary": "Existing setup: FTDX-10 + FT-710 VarAC already contains the first reviewed radio.",
+        "create_choice_label": "Create a different new VarAC cluster",
+        "new_radio_label": "FT-710",
+        "needs_attention": False,
+        "why": "Resume the matching reviewed cluster explicitly to add this radio as its next member.",
+    }
+
+    def inspect(dialog: QDialog) -> None:
+        _show_software_step(dialog)
+        combo = dialog.findChild(QComboBox, "guidedVaracArrangement")
+        assert combo is not None
+        assert combo.currentData() == ""
+        join_index = next(
+            index for index in range(combo.count()) if combo.itemData(index) == "join_cluster"
+        )
+        assert combo.itemText(join_index) == (
+            "Resume FTDX-10 + FT-710 VarAC: add FT-710 as member 2 — Recommended"
+        )
+        metadata = combo.itemData(join_index, 256 + 1)
+        assert metadata["cluster_id"] == "varac-ftdx-10-ft-710"
+        assert metadata["cluster_instance_number"] == 2
+        dialog.reject()
+
+    _open_add_radio_dialog(monkeypatch, tmp_path, presentation, inspect)
+
+
 def test_varac_arrangement_metadata_survives_the_shared_assistant_round_trip() -> None:
     from freqinout.gui.software_instance_assistant import SoftwareInstanceAssistant
 

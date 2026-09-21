@@ -221,6 +221,49 @@ def test_snapshot_adapter_provides_named_join_choice_and_next_number():
     assert tuple(result["join_choices"])[0]["next_instance_number"] == 2
 
 
+def test_snapshot_adapter_recommends_resuming_exact_partial_reviewed_cluster():
+    result = recommend_varac_arrangement_from_snapshots(
+        (
+            {
+                "id": 41,
+                "system_key": "ftdx-10-varac",
+                "name": "FTDX-10 VarAC",
+                "candidate_classification": "usable_existing",
+                "candidate_usable": True,
+                "device_profile_id": 7,
+                "linked_to_radio": True,
+            },
+        ),
+        (
+            {
+                "id": 9,
+                "cluster_id": "VARAC-FTDX-10-FT-710",
+                "name": "FTDX-10 + FT-710 VarAC",
+            },
+        ),
+        (
+            {
+                "cluster_id": 9,
+                "device_profile_id": 7,
+                "instance_number": 1,
+                "enabled": 1,
+            },
+        ),
+        ({"id": 7, "name": "FTDX-10", "varac_node_id": 41},),
+        new_radio_label="FT-710",
+    )
+
+    choice = tuple(result["join_choices"])[0]
+    assert result["default_path"] == ""
+    assert result["recommended_path"] == "join_cluster"
+    assert result["requires_explicit_selection"] is True
+    assert result["new_member_instance_number"] == 2
+    assert choice["resume_recommended"] is True
+    assert choice["member_device_profile_ids"] == (7,)
+    assert "already contains the first reviewed radio" in result["existing_setup_summary"]
+    assert "Resume the matching reviewed cluster" in result["why"]
+
+
 def _save_standalone(store: MultiRadioStore, radio_key: str, node_key: str) -> tuple[dict, dict]:
     radio = store.save_device_profile({"system_key": radio_key, "name": radio_key.title()})
     result = store.adopt_software_instance(

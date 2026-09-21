@@ -9866,10 +9866,11 @@ class SettingsTab(QWidget):
         if str(profile.get("device_class", "") or "").strip().lower() == "observer":
             self._open_selected_receiver_setup()
             return
-        self._select_settings_section_group(getattr(self, "radio_profile_section_group", None))
-        self._select_radio_profile_guided_task("apps")
-        QTimer.singleShot(0, self._refresh_radio_profile_software_chips)
-        QTimer.singleShot(0, self._sync_current_section_scroll_size)
+        # Canonical software identities cannot be changed safely by toggling a
+        # compact profile flag.  Re-enter the same guided Software step used by
+        # Add Radio so component selection, paths, endpoints, native plans,
+        # manifests, and launch recipes are saved as one reviewed transaction.
+        self._edit_device_profile_at_step(dict(profile), initial_step="software")
 
     def _open_selected_receiver_setup(self) -> None:
         """Open an observer profile directly at its receiver-control task."""
@@ -19474,6 +19475,14 @@ class SettingsTab(QWidget):
             has_profile
             and str(profile.get("device_class", "") or "").strip().lower() == "observer"
         )
+        canonical_backed = False
+        if has_profile:
+            try:
+                canonical_backed = self.multi_radio_store.radio_software_identity_generation(
+                    int(profile.get("id", 0) or 0)
+                ) > 0
+            except Exception:
+                canonical_backed = False
         self._refreshing_radio_profile_software_flags = True
         try:
             for key, chk in checks.items():
@@ -19493,6 +19502,7 @@ class SettingsTab(QWidget):
                     and not locked_for_backend
                     and observer_allowed
                     and not js8_already_assigned
+                    and not canonical_backed
                 )
                 if not has_profile:
                     chk.setToolTip("Select a radio before changing the software used by that radio.")
@@ -19502,6 +19512,10 @@ class SettingsTab(QWidget):
                     chk.setToolTip("Unavailable for a receive-only SDR profile.")
                 elif js8_already_assigned:
                     chk.setToolTip("Manage this receiver-owned JS8Call instance in Settings > Software.")
+                elif canonical_backed:
+                    chk.setToolTip(
+                        "This radio uses canonical software identities. Use Edit Apps to review and change the complete app setup."
+                    )
                 elif observer_mode and key == "js8call":
                     chk.setToolTip("Open guided setup for a new, distinct receive-only JS8Call instance.")
                 else:
@@ -19960,6 +19974,8 @@ class SettingsTab(QWidget):
         self._select_radio_profile_guided_task(getattr(self, "radio_profile_guided_task_key", "review"), scroll=False)
 
     def _emit_device_profiles_changed(self) -> None:
+        if getattr(self, "_guided_save_ui_deferred", False):
+            return
         try:
             self.device_profiles_changed.emit()
         except Exception:
@@ -22864,6 +22880,15 @@ class SettingsTab(QWidget):
             self._refresh_section_titles()
 
     def _refresh_multi_radio_tables(self, *, refresh_section_titles: bool = True) -> None:
+        # A guided save composes the radio, application rows, manifests,
+        # canonical identities, launch rows, and optional cluster membership in
+        # one SQLite transaction.  Reading that connection halfway through the
+        # transaction used to expose the provisional radio in Settings while
+        # Software Administration still held its pre-save snapshot.  Never
+        # publish that mixed generation; the outer owner performs one reload
+        # after commit or rollback.
+        if getattr(self, "_guided_save_ui_deferred", False):
+            return
         self._refresh_device_profiles_table(refresh_section_titles=refresh_section_titles)
         self._refresh_operating_profiles_table(
             refresh_assignments=True,
@@ -26303,8 +26328,15 @@ class SettingsTab(QWidget):
                         label = str(choice.get("label") or choice.get("cluster_id") or "VarAC cluster").strip()
                         next_number = choice.get("next_instance_number")
                         suffix = f" (next member {next_number})" if next_number else ""
+                        if choice.get("resume_recommended"):
+                            choice_label = (
+                                f"Resume {label}: add {presentation.get('new_radio_label') or 'new radio'} "
+                                f"as member {next_number} — Recommended"
+                            )
+                        else:
+                            choice_label = f"Join {label}{suffix}"
                         _add_choice(
-                            f"Join {label}{suffix}",
+                            choice_label,
                             "join_cluster",
                             {
                                 "cluster_id": choice.get("cluster_id"),
@@ -33083,6 +33115,8 @@ class SettingsTab(QWidget):
         self._refresh_launch_control_table()
 
     def _refresh_runtime_projection_ui(self, *, refresh_multi_radio: bool = False) -> None:
+        if getattr(self, "_guided_save_ui_deferred", False):
+            return
         try:
             self.settings.reload()
         except Exception:
@@ -33310,7 +33344,8 @@ class SettingsTab(QWidget):
             self._refresh_multi_radio_tables()
         self._last_persisted_device_profile = dict(saved)
         self._emit_device_profiles_changed()
-        self._set_save_button_state("info" if self._settings_dirty else "success")
+        if not getattr(self, "_guided_save_ui_deferred", False):
+            self._set_save_button_state("info" if self._settings_dirty else "success")
         return True
 
     def _assign_guided_frequency_plan_after_profile_save(self, device_profile_id: int, plan_id: int) -> bool:
@@ -35192,6 +35227,8 @@ class SettingsTab(QWidget):
             created.get("guided_schedule_choice", "") or ""
         ).strip()
         succeeded = False
+        prior_ui_deferred = bool(getattr(self, "_guided_save_ui_deferred", False))
+        self._guided_save_ui_deferred = True
         try:
             with self.multi_radio_store.guided_save_transaction() as transaction:
                 succeeded = self._complete_add_device_profile_in_transaction(
@@ -35214,11 +35251,23 @@ class SettingsTab(QWidget):
                 "Guided Add Radio",
                 "FIO could not save the complete reviewed radio setup. Nothing was changed.",
             )
+        finally:
+            self._guided_save_ui_deferred = prior_ui_deferred
         if not succeeded:
-            self._refresh_multi_radio_tables()
+            # A provisional row may have supplied an ID while the transaction
+            # was open.  Never let a later handoff mistake that rolled-back
+            # object for the authoritative saved radio.
+            self._last_persisted_device_profile = None
+        # Reload only after the transaction has committed or rolled back.  This
+        # makes Radios, Edit Apps, Software Administration, and launch/readiness
+        # consumers observe the same canonical generation.
+        self._refresh_multi_radio_tables()
+        if not succeeded:
             if varac_session is not None:
                 self._rollback_varac_native_session(varac_session)
         else:
+            self._emit_device_profiles_changed()
+            self._set_save_button_state("info" if self._settings_dirty else "success")
             if varac_session is not None:
                 self._complete_varac_native_session(varac_session)
             if open_plan_manager_after_commit:
@@ -35455,6 +35504,8 @@ class SettingsTab(QWidget):
             updated.get("guided_schedule_choice", "") or ""
         ).strip()
         succeeded = False
+        prior_ui_deferred = bool(getattr(self, "_guided_save_ui_deferred", False))
+        self._guided_save_ui_deferred = True
         try:
             with self.multi_radio_store.guided_save_transaction() as transaction:
                 succeeded = self._complete_edit_device_profile_in_transaction(
@@ -35478,11 +35529,17 @@ class SettingsTab(QWidget):
                 "Radio Details",
                 "FIO could not save the complete reviewed radio setup. Nothing was changed.",
             )
+        finally:
+            self._guided_save_ui_deferred = prior_ui_deferred
         if not succeeded:
-            self._refresh_multi_radio_tables()
+            self._last_persisted_device_profile = None
+        self._refresh_multi_radio_tables()
+        if not succeeded:
             if varac_session is not None:
                 self._rollback_varac_native_session(varac_session)
         else:
+            self._emit_device_profiles_changed()
+            self._set_save_button_state("info" if self._settings_dirty else "success")
             if varac_session is not None:
                 self._complete_varac_native_session(varac_session)
             if open_plan_manager_after_commit:

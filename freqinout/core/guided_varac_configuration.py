@@ -592,14 +592,10 @@ def recommend_varac_arrangement_from_snapshots(
     def text(value: object) -> str:
         return str(value or "").strip()
 
-    def proposed_cluster_identity(existing_label: str = "") -> tuple[str, str]:
-        """Return a readable, collision-free identity for a prepared cluster.
+    new_label = text(new_radio_label) or "new radio"
 
-        The proposal is configuration owned by FIO, not a claim that FIO can
-        write VarAC's native settings.  It is derived from the already-loaded
-        snapshot so the normal guided path never opens a blank cluster-name
-        field merely to complete a plan.
-        """
+    def cluster_identity_base(existing_label: str = "") -> tuple[str, str]:
+        """Return the unsuffixed identity for the reviewed member labels."""
 
         labels = [part for part in (text(existing_label), new_label) if part]
         display_name = " + ".join(labels) or "VarAC"
@@ -612,6 +608,18 @@ def recommend_varac_arrangement_from_snapshots(
             if slug:
                 slug_parts.append(slug)
         base_id = "-".join(("VARAC", *slug_parts))[:240].strip("-") or "VARAC-CLUSTER"
+        return display_name[:256], base_id
+
+    def proposed_cluster_identity(existing_label: str = "") -> tuple[str, str]:
+        """Return a readable, collision-free identity for a prepared cluster.
+
+        The proposal is configuration owned by FIO, not a claim that FIO can
+        write VarAC's native settings.  It is derived from the already-loaded
+        snapshot so the normal guided path never opens a blank cluster-name
+        field merely to complete a plan.
+        """
+
+        display_name, base_id = cluster_identity_base(existing_label)
         occupied = {str(row["cluster_id"]) for row in choices}
         public_id = base_id
         suffix = 2
@@ -622,6 +630,7 @@ def recommend_varac_arrangement_from_snapshots(
         return display_name[:256], public_id
 
     profile_by_node_id = {}
+    profile_by_id = {}
     for raw_profile in tuple(profile_rows or ()):
         if not isinstance(raw_profile, Mapping):
             continue
@@ -632,6 +641,10 @@ def recommend_varac_arrangement_from_snapshots(
                 "device_profile_id": profile_id,
                 "device_profile_name": text(raw_profile.get("name") or raw_profile.get("system_key") or f"Radio {profile_id}"),
             }
+        if profile_id > 0:
+            profile_by_id[profile_id] = text(
+                raw_profile.get("name") or raw_profile.get("system_key") or f"Radio {profile_id}"
+            )
 
     usable_rows = []
     for raw in tuple(instance_rows or ()):
@@ -711,17 +724,46 @@ def recommend_varac_arrangement_from_snapshots(
         while next_number in occupied:
             next_number += 1
         label = text(raw.get("name") or cluster_id)
+        cluster_members = tuple(
+            member
+            for member in memberships
+            if (
+                positive(member.get("cluster_id")) == cluster_db_id
+                or (
+                    text(member.get("cluster_public_id"))
+                    and normalize_cluster_id(text(member.get("cluster_public_id"))) == normalized_cluster
+                )
+            )
+            and _flag(member.get("enabled", True))
+        )
+        member_device_ids = tuple(
+            sorted(
+                positive(member.get("device_profile_id"))
+                for member in cluster_members
+                if positive(member.get("device_profile_id"))
+            )
+        )
+        member_labels = tuple(
+            profile_by_id[device_id]
+            for device_id in member_device_ids
+            if profile_by_id.get(device_id)
+        )
+        resume_recommended = False
+        if len(member_device_ids) == 1 and len(member_labels) == 1:
+            _expected_name, expected_id = cluster_identity_base(member_labels[0])
+            resume_recommended = normalize_cluster_id(expected_id) == normalized_cluster
         choices.append(
             {
                 "cluster_db_id": cluster_db_id,
                 "cluster_id": normalized_cluster,
                 "label": label,
                 "next_instance_number": next_number,
+                "member_device_profile_ids": member_device_ids,
+                "resume_recommended": resume_recommended,
             }
         )
     choices.sort(key=lambda item: (str(item["label"]).casefold(), str(item["cluster_id"])))
 
-    new_label = text(new_radio_label) or "new radio"
     enriched_standalone = []
     for row in standalone:
         cluster_label = text(row.get("device_profile_name") or row.get("label"))
@@ -768,8 +810,20 @@ def recommend_varac_arrangement_from_snapshots(
             existing_setup_summary = f"Existing setup: {len(standalone)} standalone VarAC nodes are configured. No VarAC cluster is configured."
             create_choice_label = f"Create a cluster with a selected standalone node and {new_label} — Needs attention"
     elif choices:
-        existing_setup_summary = f"Existing setup: {len(choices)} VarAC cluster{'s' if len(choices) != 1 else ''} configured."
-        create_choice_label = "Create a new VarAC cluster"
+        resume_choices = [choice for choice in choices if choice.get("resume_recommended")]
+        if len(resume_choices) == 1:
+            resume_choice = resume_choices[0]
+            default_path = ""
+            recommended_path = VarACClusterPath.JOIN_CLUSTER.value
+            requires_selection = True
+            new_member_instance_number = int(resume_choice["next_instance_number"])
+            existing_setup_summary = (
+                f"Existing setup: {resume_choice['label']} already contains the first reviewed radio."
+            )
+            create_choice_label = "Create a different new VarAC cluster"
+        else:
+            existing_setup_summary = f"Existing setup: {len(choices)} VarAC cluster{'s' if len(choices) != 1 else ''} configured."
+            create_choice_label = "Create a new VarAC cluster"
     else:
         existing_setup_summary = "Existing setup: No VarAC node or cluster is configured."
         create_choice_label = "Create a new VarAC cluster"
@@ -794,6 +848,8 @@ def recommend_varac_arrangement_from_snapshots(
                 "Choose the recommended cluster arrangement explicitly to include the existing standalone node; "
                 "otherwise keep the standalone alternative."
                 if recommended_path == VarACClusterPath.CREATE_CLUSTER.value and not needs_attention
+                else "Resume the matching reviewed cluster explicitly to add this radio as its next member."
+                if recommended_path == VarACClusterPath.JOIN_CLUSTER.value
                 else "Choose a standalone node explicitly before creating a cluster."
                 if needs_attention
                 else "Existing cluster membership is never selected automatically."

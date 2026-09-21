@@ -107,6 +107,51 @@ def test_manifest_record_round_trip_and_additive_upgrade_preserve_existing_rows(
     assert json.loads(record["evidence_json"]) == {"source": "upgrade-test"}
 
 
+def test_orphan_manifest_evidence_does_not_block_reviewed_recovery_instance(tmp_path) -> None:
+    db = tmp_path / "orphan-recovery.db"
+    store = MultiRadioStore(db)
+    old_app = store.save_js8_instance(
+        {"system_key": "rolled-back-ft710", "name": "Rolled back FT-710", "port": 2443}
+    )
+    old_manifest = store.save_software_instance_manifest(
+        {
+            "instance_key": "js8call:rolled-back-ft710",
+            "family_key": "js8call",
+            "application_system_key": old_app["system_key"],
+            "ports": [{"name": "JS8Call API", "host": "127.0.0.1", "port": 2443}],
+            "resource_claims": [
+                {"kind": "working_directory", "value": "/radio/ft710/js8call", "exclusive": True}
+            ],
+        }
+    )
+    with sqlite3.connect(db) as conn:
+        conn.execute("DELETE FROM js8_instances WHERE id=?", (int(old_app["id"]),))
+        conn.commit()
+
+    radio = store.save_device_profile({"system_key": "ft-710", "name": "FT-710"})
+    recovered = store.adopt_software_instance(
+        family_key="js8call",
+        radio_profile_id=int(radio["id"]),
+        application_values={
+            "system_key": "js8call-ft710",
+            "name": "FT-710 JS8Call",
+            "host": "127.0.0.1",
+            "port": 2443,
+        },
+        manifest_values={
+            "instance_key": "js8call:ft710",
+            "ports": [{"name": "JS8Call API", "host": "127.0.0.1", "port": 2443}],
+            "resource_claims": [
+                {"kind": "working_directory", "value": "/radio/ft710/js8call", "exclusive": True}
+            ],
+        },
+    )
+
+    assert recovered["application"]["system_key"] == "js8call_ft710"
+    assert recovered["radio"]["js8_instance_id"] == recovered["application"]["id"]
+    assert store.get_software_instance_manifest(old_manifest["instance_key"]) is not None
+
+
 @pytest.mark.parametrize(
     ("family", "app_values", "port", "item_names"),
     [

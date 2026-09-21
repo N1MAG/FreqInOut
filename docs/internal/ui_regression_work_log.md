@@ -9276,3 +9276,58 @@ No schema or destructive migration is required. No production database,
 VarAC/VARA file, external process, radio, commit, or remote was changed. The
 unrelated modified installation-guide DOCX and rendered guide directory remain
 preserved and excluded.
+
+## 2026-09-20 — Add Radio atomic UI publication and Edit Apps correction
+
+Status: automated implementation gate passed; operator retest remains open.
+
+Production evidence showed FT-710 in the Radios workspace after a reviewed
+Tri-Mode + FIO Spotter + CommStat save, while Software Administration contained
+only FTDX-10 and the supplied database had no durable FT-710 radio or canonical
+identity rows. The database retained only orphan manifests from an earlier
+attempt and a one-member `FTDX-10 + FT-710 VarAC` cluster. The visible FT-710
+was therefore a provisional in-transaction UI projection, not a committed
+radio. Opening Edit Apps then exposed legacy component toggles that attempted
+an unsafe partial reassignment and surfaced the internal
+`adopt_software_instance(..., replace_existing=True)` instruction.
+
+The guided Add/Edit owner now suppresses table refreshes, runtime projection
+reloads, and public radio-inventory signals for the complete outer transaction.
+After commit or rollback it performs one authoritative multi-radio reload;
+only a successful commit emits the public inventory change. Radios, Software
+Administration, readiness, launch, and cluster views therefore cannot publish
+different generations. Edit Apps now reopens the same guided Software step as
+Add Radio, and compact software flags are read-only for canonical-backed
+radios.
+
+The supplied database also contains the intended
+`FTDX-10 + FT-710 VarAC` cluster with only FTDX-10 as member 1. The topology
+adapter now recognizes that exact deterministic partial state and presents
+`Resume FTDX-10 + FT-710 VarAC: add FT-710 as member 2 — Recommended` as an
+explicit choice. It does not auto-select the mutation, infer from orphan
+manifests, or alter unrelated cluster choices. GRS-14.4 and operator help record
+this recovery contract.
+
+The database's three FT-710 manifests are also orphaned: each points to an
+application system key that has no application row. Manifest conflict checking
+now retains such rows as diagnostics but excludes them as resource owners, so
+their stale JS8 endpoint and working-directory claims cannot veto the reviewed
+recovery. Linked manifests retain the existing collision rules; no orphan is
+silently deleted.
+
+GRS-13.5 records the atomic publication and Edit Apps contract. Operator help
+now explains the all-or-nothing result and explicitly lists the five Software
+Administration families produced by Tri-Mode + FIO Spotter + CommStat.
+
+Acceptance evidence:
+
+- guided final-apply, radio-scoped Settings, canonical selected-stack identity,
+  VarAC arrangement, and real arrangement-widget routes: **214 passed**;
+- guided software model/discovery/proposals, Software Administration adapter,
+  editors/layout/model/persistence/workspace, instance assistant/manifest, and
+  contextual help: **195 passed**;
+- changed Python compilation and `git diff --check`: passed.
+
+No production database, orphan metadata, application file, external process,
+radio, commit, or remote was changed. The unrelated installation-guide DOCX
+and rendered guide directory remain preserved and excluded.
