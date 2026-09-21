@@ -3955,6 +3955,18 @@ move or overwrite their external data. **Replace instance** is the reviewed
 recovery route. New Final Save and Replace transactions must satisfy this
 invariant without requiring a migration of unrelated existing rows.
 
+#### GRS-13.4a — Fast Light component-scoped legacy repair
+
+For valid Fast Light identities with legacy or incomplete FLMsg/FLAmp data,
+Software Administration MUST expose **Repair FLMsg/FLAmp components**, a
+narrower action than Replace instance. It preserves FLRig/FLDigi executable,
+native profile, endpoint, and launch identity; only additive FLDigi ARQ-pairing
+arguments needed for FLAmp may be introduced. Unrelated families and Launch
+Control preferences remain unchanged. No external application files may be
+written. One optimistic generation-checked atomic transaction merges only
+FLMsg/FLAmp canonical, manifest, and launch rows, then performs complete
+readback/parity validation and rolls back on any error.
+
 ### GRS-13.5 — Atomic Publication And Edit-Apps Invariant
 
 The Add Radio database transaction and the UI publication boundary are the

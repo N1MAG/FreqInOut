@@ -413,6 +413,7 @@ class SoftwareTaskEditor(QWidget):
         managed: bool,
         *,
         identity_key: str = "",
+        component_repair_available: bool = False,
     ) -> None:
         """Keep the task projection read-only when a canonical bundle exists.
 
@@ -426,15 +427,33 @@ class SoftwareTaskEditor(QWidget):
         self.form_widget.setEnabled(not self._canonical_identity_managed)
         self.identity_notice_label.setVisible(self._canonical_identity_managed)
         if self._canonical_identity_managed:
+            repair_note = (
+                " A component-only FLMsg/FLAmp repair is available below; it preserves the "
+                "existing FLRig profile and the FLDigi profile/XML-RPC identity."
+                if component_repair_available
+                else ""
+            )
             self.identity_notice_label.setText(
                 f"This is the same saved {self._radio_name or 'radio'} software instance reviewed in Add Radio. "
                 "Review it here; use Add software instance… / Replace instance to change "
-                "identity, paths, endpoints, or launch details as one safe transaction."
+                f"identity, paths, endpoints, or launch details as one safe transaction.{repair_note}"
             )
             self.identity_notice_label.setToolTip("")
             self.discover_button.hide()
             self.save_button.hide()
             self.dirty_label.hide()
+            if component_repair_available:
+                self.task_action_button.setText("Repair FLMsg / FLAmp components…")
+                self.task_action_button.setProperty(
+                    "software_action", "repair_fast_light_message_components"
+                )
+                self.task_action_button.show()
+            else:
+                task = task_definition(self._family_key, self._task_key)
+                self.task_action_button.setVisible(bool(task and task.action))
+                if task and task.action:
+                    self.task_action_button.setText(task.action_label or "Open")
+                    self.task_action_button.setProperty("software_action", task.action)
         else:
             task = task_definition(self._family_key, self._task_key)
             has_editable_fields = bool(

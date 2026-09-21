@@ -50,3 +50,35 @@ def test_canonical_software_identity_disables_partial_edit_save_and_discovery() 
     finally:
         editor.deleteLater()
         _APP.processEvents()
+
+
+def test_canonical_fast_light_exposes_narrow_message_component_repair() -> None:
+    editor = SoftwareTaskEditor()
+    try:
+        editor.set_context(
+            family_key="fast_light",
+            family_title="Fast Light",
+            task_key="flamp",
+            radio_id=72,
+            radio_name="FT-710",
+            state={"flamp_path": "/usr/local/bin/flamp"},
+        )
+        editor.set_canonical_identity_managed(
+            True,
+            identity_key="fast_light:ft-710",
+            component_repair_available=True,
+        )
+        editor.show()
+        _APP.processEvents()
+
+        assert editor.task_action_button.isVisible()
+        assert editor.task_action_button.text() == "Repair FLMsg / FLAmp components…"
+        assert (
+            editor.task_action_button.property("software_action")
+            == "repair_fast_light_message_components"
+        )
+        assert "component-only" in editor.identity_notice_label.text()
+        assert editor.save_button.isHidden()
+    finally:
+        editor.deleteLater()
+        _APP.processEvents()

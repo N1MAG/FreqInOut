@@ -1479,7 +1479,7 @@
   </ul>
 
   <h3 id="settings-fast-light-details">Fast Light Settings Details</h3>
-  <p><strong>Where to configure it</strong>: open <a href="#settings-software-administration">Settings &gt; Software</a>, choose Fast Light, then choose the radio and task. FLMsg and FLAmp are normally shared station applications; the workspace still identifies the radio workflow that uses their folders.</p>
+  <p><strong>Where to configure it</strong>: open <a href="#settings-software-administration">Settings &gt; Software</a>, choose Fast Light, then choose the radio and task. The installed FLMsg and FLAmp executables may be shared, but each managed radio normally has its own NBEMS runtime/data identity and launch arguments.</p>
   <ul class="section-list">
     <li><strong>Software paths</strong>: configure FLRig, FLDigi, FLMsg, and FLAmp launch paths or executables. Only fill in the tools your station actually uses.</li>
     <li><strong>Managed profile names</strong>: a new managed Fast Light instance uses the radio name for its native FLRig, FLDigi, and radio-scoped NBEMS folder. FIO keeps your display label as entered but replaces spaces or unsafe path punctuation with hyphens, so <code>Field Radio 1</code> uses <code>Field-Radio-1</code>. Internal FIO IDs never appear in these paths.</li>
@@ -1488,6 +1488,7 @@
     <li><strong>FLDigi Log Path</strong>: folder or log location kept for FLDigi review and future support. It does not automatically change a live net roster.</li>
     <li><strong>ICS/Messages</strong>: the FLMsg message folder FIO should use for compose/import/export workflows.</li>
     <li><strong>FLAMP/rx</strong>: the FLAmp receive folder FIO should watch for received files and relay-related workflows.</li>
+    <li><strong>Repair FLMsg / FLAmp</strong>: older saved radios may show <code>Repair FLMsg / FLAmp components…</code> on the FLMsg, FLAmp, or Launch task. Review and apply it to correct only the saved FLMsg/FLAmp folders and launch identities plus the required FLDigi NBEMS/ARQ pairing. It does not replace the Fast Light instance, rewrite external application files, or change FLRig, unrelated software, or your Launch Control choices.</li>
     <li><strong>Auto-Fill / Find</strong>: asks FreqInOut to inspect likely local software folders and fill in paths it can identify. Review the results before saving.</li>
   </ul>
 

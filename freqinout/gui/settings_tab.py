@@ -10069,6 +10069,11 @@ class SettingsTab(QWidget):
             editor.set_canonical_identity_managed(
                 bool(assignment and assignment.canonical_identity_key),
                 identity_key=(assignment.canonical_identity_key if assignment else ""),
+                component_repair_available=(
+                    family_key == "fast_light"
+                    and task_key in {"flmsg", "flamp", "launch"}
+                    and self._fast_light_message_component_repair_needed(radio_id)
+                ),
             )
             editor.set_dirty(bool(radio_id and (radio_id, family_key) in self._software_dirty_families))
             self._software_task_editors[key] = editor
@@ -10081,6 +10086,11 @@ class SettingsTab(QWidget):
             editor.set_canonical_identity_managed(
                 bool(assignment and assignment.canonical_identity_key),
                 identity_key=(assignment.canonical_identity_key if assignment else ""),
+                component_repair_available=(
+                    family_key == "fast_light"
+                    and task_key in {"flmsg", "flamp", "launch"}
+                    and self._fast_light_message_component_repair_needed(radio_id)
+                ),
             )
         workspace.set_editor_widget(editor)
         self._sync_current_section_scroll_size()
@@ -10198,6 +10208,125 @@ class SettingsTab(QWidget):
                 self._status_service.refresh_now(reason="software_settings", force=True)
             except Exception:
                 log.exception("Unable to request software status refresh.")
+        elif action_key == "repair_fast_light_message_components":
+            self._repair_fast_light_message_components()
+
+    def _fast_light_message_component_repair_needed(self, radio_id: Optional[int]) -> bool:
+        """Return whether a saved Fast Light identity has legacy child wiring."""
+
+        ident = int(radio_id or 0)
+        if ident <= 0:
+            return False
+        try:
+            record = next(
+                (
+                    item
+                    for item in self.multi_radio_store.list_radio_software_identity_records(ident)
+                    if item.family_key == "fast_light"
+                ),
+                None,
+            )
+            if record is None:
+                return False
+            components = {item.component_id.casefold(): item for item in record.components}
+            flmsg = components.get("flmsg")
+            flamp = components.get("flamp")
+            if flmsg is not None and "--auto-dir" in flmsg.argv:
+                return True
+            if flamp is not None and (
+                "--config-dir" not in flamp.argv
+                or "--arq-server-port" not in flamp.argv
+                or not flamp.cwd
+            ):
+                return True
+            launch = self.multi_radio_store.get_radio_launch_bundle(ident)
+            return any(
+                str(item.get("app_name") or "").strip().casefold() == "flamp"
+                and "station-shared" in str(item.get("instance_key") or "").casefold()
+                for item in launch.get("items", ()) or ()
+                if isinstance(item, Mapping)
+            )
+        except Exception:
+            log.debug("Unable to inspect Fast Light component repair state.", exc_info=True)
+            return False
+
+    def _repair_fast_light_message_components(self) -> None:
+        """Review and apply the narrow GRS-13.4a legacy child repair."""
+
+        workspace = getattr(self, "software_administration_workspace", None)
+        if not isinstance(workspace, SoftwareAdministrationWorkspace):
+            return
+        radio_id = workspace.selected_radio_id()
+        if radio_id is None:
+            QMessageBox.information(
+                self,
+                "FLMsg / FLAmp repair",
+                "Choose one radio before reviewing its FLMsg/FLAmp repair.",
+            )
+            return
+        try:
+            plan = self.multi_radio_store.prepare_fast_light_message_component_repair(
+                int(radio_id)
+            )
+        except (ValueError, KeyError) as exc:
+            QMessageBox.warning(self, "FLMsg / FLAmp repair", str(exc))
+            return
+        except Exception:
+            log.exception("Failed preparing the FLMsg/FLAmp component repair.")
+            QMessageBox.warning(
+                self,
+                "FLMsg / FLAmp repair",
+                "FIO could not prepare a safe component repair. Nothing was changed.",
+            )
+            return
+
+        response = QMessageBox.question(
+            self,
+            "Update FLMsg / FLAmp launch setup?",
+            (
+                f"{plan.summary}\n\n"
+                "This updates FIO's saved FLMsg/FLAmp identity, message folders, and launch rows. "
+                "FLDigi receives only the required NBEMS/ARQ pairing arguments. FLRig, unrelated "
+                "software, Launch Control choices, and external application files are retained.\n\n"
+                "Apply this reviewed repair?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if response != QMessageBox.Yes:
+            return
+        try:
+            result = self.multi_radio_store.apply_fast_light_message_component_repair(plan)
+        except (ValueError, KeyError) as exc:
+            QMessageBox.warning(self, "FLMsg / FLAmp repair", str(exc))
+            return
+        except Exception:
+            log.exception("Failed applying the FLMsg/FLAmp component repair.")
+            QMessageBox.warning(
+                self,
+                "FLMsg / FLAmp repair",
+                "The component repair failed verification. Nothing was changed.",
+            )
+            return
+
+        saved = result.get("radio") if isinstance(result, Mapping) else None
+        if isinstance(saved, Mapping):
+            self._replace_cached_device_profile(saved)
+        self._refresh_software_administration_snapshot()
+        self._show_software_task_editor()
+        feedback = getattr(self, "settings_action_feedback_label", None)
+        if isinstance(feedback, QLabel):
+            feedback.setText(
+                f"Updated FLMsg/FLAmp for the selected radio using distinct ARQ port {plan.arq_port}."
+            )
+        QMessageBox.information(
+            self,
+            "FLMsg / FLAmp repair",
+            (
+                "FLMsg and FLAmp were updated without replacing the Fast Light instance. "
+                "Existing Launch Control choices and external application files were retained."
+            ),
+        )
 
     def _software_family_assignment(self, family_key: str, radio_id: int) -> object | None:
         family = self._software_administration_snapshot.family(family_key)

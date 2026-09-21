@@ -60,6 +60,14 @@ application row, manifest, launch projection, radio binding, and canonical
 generation in one transaction. A compact task Save must never patch one of
 those projections independently.
 
+For legacy or incomplete FLMsg/FLAmp data, expose **Repair FLMsg/FLAmp
+components** instead of Replace instance. This component-scoped review
+preserves FLRig/FLDigi executable, native profile, endpoint, and launch
+identity (allowing only additive FLDigi ARQ-pairing arguments for FLAmp), all
+unrelated families, and Launch Control preferences. It writes no external app
+files and uses one optimistic atomic transaction with generation check,
+complete readback, parity validation, and rollback on failure.
+
 ## Product Outcome
 
 Software Administration must let an operator start with the software they want

@@ -1,5 +1,35 @@
 # UI Regression Work Log
 
+## 2026-09-21 — GRS-13.4a Fast Light component-scoped legacy repair
+
+The controlling specifications now define a dedicated Repair FLMsg/FLAmp
+components review action. It is narrower than Replace instance, preserves
+FLRig/FLDigi identity (with only additive ARQ pairing arguments), unrelated
+families, and Launch Control preferences, writes no external app files, and
+requires one optimistic atomic transaction with readback, parity validation,
+and rollback.
+
+Implementation packages and evidence:
+
+- Architecture, persistence transaction, production-copy validation, and final
+  integration: primary high-reasoning model. The repair updates FLMsg/FLAmp and
+  the required additive FLDigi NBEMS/ARQ arguments while proving FLRig and all
+  unrelated canonical families unchanged.
+- Bounded store/test audit and specification update:
+  `gpt-5.6-luna`, low reasoning. The primary reviewed and integrated the diff.
+- Acceptance: `89 passed` across the component repair, GRS-13 identity,
+  Software Administration, launch identity, persistence, workspace, and guided
+  recipe suites. An additional disposable copy of the attached production
+  settings database repaired FT-710 to distinct ARQ port `7323` and returned no
+  Fast Light parity issues; the original attachment remained read-only.
+- A repository-wide `pytest -q` attempt reached 3% before the existing macOS
+  Qt/background-reader exit fault interrupted the process in Compose layout
+  acceptance. The named Compose test passes by itself (`1 passed`); no failure
+  was attributed to this repair slice.
+- The implementation gate is closed. Live operator confirmation that the second
+  FLMsg/FLAmp pair launches and exchanges traffic remains the external
+  qualification gate.
+
 All new entries must follow the authoritative multi-model delivery contract in
 `docs/internal/project_delivery_rules.md` and record the required package/model,
 primary-review, acceptance, and exit-gate evidence.

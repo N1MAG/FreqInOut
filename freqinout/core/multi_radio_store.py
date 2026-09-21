@@ -8266,6 +8266,189 @@ class MultiRadioStore:
                 conn.rollback()
                 raise
 
+    def prepare_fast_light_message_component_repair(
+        self,
+        radio_profile_id: int,
+        *,
+        platform: object | None = None,
+        storage_home: Path | None = None,
+    ) -> Any:
+        """Prepare a reviewed FLMsg/FLAmp-only repair for one saved radio.
+
+        Legacy Fast Light records can predate qualified radio-scoped FLMsg and
+        FLAmp launch identities.  This method is read-only: it allocates a
+        deterministic distinct ARQ port from persisted station evidence and
+        returns the complete merged transaction for operator review.
+        """
+
+        from freqinout.core.fast_light_component_repair import (
+            build_fast_light_component_repair_plan,
+        )
+
+        radio_id = int(radio_profile_id)
+        profile = self.get_device_profile(radio_id)
+        if not isinstance(profile, Mapping):
+            raise KeyError(f"Unknown radio profile id: {radio_id}")
+        records = self.list_radio_software_identity_records(radio_id)
+        fast_light = next((record for record in records if record.family_key == "fast_light"), None)
+        if fast_light is None:
+            raise ValueError("The selected radio has no canonical Fast Light identity to repair.")
+        manifest = self.get_software_instance_manifest(fast_light.bundle_id)
+        if not isinstance(manifest, Mapping):
+            raise ValueError("The selected Fast Light identity has no saved manifest to repair.")
+
+        manifests = self.list_software_instance_manifests()
+        occupied_ports: set[int] = set()
+        explicit_arq_by_application: Dict[str, int] = {}
+        for row in manifests:
+            if not isinstance(row, Mapping):
+                continue
+            application_key = _coerce_text(row.get("application_system_key", ""), "")
+            for raw_endpoint in row.get("ports", ()) or ():
+                if not isinstance(raw_endpoint, Mapping):
+                    continue
+                port = _coerce_int(raw_endpoint.get("port"), 0)
+                if 1 <= port <= 65535:
+                    occupied_ports.add(port)
+                    label = _coerce_text(raw_endpoint.get("name", ""), "").casefold()
+                    if row.get("family_key") == "fast_light" and "arq" in label:
+                        explicit_arq_by_application[application_key] = port
+
+        target_application_key = _coerce_text(manifest.get("application_system_key", ""), "")
+        arq_port = explicit_arq_by_application.get(target_application_key, 0)
+        if not arq_port:
+            # Older manifests have no ARQ claim.  Reserve one deterministic
+            # legacy slot per earlier FLAmp radio so a second instance does not
+            # inherit the first pair's conventional 7322 listener.
+            with self._connect_readonly() as conn:
+                flamp_radios = conn.execute(
+                    """
+                    SELECT d.id, f.system_key
+                      FROM device_profiles d
+                      JOIN fast_light_configs f ON f.id=d.fast_light_config_id
+                     WHERE d.use_flamp=1
+                     ORDER BY d.id
+                    """
+                ).fetchall()
+            candidate = 7322
+            for row in flamp_radios:
+                application_key = str(row[1] or "").strip()
+                explicit = explicit_arq_by_application.get(application_key, 0)
+                if explicit:
+                    if int(row[0]) == radio_id:
+                        arq_port = explicit
+                        break
+                    continue
+                while candidate in occupied_ports:
+                    candidate += 1
+                    if candidate > 65535:
+                        raise ValueError("No distinct FLAmp ARQ port is available.")
+                reserved = candidate
+                occupied_ports.add(reserved)
+                candidate += 1
+                if int(row[0]) == radio_id:
+                    arq_port = reserved
+                    break
+        if not arq_port:
+            raise ValueError("FIO could not allocate a distinct FLAmp ARQ port for this radio.")
+
+        return build_fast_light_component_repair_plan(
+            profile=profile,
+            manifest=manifest,
+            identity_records=records,
+            identity_generation=self.radio_software_identity_generation(radio_id),
+            launch_bundle=self.get_radio_launch_bundle(radio_id),
+            arq_port=arq_port,
+            platform=platform,
+            storage_home=storage_home,
+        )
+
+    def apply_fast_light_message_component_repair(self, plan: Any) -> Dict[str, Any]:
+        """Persist one reviewed component repair as an optimistic transaction."""
+
+        from freqinout.core.software_identity_bundle import identity_record_to_mapping
+
+        radio_id = int(getattr(plan, "radio_profile_id", 0) or 0)
+        if radio_id <= 0:
+            raise ValueError("The FLMsg/FLAmp repair has no saved radio identity.")
+        before_records = self.list_radio_software_identity_records(radio_id)
+        before_by_family = {
+            record.family_key: identity_record_to_mapping(record) for record in before_records
+        }
+        before_fast_light = before_by_family.get("fast_light")
+        if not isinstance(before_fast_light, Mapping):
+            raise ValueError("The selected radio no longer has a Fast Light identity.")
+        before_components = {
+            str(item.get("component_id") or "").casefold(): dict(item)
+            for item in before_fast_light.get("components", ()) or ()
+            if isinstance(item, Mapping)
+        }
+
+        with self.guided_save_transaction() as transaction:
+            if self.radio_software_identity_generation(radio_id) != int(plan.identity_generation):
+                raise ValueError(
+                    "The Fast Light identity changed after review. Refresh Software Administration and review the repair again."
+                )
+            current_manifest = self.get_software_instance_manifest(plan.manifest_instance_key)
+            if not isinstance(current_manifest, Mapping) or str(
+                current_manifest.get("updated_utc") or ""
+            ) != str(plan.manifest_updated_utc or ""):
+                raise ValueError(
+                    "The Fast Light manifest changed after review. Refresh Software Administration and review the repair again."
+                )
+
+            saved_profile = self.save_device_profile(plan.profile)
+            saved_manifest = self.save_software_instance_manifest(plan.manifest)
+            saved_records = self.save_radio_software_identity_records(
+                radio_id,
+                plan.identity_records,
+                expected_generation=int(plan.identity_generation),
+            )
+            self.save_radio_launch_bundle(
+                radio_id,
+                launch_enabled=bool(plan.launch_enabled),
+                items=plan.launch_items,
+            )
+
+            after_by_family = {
+                record.family_key: identity_record_to_mapping(record) for record in saved_records
+            }
+            for family_key, prior in before_by_family.items():
+                if family_key != "fast_light" and after_by_family.get(family_key) != prior:
+                    raise ValueError(
+                        f"Component repair changed unrelated {family_key} identity; nothing was saved."
+                    )
+            after_fast_light = after_by_family.get("fast_light", {})
+            after_components = {
+                str(item.get("component_id") or "").casefold(): dict(item)
+                for item in after_fast_light.get("components", ()) or ()
+                if isinstance(item, Mapping)
+            }
+            if after_components.get("flrig") != before_components.get("flrig"):
+                raise ValueError("Component repair changed FLRig identity; nothing was saved.")
+            prior_fldigi = dict(before_components.get("fldigi") or {})
+            next_fldigi = dict(after_components.get("fldigi") or {})
+            prior_fldigi.pop("argv", None)
+            next_fldigi.pop("argv", None)
+            if next_fldigi != prior_fldigi:
+                raise ValueError(
+                    "Component repair changed FLDigi outside its required FLMsg/FLAmp pairing arguments; nothing was saved."
+                )
+            parity_issues = self.validate_radio_software_identity_projections(radio_id)
+            if parity_issues.get("fast_light"):
+                raise ValueError(
+                    "Component repair did not pass canonical readback: "
+                    + "; ".join(parity_issues["fast_light"])
+                )
+            transaction.complete()
+
+        return {
+            "radio": saved_profile,
+            "manifest": saved_manifest,
+            "identity_records": saved_records,
+            "arq_port": int(plan.arq_port),
+        }
+
     def adopt_software_instance(
         self,
         *,
