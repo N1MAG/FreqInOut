@@ -9644,3 +9644,49 @@ Acceptance evidence: the focused launch, status, readiness, custom-tool, and
 GRS-13 suite passes **116 tests** with 6 platform skips. The broader guided
 recipe, native writer, receiver, Software Administration, and persistence suite
 passes **275 tests**. Changed Python compilation and `git diff --check` pass.
+
+## 2026-09-21 — FLMsg/FLAmp radio-scoped native launch correction
+
+Status: specified, implemented, and regression-tested; Linux and Windows
+production operator retest remains open. Existing application files and the
+operator's unrelated documentation changes were not modified.
+
+The prior work-log statement that the qualified FLAmp recipe remained
+station-shared is superseded. Upstream source review found two precise launch
+contract errors. Current FLMsg accepts `--flmsg-dir` but its advertised
+`--auto-dir` parser is disabled; passing that argument can prevent startup.
+Current FLAmp supports `--config-dir` plus explicit FLDigi ARQ and XML-RPC
+address/port arguments, so it can have a radio-scoped process and native NBEMS
+root instead of being forced into one station-shared process.
+
+The canonical Fast Light recipe now gives each selected radio one stable NBEMS
+root. FLMsg launches only with `--flmsg-dir`; FLDigi owns the matching
+`--flmsg-dir` and `--auto-dir` handoff. FLAmp launches with that radio's
+`--config-dir`, explicit ARQ endpoint, and FLDigi XML-RPC endpoint. The ARQ port
+is allocated, collision-checked, displayed, persisted in the manifest, and
+round-tripped through Add Radio and Software Administration. FLAmp receive,
+transmit, scripts, and relay directories are derived below the same reviewed
+radio root and are created by the existing canonical-directory transaction.
+Exact executable-and-argument matching prevents another radio's FLMsg or
+FLAmp process from satisfying readiness.
+
+FLMsg's XML-RPC endpoint remains a per-root `FLMSG.prefs` fact, not a supported
+command-line option. This slice does not claim an unqualified writer: the
+intended FLDigi endpoint is review evidence until a platform/version exact
+preferences writer passes backup/write/readback/rollback qualification. Legacy
+FLAmp rows without a root or ARQ endpoint remain visible for reviewed
+replacement and are not silently converted or auto-started.
+
+Delegation evidence: `flamp_flmsg_cli_audit` used `gpt-5.6-terra` at medium
+reasoning for read-only upstream/current-source launch-contract research;
+`flamp_flmsg_test_audit` used `gpt-5.6-luna` at medium reasoning for independent
+regression-gap analysis. The primary `gpt-6-astra` implemented and reviewed the
+recipe, UI/persistence, specification, and test changes.
+
+Acceptance evidence: focused launch-recipe, inventory, status, canonical
+identity, assistant, native-directory, Software Administration, launch-bundle,
+and review suites pass **182 tests**
+with 2 platform skips. The slow all-guided offscreen sweep was interrupted and
+the macOS PySide process faulted while handling that interruption in the GRS-74
+theme test; that exact parametrized test passes independently (**12 tests**).
+Changed Python compilation and `git diff --check` pass.

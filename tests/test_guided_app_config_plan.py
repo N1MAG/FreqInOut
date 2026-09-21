@@ -182,6 +182,7 @@ def test_canonical_fast_light_recipe_replaces_legacy_dirs_and_materializes_all_s
         "use_flamp": True,
         "port": 12346,
         "secondary_port": 7363,
+        "arq_port": 7323,
     }
     recipe = resolve_fast_light_managed_recipe(
         draft,
@@ -199,7 +200,7 @@ def test_canonical_fast_light_recipe_replaces_legacy_dirs_and_materializes_all_s
     assert str(tmp_path / "home" / ".flrig" / "instances" / "FT-710") in directory_targets
     assert str(tmp_path / "home" / ".fldigi" / "instances" / "FT-710") in directory_targets
     assert str(tmp_path / "home" / ".nbems" / "instances" / "FT-710" / "ICS" / "messages") in directory_targets
-    assert str(tmp_path / "home" / ".nbems" / "FLAMP" / "rx") in directory_targets
+    assert str(tmp_path / "home" / ".nbems" / "instances" / "FT-710" / "FLAMP" / "rx") in directory_targets
     assert not any("fio-config/managed-instances" in target for target in directory_targets)
 
     applied = apply_guided_external_app_config_plan(canonical)

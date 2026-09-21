@@ -57,8 +57,6 @@ def test_flmsg_process_identity_uses_radio_scoped_nbems_arguments(monkeypatch):
             "/usr/local/bin/flmsg",
             "--flmsg-dir",
             "/home/bill/.nbems/instances/FTDX-10",
-            "--auto-dir",
-            "/home/bill/.nbems/instances/FTDX-10/WRAP/auto",
         ),
     }
     monkeypatch.setattr(SoftwareStatusService, "_shared_proc_records", [record])
@@ -70,8 +68,6 @@ def test_flmsg_process_identity_uses_radio_scoped_nbems_arguments(monkeypatch):
         (
             "--flmsg-dir",
             "/home/bill/.nbems/instances/FTDX-10",
-            "--auto-dir",
-            "/home/bill/.nbems/instances/FTDX-10/WRAP/auto",
         ),
     )
     assert not service.cached_program_instance_running(
@@ -80,9 +76,40 @@ def test_flmsg_process_identity_uses_radio_scoped_nbems_arguments(monkeypatch):
         (
             "--flmsg-dir",
             "/home/bill/.nbems/instances/FT-710",
-            "--auto-dir",
-            "/home/bill/.nbems/instances/FT-710/WRAP/auto",
         ),
+    )
+
+
+def test_flamp_process_identity_requires_the_selected_radio_root_and_ports(monkeypatch):
+    record = {
+        "name": "flamp",
+        "exe": "flamp",
+        "exe_path": "/usr/local/bin/flamp",
+        "cmd_tokens": ("flamp",),
+        "cmd_paths": ("/usr/local/bin/flamp", "/home/bill/.nbems/instances/FTDX-10"),
+        "cmdline": (
+            "/usr/local/bin/flamp",
+            "--config-dir",
+            "/home/bill/.nbems/instances/FTDX-10",
+            "--arq-server-address",
+            "127.0.0.1",
+            "--arq-server-port",
+            "7322",
+            "--xmlrpc-server-address",
+            "127.0.0.1",
+            "--xmlrpc-server-port",
+            "7362",
+        ),
+    }
+    monkeypatch.setattr(SoftwareStatusService, "_shared_proc_records", [record])
+    service = SoftwareStatusService(DummySettings())
+
+    expected = record["cmdline"][1:]
+    assert service.cached_program_instance_running("FLAmp", "/usr/local/bin/flamp", expected)
+    assert not service.cached_program_instance_running(
+        "FLAmp",
+        "/usr/local/bin/flamp",
+        tuple("7323" if value == "7322" else value for value in expected),
     )
 
 

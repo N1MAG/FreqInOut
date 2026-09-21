@@ -92,6 +92,7 @@ SOFTWARE_EDITOR_TASKS: dict[str, dict[str, SoftwareEditorTask]] = {
             F("path_fldigi", "FLDigi application", "path", browse=True),
             F("fldigi_host", "FLDigi XML-RPC host", placeholder="127.0.0.1"),
             F("fldigi_port", "FLDigi XML-RPC port", "integer", "7362"),
+            F("arq_port", "FLDigi / FLAmp ARQ port", "integer", "7322"),
             F("fldigi_log_path", "FLDigi log folder", "path", browse=True),
             F("fldigi_checkin_dir", "Check-in folder", "path", browse=True),
         )),
@@ -99,7 +100,7 @@ SOFTWARE_EDITOR_TASKS: dict[str, dict[str, SoftwareEditorTask]] = {
             F("path_flmsg", "FLMsg application", "path", browse=True),
             F("message_paths.flmsg", "ICS messages folder", "path", browse=True),
         )),
-        "flamp_signing": T("FLAmp & Signing", "Review the FLAmp application and native receive source. A shared source is labeled honestly; signing identities are managed centrally.", (
+        "flamp_signing": T("FLAmp & Signing", "Review this radio's FLAmp application, native receive source, and paired FLDigi ARQ endpoint. Signing identities are managed centrally.", (
             F("path_flamp", "FLAmp application", "path", browse=True),
             F("message_paths.flamp", "FLAMP receive folder", "path", browse=True),
         ), action="message_signing", action_label="Manage signing identities"),
@@ -118,6 +119,7 @@ SOFTWARE_EDITOR_TASKS: dict[str, dict[str, SoftwareEditorTask]] = {
             F("flrig_port", "FLRig XML-RPC port", "integer", "12345"),
             F("fldigi_host", "FLDigi XML-RPC host", placeholder="127.0.0.1"),
             F("fldigi_port", "FLDigi XML-RPC port", "integer", "7362"),
+            F("arq_port", "FLDigi / FLAmp ARQ port", "integer", "7322"),
             F("fldigi_log_path", "FLDigi log folder", "path", browse=True),
             F("fldigi_checkin_dir", "Check-in folder", "path", browse=True),
         )),

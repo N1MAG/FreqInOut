@@ -368,6 +368,7 @@ def test_fast_light_transceiver_recipe_orders_distinct_components(tmp_path):
             "host": "127.0.0.1",
             "port": 12346,
             "secondary_port": 7363,
+            "arq_port": 7323,
             "launch_at_startup": True,
         },
         managed_root="/fio/managed-instances",
@@ -386,12 +387,24 @@ def test_fast_light_transceiver_recipe_orders_distinct_components(tmp_path):
     assert resolution.components[2].arguments == (
         "--flmsg-dir",
         str(tmp_path / ".nbems" / "instances" / "South"),
-        "--auto-dir",
-        str(tmp_path / ".nbems" / "instances" / "South" / "WRAP" / "auto"),
     )
-    assert resolution.components[3].execution_scope == "station_shared_utility"
-    assert resolution.components[3].operator_starts is True
-    assert resolution.components[3].launch_at_startup is False
+    assert resolution.components[3].execution_scope == "standard"
+    assert resolution.components[3].arguments == (
+        "--config-dir",
+        str(tmp_path / ".nbems" / "instances" / "South"),
+        "--arq-server-address",
+        "127.0.0.1",
+        "--arq-server-port",
+        "7323",
+        "--xmlrpc-server-address",
+        "127.0.0.1",
+        "--xmlrpc-server-port",
+        "7363",
+    )
+    assert resolution.components[3].operator_starts is False
+    assert resolution.components[3].launch_at_startup is True
+    assert "--flmsg-dir" in resolution.components[1].arguments
+    assert "--auto-dir" in resolution.components[1].arguments
     assert resolution.components[0].configuration_roots != resolution.components[1].configuration_roots
     updates = recipe_draft_updates(resolution)
     assert updates["configuration_path"].endswith("/.flrig/instances/South")
@@ -400,7 +413,77 @@ def test_fast_light_transceiver_recipe_orders_distinct_components(tmp_path):
     assert "south123" not in updates["secondary_configuration_path"]
     assert updates["storage_path"].endswith("/logs")
     assert updates["flmsg_message_path"].endswith("/ICS/messages")
-    assert updates["flamp_receive_path"].endswith("/.nbems/FLAMP/rx")
+    assert updates["flamp_receive_path"].endswith("/.nbems/instances/South/FLAMP/rx")
+    assert updates["arq_port"] == 7323
+
+
+def test_flmsg_and_flamp_launch_identity_isolated_for_two_radios(tmp_path):
+    recipes = []
+    for label, flrig_port, fldigi_port, arq_port in (
+        ("FTDX-10", 12345, 7362, 7322),
+        ("FT-710", 12346, 7363, 7323),
+    ):
+        recipes.append(
+            resolve_fast_light_managed_recipe(
+                {
+                    "draft_instance_key": f"draft-{label}",
+                    "application_system_key": f"fast-light-{label}",
+                    "owner_label": label,
+                    "radio_role": "tx_rx",
+                    "application_path": "/opt/flrig",
+                    "secondary_application_path": "/opt/fldigi",
+                    "flmsg_application_path": "/opt/flmsg",
+                    "flamp_application_path": "/opt/flamp",
+                    "host": "127.0.0.1",
+                    "port": flrig_port,
+                    "secondary_port": fldigi_port,
+                    "arq_port": arq_port,
+                    "launch_at_startup": True,
+                },
+                managed_root="/fio/managed-instances",
+                platform="linux",
+                storage_home=tmp_path,
+            )
+        )
+
+    assert all(recipe.qualified for recipe in recipes)
+    first = {item.component_key: item for item in recipes[0].components}
+    second = {item.component_key: item for item in recipes[1].components}
+    assert first["flmsg"].arguments != second["flmsg"].arguments
+    assert first["flamp"].arguments != second["flamp"].arguments
+    assert first["flamp"].configuration_roots != second["flamp"].configuration_roots
+    assert first["flamp"].launch_at_startup is second["flamp"].launch_at_startup is True
+
+
+def test_windows_flmsg_and_flamp_use_radio_scoped_nbems_native_root(tmp_path):
+    resolution = resolve_fast_light_managed_recipe(
+        {
+            "draft_instance_key": "draft-windows-ft710",
+            "application_system_key": "fast-light-windows-ft710",
+            "owner_label": "FT-710",
+            "radio_role": "tx_rx",
+            "application_path": "C:/Program Files/flrig/flrig.exe",
+            "secondary_application_path": "C:/Program Files/fldigi/fldigi.exe",
+            "flmsg_application_path": "C:/Program Files/flmsg/flmsg.exe",
+            "flamp_application_path": "C:/Program Files/flamp/flamp.exe",
+            "host": "127.0.0.1",
+            "port": 12346,
+            "secondary_port": 7363,
+            "arq_port": 7323,
+        },
+        managed_root="C:/Users/Bill/AppData/Local/FreqInOut",
+        platform="windows",
+        storage_home=tmp_path,
+    )
+    components = {item.component_key: item for item in resolution.components}
+    expected_root = str(tmp_path / "NBEMS.files" / "instances" / "FT-710")
+
+    assert resolution.qualified
+    assert components["flmsg"].arguments == ("--flmsg-dir", expected_root)
+    assert components["flamp"].arguments[:2] == ("--config-dir", expected_root)
+    assert components["flamp"].data_roots[0] == str(
+        tmp_path / "NBEMS.files" / "instances" / "FT-710" / "FLAMP" / "rx"
+    )
 
 
 def test_fast_light_recipe_uses_explicit_component_selection_not_discovery_side_effects(tmp_path):
@@ -493,6 +576,7 @@ def test_atomic_store_projects_qualified_recipe_to_component_launch_rows(tmp_pat
             "host": "127.0.0.1",
             "port": 12346,
             "secondary_port": 7363,
+            "arq_port": 7323,
             "launch_at_startup": True,
         },
         managed_root=str(tmp_path / "managed-instances"),
@@ -550,6 +634,13 @@ def test_atomic_store_projects_qualified_recipe_to_component_launch_rows(tmp_pat
         str(tmp_path / "home" / ".nbems" / "instances" / "Radio-A" / "ICS" / "messages"),
         str(tmp_path / "home" / ".nbems" / "instances" / "Radio-A" / "ICS" / "templates"),
         str(tmp_path / "home" / ".nbems" / "instances" / "Radio-A" / "WRAP" / "auto"),
+    ]
+    assert readiness_by_app["FLAmp"]["managed_directories"] == [
+        str(tmp_path / "home" / ".nbems" / "instances" / "Radio-A"),
+        str(tmp_path / "home" / ".nbems" / "instances" / "Radio-A" / "FLAMP" / "rx"),
+        str(tmp_path / "home" / ".nbems" / "instances" / "Radio-A" / "FLAMP" / "tx"),
+        str(tmp_path / "home" / ".nbems" / "instances" / "Radio-A" / "FLAMP" / "scripts"),
+        str(tmp_path / "home" / ".nbems" / "instances" / "Radio-A" / "FLAMP" / "relay"),
     ]
     saved_radio = store.get_device_profile(int(radio["id"]))
     assert saved_radio["use_flmsg"] == 1

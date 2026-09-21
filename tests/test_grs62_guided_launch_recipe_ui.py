@@ -143,6 +143,7 @@ def test_qualified_fast_light_review_preserves_component_order_and_dependencies(
             "host": "127.0.0.1",
             "port": 12346,
             "secondary_port": 7363,
+            "arq_port": 7323,
         },
     )
     try:

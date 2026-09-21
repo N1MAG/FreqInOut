@@ -72,7 +72,7 @@ _FAMILY_FIELDS = {
         {"instance_name", "ownership", "variant", "version", "rig_name", "host", "port", "udp_port", "application_path", "configuration_path", "storage_path", "launch_command", "launch_at_startup", "notes"}
     ),
     "fast_light": frozenset(
-        {"instance_name", "ownership", "host", "port", "secondary_port", "application_path", "secondary_application_path", "flmsg_application_path", "flamp_application_path", "configuration_path", "secondary_configuration_path", "storage_path", "secondary_storage_path", "launch_command", "launch_at_startup", "advanced_tx_requested", "advanced_tx_acknowledged", "notes"}
+        {"instance_name", "ownership", "host", "port", "secondary_port", "arq_port", "application_path", "secondary_application_path", "flmsg_application_path", "flamp_application_path", "configuration_path", "secondary_configuration_path", "storage_path", "secondary_storage_path", "launch_command", "launch_at_startup", "advanced_tx_requested", "advanced_tx_acknowledged", "notes"}
     ),
     "varac": frozenset(
         {"instance_name", "ownership", "application_path", "configuration_path", "storage_path", "secondary_storage_path", "outbox_path", "working_directory", "cluster_path", "cluster_id", "cluster_name", "cluster_shared_database", "cluster_instance_number", "existing_standalone_node_id", "existing_standalone_device_profile_id", "existing_standalone_member_number", "email_gateway_sender_choice", "cluster_gateway", "cluster_ptt_lock", "launch_command", "launch_at_startup", "notes"}
@@ -95,6 +95,7 @@ _FAMILY_FIELD_LABELS = {
         "host": "Local service host",
         "port": "FLRig XML-RPC port",
         "secondary_port": "FLDigi XML-RPC port",
+        "arq_port": "FLDigi ARQ port",
         "application_path": "FLRig application",
         "secondary_application_path": "FLDigi application",
         "flmsg_application_path": "FLMsg application",
@@ -287,6 +288,7 @@ class SoftwareInstanceDraft:
     port: int = 0
     udp_port: int = 0
     secondary_port: int = 0
+    arq_port: int = 0
     rig_name: str = ""
     application_path: str = ""
     secondary_application_path: str = ""
@@ -353,6 +355,8 @@ class SoftwareInstanceDraft:
                 ports.append({"name": "FLRig XML-RPC", "protocol": "tcp", "host": self.host, "port": self.port})
             if self.secondary_port:
                 ports.append({"name": "FLDigi XML-RPC", "protocol": "tcp", "host": self.host, "port": self.secondary_port})
+            if self.arq_port:
+                ports.append({"name": "FLDigi ARQ", "protocol": "tcp", "host": self.host, "port": self.arq_port})
             for kind, value in (
                 ("flrig_configuration", self.configuration_path),
                 ("fldigi_configuration", self.secondary_configuration_path),
@@ -444,6 +448,7 @@ class SoftwareInstanceDraft:
             "port": int(self.port or 0),
             "udp_port": int(self.udp_port or 0),
             "secondary_port": int(self.secondary_port or 0),
+            "arq_port": int(self.arq_port or 0),
             "rig_name": self.rig_name,
             "ports": ports,
             "application_path": self.application_path,
@@ -507,6 +512,7 @@ class SoftwareInstanceDraft:
                 {
                     "flrig_port": int(self.port or 0),
                     "fldigi_port": int(self.secondary_port or 0),
+                    "fldigi_arq_port": int(self.arq_port or 0),
                     "flrig_path": self.application_path,
                     "fldigi_path": self.secondary_application_path,
                     "flmsg_path": self.flmsg_application_path,
@@ -619,6 +625,7 @@ def normalize_instance_draft(value: Mapping[str, Any] | SoftwareInstanceDraft) -
         port=_int(row.get("port") or row.get("js8_tcp_port") or row.get("flrig_port")) or 0,
         udp_port=_int(row.get("udp_port") or row.get("js8_udp_port")) or 0,
         secondary_port=_int(row.get("secondary_port") or row.get("fldigi_port")) or 0,
+        arq_port=_int(row.get("arq_port") or row.get("fldigi_arq_port")) or 0,
         rig_name=_text(row.get("rig_name") or row.get("js8_rig_name")),
         application_path=_text(row.get("application_path") or row.get("install_path") or row.get("path") or row.get("js8_application_path") or row.get("flrig_path") or row.get("varac_install_path")),
         secondary_application_path=_text(row.get("secondary_application_path") or row.get("fldigi_path")),
@@ -788,6 +795,7 @@ def instance_conflicts(
         ("TCP", current.port),
         ("UDP", current.udp_port),
         ("secondary", current.secondary_port),
+        ("FLDigi ARQ", current.arq_port),
     ):
         if port and not 1 <= port <= 65535:
             conflicts.append(InstanceConflict("port_invalid", "error", f"{port_name} port is invalid", "Use a port from 1 through 65535."))
@@ -827,13 +835,16 @@ def instance_conflicts(
                     "Acknowledge the operating-model, RF Guard, and final-preflight requirements or leave Fast Light receive-safe.",
                 )
             )
-        if current.host and current.port and current.port == current.secondary_port:
+        fast_light_ports = tuple(
+            port for port in (current.port, current.secondary_port, current.arq_port) if port
+        )
+        if len(set(fast_light_ports)) != len(fast_light_ports):
             conflicts.append(
                 InstanceConflict(
                     "fast_light_endpoint_overlap",
                     "error",
-                    "FLRig and FLDigi endpoints overlap",
-                    "Assign different local TCP ports to FLRig and FLDigi.",
+                    "Fast Light endpoints overlap",
+                    "Assign different local TCP ports to FLRig, FLDigi XML-RPC, and FLDigi ARQ.",
                 )
             )
         missing_launch_profile = (
@@ -1921,6 +1932,7 @@ class SoftwareInstanceAssistant(QWidget):
                 ("port", "FLRig or JS8 TCP port", "TCP port"),
                 ("udp_port", "JS8 UDP port", "UDP port"),
                 ("secondary_port", "FLDigi XML-RPC port", "TCP port"),
+                ("arq_port", "FLDigi ARQ port", "TCP port"),
             ),
         )
 
@@ -1930,8 +1942,8 @@ class SoftwareInstanceAssistant(QWidget):
             (
                 ("application_path", "Application / FLRig path", "Path to the application or launcher"),
                 ("secondary_application_path", "FLDigi path", "Fast Light FLDigi application (optional)"),
-                ("flmsg_application_path", "FLMsg path", "Fast Light FLMsg application (optional shared tool)"),
-                ("flamp_application_path", "FLAmp path", "Fast Light FLAmp application (optional shared tool)"),
+                ("flmsg_application_path", "FLMsg path", "Shared installation; radio-scoped NBEMS launch identity"),
+                ("flamp_application_path", "FLAmp path", "Shared installation; radio-scoped NBEMS and endpoint identity"),
                 ("configuration_path", "Configuration / profile / INI", "Profile, configuration, or VarAC INI"),
                 ("secondary_configuration_path", "FLDigi configuration", "FLDigi profile/configuration"),
                 ("storage_path", "Data / database / log folder", "Instance-owned data, database, or FLDigi logs"),
@@ -2365,6 +2377,9 @@ class SoftwareInstanceAssistant(QWidget):
         secondary = self._field_widgets.get("secondary_port")
         if isinstance(secondary, QLineEdit) and not secondary.text() and normalized == "fast_light":
             secondary.setText(str(self._next_port(7362, "fldigi_port", "secondary_port")))
+        arq = self._field_widgets.get("arq_port")
+        if isinstance(arq, QLineEdit) and not arq.text() and normalized == "fast_light":
+            arq.setText(str(self._next_port(7322, "fldigi_arq_port", "arq_port")))
         udp = self._field_widgets.get("udp_port")
         if isinstance(udp, QLineEdit) and not udp.text() and normalized == "js8call":
             udp.setText(str(self._next_port(2242, "udp_port", "js8_udp_port")))
@@ -2986,6 +3001,7 @@ class SoftwareInstanceAssistant(QWidget):
             port=number("port"),
             udp_port=number("udp_port"),
             secondary_port=number("secondary_port"),
+            arq_port=number("arq_port"),
             rig_name=value("rig_name"),
             application_path=value("application_path"),
             secondary_application_path=value("secondary_application_path"),

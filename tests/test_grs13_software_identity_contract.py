@@ -209,7 +209,7 @@ def test_guided_fast_light_save_round_trips_all_native_paths_and_components(tmp_
     assert saved["flmsg_path"] == "/Applications/flmsg.app"
     assert saved["flamp_path"] == "/Applications/flamp.app"
     assert saved["flmsg_message_path"].endswith("/ICS/messages")
-    assert saved["flamp_message_path"].endswith("/.nbems/FLAMP/rx")
+    assert saved["flamp_message_path"].endswith("/.nbems/instances/FT-710/FLAMP/rx")
     manifest = store.list_software_instance_manifests()[0]
     assert manifest["management_mode"] == "fio_managed"
     claims = {item["kind"]: item["value"] for item in manifest["resource_claims"]}
@@ -219,8 +219,17 @@ def test_guided_fast_light_save_round_trips_all_native_paths_and_components(tmp_
     items = {item["app_name"]: item for item in launch["items"]}
     assert set(items) >= {"FLRig", "FLDigi", "FLMsg", "FLAmp"}
     assert items["FLMsg"]["readiness"]["launch_arguments"][0] == "--flmsg-dir"
-    assert items["FLAmp"]["launch_at_startup"] == 0
-    assert items["FLAmp"]["readiness"]["operator_starts"] is True
+    assert items["FLAmp"]["launch_at_startup"] == 1
+    assert items["FLAmp"]["readiness"]["operator_starts"] is False
+    assert items["FLMsg"]["readiness"]["launch_arguments"] == [
+        "--flmsg-dir",
+        str(tmp_path / "operator-home" / ".nbems" / "instances" / "FT-710"),
+    ]
+    assert items["FLAmp"]["readiness"]["launch_arguments"][:2] == [
+        "--config-dir",
+        str(tmp_path / "operator-home" / ".nbems" / "instances" / "FT-710"),
+    ]
+    assert "--arq-server-port" in items["FLAmp"]["readiness"]["launch_arguments"]
     persisted = " ".join(
         (
             saved["fldigi_log_path"],
@@ -232,6 +241,26 @@ def test_guided_fast_light_save_round_trips_all_native_paths_and_components(tmp_
     assert "draft-fast_light" not in persisted
     assert ".freqinout" not in persisted
     assert store.validate_radio_software_identity_projections(int(radio["id"])) == {}
+
+
+def test_software_administration_rehydrates_saved_flamp_arq_port() -> None:
+    tab = SettingsTab.__new__(SettingsTab)
+    tab._software_radio_drafts = {}
+    tab._device_profile_by_id = lambda _radio_id: {
+        "id": 9,
+        "fast_light_config_id": 17,
+        "flrig_port": 12346,
+        "fldigi_port": 7363,
+    }
+    tab._software_administration_inventory_by_family = {
+        "fast_light": ({"id": 17, "arq_port": 7323},),
+    }
+
+    state = tab._software_editor_state(9)
+
+    assert state["flrig_port"] == "12346"
+    assert state["fldigi_port"] == "7363"
+    assert state["arq_port"] == "7323"
 
 
 def test_converted_varac_member_is_mirrored_without_losing_other_identities(tmp_path) -> None:

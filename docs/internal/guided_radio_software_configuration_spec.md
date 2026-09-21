@@ -3519,8 +3519,9 @@ schema or migration is introduced.
 ## GRS-13 — Application-Native Storage, Unified Administration, And Stable Multi-Instance Launch
 
 Status: controlling specification accepted. The GRS-13.1 canonical identity,
-GRS-13.2 layout, GRS-13.3 JS8Call native-identity parity, and GRS-13.4 Fast
-Light native-bundle parity/planner-handoff slices are implemented with
+GRS-13.2 layout, GRS-13.3 JS8Call native-identity parity, GRS-13.4 Fast
+Light native-bundle parity/planner-handoff, and the GRS-13 Fast Light
+FLMsg/FLAmp launch-isolation slice are implemented with
 automated coverage; the wider native-writer, Station Message
 Library, publication/NAS, and live Windows/Linux-Wine GRS-13 exit gates remain open. This section unifies
 Add Radio and Software Administration for every supported software family. It
@@ -3827,25 +3828,36 @@ selection or the component identity.
 
 For managed multi-radio operation, FLMsg data is radio-scoped by default even
 though the executable is normally shared. FIO uses the application's supported
-`--flmsg-dir` for one complete radio-specific NBEMS root and uses matching
-FLMsg/FLDigi `--auto-dir` values for that radio's `WRAP/auto` workflow. The
+`--flmsg-dir <radio NBEMS root>` selector as FLMsg's complete structured launch
+identity. FLDigi, not FLMsg, receives the matching `--flmsg-dir <radio NBEMS
+root>` and `--auto-dir <radio WRAP/auto>` values for that radio's handoff
+workflow. Current qualified FLMsg releases advertise `--auto-dir` in help but
+do not parse it; FIO must not pass that unsupported argument to FLMsg. The
 bundle persists, at minimum, the root plus `ICS/messages`, `ICS/templates`, and
 `WRAP/auto` resources. FIO derives these from the native convention; the normal
 flow does not ask the operator to type each child path.
 
-FLDigi and FLMsg persist the same reviewed `WRAP/auto` path. FLDigi launches
-with `--auto-dir <radio WRAP/auto>` and FLMsg launches with
-`--flmsg-dir <radio NBEMS root> --auto-dir <radio WRAP/auto>`. Software
+FLDigi and FLMsg persist the same reviewed NBEMS root and `WRAP/auto` path.
+FLDigi launches with both selectors; FLMsg launches only with
+`--flmsg-dir <radio NBEMS root>`. Software
 Administration must show the exact saved executable and `ICS/messages` source
 that those arguments select; it may not show a blank field, an unrelated
 station default, or a draft-only path.
 
 FLMsg has no service endpoint readiness substitute. FIO therefore recognizes
 an already-running managed FLMsg instance only by its exact executable and the
-persisted `--flmsg-dir`/`--auto-dir` argument identity. Another radio's FLMsg
+persisted `--flmsg-dir` argument identity. Another radio's FLMsg
 process does not satisfy that check. A legacy FLMsg row without a qualified
 argument identity remains on the compatibility/operator-review path; FIO does
 not guess and spawn a potentially conflicting second process.
+
+FLMsg's XML-RPC address and port are native per-root preferences, not launch
+arguments. FIO may show the intended FLDigi endpoint as review evidence, but it
+must not claim to have configured that endpoint until a platform/version exact
+`FLMSG.prefs` writer has completed backup, write, readback, and rollback
+qualification. This does not block safe creation of the radio-scoped root or
+launch with `--flmsg-dir`; it is a visible post-launch review item when native
+preferences have not been qualified.
 
 An intentionally shared FLMsg workspace is an explicit advanced choice with a
 declared station owner, concurrency policy, radio bindings, and limited
@@ -3855,33 +3867,37 @@ workspace. Sharing an executable never shares its NBEMS root.
 #### FLAmp
 
 Each concurrent FLDigi/FLAmp pair has distinct, persisted XML-RPC and ARQ
-endpoint pairs, component keys, dependencies, and launch identity. FIO stores
+endpoints, component keys, dependencies, and launch identity. The current
+qualified FLAmp contract uses one radio-scoped NBEMS root plus the structured
+arguments `--config-dir <radio NBEMS root>`, `--arq-server-address <IPv4>`,
+`--arq-server-port <radio ARQ port>`, `--xmlrpc-server-address <IPv4>`, and
+`--xmlrpc-server-port <radio FLDigi XML-RPC port>`. FLDigi receives the matching
+ARQ address/port arguments. Because the qualified FLAmp parser accepts dotted
+IPv4 addresses rather than arbitrary host names, a managed local recipe uses a
+reviewed numeric loopback or numeric local address.
+
+FIO allocates the ARQ port independently from FLRig and FLDigi XML-RPC ports,
+checks all three for overlap, and persists it in the canonical manifest,
+Software Administration projection, Add Radio review, and launch rows. FIO stores
 the exact native receive source and an explicit outgoing staging/queue resource;
 it never derives a transmit directory merely by replacing `rx` with `tx`.
 
-Because supported FLAmp versions do not expose a universally qualified
-FLMsg-style native-root selector, FIO claims radio-specific native storage only
-when the exact platform/version launch recipe or an adopted existing launcher
-proves that isolation. Existing working multi-instance launch environments are
-adopted unchanged. Without such evidence, FIO offers an operator-managed
-station-shared or one-at-a-time process and labels receive attribution limits;
-it does not fabricate per-radio isolation. Qualified configuration/queue
-scripts may select explicit outbound files but are not evidence that native
-receive state is isolated.
+The shared executable installation never makes FLAmp process state or receive
+storage station-shared. The per-radio NBEMS root owns its `FLAMP/rx`,
+`FLAMP/tx`, `FLAMP/scripts`, and `FLAMP/relay` children. Final Save creates only
+those reviewed directories, before launch; launch preflight may idempotently
+repair only the same persisted set. Another radio's FLAmp process cannot satisfy
+readiness because exact executable plus all persisted arguments are the process
+identity. Launch-at-startup follows the radio's Launch Control policy and still
+requires **Use Radio**.
 
-When FLAmp is selected without qualified per-radio isolation, FIO still
-persists the discovered executable and the reviewed application-standard
-station receive/outgoing sources so message intake and administration are not
-blank. It labels the process/source as station-shared with limited radio
-attribution, stores those claims as non-exclusive, and does not silently enable
-radio-scoped startup. This is a truthful usable configuration, not a reason to
-discard the component during Final Save.
-
-The endpoint-missing relaunch rule for FLRig, FLDigi, and JS8Call never applies
-to this station-shared FLAmp recipe. FLAmp remains one operator-started utility
-and a running shared process suppresses duplicate launch. A future qualified
-isolated FLAmp recipe must define its own exact process identity and readiness
-contract before FIO may launch concurrent instances.
+An adopted existing launcher may preserve another proven platform/version
+layout unchanged. A legacy FLAmp row lacking a qualified root or explicit ARQ
+pair remains `Needs attention` and is never silently converted, shared, or
+started. Recovery uses one reviewed Replace-instance transaction. Missing or
+ambiguous minor details may allow the radio/software draft to save as
+`launch setup pending`, but FIO must not invent isolation or let another radio's
+process satisfy it.
 
 ### GRS-13.4 — Fast Light Projection And Planner Handoff Invariant
 
@@ -3902,8 +3918,8 @@ Administration, Launch Control, and canonical parity validation must agree on:
 - FLDigi log and NBEMS auto/check-in sources;
 - FLMsg executable, NBEMS root, messages, templates, auto path, arguments and
   dependency;
-- FLAmp executable, truthful shared/isolated classification, receive/outgoing
-  sources, startup policy and dependency; and
+- FLAmp executable, radio-scoped NBEMS root, receive/outgoing sources,
+  explicit ARQ/XML-RPC pairing, startup policy and dependency; and
 - every structured component command, working directory, readiness fact and
   resource claim.
 
@@ -4369,9 +4385,11 @@ The integrated gate requires all of the following:
    processes, message sources, and launch components. Shared binaries do not
    collapse them. Explicit station services launch once and retain all intended
    radio and access-policy bindings.
-5. FLMsg launches with one qualified radio-specific NBEMS/auto directory pair.
-   FLAmp launches only with qualified isolation and exact endpoint pairs;
-   otherwise the UI accurately presents shared/operator-managed limitations.
+5. FLMsg launches with only its supported radio-specific `--flmsg-dir`
+   identity while FLDigi owns the matching `--flmsg-dir`/`--auto-dir` handoff.
+   FLAmp launches with its radio-scoped `--config-dir` and exact distinct
+   ARQ/XML-RPC pairing. A second radio's process satisfies neither identity;
+   legacy incomplete rows remain visible for reviewed replacement.
 6. Messages retain radio, instance, and receipt-context provenance;
    unsafe/partial files are not presented as complete; duplicate content is
    idempotent without erasing distinct receipts; no source file is moved or

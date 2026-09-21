@@ -25,7 +25,7 @@ _IDENTITY_FIELDS = {
         "launch_command",
     ),
     "fast_light": (
-        "system_key", "host", "port", "secondary_port",
+        "system_key", "host", "port", "secondary_port", "arq_port",
         "application_path", "secondary_application_path",
         "configuration_path", "secondary_configuration_path",
         "storage_path", "secondary_storage_path", "launch_command",
@@ -175,6 +175,7 @@ def _resource_claims(family: str, normalized: Mapping[str, Any]) -> tuple[tuple[
     elif family == "fast_light":
         add_endpoint("tcp", normalized.get("port"))
         add_endpoint("tcp", normalized.get("secondary_port"))
+        add_endpoint("tcp", normalized.get("arq_port"))
         add_path(normalized.get("configuration_path"))
         add_path(normalized.get("secondary_configuration_path"))
         add_path(normalized.get("storage_path"))
@@ -227,6 +228,7 @@ def _normalized_identity(family_key: object, row: Mapping[str, Any]) -> dict[str
         "outbox_path": ("outbox_path", "outbox_dir"),
         "port": ("port", "js8_tcp_port", "flrig_port"),
         "secondary_port": ("secondary_port", "fldigi_port"),
+        "arq_port": ("arq_port", "fldigi_arq_port"),
         "udp_port": ("udp_port", "js8_udp_port"),
         "rig_name": ("rig_name", "js8_rig_name"),
         "launch_command": ("launch_command", "launch_cmd"),
@@ -239,7 +241,7 @@ def _normalized_identity(family_key: object, row: Mapping[str, Any]) -> dict[str
             if row.get(candidate) not in (None, ""):
                 value = row.get(candidate)
                 break
-        if name in {"port", "udp_port", "secondary_port", "cluster_instance_number"}:
+        if name in {"port", "udp_port", "secondary_port", "arq_port", "cluster_instance_number"}:
             try:
                 value = int(value or 0)
             except (TypeError, ValueError):
@@ -559,6 +561,7 @@ def distinct_draft_seed(
     elif family == "fast_light":
         seed["port"] = first_available_port(snapshot, family, start_port=12345)
         seed["secondary_port"] = first_available_port(snapshot, family, start_port=7362, field_name="secondary_port")
+        seed["arq_port"] = first_available_port(snapshot, family, start_port=7322, field_name="arq_port")
     else:
         seed["port"] = 0
     return seed

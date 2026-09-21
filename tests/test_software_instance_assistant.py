@@ -452,6 +452,12 @@ def test_new_local_setup_is_default_and_fast_light_endpoints_must_be_distinct() 
         findings = assistant.validation()
         assert "fast_light_endpoint_overlap" in {item.code for item in findings}
         assert assistant._field_labels["port"].text() == "FLRig XML-RPC port"
+        assert assistant._field_labels["arq_port"].text() == "FLDigi ARQ port"
+        assistant._field_widgets["secondary_port"].setText("7363")
+        assistant._field_widgets["arq_port"].setText("7363")
+        assert "fast_light_endpoint_overlap" in {
+            item.code for item in assistant.validation()
+        }
     finally:
         assistant.deleteLater()
 

@@ -134,10 +134,10 @@ not silently attribute one shared file source to multiple radios.
 A Fast Light instance is a radio-scoped workflow containing FLRig and FLDigi.
 The installed FLMsg and FLAmp executables may be station-shared, but their
 runtime/data identity is not implicitly shared. Managed multi-radio FLMsg uses
-a radio-scoped native NBEMS root by default. FLAmp uses a radio-scoped native
-receive identity only when the exact platform/version recipe or an adopted
-existing launcher proves isolation; otherwise its shared/operator-managed
-limitation is explicit. A distinct instance requires:
+a radio-scoped native NBEMS root by default. The current qualified FLAmp recipe
+uses that radio's NBEMS root plus explicit ARQ and FLDigi XML-RPC pairing; an
+adopted existing launcher may retain another proven isolation recipe unchanged.
+A distinct instance requires:
 
 - unique FLRig and FLDigi control endpoints;
 - distinct native profile/config roots where supported;
@@ -155,10 +155,11 @@ Runtime status and launch suppression follow the same saved identity shown in
 Software Administration. FLRig, FLDigi, and JS8Call use their persisted
 endpoint plus exact process recipe, so a process belonging to another radio
 cannot block the selected radio's launch. FLMsg uses its exact executable plus
-radio-scoped `--flmsg-dir` and `--auto-dir` arguments. The currently qualified
-FLAmp recipe remains explicitly station-shared and operator-started; it is not
-converted into a concurrent per-radio process merely because more than one
-radio selects Fast Light.
+radio-scoped `--flmsg-dir` argument; `--auto-dir` belongs to FLDigi because the
+current FLMsg parser does not accept it. FLAmp uses its exact executable plus
+radio-scoped `--config-dir`, ARQ address/port, and FLDigi XML-RPC address/port
+arguments. Another radio's FLMsg or FLAmp process therefore cannot satisfy the
+selected radio's runtime identity.
 
 ### Cluster VarAC
 

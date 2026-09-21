@@ -9987,7 +9987,25 @@ class SettingsTab(QWidget):
         if radio_id in self._software_radio_drafts:
             return dict(self._software_radio_drafts[radio_id])
         profile = self._device_profile_by_id(radio_id)
-        return self._radio_software_state_from_profile(profile if isinstance(profile, dict) else {})
+        profile = profile if isinstance(profile, dict) else {}
+        state = self._radio_software_state_from_profile(profile)
+        fast_light_id = int(profile.get("fast_light_config_id", 0) or 0)
+        inventory = getattr(self, "_software_administration_inventory_by_family", {})
+        rows = inventory.get("fast_light", ()) if isinstance(inventory, Mapping) else ()
+        fast_light = next(
+            (
+                row
+                for row in rows
+                if isinstance(row, Mapping) and int(row.get("id", 0) or 0) == fast_light_id
+            ),
+            None,
+        )
+        if isinstance(fast_light, Mapping):
+            arq_port = int(
+                fast_light.get("arq_port") or fast_light.get("fldigi_arq_port") or 0
+            )
+            state["arq_port"] = str(arq_port) if arq_port else ""
+        return state
 
     def _show_software_task_editor(self) -> None:
         """Show one cache-backed task editor without selecting legacy pages."""
@@ -10636,7 +10654,11 @@ class SettingsTab(QWidget):
                     if family == "js8call" and protocol == "udp":
                         row["udp_port"] = port
                     elif family == "fast_light" and "fldigi" in name:
-                        row["secondary_port"] = port
+                        if "arq" in name:
+                            row["arq_port"] = port
+                            row["fldigi_arq_port"] = port
+                        else:
+                            row["secondary_port"] = port
                 for claim in manifest.get("resource_claims", ()) or ():
                     if not isinstance(claim, Mapping):
                         continue
@@ -10649,6 +10671,7 @@ class SettingsTab(QWidget):
                         "fldigi_checkins": "secondary_storage_path",
                         "flmsg_application": "flmsg_application_path",
                         "flamp_application": "flamp_application_path",
+                        "flamp_root": "flamp_native_root",
                         "flmsg_root": "flmsg_native_root",
                         "flmsg_messages": "flmsg_message_path",
                         "flmsg_templates": "flmsg_templates_path",
@@ -17952,16 +17975,18 @@ class SettingsTab(QWidget):
             manifests = ()
             identity_records = ()
             identity_projection_issues = {}
+        inventory_by_family = {
+            "js8call": self._enrich_software_instance_rows("js8call", js8_instances, manifests),
+            "fast_light": self._enrich_software_instance_rows("fast_light", fast_light_configs, manifests),
+            "varac": self._enrich_software_instance_rows("varac", varac_nodes, manifests),
+        }
         self._software_administration_snapshot = snapshot
+        self._software_administration_inventory_by_family = inventory_by_family
         workspace = getattr(self, "software_administration_workspace", None)
         if isinstance(workspace, SoftwareAdministrationWorkspace):
             workspace.set_instance_context(
                 radios=tuple(self.device_profiles),
-                inventory_by_family={
-                    "js8call": self._enrich_software_instance_rows("js8call", js8_instances, manifests),
-                    "fast_light": self._enrich_software_instance_rows("fast_light", fast_light_configs, manifests),
-                    "varac": self._enrich_software_instance_rows("varac", varac_nodes, manifests),
-                },
+                inventory_by_family=inventory_by_family,
                 varac_clusters=tuple(getattr(self, "varac_clusters", ()) or ()),
                 managed_root=str(Path(get_config_dir()) / "managed-instances"),
             )
@@ -26681,6 +26706,22 @@ class SettingsTab(QWidget):
         fldigi_wrap.setLayout(fldigi_row)
         _add_form_row(connection_form, "FLDigi XML RPC:", fldigi_wrap, "Host and port for FLDigi XML RPC when this radio uses Fast Light workflows.")
 
+        fldigi_arq_port_edit = QLineEdit(
+            str(
+                (profile_seed or {}).get("arq_port")
+                or (profile_seed or {}).get("fldigi_arq_port")
+                or ""
+            )
+        )
+        fldigi_arq_port_edit.setValidator(QIntValidator(1, 65535, fldigi_arq_port_edit))
+        _configure_port_edit(fldigi_arq_port_edit)
+        _add_form_row(
+            connection_form,
+            "FLDigi ARQ Port:",
+            fldigi_arq_port_edit,
+            "Radio-scoped ARQ endpoint shared by this FLDigi instance and its FLAmp instance.",
+        )
+
         fldigi_path_edit = QLineEdit(str((profile_seed or {}).get("fldigi_path", "") or ""))
         fldigi_path_wrap = _make_browse_row(fldigi_path_edit, title="Select FLDigi app", mode="folder")
         _add_form_row(connection_form, "FLDigi App:", fldigi_path_wrap, "Optional FLDigi executable or app path associated with this radio.")
@@ -27227,6 +27268,7 @@ class SettingsTab(QWidget):
         port_prompt_specs = {
             "flrig_port": ("What port does this radio's FLRig use?", flrig_port_edit),
             "fldigi_port": ("What port does this radio's FLDigi use?", fldigi_port_edit),
+            "arq_port": ("What ARQ port does this radio's FLDigi and FLAmp use?", fldigi_arq_port_edit),
             "js8_port": ("What port does this radio's JS8Call use?", js8_port_edit),
         }
         port_prompt_fields: Dict[str, QLineEdit] = {}
@@ -27470,7 +27512,7 @@ class SettingsTab(QWidget):
         fldigi_recipe_owned_widgets = [fldigi_path_wrap]
         flmsg_field_widgets: List[QWidget] = []
         flmsg_recipe_owned_widgets = [flmsg_path_wrap]
-        flamp_field_widgets: List[QWidget] = []
+        flamp_field_widgets: List[QWidget] = [fldigi_arq_port_edit]
         flamp_recipe_owned_widgets = [flamp_path_wrap]
         varac_field_widgets = [
             varac_install_wrap,
@@ -27737,10 +27779,17 @@ class SettingsTab(QWidget):
                         host = str(managed_draft.get("host") or "").strip()
                         rig_port = str(managed_draft.get("port") or "").strip()
                         fldigi_port = str(managed_draft.get("secondary_port") or "").strip()
+                        arq_port = str(
+                            managed_draft.get("arq_port")
+                            or managed_draft.get("fldigi_arq_port")
+                            or ""
+                        ).strip()
                         if host and rig_port:
                             compact_facts.append(f"FLRig {host}:{rig_port}")
                         if host and fldigi_port:
                             compact_facts.append(f"FLDigi {host}:{fldigi_port}")
+                        if host and arq_port and bool(managed_draft.get("use_flamp")):
+                            compact_facts.append(f"FLAmp ARQ {host}:{arq_port}")
                     compact_facts = [fact for fact in compact_facts if fact]
                     if compact_facts:
                         state_label.setText(
@@ -27904,6 +27953,9 @@ class SettingsTab(QWidget):
                 else:
                     fldigi_host_edit.setText(str(draft.get("host") or "127.0.0.1"))
                     fldigi_port_edit.setText(str(draft.get("secondary_port") or ""))
+                    fldigi_arq_port_edit.setText(
+                        str(draft.get("arq_port") or draft.get("fldigi_arq_port") or "")
+                    )
                     if radio_role != "observer":
                         flrig_port_edit.setText(str(draft.get("port") or ""))
             setattr(dlg, "_guided_software_instance_drafts", retained)
@@ -28374,6 +28426,7 @@ class SettingsTab(QWidget):
                 "path_fldigi": fldigi_path_edit.text().strip(),
                 "fldigi_host": fldigi_host_edit.text().strip(),
                 "fldigi_port": fldigi_port_edit.text().strip(),
+                "arq_port": fldigi_arq_port_edit.text().strip(),
                 "path_flmsg": flmsg_path_edit.text().strip(),
                 "path_flamp": flamp_path_edit.text().strip(),
                 "path_commstat": commstat_launch_edit.text().strip(),
@@ -28406,6 +28459,7 @@ class SettingsTab(QWidget):
                 "path_fldigi": fldigi_path_edit,
                 "fldigi_host": fldigi_host_edit,
                 "fldigi_port": fldigi_port_edit,
+                "arq_port": fldigi_arq_port_edit,
                 "path_flmsg": flmsg_path_edit,
                 "path_flamp": flamp_path_edit,
                 "path_commstat": commstat_launch_edit,
@@ -28656,6 +28710,7 @@ class SettingsTab(QWidget):
                         host=str(state.get("fldigi_host") or "127.0.0.1"),
                         port="" if radio_role == "observer" else str(state.get("flrig_port") or "12345"),
                         secondary_port=str(state.get("fldigi_port") or "7362"),
+                        arq_port=str(state.get("arq_port") or "7322"),
                         application_path="" if radio_role == "observer" else str(state.get("path_flrig") or ""),
                         secondary_application_path=str(state.get("path_fldigi") or ""),
                         flmsg_application_path=str(state.get("path_flmsg") or ""),
@@ -28799,6 +28854,11 @@ class SettingsTab(QWidget):
                         path_flamp=str(completed_payload.get("flamp_application_path") or ""),
                         fldigi_host=str(completed_payload.get("host") or "127.0.0.1"),
                         fldigi_port=str(completed_payload.get("secondary_port") or ""),
+                        arq_port=str(
+                            completed_payload.get("arq_port")
+                            or completed_payload.get("fldigi_arq_port")
+                            or ""
+                        ),
                     )
                 else:
                     applied.update(
@@ -29885,6 +29945,8 @@ class SettingsTab(QWidget):
                 "flrig_path": flrig_path_edit.text().strip(),
                 "fldigi_host": fldigi_host_edit.text().strip(),
                 "fldigi_port": fldigi_port_edit.text().strip(),
+                "arq_port": fldigi_arq_port_edit.text().strip(),
+                "fldigi_arq_port": fldigi_arq_port_edit.text().strip(),
                 "fldigi_path": fldigi_path_edit.text().strip(),
                 "flmsg_path": flmsg_path_edit.text().strip(),
                 "flamp_path": flamp_path_edit.text().strip(),
@@ -31243,6 +31305,16 @@ class SettingsTab(QWidget):
                     ("JS8Call", js8_host_edit.text(), js8_port_edit.text(), "js8_host", "js8_port"),
                     ("RigCtlD", rig_host_edit.text(), rig_port_edit.text(), "rigctld_host", "rigctld_port"),
                 ]
+                if use_flamp_chk.isChecked():
+                    endpoint_specs.append(
+                        (
+                            "FLDigi ARQ",
+                            fldigi_host_edit.text(),
+                            fldigi_arq_port_edit.text(),
+                            "fldigi_host",
+                            "arq_port",
+                        )
+                    )
                 conflicts: List[str] = []
                 for label, host, port, host_key, port_key in endpoint_specs:
                     port_text = str(port or "").strip()
@@ -31359,6 +31431,10 @@ class SettingsTab(QWidget):
                 endpoint_lines.append(_endpoint_summary("RigCtlD", rig_host_edit.text(), rig_port_edit.text()))
             if use_fldigi_chk.isChecked():
                 endpoint_lines.append(_endpoint_summary("FLDigi", fldigi_host_edit.text(), fldigi_port_edit.text()))
+            if use_flamp_chk.isChecked():
+                endpoint_lines.append(
+                    _endpoint_summary("FLAmp ARQ", fldigi_host_edit.text(), fldigi_arq_port_edit.text())
+                )
             if backend_value == "js8call" or use_js8call_chk.isChecked():
                 endpoint_lines.append(_endpoint_summary("JS8Call", js8_host_edit.text(), js8_port_edit.text()))
             if str(device_class_combo.currentData() or "").strip().lower() == "observer":
@@ -32035,6 +32111,7 @@ class SettingsTab(QWidget):
                 "flrig_path": (flrig_path_edit, "FLRig app"),
                 "fldigi_host": (fldigi_host_edit, "FLDigi host"),
                 "fldigi_port": (fldigi_port_edit, "FLDigi port"),
+                "arq_port": (fldigi_arq_port_edit, "FLDigi/FLAmp ARQ port"),
                 "fldigi_path": (fldigi_path_edit, "FLDigi app"),
                 "flmsg_path": (flmsg_path_edit, "FLMsg app"),
                 "flamp_path": (flamp_path_edit, "FLAmp app"),
@@ -32941,7 +33018,13 @@ class SettingsTab(QWidget):
         advanced_frequency_window_spin.valueChanged.connect(lambda _value: _update_dialog_readiness())
         for widget in [js8_port_edit, js8_profile_edit, js8_directed_edit]:
             widget.textChanged.connect(lambda _text: _update_app_choice_visibility())
-        for widget in [flrig_port_edit, fldigi_port_edit, js8_port_edit, *port_prompt_fields.values()]:
+        for widget in [
+            flrig_port_edit,
+            fldigi_port_edit,
+            fldigi_arq_port_edit,
+            js8_port_edit,
+            *port_prompt_fields.values(),
+        ]:
             widget.textChanged.connect(lambda _text: _update_port_prompt_visibility())
         notes_edit.textChanged.connect(_update_dialog_readiness)
         use_flrig_chk.stateChanged.connect(lambda _state: _update_dialog_readiness())
@@ -33954,8 +34037,9 @@ class SettingsTab(QWidget):
                         ("flmsg_auto", "data_roots", 2, True),
                     ),
                     "flamp": (
-                        ("flamp_receive", "data_roots", 0, False),
-                        ("flamp_outgoing", "data_roots", 1, False),
+                        ("flamp_root", "configuration_roots", 0, True),
+                        ("flamp_receive", "data_roots", 0, True),
+                        ("flamp_outgoing", "data_roots", 1, True),
                     ),
                 }
                 by_kind = {

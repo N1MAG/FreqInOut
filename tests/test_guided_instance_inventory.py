@@ -78,3 +78,34 @@ def test_imported_source_fingerprint_detects_identity_change():
     changed = {**original, "port": 2443}
     changed_snapshot = build_guided_instance_inventory({"js8call": (changed,)})
     assert not changed_snapshot.source_is_current("js8call", 5, fingerprint)
+
+
+def test_fast_light_seed_allocates_a_distinct_flamp_arq_port():
+    snapshot = build_guided_instance_inventory(
+        {
+            "fast_light": (
+                {
+                    "id": 1,
+                    "system_key": "ftdx-10",
+                    "flrig_host": "127.0.0.1",
+                    "flrig_port": 12345,
+                    "fldigi_port": 7362,
+                    "arq_port": 7322,
+                },
+                {
+                    "id": 2,
+                    "system_key": "ft-710",
+                    "flrig_host": "127.0.0.1",
+                    "flrig_port": 12346,
+                    "fldigi_port": 7363,
+                    "fldigi_arq_port": 7323,
+                },
+            )
+        }
+    )
+    proposal = distinct_draft_seed(
+        "fast_light",
+        owner_draft_key="transaction-fast-light",
+        snapshot=snapshot,
+    )
+    assert proposal["arq_port"] == 7324

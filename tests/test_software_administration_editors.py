@@ -58,6 +58,7 @@ def test_task_schemas_keep_external_tools_out_of_js8call() -> None:
     assert not any("expect" in key.lower() for key in fio)
     assert "dependencies" in SOFTWARE_EDITOR_TASKS["fio_spotter"]
     assert "operational_workspace" in SOFTWARE_EDITOR_TASKS["fio_spotter"]
+    assert "arq_port" in _field_keys("fast_light")
 
 
 def test_fio_spotter_editor_is_dependency_mapping_and_operational_route_only() -> None:

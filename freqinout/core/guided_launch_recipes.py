@@ -102,11 +102,15 @@ def _fast_light_native_roots(
     flrig_root = Path(_text(draft.get("flrig_native_root")) or flrig_base / "instances" / child)
     fldigi_root = Path(_text(draft.get("fldigi_native_root")) or fldigi_base / "instances" / child)
     flmsg_root = Path(_text(draft.get("flmsg_native_root")) or nbems_base / "instances" / child)
+    # FLMsg and FLAmp share the radio's familiar NBEMS instance root.  Their
+    # executable installations remain shared, while native state and traffic
+    # stay attributable to the selected radio.
+    flamp_root = Path(_text(draft.get("flamp_native_root")) or flmsg_root)
     flamp_receive = Path(
-        _text(draft.get("flamp_receive_path")) or nbems_base / "FLAMP" / "rx"
+        _text(draft.get("flamp_receive_path")) or flamp_root / "FLAMP" / "rx"
     )
     flamp_outgoing = Path(
-        _text(draft.get("flamp_outgoing_path")) or nbems_base / "FLAMP" / "tx"
+        _text(draft.get("flamp_outgoing_path")) or flamp_root / "FLAMP" / "tx"
     )
     return {
         "flrig_root": str(flrig_root),
@@ -116,6 +120,7 @@ def _fast_light_native_roots(
         "flmsg_messages": str(flmsg_root / "ICS" / "messages"),
         "flmsg_templates": str(flmsg_root / "ICS" / "templates"),
         "flmsg_auto": str(flmsg_root / "WRAP" / "auto"),
+        "flamp_root": str(flamp_root),
         "flamp_receive": str(flamp_receive),
         "flamp_outgoing": str(flamp_outgoing),
         "nbems_base": str(nbems_base),
@@ -629,6 +634,7 @@ def resolve_fast_light_managed_recipe(
     host = _text(draft.get("host")) or "127.0.0.1"
     flrig_port = _safe_port(draft.get("port"))
     fldigi_port = _safe_port(draft.get("secondary_port"))
+    arq_port = _safe_port(draft.get("arq_port") or draft.get("fldigi_arq_port"))
     if not fldigi_port or (not observer and not flrig_port):
         return _safety_block(
             "fast_light",
@@ -648,13 +654,14 @@ def resolve_fast_light_managed_recipe(
         if "use_flamp" in draft
         else bool(_text(draft.get("flamp_application_path")))
     )
+    flamp_arq_port = arq_port if selected_flamp else 0
     flmsg_path = _text(draft.get("flmsg_application_path"))
     flamp_path = _text(draft.get("flamp_application_path"))
     missing_required = (
         not fldigi
         or (not observer and not flrig)
         or (selected_flmsg and not flmsg_path)
-        or (selected_flamp and not flamp_path)
+        or (selected_flamp and (not flamp_path or not flamp_arq_port))
     )
     confidence = "pending" if missing_required else "verified"
     status = "launch_pending" if missing_required else "qualified_managed"
@@ -667,6 +674,8 @@ def resolve_fast_light_managed_recipe(
         missing_labels.append("FLMsg")
     if selected_flamp and not flamp_path:
         missing_labels.append("FLAmp")
+    if selected_flamp and not flamp_arq_port:
+        missing_labels.append("FLDigi ARQ port")
     recovery = (
         "Browse for " + " and ".join(missing_labels) + " to enable launch; this isolated Fast Light profile can still be saved."
         if missing_labels
@@ -696,6 +705,8 @@ def resolve_fast_light_managed_recipe(
         "--config-dir", fldigi_profile,
         "--xmlrpc-server-address", host,
         "--xmlrpc-server-port", str(fldigi_port),
+        *(("--arq-server-address", host, "--arq-server-port", str(flamp_arq_port)) if flamp_arq_port else ()),
+        *(("--flmsg-dir", native["flmsg_root"]) if selected_flmsg else ()),
         "--auto-dir", native["flmsg_auto"],
     )
     components.append(
@@ -725,7 +736,10 @@ def resolve_fast_light_managed_recipe(
                 component_key="flmsg",
                 label="FLMsg",
                 executable=flmsg_path,
-                arguments=("--flmsg-dir", native["flmsg_root"], "--auto-dir", native["flmsg_auto"]),
+                # FLMsg 4.0.24 advertises --auto-dir, but its parser does not
+                # accept it.  --flmsg-dir is the supported multi-instance
+                # selector; FLDigi receives the same root plus --auto-dir.
+                arguments=("--flmsg-dir", native["flmsg_root"]),
                 working_directory=native["flmsg_root"],
                 dependencies=("fldigi",),
                 profile_selector=native["flmsg_root"],
@@ -745,6 +759,8 @@ def resolve_fast_light_managed_recipe(
                     "source": "nbems_native_radio_root",
                     "confidence": "isolated",
                     "nbems_base": native["nbems_base"],
+                    "fldigi_host": host,
+                    "fldigi_xmlrpc_port": fldigi_port,
                 },
                 confidence="pending" if not flmsg_path else "verified",
                 execution_scope=_scope(draft),
@@ -758,21 +774,43 @@ def resolve_fast_light_managed_recipe(
                 component_key="flamp",
                 label="FLAmp",
                 executable=flamp_path,
+                arguments=(
+                    "--config-dir", native["flamp_root"],
+                    "--arq-server-address", host,
+                    "--arq-server-port", str(flamp_arq_port),
+                    "--xmlrpc-server-address", host,
+                    "--xmlrpc-server-port", str(fldigi_port),
+                ) if flamp_arq_port else (),
+                working_directory=native["flamp_root"],
                 dependencies=("fldigi",),
+                profile_selector=native["flamp_root"],
+                configuration_roots=(native["flamp_root"],),
                 data_roots=(native["flamp_receive"], native["flamp_outgoing"]),
-                managed_directories=(native["flamp_receive"], native["flamp_outgoing"]),
-                evidence={
-                    "source": "nbems_station_standard",
-                    "confidence": "shared",
-                    "attribution": "station_shared_limited",
+                managed_directories=(
+                    native["flamp_root"],
+                    native["flamp_receive"],
+                    native["flamp_outgoing"],
+                    str(Path(native["flamp_root"]) / "FLAMP" / "scripts"),
+                    str(Path(native["flamp_root"]) / "FLAMP" / "relay"),
+                ),
+                endpoints=(
+                    {"name": "FLDigi ARQ pairing", "protocol": "tcp", "host": host, "port": flamp_arq_port},
+                ) if flamp_arq_port else (),
+                readiness={
+                    "kind": "process",
+                    "fldigi_host": host,
+                    "fldigi_xmlrpc_port": fldigi_port,
+                    "fldigi_arq_port": flamp_arq_port,
                 },
-                confidence="pending" if not flamp_path else "verified",
-                execution_scope="station_shared_utility",
-                # This FLAmp family has no universally qualified native-root
-                # selector.  Persist and monitor the shared standard paths,
-                # but do not imply isolated automatic launch.
-                launch_at_startup=False,
-                operator_starts=True,
+                evidence={
+                    "source": "flamp_config_dir_and_endpoint_pair",
+                    "confidence": "isolated" if flamp_arq_port else "pending",
+                    "attribution": "radio_scoped",
+                },
+                confidence="pending" if not flamp_path or not flamp_arq_port else "verified",
+                execution_scope=_scope(draft),
+                launch_at_startup=startup and bool(flamp_path) and bool(flamp_arq_port),
+                operator_starts=not bool(flamp_path) or not bool(flamp_arq_port),
             )
         )
     return GuidedLaunchRecipeResolution(
@@ -801,8 +839,10 @@ def resolve_fast_light_managed_recipe(
             "flmsg_messages": native["flmsg_messages"],
             "flmsg_templates": native["flmsg_templates"],
             "flmsg_auto": native["flmsg_auto"],
+            "flamp_root": native["flamp_root"],
             "flamp_receive": native["flamp_receive"],
             "flamp_outgoing": native["flamp_outgoing"],
+            "fldigi_arq_port": flamp_arq_port,
             "native_layout": "application_standard",
         },
     )
@@ -932,8 +972,9 @@ def recipe_draft_updates(resolution: GuidedLaunchRecipeResolution) -> dict[str, 
                 ("flmsg_auto", 2, True),
             ),
             "flamp": (
-                ("flamp_receive", 0, False),
-                ("flamp_outgoing", 1, False),
+                ("flamp_root", 0, True),
+                ("flamp_receive", 0, True),
+                ("flamp_outgoing", 1, True),
             ),
         }
         for component_key, component in by_key.items():
@@ -946,7 +987,7 @@ def recipe_draft_updates(resolution: GuidedLaunchRecipeResolution) -> dict[str, 
                     }
                 )
             for kind, index, exclusive in claim_names.get(component_key, ()):
-                roots = component.configuration_roots if "configuration" in kind or kind == "flmsg_root" else component.data_roots
+                roots = component.configuration_roots if "configuration" in kind or kind in {"flmsg_root", "flamp_root"} else component.data_roots
                 if index < len(roots) and roots[index]:
                     claims.append({"kind": kind, "value": roots[index], "exclusive": exclusive})
         updates["resource_claims"] = claims
@@ -955,6 +996,10 @@ def recipe_draft_updates(resolution: GuidedLaunchRecipeResolution) -> dict[str, 
             for component in by_key.values()
             for endpoint in component.endpoints
         ]
+        updates["arq_port"] = int(
+            resolution.evidence.get("fldigi_arq_port", 0) or 0
+        )
+        updates["fldigi_arq_port"] = updates["arq_port"]
         flmsg = by_key.get("flmsg")
         if flmsg is not None:
             updates.update(
@@ -968,6 +1013,7 @@ def recipe_draft_updates(resolution: GuidedLaunchRecipeResolution) -> dict[str, 
         if flamp is not None:
             updates.update(
                 flamp_application_path=flamp.executable,
+                flamp_native_root=flamp.configuration_roots[0],
                 flamp_receive_path=flamp.data_roots[0],
                 flamp_outgoing_path=flamp.data_roots[1],
             )
