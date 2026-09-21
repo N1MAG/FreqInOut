@@ -571,6 +571,10 @@ TIMEZONE_CHOICES = [
     "America/Los_Angeles",
 ]
 
+FAST_LIGHT_COMPONENT_REPAIR_TASK_KEYS = frozenset(
+    {"flmsg", "flamp_signing", "message_folders", "launch"}
+)
+
 DEVICE_CLASS_OPTIONS = [
     ("Transceiver", "tx_rx"),
     ("Receive-only SDR", "observer"),
@@ -10071,7 +10075,7 @@ class SettingsTab(QWidget):
                 identity_key=(assignment.canonical_identity_key if assignment else ""),
                 component_repair_available=(
                     family_key == "fast_light"
-                    and task_key in {"flmsg", "flamp", "launch"}
+                    and task_key in FAST_LIGHT_COMPONENT_REPAIR_TASK_KEYS
                     and self._fast_light_message_component_repair_needed(radio_id)
                 ),
             )
@@ -10088,7 +10092,7 @@ class SettingsTab(QWidget):
                 identity_key=(assignment.canonical_identity_key if assignment else ""),
                 component_repair_available=(
                     family_key == "fast_light"
-                    and task_key in {"flmsg", "flamp", "launch"}
+                    and task_key in FAST_LIGHT_COMPONENT_REPAIR_TASK_KEYS
                     and self._fast_light_message_component_repair_needed(radio_id)
                 ),
             )
@@ -10239,6 +10243,26 @@ class SettingsTab(QWidget):
                 or not flamp.cwd
             ):
                 return True
+            profile = self._device_profile_by_id(ident) or {}
+            if str(getattr(record, "management_mode", "") or "").casefold() == "fio_managed":
+                if flmsg is not None and bool(int(profile.get("use_flmsg", 0) or 0)):
+                    expected_messages = self._normalized_path_text(
+                        os.path.join(str(flmsg.cwd or ""), "ICS", "messages")
+                    )
+                    saved_messages = self._normalized_path_text(
+                        str(profile.get("flmsg_message_path") or "")
+                    )
+                    if expected_messages and saved_messages != expected_messages:
+                        return True
+                if flamp is not None and bool(int(profile.get("use_flamp", 0) or 0)):
+                    expected_receive = self._normalized_path_text(
+                        os.path.join(str(flamp.cwd or ""), "FLAMP", "rx")
+                    )
+                    saved_receive = self._normalized_path_text(
+                        str(profile.get("flamp_message_path") or "")
+                    )
+                    if expected_receive and saved_receive != expected_receive:
+                        return True
             launch = self.multi_radio_store.get_radio_launch_bundle(ident)
             return any(
                 str(item.get("app_name") or "").strip().casefold() == "flamp"

@@ -30,6 +30,13 @@ Implementation packages and evidence:
   FLMsg/FLAmp pair launches and exchanges traffic remains the external
   qualification gate.
 
+Follow-up screenshot evidence found that the action was hidden on the visible
+`FLAmp & Signing` task because its internal key is `flamp_signing`, while the
+initial route checked the nonexistent `flamp` key. The availability contract
+now includes FLMsg, FLAmp & Signing, Message Folders, and Launch, and also
+detects a stale Software Administration message-folder projection even when the
+canonical launch component was already partly corrected.
+
 All new entries must follow the authoritative multi-model delivery contract in
 `docs/internal/project_delivery_rules.md` and record the required package/model,
 primary-review, acceptance, and exit-gate evidence.

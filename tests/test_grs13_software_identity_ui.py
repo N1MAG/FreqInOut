@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -12,6 +13,7 @@ pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QApplication, QLineEdit
 
 from freqinout.gui.software_administration_editor import SoftwareTaskEditor
+from freqinout.gui.settings_tab import FAST_LIGHT_COMPONENT_REPAIR_TASK_KEYS, SettingsTab
 
 
 _APP: QApplication | None = QApplication.instance() or QApplication([])
@@ -82,3 +84,51 @@ def test_canonical_fast_light_exposes_narrow_message_component_repair() -> None:
     finally:
         editor.deleteLater()
         _APP.processEvents()
+
+
+def test_component_repair_visibility_detects_stale_software_admin_message_path() -> None:
+    assert {"flmsg", "flamp_signing", "message_folders", "launch"}.issubset(
+        FAST_LIGHT_COMPONENT_REPAIR_TASK_KEYS
+    )
+    tab = SettingsTab.__new__(SettingsTab)
+    tab.device_profiles = [
+        {
+            "id": 72,
+            "use_flmsg": 1,
+            "use_flamp": 1,
+            "flmsg_message_path": "/home/bill/.nbems/instances/FT-710/ICS/messages",
+            "flamp_message_path": "/home/bill/.nbems/FLAMP/rx",
+        }
+    ]
+    record = SimpleNamespace(
+        family_key="fast_light",
+        management_mode="fio_managed",
+        components=(
+            SimpleNamespace(
+                component_id="flmsg",
+                argv=("/usr/local/bin/flmsg", "--flmsg-dir", "/home/bill/.nbems/instances/FT-710"),
+                cwd="/home/bill/.nbems/instances/FT-710",
+            ),
+            SimpleNamespace(
+                component_id="flamp",
+                argv=(
+                    "/usr/local/bin/flamp",
+                    "--config-dir",
+                    "/home/bill/.nbems/instances/FT-710",
+                    "--arq-server-port",
+                    "7323",
+                ),
+                cwd="/home/bill/.nbems/instances/FT-710",
+            ),
+        ),
+    )
+    tab.multi_radio_store = SimpleNamespace(
+        list_radio_software_identity_records=lambda _radio_id: (record,),
+        get_radio_launch_bundle=lambda _radio_id: {"items": []},
+    )
+
+    assert tab._fast_light_message_component_repair_needed(72) is True
+    tab.device_profiles[0]["flamp_message_path"] = (
+        "/home/bill/.nbems/instances/FT-710/FLAMP/rx"
+    )
+    assert tab._fast_light_message_component_repair_needed(72) is False
