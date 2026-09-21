@@ -3478,6 +3478,114 @@ def _list_software_instance_manifests_conn(conn: sqlite3.Connection) -> List[Dic
     return [_software_instance_manifest_row(dict(row)) for row in rows]
 
 
+_VARAC_CLUSTER_SHARED_RESOURCE_KINDS = frozenset(
+    {
+        "varac_executable",
+        "working_directory",
+        "varac_database",
+        "varac_bbs",
+        "varac_bbs_archive",
+    }
+)
+_VARAC_MEMBER_EXCLUSIVE_RESOURCE_KINDS = frozenset(
+    {
+        "varac_ini",
+        "vara_runtime",
+        "vara_ini",
+        "varac_incoming",
+        "varac_outbox",
+        "varac_cluster_instance",
+    }
+)
+
+
+def _scope_varac_cluster_manifest(
+    values: Mapping[str, Any],
+    application_values: Mapping[str, Any],
+    *,
+    cluster_id: str,
+    instance_number: Optional[int],
+    shared_db_path: str,
+    shared_bbs_path: str,
+    shared_bbs_archive_path: str,
+) -> Dict[str, Any]:
+    """Return one canonical VarAC member manifest for a reviewed cluster.
+
+    A VarAC cluster intentionally shares the installed program, its install
+    working directory, database, and BBS publication roots.  The native INI,
+    cloned VARA runtime, mailboxes, endpoint ports, and member number remain
+    member-owned.  Rebuilding these known claims at the persistence boundary
+    prevents an older standalone manifest from vetoing a safe cluster
+    conversion merely because it described shared infrastructure as exclusive.
+    Unknown claims are preserved exactly so this normalization cannot silently
+    weaken a future resource contract.
+    """
+
+    payload = dict(values or {})
+    claims_by_kind: Dict[str, Dict[str, Any]] = {}
+    for raw in payload.get("resource_claims", payload.get("resource_claims_json", ())) or ():
+        if not isinstance(raw, Mapping):
+            continue
+        kind = _coerce_text(raw.get("kind", ""), "").lower()
+        value = _coerce_text(raw.get("value", ""), "")
+        if kind and value:
+            claims_by_kind[kind] = {
+                "kind": kind,
+                "value": value,
+                "exclusive": bool(raw.get("exclusive", True)),
+            }
+
+    executable = _coerce_text(payload.get("executable_path", ""), "") or _coerce_text(
+        claims_by_kind.get("varac_executable", {}).get("value", ""), ""
+    ) or _coerce_text(application_values.get("install_path", ""), "")
+    known_values = {
+        "varac_executable": executable,
+        "varac_database": _coerce_text(shared_db_path, ""),
+        "varac_bbs": _coerce_text(shared_bbs_path, ""),
+        "varac_bbs_archive": _coerce_text(shared_bbs_archive_path, ""),
+        "varac_ini": _coerce_text(application_values.get("ini_path", ""), ""),
+        "vara_runtime": _coerce_text(application_values.get("vara_runtime_path", ""), ""),
+        "vara_ini": _coerce_text(application_values.get("vara_ini_path", ""), ""),
+        "varac_incoming": _coerce_text(application_values.get("incoming_path", ""), ""),
+        "varac_outbox": _coerce_text(application_values.get("outbox_path", ""), ""),
+    }
+    for kind, value in known_values.items():
+        if value:
+            claims_by_kind[kind] = {
+                "kind": kind,
+                "value": value,
+                "exclusive": kind in _VARAC_MEMBER_EXCLUSIVE_RESOURCE_KINDS,
+            }
+
+    # Working directory is supplied by the reviewed launch identity.  Keep its
+    # exact spelling (including Wine paths) and only correct its ownership.
+    working_directory = claims_by_kind.get("working_directory", {}).get("value", "")
+    if working_directory:
+        claims_by_kind["working_directory"] = {
+            "kind": "working_directory",
+            "value": str(working_directory),
+            "exclusive": False,
+        }
+    member_number = int(instance_number or 0)
+    public_cluster_id = _coerce_text(cluster_id, "")
+    if public_cluster_id and member_number > 0:
+        claims_by_kind["varac_cluster_instance"] = {
+            "kind": "varac_cluster_instance",
+            "value": f"{public_cluster_id}:{member_number}",
+            "exclusive": True,
+        }
+
+    for kind in _VARAC_CLUSTER_SHARED_RESOURCE_KINDS:
+        if kind in claims_by_kind:
+            claims_by_kind[kind]["exclusive"] = False
+    for kind in _VARAC_MEMBER_EXCLUSIVE_RESOURCE_KINDS:
+        if kind in claims_by_kind:
+            claims_by_kind[kind]["exclusive"] = True
+    payload["resource_claims"] = list(claims_by_kind.values())
+    payload.pop("resource_claims_json", None)
+    return payload
+
+
 def _save_software_instance_manifest_conn(
     conn: sqlite3.Connection,
     values: Mapping[str, Any],
@@ -8533,6 +8641,111 @@ class MultiRadioStore:
                                 raise ValueError(
                                     "The VarAC cluster shared database conflicts with an existing node-local path."
                                 )
+                        if existing_standalone_node_id is not None:
+                            # Converting a reviewed standalone node is one
+                            # transaction: update its native identity facts and
+                            # re-scope its manifest before the second member is
+                            # checked.  Otherwise the old standalone manifest
+                            # falsely vetoes the common executable, install
+                            # working directory, database, and BBS roots.
+                            existing_updates = create_cluster_values.get(
+                                "existing_standalone_application_values", {}
+                            )
+                            if isinstance(existing_updates, Mapping) and existing_updates:
+                                existing_standalone = _save_varac_node_conn(
+                                    conn,
+                                    {
+                                        **dict(existing_standalone or {}),
+                                        **dict(existing_updates),
+                                        "id": int(existing_standalone_node_id),
+                                    },
+                                )
+                            existing_manifest_row = conn.execute(
+                                """
+                                SELECT * FROM software_instance_manifests
+                                 WHERE family_key='varac' AND application_system_key=?
+                                 LIMIT 1
+                                """,
+                                (str((existing_standalone or {}).get("system_key") or ""),),
+                            ).fetchone()
+                            if existing_manifest_row is not None:
+                                existing_manifest = _software_instance_manifest_row(
+                                    dict(existing_manifest_row)
+                                )
+                                existing_manifest_updates = create_cluster_values.get(
+                                    "existing_standalone_manifest_values", {}
+                                )
+                                if isinstance(existing_manifest_updates, Mapping):
+                                    existing_manifest.update(
+                                        dict(existing_manifest_updates)
+                                    )
+                                existing_manifest = _scope_varac_cluster_manifest(
+                                    existing_manifest,
+                                    existing_standalone or {},
+                                    cluster_id=public_cluster_id,
+                                    instance_number=_coerce_int(
+                                        create_cluster_values.get(
+                                            "existing_standalone_instance_number", 1
+                                        ),
+                                        1,
+                                    ),
+                                    shared_db_path=shared_db_path,
+                                    shared_bbs_path=shared_bbs_path,
+                                    shared_bbs_archive_path=shared_bbs_archive_path,
+                                )
+                                saved_existing_manifest = _save_software_instance_manifest_conn(
+                                    conn,
+                                    existing_manifest,
+                                )
+                                existing_launch_row = conn.execute(
+                                    """
+                                    SELECT MAX(launch_at_startup)
+                                      FROM radio_launch_bundle_items
+                                     WHERE radio_profile_id=?
+                                       AND (
+                                            instance_key=?
+                                            OR substr(instance_key, 1, length(?) + 1)=? || ':'
+                                       )
+                                    """,
+                                    (
+                                        int(existing_standalone_device_id or 0),
+                                        str(saved_existing_manifest.get("instance_key") or ""),
+                                        str(saved_existing_manifest.get("instance_key") or ""),
+                                        str(saved_existing_manifest.get("instance_key") or ""),
+                                    ),
+                                ).fetchone()
+                                existing_launch_at_startup = bool(
+                                    int(existing_launch_row[0] or 0)
+                                ) if existing_launch_row is not None else False
+                                _remove_instance_launch_links_conn(
+                                    conn,
+                                    radio_profile_id=int(
+                                        existing_standalone_device_id or 0
+                                    ),
+                                    family_key="varac",
+                                    application_system_key=str(
+                                        (existing_standalone or {}).get("system_key") or ""
+                                    ),
+                                )
+                                self._upsert_instance_launch_items_conn(
+                                    conn,
+                                    radio_profile_id=int(
+                                        existing_standalone_device_id or 0
+                                    ),
+                                    family_key="varac",
+                                    saved_app=existing_standalone or {},
+                                    manifest=saved_existing_manifest,
+                                    launch_at_startup=existing_launch_at_startup,
+                                )
+                        requested_manifest = _scope_varac_cluster_manifest(
+                            requested_manifest,
+                            app_values,
+                            cluster_id=public_cluster_id,
+                            instance_number=varac_cluster_instance_number,
+                            shared_db_path=shared_db_path,
+                            shared_bbs_path=shared_bbs_path,
+                            shared_bbs_archive_path=shared_bbs_archive_path,
+                        )
                         now_iso = _utc_now_iso()
                         conn.execute(
                             """
@@ -8635,6 +8848,19 @@ class MultiRadioStore:
                     application_id=int(saved_app["id"]),
                 )
 
+                if family == "varac" and cluster_db_id_value is not None and not create_cluster_values:
+                    selected_cluster = _varac_cluster_by_id(conn, int(cluster_db_id_value)) or {}
+                    requested_manifest = _scope_varac_cluster_manifest(
+                        requested_manifest,
+                        app_values,
+                        cluster_id=str(selected_cluster.get("cluster_id") or ""),
+                        instance_number=varac_cluster_instance_number,
+                        shared_db_path=str(selected_cluster.get("shared_db_path") or ""),
+                        shared_bbs_path=str(selected_cluster.get("shared_bbs_path") or ""),
+                        shared_bbs_archive_path=str(
+                            selected_cluster.get("shared_bbs_archive_path") or ""
+                        ),
+                    )
                 manifest_payload = requested_manifest
                 manifest_payload["family_key"] = family
                 manifest_payload["application_system_key"] = str(saved_app.get("system_key", "") or "")
@@ -8654,6 +8880,35 @@ class MultiRadioStore:
                     "instance_key",
                     f"{family}:{str(saved_app.get('system_key', '') or '')}",
                 )
+                if family == "varac" and cluster_db_id_value is not None:
+                    # Membership is the authoritative owner of the cluster
+                    # number.  Check it before generic manifest collision
+                    # reporting so Add Radio names the operator-correctable
+                    # choice rather than an implementation resource key.
+                    preflight_instance_number = _coerce_int(
+                        varac_cluster_instance_number, 0
+                    )
+                    if preflight_instance_number <= 0:
+                        raise ValueError(
+                            "VarAC cluster instance number must be a positive integer."
+                        )
+                    occupied = conn.execute(
+                        """
+                        SELECT device_profile_id FROM varac_cluster_members
+                         WHERE cluster_id=? AND instance_number=?
+                           AND device_profile_id<>? AND enabled=1
+                         LIMIT 1
+                        """,
+                        (
+                            int(cluster_db_id_value),
+                            preflight_instance_number,
+                            radio_id,
+                        ),
+                    ).fetchone()
+                    if occupied is not None:
+                        raise ValueError(
+                            f"VarAC cluster instance {preflight_instance_number} is already assigned."
+                        )
                 saved_manifest = _save_software_instance_manifest_conn(conn, manifest_payload)
                 if family == "varac" and cluster_db_id_value is not None:
                     cluster = _varac_cluster_by_id(conn, int(cluster_db_id_value))

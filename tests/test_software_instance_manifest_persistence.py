@@ -494,6 +494,116 @@ def test_varac_cluster_membership_and_instance_collision_roll_back_adoption(tmp_
     assert [row["instance_number"] for row in store.list_varac_cluster_members(cluster_id=cluster["id"]) ] == [1]
 
 
+def test_create_varac_cluster_converts_standalone_and_scopes_shared_claims(tmp_path) -> None:
+    """A cluster conversion shares VarAC infrastructure, never member identity."""
+
+    store = MultiRadioStore(tmp_path / "varac-cluster-conversion.db")
+    ftdx10 = store.save_device_profile({"system_key": "ftdx10", "name": "FTDX-10"})
+    ft710 = store.save_device_profile({"system_key": "ft710", "name": "FT-710"})
+    install = "/home/bill/.wine/drive_c/VarAC"
+    shared_db = f"{install}/VarAC.db"
+    shared_bbs = "/home/bill/Desktop/VarAFiles/BBS"
+    shared_bbs_archive = f"{shared_bbs}/Archive"
+
+    def manifest(instance_key, port, ini, runtime, vara_ini, incoming, outbox):
+        return {
+            "instance_key": instance_key,
+            "family_key": "varac",
+            "management_mode": "fio_managed",
+            "ports": [{"name": "VarAC API", "host": "127.0.0.1", "port": port}],
+            # These are initially standalone claims.  Creating the cluster must
+            # atomically re-scope them to the cluster, rather than rejecting the
+            # second member because it uses the reviewed common installation.
+            "resource_claims": [
+                {"kind": "varac_executable", "value": f"{install}/VarAC.exe", "exclusive": True},
+                {"kind": "working_directory", "value": install, "exclusive": True},
+                {"kind": "varac_database", "value": shared_db, "exclusive": True},
+                {"kind": "varac_bbs", "value": shared_bbs, "exclusive": True},
+                {"kind": "varac_bbs_archive", "value": shared_bbs_archive, "exclusive": True},
+                {"kind": "varac_ini", "value": ini, "exclusive": True},
+                {"kind": "vara_runtime", "value": runtime, "exclusive": True},
+                {"kind": "vara_ini", "value": vara_ini, "exclusive": True},
+                {"kind": "varac_incoming", "value": incoming, "exclusive": True},
+                {"kind": "varac_outbox", "value": outbox, "exclusive": True},
+            ],
+        }
+
+    existing = store.adopt_software_instance(
+        family_key="varac",
+        radio_profile_id=ftdx10["id"],
+        application_values={
+            "system_key": "varac-ftdx10", "name": "VarAC FTDX-10",
+            "install_path": install, "db_path": shared_db,
+            "ini_path": f"{install}/VarAC-ftdx10.ini",
+            "vara_runtime_path": "/managed/ftdx10/VARA", "vara_ini_path": "/managed/ftdx10/VARA.ini",
+            "incoming_path": "/files/ftdx10/in", "outbox_path": "/files/ftdx10/out",
+            "native_management_state": "managed",
+        },
+        manifest_values=manifest(
+            "varac:ftdx10", 2443, f"{install}/VarAC-ftdx10.ini", "/managed/ftdx10/VARA",
+            "/managed/ftdx10/VARA.ini", "/files/ftdx10/in", "/files/ftdx10/out",
+        ),
+    )
+
+    added = store.adopt_software_instance(
+        family_key="varac",
+        radio_profile_id=ft710["id"],
+        application_values={
+            "system_key": "varac-ft710", "name": "VarAC FT-710",
+            "install_path": install, "db_path": shared_db,
+            "ini_path": f"{install}/VarAC-ft710.ini",
+            "vara_runtime_path": "/managed/ft710/VARA", "vara_ini_path": "/managed/ft710/VARA.ini",
+            "incoming_path": "/files/ft710/in", "outbox_path": "/files/ft710/out",
+            "native_management_state": "managed",
+        },
+        manifest_values=manifest(
+            "varac:ft710", 2444, f"{install}/VarAC-ft710.ini", "/managed/ft710/VARA",
+            "/managed/ft710/VARA.ini", "/files/ft710/in", "/files/ft710/out",
+        ),
+        varac_cluster_instance_number=2,
+        varac_create_cluster_values={
+            "name": "Home", "cluster_id": "HOME", "shared_db_path": shared_db,
+            "shared_bbs_path": shared_bbs, "shared_bbs_archive_path": shared_bbs_archive,
+            "native_management_state": "managed", "existing_standalone_node_id": existing["application"]["id"],
+            "existing_standalone_instance_number": 1,
+        },
+    )
+
+    cluster = store.list_varac_clusters()[0]
+    assert added["radio"]["varac_node_id"] == added["application"]["id"]
+    assert [(row["device_profile_id"], row["instance_number"]) for row in store.list_varac_cluster_members(cluster_id=cluster["id"])] == [
+        (ftdx10["id"], 1), (ft710["id"], 2)
+    ]
+    first = store.get_software_instance_manifest("varac:ftdx10")
+    second = store.get_software_instance_manifest("varac:ft710")
+    shared_kinds = {"varac_executable", "working_directory", "varac_database", "varac_bbs", "varac_bbs_archive"}
+    member_kinds = {"varac_ini", "vara_runtime", "vara_ini", "varac_incoming", "varac_outbox"}
+    for saved in (first, second):
+        claims = {item["kind"]: item for item in saved["resource_claims"]}
+        assert {kind for kind in shared_kinds if claims[kind]["exclusive"] is False} == shared_kinds
+        assert {kind for kind in member_kinds if claims[kind]["exclusive"] is True} == member_kinds
+        assert claims["varac_executable"]["value"] == f"{install}/VarAC.exe"
+    assert find_manifest_conflicts(manifest_from_mapping(second), [manifest_from_mapping(first)]) == ()
+
+    duplicate_member = manifest(
+        "varac:duplicate", 2444, f"{install}/VarAC-ft710.ini", "/managed/ft710/VARA",
+        "/managed/ft710/VARA.ini", "/files/ft710/in", "/files/ft710/out",
+    )
+    issues = find_manifest_conflicts(manifest_from_mapping(duplicate_member), [manifest_from_mapping(second)])
+    assert [issue.code for issue in issues].count("resource_collision") == len(member_kinds)
+    assert [issue.code for issue in issues].count("endpoint_collision") == 1
+
+    radio_c = store.save_device_profile({"system_key": "radio-c", "name": "Radio C"})
+    with pytest.raises(ValueError, match="already (owned|assigned)"):
+        store.adopt_software_instance(
+            family_key="varac", radio_profile_id=radio_c["id"],
+            application_values={"system_key": "varac-c", "name": "C", "ini_path": "/varac/c.ini"},
+            manifest_values={"instance_key": "varac:c"},
+            varac_cluster_db_id=cluster["id"], varac_cluster_instance_number=2,
+        )
+    assert store.get_device_profile(radio_c["id"])["varac_node_id"] is None
+
+
 def test_one_application_instance_cannot_be_silently_shared_across_radios(tmp_path) -> None:
     store = MultiRadioStore(tmp_path / "sharing.db")
     radio_a = store.save_device_profile({"system_key": "radio-a", "name": "Radio A"})

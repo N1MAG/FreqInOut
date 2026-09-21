@@ -698,3 +698,41 @@ full applicable guided-radio, planner, Software Administration, native
 preparation/writer/transaction, and VNC partition passed. Changed Python
 compilation and diff hygiene passed. A controlled operator walkthrough remains
 required before release qualification.
+
+## VNC-9 — Shared Installation Claims And Atomic Cluster Conversion
+
+Status: automated implementation gate passed 2026-09-20; live Windows and
+Linux/Wine qualification remains open.
+
+The native plan and the FIO persistence model use the same ownership boundary.
+VarAC cluster members may intentionally share the qualified VarAC executable,
+installation working directory, effective cluster database, and cluster
+BBS/archive. Those paths are nonexclusive member-manifest references to
+application- or cluster-owned resources. A launch working directory is not a
+member identity merely because each process starts there.
+
+Member identity remains strict and exclusive: each member has its own VarAC
+INI, cloned VARA runtime, VARA INI, incoming folder, outbox, endpoint ports,
+and positive cluster instance number. The writer continues to reject any
+existing VARA target and any unsafe or ambiguous member-local collision.
+
+For `Create cluster` from a standalone node, final Save is one indivisible
+operation. The existing node's verified native paths and launch command, its
+manifest ownership, its cluster membership, the new node/application/manifest,
+both radio projections, and both canonical Software Administration identities
+commit together. Native files are applied under the existing split external
+transaction, and any later FIO rejection rolls the database transaction back
+and compensates the external session. Join-cluster applies the same shared
+claim normalization to the new member without changing unrelated members.
+
+Final validation reports authoritative member-number conflicts before generic
+manifest wording. Other member-local path or endpoint collisions remain hard
+stops. A persistence rejection must not claim that the radio was saved; its UI
+and log state that nothing was saved, existing assignments were retained, and
+whether native compensation completed or needs recovery.
+
+Required regression evidence begins with a legacy standalone manifest whose
+common executable, install working directory, database, BBS, and archive are
+exclusive. Conversion must reload both manifests with only those named shared
+claims nonexclusive, while preserving member-local exclusivity and rejecting a
+duplicate member. No schema or destructive data migration is introduced.

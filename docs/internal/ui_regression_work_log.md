@@ -9226,3 +9226,53 @@ No schema or data migration is required. No production database, VarAC/VARA
 file, external process, radio, commit, or remote was changed. The unrelated
 modified installation-guide DOCX and rendered guide directory remain preserved
 and excluded.
+
+## 2026-09-20 — VarAC shared-install final-save correction
+
+Status: automated implementation gate passed; live Linux/Wine and Windows
+standalone-to-cluster qualification remains operator-assisted.
+
+Production testing reached final Add Radio save with correct generated paths,
+then rolled the radio back because the old standalone manifest described the
+common VarAC installation working directory as member-exclusive. A
+production-shaped regression also reproduced the same error for the executable
+and shared database. The UI compounded the failure by titling the recovery
+message `Saved — one app needs attention`, and the handled validation exception
+was absent from the log.
+
+The persistence boundary now normalizes the explicit cluster ownership model.
+Executable/install working directory, cluster database, and cluster
+BBS/archive are nonexclusive shared references. VarAC INI, cloned VARA runtime
+and INI, incoming/outbox, ports, and member number remain exclusive. Creating a
+cluster re-scopes the existing standalone manifest, updates its verified native
+paths, creates both memberships, saves the new member, and mirrors the existing
+radio's canonical Software Administration identity within the same outer
+transaction. Unknown claims retain their reviewed exclusivity.
+
+Member-number validation now runs before generic manifest collision reporting.
+A rejected final persistence step explicitly says `Nothing Saved`, logs the
+family/radio/phase/detail, and logs both scheduling and successful completion of
+native compensation; recovery failures retain their existing error path.
+
+Focused delegated store coverage was implemented by `gpt-5.6-terra`, medium
+reasoning, and reviewed/adjusted by the primary. Architecture, transaction
+semantics, UI/canonical parity, diagnostics, specification/help reconciliation,
+and final integration are owned by the high-reasoning primary model. The
+requested Luna diagnostics package could not start because all remaining agent
+slots were occupied by completed historical workers, so the primary retained
+that bounded package rather than delaying the gate.
+
+Final combined evidence: **277 passed** across manifest persistence, assistant
+payloads, Add Radio/Software Administration adapters and canonical parity,
+VarAC arrangement, native preparation/writer/transaction/final apply,
+responsive real widgets, production-shaped operator routes, and contextual
+help. Changed-file compilation and `git diff --check` passed. A repository-wide
+run progressed through its first 170 tests, then the Python process exited with
+a Qt segmentation fault in the unrelated Compose layout coalescing test while
+a JS8 reader thread was active; that exact test passed **1/1** when rerun alone.
+No assertion failure from this change was suppressed.
+
+No schema or destructive migration is required. No production database,
+VarAC/VARA file, external process, radio, commit, or remote was changed. The
+unrelated modified installation-guide DOCX and rendered guide directory remain
+preserved and excluded.

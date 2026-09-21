@@ -110,6 +110,37 @@ def test_varac_cluster_shared_database_is_not_reported_as_private_storage_collis
     assert "duplicate_storage" not in {item.code for item in findings}
 
 
+def test_varac_cluster_draft_distinguishes_shared_and_member_resources() -> None:
+    draft = SoftwareInstanceDraft(
+        family_key="varac",
+        application_path="/opt/VarAC/VarAC.exe",
+        configuration_path="/opt/VarAC/VarAC-ft710.ini",
+        storage_path="/opt/VarAC/VarAC.db",
+        secondary_storage_path="/srv/VaraFiles/FT-710_In",
+        outbox_path="/srv/VaraFiles/FT-710_Out",
+        vara_runtime_path="/srv/ft-710/VARA",
+        vara_ini_path="/srv/ft-710/VARA/VARA.ini",
+        cluster_path="create_cluster",
+        cluster_id="HOME",
+        cluster_instance_number=2,
+    )
+
+    claims = {
+        item["kind"]: item for item in draft.payload()["resource_claims"]
+    }
+    assert claims["varac_executable"]["exclusive"] is False
+    assert claims["varac_database"]["exclusive"] is False
+    for kind in (
+        "varac_ini",
+        "vara_runtime",
+        "vara_ini",
+        "varac_incoming",
+        "varac_outbox",
+        "varac_cluster_instance",
+    ):
+        assert claims[kind]["exclusive"] is True
+
+
 def test_unsaved_radio_owner_uses_authoritative_assistant_without_fake_radio_id() -> None:
     app = _app()
     assistant = SoftwareInstanceAssistant(

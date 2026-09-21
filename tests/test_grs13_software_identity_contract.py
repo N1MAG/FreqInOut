@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -231,6 +232,125 @@ def test_guided_fast_light_save_round_trips_all_native_paths_and_components(tmp_
     assert "draft-fast_light" not in persisted
     assert ".freqinout" not in persisted
     assert store.validate_radio_software_identity_projections(int(radio["id"])) == {}
+
+
+def test_converted_varac_member_is_mirrored_without_losing_other_identities(tmp_path) -> None:
+    store = MultiRadioStore(tmp_path / "converted-varac-identity.sqlite")
+    old_radio = store.save_device_profile({
+        "system_key": "ftdx10", "name": "FTDX-10", "use_flrig": 0,
+        "use_fldigi": 0, "use_flmsg": 0, "use_flamp": 0,
+        "use_js8spotter": 1,
+    })
+    new_radio = store.save_device_profile({
+        "system_key": "ft710", "name": "FT-710", "use_flrig": 0,
+        "use_fldigi": 0, "use_flmsg": 0, "use_flamp": 0,
+    })
+    install = "/opt/VarAC/VarAC.exe"
+    shared_db = "/opt/VarAC/VarAC.db"
+    old = store.adopt_software_instance(
+        family_key="varac",
+        radio_profile_id=int(old_radio["id"]),
+        application_values={
+            "system_key": "varac-ftdx10", "name": "FTDX-10", "install_path": install,
+            "ini_path": "/opt/VarAC/VarAC-ftdx10.ini", "db_path": shared_db,
+            "vara_runtime_path": "/managed/ftdx10/VARA",
+            "vara_ini_path": "/managed/ftdx10/VARA/VARA.ini",
+            "incoming_path": "/files/FTDX10_In", "outbox_path": "/files/FTDX10_Out",
+            "native_management_state": "managed",
+        },
+        manifest_values={
+            "instance_key": "varac:varac-ftdx10",
+            "resource_claims": [
+                {"kind": "varac_executable", "value": install, "exclusive": True},
+                {"kind": "working_directory", "value": "/opt/VarAC", "exclusive": True},
+                {"kind": "varac_database", "value": shared_db, "exclusive": True},
+            ],
+        },
+    )
+    old_profile = store.get_device_profile(int(old_radio["id"]))
+    initial = build_guided_identity_records(
+        old_profile,
+        {
+            "varac": {
+                "instance_key": "varac:varac-ftdx10",
+                "management_mode": "fio_managed",
+                "application_path": install,
+                "configuration_path": "/opt/VarAC/VarAC-ftdx10.ini",
+                "storage_path": shared_db,
+                "secondary_storage_path": "/files/FTDX10_In",
+                "outbox_path": "/files/FTDX10_Out",
+                "resource_claims": old["manifest"]["resource_claims"],
+            }
+        },
+        ("varac", "fio_spotter"),
+    )
+    store.save_radio_software_identity_records(int(old_radio["id"]), initial)
+    added = store.adopt_software_instance(
+        family_key="varac",
+        radio_profile_id=int(new_radio["id"]),
+        application_values={
+            "system_key": "varac-ft710", "name": "FT-710", "install_path": install,
+            "ini_path": "/opt/VarAC/VarAC-ft710.ini", "db_path": shared_db,
+            "vara_runtime_path": "/managed/ft710/VARA",
+            "vara_ini_path": "/managed/ft710/VARA/VARA.ini",
+            "incoming_path": "/files/FT710_In", "outbox_path": "/files/FT710_Out",
+            "native_management_state": "managed",
+        },
+        manifest_values={"instance_key": "varac:varac-ft710"},
+        varac_cluster_instance_number=2,
+        varac_create_cluster_values={
+            "name": "Home", "cluster_id": "HOME", "shared_db_path": shared_db,
+            "shared_bbs_path": "/files/BBS", "shared_bbs_archive_path": "/files/BBS/Archive",
+            "existing_standalone_node_id": old["application"]["id"],
+            "existing_standalone_instance_number": 1,
+            "native_management_state": "managed",
+            "existing_standalone_application_values": {
+                "launch_cmd": r"wine /opt/VarAC/VarAC.exe C:\\VarAC\\VarAC-ftdx10.ini",
+                "native_management_state": "managed",
+            },
+            "existing_standalone_manifest_values": {
+                "launch_command": r"wine /opt/VarAC/VarAC.exe C:\\VarAC\\VarAC-ftdx10.ini",
+                "evidence": {
+                    "launch_recipe": {
+                        "status": "qualified_managed",
+                        "components": ({
+                            "component_key": "varac", "executable": "wine",
+                            "arguments": (install, r"C:\\VarAC\\VarAC-ftdx10.ini"),
+                            "working_directory": "/opt/VarAC",
+                            "environment": {"WINEPREFIX": "/home/operator/.wine"},
+                            "operator_starts": False,
+                            "readiness": {"kind": "process"},
+                        },),
+                    }
+                },
+            },
+        },
+    )
+    assert added["radio"]["varac_node_id"]
+    existing_application = store.get_varac_node(int(old["application"]["id"]))
+    existing_manifest = store.get_software_instance_manifest("varac:varac-ftdx10")
+    tab = SettingsTab.__new__(SettingsTab)
+    tab.multi_radio_store = store
+    tab._sync_converted_varac_identity(
+        radio_id=int(old_radio["id"]),
+        member=SimpleNamespace(
+            launch_command=("wine", install, r"C:\\VarAC\\VarAC-ftdx10.ini"),
+            working_directory="/opt/VarAC",
+            wine_prefix="/home/operator/.wine",
+        ),
+        manifest=existing_manifest,
+        application=existing_application,
+    )
+
+    records = store.list_radio_software_identity_records(int(old_radio["id"]))
+    assert {record.family_key for record in records} == {"varac", "fio_spotter"}
+    varac = next(record for record in records if record.family_key == "varac")
+    claims = {item["resource_type"]: item for item in varac.resources}
+    assert claims["working_directory"]["exclusive"] is False
+    assert claims["varac_database"]["exclusive"] is False
+    assert varac.components[0].argv[:2] == ("wine", install)
+    assert varac.components[0].cwd == "/opt/VarAC"
+    assert store.validate_radio_software_identity_projections(int(old_radio["id"])) == {}
 
 
 def _component(key: str, executable: str, *arguments: str, depends_on: tuple[str, ...] = ()) -> LaunchComponentRecord:

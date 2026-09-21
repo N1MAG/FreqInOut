@@ -370,14 +370,31 @@ class SoftwareInstanceDraft:
                         }
                     )
         else:
+            clustered = self.cluster_path in {"create_cluster", "join_cluster"}
             for kind, value in (
                 ("varac_ini", self.configuration_path),
                 ("varac_database", self.storage_path),
                 ("varac_incoming", self.secondary_storage_path),
                 ("varac_outbox", self.outbox_path),
+                ("vara_runtime", self.vara_runtime_path),
+                ("vara_ini", self.vara_ini_path),
             ):
                 if value:
-                    resources.append({"kind": kind, "value": value, "exclusive": True})
+                    resources.append(
+                        {
+                            "kind": kind,
+                            "value": value,
+                            "exclusive": not (clustered and kind == "varac_database"),
+                        }
+                    )
+            if self.application_path:
+                resources.append(
+                    {
+                        "kind": "varac_executable",
+                        "value": self.application_path,
+                        "exclusive": False,
+                    }
+                )
             if self.cluster_id and self.cluster_instance_number:
                 resources.append(
                     {

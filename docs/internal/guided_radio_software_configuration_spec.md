@@ -4346,3 +4346,52 @@ existing target is rejected. Focused native preparation/writer tests, the full
 guided VarAC route, final-apply/persistence tests, changed-file compilation, and
 diff hygiene must pass. No schema or production-data migration is part of this
 correction.
+
+### GRS-14.3 — VarAC Cluster Ownership And Atomic Standalone Conversion
+
+Status: automated implementation gate passed 2026-09-20; supported-platform
+operator qualification remains open.
+
+Creating a cluster from an existing standalone node changes the ownership of
+some reviewed resources; it does not create a second unrelated installation.
+The persistence boundary, Add Radio Review, and Software Administration use
+one exact ownership model:
+
+- the VarAC executable/installation and its launch working directory are
+  reusable application resources, not member-exclusive directories;
+- the selected cluster database and cluster BBS/archive directories are owned
+  by the cluster and are nonexclusive in each member manifest;
+- each member's VarAC INI, cloned VARA runtime and VARA INI, incoming folder,
+  outbox, endpoint ports, and positive cluster member number remain exclusive;
+- unknown future claims retain their reviewed exclusivity; normalization may
+  weaken only the named cluster-shared kinds above; and
+- a standalone manifest that previously described a now-shared resource as
+  exclusive is re-scoped in the same database transaction as cluster creation,
+  both memberships, the new member manifest, and the radio assignments.
+
+When the qualified native writer changes the existing member's INI, VARA
+runtime, or launch vector, FIO updates the existing application row and its
+canonical Software Administration identity in that same outer reviewed save.
+Unrelated software identities on the existing radio are preserved. A failure
+in any application, manifest, membership, canonical-identity, or launch
+projection rolls back the complete FIO transaction and triggers compensation
+of the already-applied native session.
+
+Persistence validation occurs before generic conflict reporting whenever the
+authoritative cluster membership can name the problem. A duplicate member
+number is reported as that operator-correctable choice. A genuinely duplicated
+member INI, VARA runtime/INI, mailbox, or endpoint remains a blocking collision;
+shared application/cluster paths never are. The failure dialog must say
+`Nothing Saved`, not `Saved`, and the log records family, radio, persistence
+phase, exact rejection detail, scheduled native compensation, and compensation
+completion or recovery failure.
+
+Acceptance requires a production-shaped standalone-to-cluster store test with
+two radios. It must begin with the old standalone manifest claiming the common
+executable, working directory, database, BBS, and archive exclusively, then
+prove that final adoption succeeds and reloads both member manifests with the
+shared/member split above. It must also prove that duplicate member resources
+and member numbers still fail without partial rows. Focused assistant payload,
+canonical identity, VarAC arrangement, manifest persistence, native
+transaction, changed-file compilation, and diff-hygiene gates must pass. No
+schema or destructive data migration is part of this correction.

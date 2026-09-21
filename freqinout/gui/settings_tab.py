@@ -11078,6 +11078,13 @@ class SettingsTab(QWidget):
                     payload.get("existing_standalone_member_number") or 0
                 ) or None,
             }
+            if varac_session is not None and len(varac_session.plan.members) > 1:
+                create_cluster_values.update(
+                    self._converted_varac_member_persistence_values(
+                        varac_session,
+                        native_writer_key=str(payload.get("native_writer_key") or ""),
+                    )
+                )
             cluster_instance_number = int(payload.get("cluster_instance_number") or 0) or None
 
         # Capture the canonical generation and complete retained set before
@@ -11132,25 +11139,38 @@ class SettingsTab(QWidget):
                         varac_cluster_instance_number=cluster_instance_number,
                         varac_create_cluster_values=create_cluster_values,
                     )
-                if family == "varac" and varac_session is not None and len(varac_session.plan.members) > 1:
-                    existing_member = varac_session.plan.members[0]
+                if (
+                    family == "varac"
+                    and cluster_path == "create_cluster"
+                    and varac_session is not None
+                    and len(varac_session.plan.members) > 1
+                ):
                     existing_node_id = int(payload.get("existing_standalone_node_id") or 0)
-                    if existing_node_id > 0:
-                        self.multi_radio_store.save_varac_node(
-                            {
-                                "id": existing_node_id,
-                                "db_path": varac_session.plan.shared_db_path,
-                                "ini_path": str(existing_member.target_path),
-                                "vara_runtime_path": str(existing_member.vara_target_runtime_folder),
-                                "vara_ini_path": str(existing_member.vara_target_path),
-                                "launch_cmd": " ".join(existing_member.launch_command),
-                                "native_management_state": "managed",
-                                "native_writer_key": str(payload.get("native_writer_key") or ""),
-                                "desired_fingerprint": varac_session.plan.plan_fingerprint,
-                                "observed_fingerprint": str(varac_session.observed.get("observed_fingerprint") or ""),
-                                "native_verification_summary": "Native VarAC and distinct VARA runtime applied and read back.",
-                            }
+                    existing_radio_id = int(
+                        payload.get("existing_standalone_device_profile_id") or 0
+                    )
+                    existing_application = self.multi_radio_store.get_varac_node(
+                        existing_node_id
+                    )
+                    existing_manifest = (
+                        self.multi_radio_store.get_software_instance_manifest(
+                            f"varac:{str(existing_application.get('system_key') or '')}"
                         )
+                        if isinstance(existing_application, Mapping)
+                        else None
+                    )
+                    if existing_radio_id <= 0 or not isinstance(
+                        existing_manifest, Mapping
+                    ) or not isinstance(existing_application, Mapping):
+                        raise ValueError(
+                            "FIO could not mirror the converted VarAC member into Software Administration."
+                        )
+                    self._sync_converted_varac_identity(
+                        radio_id=existing_radio_id,
+                        member=varac_session.plan.members[0],
+                        manifest=existing_manifest,
+                        application=existing_application,
+                    )
                 if varac_session is not None:
                     mark_varac_native_fio_committed(self.multi_radio_store, varac_session)
                 saved_for_identity = (
@@ -33468,6 +33488,142 @@ class SettingsTab(QWidget):
             return False
         return True
 
+    @staticmethod
+    def _converted_varac_member_persistence_values(
+        session: VarACNativeExternalSession,
+        *,
+        native_writer_key: str,
+    ) -> Dict[str, Any]:
+        """Project the existing member's verified native result once."""
+
+        member = session.plan.members[0]
+        launch_argv = tuple(str(value) for value in member.launch_command)
+        return {
+            "existing_standalone_application_values": {
+                "db_path": session.plan.shared_db_path,
+                "ini_path": str(member.target_path),
+                "vara_runtime_path": str(member.vara_target_runtime_folder),
+                "vara_ini_path": str(member.vara_target_path),
+                "launch_cmd": " ".join(launch_argv),
+                "native_management_state": "managed",
+                "native_writer_key": str(native_writer_key or ""),
+                "desired_fingerprint": session.plan.plan_fingerprint,
+                "observed_fingerprint": str(
+                    session.observed.get("observed_fingerprint") or ""
+                ),
+                "native_verification_summary": (
+                    "Native VarAC and distinct VARA runtime applied and read back."
+                ),
+            },
+            "existing_standalone_manifest_values": {
+                "configuration_path": str(member.target_path),
+                "configuration_root": str(member.target_path),
+                "data_root": session.plan.shared_db_path,
+                "launch_command": " ".join(launch_argv),
+                "evidence": {
+                    "launch_recipe": {
+                        "status": "qualified_managed",
+                        "fingerprint": session.plan.plan_fingerprint,
+                        "components": (
+                            {
+                                "component_key": "varac",
+                                "executable": launch_argv[0] if launch_argv else "",
+                                "arguments": launch_argv[1:],
+                                "effective_command": launch_argv,
+                                "working_directory": str(member.working_directory),
+                                "environment": (
+                                    {"WINEPREFIX": str(member.wine_prefix)}
+                                    if member.wine_prefix else {}
+                                ),
+                                "dependencies": (),
+                                "execution_scope": "standard",
+                                "operator_starts": False,
+                                "readiness": {"kind": "process"},
+                            },
+                        ),
+                    }
+                },
+            },
+        }
+
+    def _sync_converted_varac_identity(
+        self,
+        *,
+        radio_id: int,
+        member: Any,
+        manifest: Mapping[str, Any],
+        application: Mapping[str, Any],
+    ) -> None:
+        """Mirror a standalone-to-cluster conversion into canonical identity.
+
+        The existing radio changes in the same reviewed operation as the new
+        radio.  Its Software Administration record must therefore receive the
+        same member-specific launch and path facts, while retaining every
+        unrelated software identity already assigned to that radio.
+        """
+
+        profile = self.multi_radio_store.get_device_profile(int(radio_id))
+        if not isinstance(profile, Mapping):
+            raise KeyError(f"Unknown existing VarAC radio profile id: {radio_id}")
+        launch_argv = tuple(str(value) for value in member.launch_command)
+        launch_environment = (
+            {"WINEPREFIX": str(member.wine_prefix)} if member.wine_prefix else {}
+        )
+        draft = {
+            "family_key": "varac",
+            "instance_key": str(manifest.get("instance_key") or ""),
+            "application_system_key": str(application.get("system_key") or ""),
+            "mode": "managed",
+            "management_mode": str(manifest.get("management_mode") or "fio_managed"),
+            "provenance": str(manifest.get("provenance") or "guided"),
+            "application_path": str(application.get("install_path") or ""),
+            "configuration_path": str(application.get("ini_path") or ""),
+            "storage_path": str(application.get("db_path") or ""),
+            "secondary_storage_path": str(application.get("incoming_path") or ""),
+            "outbox_path": str(profile.get("varac_outbox_dir") or ""),
+            "bbs_path": str(profile.get("varac_bbs_dir") or ""),
+            "bbs_archive_path": str(profile.get("varac_bbs_archive_dir") or ""),
+            "working_directory": str(member.working_directory),
+            "ports": list(manifest.get("ports") or ()),
+            "resource_claims": list(manifest.get("resource_claims") or ()),
+            "desired_fingerprint": str(application.get("desired_fingerprint") or ""),
+            "observed_fingerprint": str(application.get("observed_fingerprint") or ""),
+            "native_configuration_status": "native_applied_readback_verified",
+            "launch_recipe": {
+                "status": "qualified_managed",
+                "components": (
+                    {
+                        "component_key": "varac",
+                        "executable": launch_argv[0] if launch_argv else "",
+                        "arguments": launch_argv[1:],
+                        "working_directory": str(member.working_directory),
+                        "environment": launch_environment,
+                        "dependencies": (),
+                        "execution_scope": "standard",
+                        "operator_starts": False,
+                        "readiness": {"kind": "process"},
+                    },
+                ),
+            },
+        }
+        converted = build_guided_identity_records(profile, {"varac": draft}, ("varac",))[0]
+        current = list(
+            self.multi_radio_store.list_radio_software_identity_records(int(radio_id))
+        )
+        replacement_index = next(
+            (index for index, record in enumerate(current) if record.family_key == "varac"),
+            len(current),
+        )
+        retained = [record for record in current if record.family_key != "varac"]
+        retained.insert(min(replacement_index, len(retained)), converted)
+        self.multi_radio_store.save_radio_software_identity_records(
+            int(radio_id),
+            retained,
+            expected_generation=self.multi_radio_store.radio_software_identity_generation(
+                int(radio_id)
+            ),
+        )
+
     def _adopt_guided_software_drafts(
         self,
         device_profile: Mapping[str, Any],
@@ -33701,6 +33857,44 @@ class SettingsTab(QWidget):
                                 "exclusive": exclusive,
                             }
                 resource_claims = list(by_kind.values())
+            elif family == "varac":
+                # The executable/install directory is reusable by independent
+                # VarAC launch identities.  A cluster additionally shares its
+                # database and station BBS roots; member INI, cloned VARA
+                # runtime, mailboxes, endpoints, and member number stay
+                # exclusive.  The store reasserts this model at commit time,
+                # while this projection keeps Review and Software
+                # Administration truthful before Save.
+                cluster_path = str(draft.get("cluster_path") or "standalone").strip().lower()
+                clustered = cluster_path in {"create_cluster", "join_cluster"}
+                by_kind = {
+                    str(item.get("kind") or "").strip(): dict(item)
+                    for item in resource_claims
+                    if str(item.get("kind") or "").strip()
+                }
+                varac_claims = {
+                    "varac_executable": (application_values.get("install_path"), False),
+                    "varac_database": (application_values.get("db_path"), not clustered),
+                    "varac_bbs": (application_values.get("bbs_path"), not clustered),
+                    "varac_bbs_archive": (
+                        application_values.get("bbs_archive_path"),
+                        not clustered,
+                    ),
+                    "varac_ini": (application_values.get("ini_path"), True),
+                    "vara_runtime": (application_values.get("vara_runtime_path"), True),
+                    "vara_ini": (application_values.get("vara_ini_path"), True),
+                    "varac_incoming": (application_values.get("incoming_path"), True),
+                    "varac_outbox": (application_values.get("outbox_path"), True),
+                }
+                for kind, (value, exclusive) in varac_claims.items():
+                    value = str(value or "").strip()
+                    if value:
+                        by_kind[kind] = {
+                            "kind": kind,
+                            "value": value,
+                            "exclusive": exclusive,
+                        }
+                resource_claims = list(by_kind.values())
             management_mode = str(draft.get("management_mode") or "").strip().lower()
             if not management_mode:
                 ownership = str(draft.get("ownership") or "").strip().lower()
@@ -33731,7 +33925,11 @@ class SettingsTab(QWidget):
                 "resource_claims": [
                     *resource_claims,
                     *(
-                        [{"kind": "working_directory", "value": str(draft.get("working_directory") or "").strip(), "exclusive": True}]
+                        [{
+                            "kind": "working_directory",
+                            "value": str(draft.get("working_directory") or "").strip(),
+                            "exclusive": family != "varac",
+                        }]
                         if str(draft.get("working_directory") or "").strip()
                         else []
                     ),
@@ -33825,6 +34023,13 @@ class SettingsTab(QWidget):
                     )
                     or None,
                 }
+                if varac_session is not None and len(varac_session.plan.members) > 1:
+                    create_cluster_values.update(
+                        self._converted_varac_member_persistence_values(
+                            varac_session,
+                            native_writer_key=str(draft.get("native_writer_key") or ""),
+                        )
+                    )
             try:
                 current_link_column = {
                     "js8call": "js8_instance_id",
@@ -33859,34 +34064,57 @@ class SettingsTab(QWidget):
                         ),
                         **kwargs,
                     )
-                    if family == "varac" and varac_session is not None and len(varac_session.plan.members) > 1:
-                        existing_member = varac_session.plan.members[0]
-                        existing_node_id = int(draft.get("existing_standalone_node_id") or 0)
-                        if existing_node_id > 0:
-                            self.multi_radio_store.save_varac_node(
-                                {
-                                    "id": existing_node_id,
-                                    "db_path": varac_session.plan.shared_db_path,
-                                    "ini_path": str(existing_member.target_path),
-                                    "vara_runtime_path": str(existing_member.vara_target_runtime_folder),
-                                    "vara_ini_path": str(existing_member.vara_target_path),
-                                    "launch_cmd": " ".join(existing_member.launch_command),
-                                    "native_management_state": "managed",
-                                    "native_writer_key": str(draft.get("native_writer_key") or ""),
-                                    "desired_fingerprint": varac_session.plan.plan_fingerprint,
-                                    "observed_fingerprint": str(
-                                        varac_session.observed.get("observed_fingerprint") or ""
-                                    ),
-                                    "native_verification_summary": "Native VarAC and distinct VARA runtime applied and read back.",
-                                }
+                    if (
+                        family == "varac"
+                        and cluster_path == "create_cluster"
+                        and varac_session is not None
+                        and len(varac_session.plan.members) > 1
+                    ):
+                        existing_node_id = int(
+                            draft.get("existing_standalone_node_id") or 0
+                        )
+                        existing_radio_id = int(
+                            draft.get("existing_standalone_device_profile_id") or 0
+                        )
+                        existing_application = self.multi_radio_store.get_varac_node(
+                            existing_node_id
+                        )
+                        if not isinstance(existing_application, Mapping):
+                            raise KeyError(
+                                "The existing standalone VarAC node changed during final save."
                             )
+                        existing_manifest = self.multi_radio_store.get_software_instance_manifest(
+                            f"varac:{str(existing_application.get('system_key') or '')}"
+                        )
+                        if existing_radio_id <= 0 or not isinstance(
+                            existing_manifest, Mapping
+                        ):
+                            raise ValueError(
+                                "FIO could not mirror the converted VarAC member into Software Administration."
+                            )
+                        self._sync_converted_varac_identity(
+                            radio_id=existing_radio_id,
+                            member=varac_session.plan.members[0],
+                            manifest=existing_manifest,
+                            application=existing_application,
+                        )
             except (ValueError, KeyError) as exc:
-                recovery = guided_recovery_presentation(needs_attention_app=instance_name)
+                log.warning(
+                    "Guided Add Radio software adoption rejected; family=%s radio_id=%s "
+                    "instance=%s phase=persistence_preflight detail=%s; database transaction "
+                    "will roll back and any native VarAC session will be restored.",
+                    family,
+                    radio_id,
+                    instance_name,
+                    exc,
+                )
                 QMessageBox.warning(
                     self,
-                    recovery.status,
-                    f"{recovery.detail} The radio remains inactive so you can correct the setup. "
-                    f"Retry at: {recovery.retry_route}. {exc}",
+                    "Guided Add Radio — Nothing Saved",
+                    "FIO could not save the complete reviewed radio and software setup, so the "
+                    "database transaction was rolled back. Existing assignments remain unchanged. "
+                    "Review the named setting in Add Radio > Software and try again. "
+                    f"Technical detail: {exc}",
                 )
                 self._refresh_multi_radio_tables()
                 return False
@@ -34535,13 +34763,21 @@ class SettingsTab(QWidget):
         )
 
     def _rollback_varac_native_session(self, session: VarACNativeExternalSession) -> None:
+        fingerprint = str(session.plan.plan_fingerprint or "")
+        log.info(
+            "Scheduling native VarAC rollback after guided save rejection; plan=%s.",
+            fingerprint or "unknown",
+        )
         self._start_varac_native_job(
             _VarACNativeApplyWorker(
                 action="rollback",
                 db_path=self.multi_radio_store.db_path,
                 session=session,
             ),
-            on_finished=lambda _result: None,
+            on_finished=lambda _result: log.info(
+                "Native VarAC rollback completed after guided save rejection; plan=%s.",
+                fingerprint or "unknown",
+            ),
             on_failed=lambda detail: log.error("Native VarAC rollback requires operator attention: %s", detail),
         )
 
