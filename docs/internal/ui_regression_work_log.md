@@ -9595,3 +9595,52 @@ attempt encountered a macOS PySide segmentation fault while an unrelated JS8
 reader thread was alive in the compose-layout test; that exact compose test
 passes independently (**1 test**), so this is recorded as a suite-harness
 limitation rather than launch-change evidence.
+
+## 2026-09-21 — Launch bundle catalog integrity and radio-focus isolation
+
+Status: specified, implemented, and regression-tested; Linux production retest
+remains open. No production database or unrelated user artifact was changed.
+
+Production evidence for radio 9 showed repeated FT-710 endpoint probes without
+an FLRig spawn, canonical parity warnings that FLRig/FLDigi arguments, working
+directories, and readiness differed, a missing/duplicate VARA component, launch
+checkboxes that appeared not to persist, and custom-tool changes leaking across
+radio contexts. The common causes were bounded and deterministic:
+
+- custom-tool catalog reconciliation rebuilt every launch row from only its
+  display name and two booleans, discarding its immutable instance key and
+  complete canonical recipe;
+- hidden VARA and SDR++ companion rows were discarded because they are not
+  independent station catalog buttons; and
+- after a radio-focus change, the still-painted previous-radio table was synced
+  into the newly loaded radio cache by display name.
+
+Catalog reconciliation is now lossless for existing rows and snapshots a new
+custom command into the selected radio assignment. Editing a definition updates
+only that selected radio's matching assignment; its identity name is immutable
+after creation so a rename cannot orphan another radio's reference. Hidden
+canonical companion rows
+survive without becoming independent UI checkboxes. The launch table records
+the radio it renders and refuses stale table-to-cache synchronization; each row
+binds by immutable instance key. Canonical component dependencies are ordered
+case-insensitively so stored `flrig` and displayed `FLRig` remain the same
+dependency.
+
+Already-damaged saved rows are repaired in memory from the selected radio's
+committed GRS-13 identity and exact software manifest. FIO restores component
+identity, executable, arguments, working directory, environment, dependency,
+readiness, managed-directory, and scope fields while retaining that radio's
+enabled/startup/monitor preferences. Manual and startup planning can use the
+repaired recipe immediately; normal Settings Save persists it.
+
+Delegation evidence: `flrig_startup_audit` used `gpt-5.6-terra` at medium
+reasoning for tests covering FT-710 exact-argument launch plus per-radio startup
+and monitoring persistence. `custom_tool_mapping_audit` used `gpt-5.6-luna` at
+medium reasoning for tests covering lossless catalog operations and distinct
+per-radio custom commands. The primary `gpt-6-astra` integrated the production
+fixes, canonical recovery, specifications, work log, and broader validation.
+
+Acceptance evidence: the focused launch, status, readiness, custom-tool, and
+GRS-13 suite passes **116 tests** with 6 platform skips. The broader guided
+recipe, native writer, receiver, Software Administration, and persistence suite
+passes **275 tests**. Changed Python compilation and `git diff --check` pass.

@@ -38,6 +38,11 @@ LAUNCH_APP_ORDER: List[str] = [
     "CommStat",
 ]
 
+# Canonical companion components that belong in the radio bundle but are not
+# independent Launch Control rows.  They must survive catalog reconciliation;
+# their owning family controls whether they are launched and displayed.
+INTERNAL_LAUNCH_COMPONENT_NAMES = frozenset({"VARA", "SDR++"})
+
 JS8_DEPENDENT_APPS = {"JS8Spotter", "CommStat"}
 DEFAULT_VARAC_SETTLE_DELAY_SEC = 12.0
 DEFAULT_JS8CALL_DEPENDENT_DELAY_SEC = 4.0
@@ -244,7 +249,7 @@ class LaunchOrchestrator(QObject):
         ordered_names: List[str] = []
         seen: set[str] = set()
         for name in existing_order:
-            if name not in catalog or name in seen:
+            if (name not in catalog and name not in INTERNAL_LAUNCH_COMPONENT_NAMES) or name in seen:
                 continue
             ordered_names.append(name)
             seen.add(name)
@@ -255,20 +260,32 @@ class LaunchOrchestrator(QObject):
             seen.add(name)
         out: List[Dict[str, Any]] = []
         for name in ordered_names:
-            prev = existing_map.get(name, {})
+            prev = existing_map.get(name)
+            if prev is not None:
+                # Catalog reconciliation is not a launch-recipe migration.  In
+                # particular, adding or reordering a custom tool must not erase
+                # the instance selector, arguments, working directory,
+                # dependencies, or readiness policy that make this row belong
+                # to one radio.  Keep the complete radio-owned row verbatim.
+                out.append(dict(prev))
+                continue
             default_startup = False
             legacy_key = LAUNCH_APP_META.get(name, {}).get("legacy_autostart_key")
             if legacy_key:
                 default_startup = self.is_truthy(self.settings.get(str(legacy_key), False))
             normalized_item = {
                 "name": name,
-                "enabled": bool(prev.get("enabled", True)),
-                "startup": bool(prev.get("startup", default_startup)),
+                "instance_key": name,
+                "enabled": True,
+                "startup": bool(default_startup),
+                "monitor_health": True,
             }
-            for key in ("launch_path_override", "launch_command_override"):
-                value = str(prev.get(key, "") or "").strip()
-                if value:
-                    normalized_item[key] = value
+            custom_command = self._custom_tool_command(name, custom_tools)
+            if custom_command:
+                # Snapshot the definition into the radio bundle.  Subsequent
+                # edits to a station catalog entry cannot silently retarget a
+                # different radio's saved custom-tool assignment.
+                normalized_item["launch_command_override"] = custom_command
             out.append(normalized_item)
         return out
 
@@ -279,11 +296,210 @@ class LaunchOrchestrator(QObject):
         normalized = self.build_default_items(raw, custom_tools=self.get_custom_tools())
         return normalized
 
+    def _restore_canonical_launch_items(
+        self,
+        radio_profile_id: int,
+        items: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Restore recipe fields lost by an older Launch Control catalog edit.
+
+        The canonical GRS-13 identity is the authority for executable identity,
+        arguments, working directory, dependencies, and readiness.  Operator
+        choices (enabled/startup/monitor) remain owned by the radio launch row.
+        This is an in-memory projection: normal Settings Save persists it.
+        """
+
+        try:
+            if (
+                self.multi_radio_store.radio_software_identity_generation(int(radio_profile_id))
+                <= 0
+            ):
+                return items
+            records = self.multi_radio_store.list_radio_software_identity_records(
+                int(radio_profile_id)
+            )
+        except Exception:
+            return items
+        if not records:
+            return items
+
+        restored = [dict(item) for item in items if isinstance(item, dict)]
+        consumed: set[int] = set()
+        removed: set[int] = set()
+        component_names = {
+            "flrig": "FLRig",
+            "fldigi": "FLDigi",
+            "flmsg": "FLMsg",
+            "flamp": "FLAmp",
+            "js8call": "JS8Call",
+            "varac": "VarAC",
+            "vara": "VARA",
+            "external-js8spotter": "JS8Spotter",
+            "commstat": "CommStat",
+            "sdrpp": "SDR++",
+        }
+
+        for record in records:
+            recipe_components: Dict[str, Mapping[str, Any]] = {}
+            try:
+                manifest = (
+                    self.multi_radio_store.get_software_instance_manifest(record.bundle_id)
+                    or {}
+                )
+                evidence = manifest.get("evidence", {})
+                evidence = evidence if isinstance(evidence, Mapping) else {}
+                recipe = evidence.get("launch_recipe", {})
+                recipe = recipe if isinstance(recipe, Mapping) else {}
+                for raw in recipe.get("components", ()) or ():
+                    if not isinstance(raw, Mapping):
+                        continue
+                    key = (
+                        str(raw.get("component_key", "") or "")
+                        .strip()
+                        .casefold()
+                        .replace("_", "-")
+                    )
+                    if key:
+                        recipe_components[key] = raw
+            except Exception:
+                recipe_components = {}
+
+            cross_family = record.launch.get("cross_family_dependencies", {})
+            cross_family = cross_family if isinstance(cross_family, Mapping) else {}
+            for component in record.components:
+                component_id = str(component.component_id or "").strip()
+                component_key = component_id.casefold().replace("_", "-")
+                component_kind = component_key.split(":", 1)[0]
+                app_name = component_names.get(component_kind)
+                argv = [str(value) for value in component.argv]
+                if not app_name or not argv or not argv[0].strip():
+                    continue
+                recipe_component = (
+                    recipe_components.get(component_key)
+                    or recipe_components.get(component_kind)
+                    or {}
+                )
+                component_scope = str(
+                    recipe_component.get("execution_scope", record.scope or "standard") or "standard"
+                ).strip().lower()
+                expected_key = (
+                    f"fast-light:station-shared:{component_key}"
+                    if record.family_key == "fast_light"
+                    and component_scope == "station_shared_utility"
+                    else f"{record.bundle_id}:{component_key}"
+                )
+                exact_matches = [
+                    index for index, row in enumerate(restored)
+                    if index not in consumed
+                    and str(row.get("instance_key", row.get("name", "")) or "")
+                    .strip()
+                    .casefold()
+                    == expected_key.casefold()
+                ]
+                name_matches = [
+                    index for index, row in enumerate(restored)
+                    if index not in consumed
+                    and str(row.get("name", "") or "").strip().casefold() == app_name.casefold()
+                ]
+                matches = exact_matches or name_matches
+                selected_index = matches[0] if matches else len(restored)
+                base = dict(restored[selected_index]) if matches else {}
+                if matches:
+                    consumed.add(selected_index)
+                    # Older damaged bundles can contain both a canonical row
+                    # and a name-only duplicate.  Collapse only duplicates for
+                    # this same built-in component.
+                    removed.update(index for index in name_matches if index != selected_index)
+
+                readiness = base.get("readiness_policy", {})
+                readiness = dict(readiness) if isinstance(readiness, Mapping) else {}
+                recipe_readiness = recipe_component.get("readiness", {})
+                if isinstance(recipe_readiness, Mapping):
+                    readiness.update(recipe_readiness)
+                readiness.update(dict(component.readiness))
+                readiness.update(
+                    {
+                        "launch_arguments": argv[1:],
+                        "working_directory": str(component.cwd or ""),
+                        "environment": {
+                            str(key): str(value) for key, value in component.env.items()
+                        },
+                    }
+                )
+                for key in (
+                    "effective_command",
+                    "effective_command_text",
+                    "profile_selector",
+                    "configuration_roots",
+                    "data_roots",
+                    "managed_directories",
+                    "endpoints",
+                    "evidence",
+                    "confidence",
+                    "execution_scope",
+                    "operator_starts",
+                    "structured_launch",
+                ):
+                    if key in recipe_component:
+                        value = recipe_component.get(key)
+                        readiness[key] = (
+                            dict(value)
+                            if isinstance(value, Mapping)
+                            else list(value)
+                            if isinstance(value, tuple)
+                            else value
+                        )
+                if "executable" in recipe_component or record.family_key == "varac":
+                    readiness["executable"] = argv[0]
+
+                dependencies = [str(value) for value in component.dependencies if str(value)]
+                cross_items = cross_family.get(component.component_id, ())
+                if isinstance(cross_items, (tuple, list)):
+                    dependencies.extend(
+                        str(value.get("family_key", "") or "").strip()
+                        for value in cross_items
+                        if isinstance(value, Mapping) and str(value.get("family_key", "") or "").strip()
+                    )
+                launch = component.launch if isinstance(component.launch, Mapping) else {}
+                canonical = {
+                    **base,
+                    "name": app_name,
+                    "instance_key": expected_key,
+                    "enabled": bool(base.get("enabled", True)),
+                    "startup": bool(base.get("startup", launch.get("at_startup", False))),
+                    "monitor_health": bool(
+                        base.get("monitor_health", launch.get("monitor_health", True))
+                    ),
+                    "launch_path_override": argv[0],
+                    "launch_command_override": "",
+                    "dependencies": list(dict.fromkeys(dependencies)),
+                    "readiness_policy": readiness,
+                    "execution_scope": str(
+                        readiness.get("execution_scope", record.scope or "standard")
+                        or "standard"
+                    ),
+                }
+                if matches:
+                    restored[selected_index] = canonical
+                else:
+                    restored.append(canonical)
+                    consumed.add(selected_index)
+
+        return [row for index, row in enumerate(restored) if index not in removed]
+
     def get_radio_launch_bundle(self, radio_profile_id: int) -> Dict[str, Any]:
-        return self.bundle_store.get_bundle(
+        bundle = self.bundle_store.get_bundle(
             int(radio_profile_id),
             legacy_items=self.settings.get("launch_control_items", []),
         )
+        raw_items = bundle.get("items", []) if isinstance(bundle, Mapping) else []
+        items = [dict(item) for item in raw_items if isinstance(item, dict)]
+        restored = self._restore_canonical_launch_items(int(radio_profile_id), items)
+        if restored != items:
+            bundle = dict(bundle)
+            bundle["items"] = restored
+            bundle["canonical_recovery"] = True
+        return bundle
 
     def set_radio_launch_bundle(
         self,

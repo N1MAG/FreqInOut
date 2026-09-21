@@ -130,6 +130,7 @@ from freqinout.core.operating_group_identity import ensure_operating_group_keys
 from freqinout.core.nbems_compose import discover_form_families
 from freqinout.core.launch_orchestrator import (
     DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC,
+    INTERNAL_LAUNCH_COMPONENT_NAMES,
     LAUNCH_APP_ORDER,
     LaunchOrchestrator,
 )
@@ -519,12 +520,17 @@ class _CustomToolDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Custom Tool")
         layout = QVBoxLayout(self)
-        hint = QLabel("Set a display name and the launch command FreqInOut should run for this tool.")
+        hint = QLabel(
+            "Set a display name and the launch command FreqInOut should run for this tool."
+            if not str(name or "").strip()
+            else "Update this tool's command for the selected radio. The identity name stays stable."
+        )
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
         form = QFormLayout()
         self.name_edit = QLineEdit(name)
+        self.name_edit.setReadOnly(bool(str(name or "").strip()))
         self.command_edit = QLineEdit(command)
         self.command_edit.setPlaceholderText("python /path/to/tool.py or /path/to/script.sh")
         form.addRow("Tool Name", self.name_edit)
@@ -1490,6 +1496,11 @@ class SettingsTab(QWidget):
         # operator switches focus, then commit all staged bundles on Save.
         self._launch_radio_bundle_drafts: Dict[int, Dict[str, object]] = {}
         self._launch_visible_names: List[str] = []
+        # Identifies the radio whose values are currently painted in the
+        # table.  The selected radio may change before the next repaint; in
+        # that interval the old checkboxes must never be synced into the new
+        # radio's bundle.
+        self._launch_table_radio_id: Optional[int] = None
         self._launch_table_loading = False
         self._device_profiles_table_loading = False
         self._operating_profiles_table_loading = False
@@ -36343,6 +36354,16 @@ class SettingsTab(QWidget):
             QMessageBox.warning(self, "Custom Tools", issue)
             return
         self._custom_tool_items_cache[row] = {"name": name, "command": command}
+        # Definitions are reusable station catalog entries, while launch rows
+        # are radio-owned assignments.  Apply this edit only to the selected
+        # radio's matching assignment; the other radios retain their saved
+        # command snapshots and checkbox state.
+        for launch_item in self._launch_items_cache:
+            if str(launch_item.get("name", "") or "").strip() != previous_name:
+                continue
+            launch_item["name"] = name
+            launch_item["launch_command_override"] = command
+            break
         self._launch_items_cache = self.launch_orchestrator.build_default_items(
             self._launch_items_cache,
             custom_tools=self._custom_tool_items_cache,
@@ -36541,13 +36562,22 @@ class SettingsTab(QWidget):
     def _sync_launch_cache_from_table(self) -> None:
         if not hasattr(self, "launch_control_table"):
             return
+        selected_radio_id = self._selected_launch_radio_id()
+        rendered_radio_id = getattr(self, "_launch_table_radio_id", None)
+        if not rendered_radio_id or int(rendered_radio_id) != int(selected_radio_id or 0):
+            return
         for row, name in enumerate(self._launch_visible_names):
+            app_item = self.launch_control_table.item(row, 0)
+            instance_key = str(app_item.data(Qt.UserRole) or "").strip() if app_item is not None else ""
             monitor_item = self.launch_control_table.item(row, 1)
             startup_item = self.launch_control_table.item(row, 2)
             monitor_health = bool(monitor_item and monitor_item.checkState() == Qt.Checked)
             startup = bool(startup_item and startup_item.checkState() == Qt.Checked)
             for item in self._launch_items_cache:
-                if str(item.get("name", "")).strip() == name:
+                item_key = str(item.get("instance_key", item.get("name", "")) or "").strip()
+                if (instance_key and item_key == instance_key) or (
+                    not instance_key and str(item.get("name", "")).strip() == name
+                ):
                     item["startup"] = startup
                     item["monitor_health"] = monitor_health
                     break
@@ -36698,7 +36728,7 @@ class SettingsTab(QWidget):
             if not isinstance(item, dict):
                 continue
             name = str(item.get("name", "")).strip()
-            if name not in catalog or name in seen:
+            if (name not in catalog and name not in INTERNAL_LAUNCH_COMPONENT_NAMES) or name in seen:
                 continue
             seen.add(name)
             ordered.append(dict(item))
@@ -36725,6 +36755,7 @@ class SettingsTab(QWidget):
             name = str(item.get("name", "")).strip()
             app_item = QTableWidgetItem(name)
             app_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            app_item.setData(Qt.UserRole, str(item.get("instance_key", name) or name).strip())
             self.launch_control_table.setItem(row, 0, app_item)
 
             enabled_item = QTableWidgetItem()
@@ -36753,6 +36784,7 @@ class SettingsTab(QWidget):
             self.launch_control_table.setItem(row, 4, status_item)
         self.launch_control_table.blockSignals(False)
         self._launch_table_loading = False
+        self._launch_table_radio_id = self._selected_launch_radio_id()
         if self.launch_control_table.rowCount() > 0 and self.launch_control_table.currentRow() < 0:
             self.launch_control_table.selectRow(0)
         self._refresh_launch_control_guidance()

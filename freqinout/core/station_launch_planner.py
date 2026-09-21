@@ -704,13 +704,16 @@ class StationLaunchPlanner:
         remaining = sorted(values, key=lambda value: (value[0], value[1], value[2].name.casefold()))
         output: List[Tuple[int, int, PlannedInstance]] = []
         emitted_names: set[str] = set()
-        available_names = {value[2].name for value in remaining}
+        available_names = {value[2].name.casefold() for value in remaining}
         while remaining:
             ready_index = next(
                 (
                     index
                     for index, value in enumerate(remaining)
-                    if all(dep in emitted_names or dep not in available_names for dep in value[2].dependencies)
+                    if all(
+                        dep.casefold() in emitted_names or dep.casefold() not in available_names
+                        for dep in value[2].dependencies
+                    )
                 ),
                 None,
             )
@@ -719,5 +722,5 @@ class StationLaunchPlanner:
                 raise ValueError(f"Launch dependency cycle: {cycle_names}")
             value = remaining.pop(ready_index)
             output.append(value)
-            emitted_names.add(value[2].name)
+            emitted_names.add(value[2].name.casefold())
         return output

@@ -1357,7 +1357,19 @@ operator-facing guidance.
 12. Editing `Launch at Startup` or `Monitor Health` does not create canonical
     software-identity drift and does not require rebuilding the application
     identity.
-9. One station-shared CommStat process can bind to multiple distinct radio-owned
+13. Station custom-tool catalog edits are lossless with respect to every
+    radio-owned launch row. They cannot remove a canonical VARA/SDR++ companion,
+    erase FLRig/FLDigi/JS8Call/VarAC selectors or working directories, or copy
+    one radio's monitoring/startup choices into another radio.
+14. Each rendered Launch Control row binds to its immutable component/instance
+    key. A radio-focus transition must complete the old-radio stash before the
+    selected ID changes and must reject table-to-cache synchronization until
+    the table has been repainted for the selected radio.
+15. A legacy row that lost canonical recipe fields is recoverable from that
+    radio's committed identity plus manifest. Recovery replaces only canonical
+    recipe fields and preserves the radio-owned enabled, startup, and monitor
+    preferences; no cross-radio or process-name inference is permitted.
+16. One station-shared CommStat process can bind to multiple distinct radio-owned
    JS8 endpoints. It launches once, shows every binding, and is never
    deduplicated or reassigned solely by process name.
 
@@ -4415,8 +4427,12 @@ data, and message fields are compared only with their exact linked fields;
 launch executable, `argv[]`, working directory, environment, dependency order,
 startup/monitor policy, and readiness evidence are compared with the exact
 component launch row. Projection drift is shown as
-`Needs attention`; a scoped manual launch is rejected and station startup skips
-only the affected radio while leaving unrelated radio launch lanes available.
+`Needs attention`. Derivable legacy projection loss is recovered from the same
+radio's canonical record and manifest before planning; other projection drift
+remains a review warning and does not discard an independently valid saved
+recipe. Only a genuine launch-time safety conflict rejects scoped manual launch
+or skips that radio during station startup, leaving unrelated launch lanes
+available.
 Legacy compact fields cannot patch a canonical record independently.
 
 Automated GRS-13.1 coverage includes one production-shaped linked-row

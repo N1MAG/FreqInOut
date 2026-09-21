@@ -10,11 +10,12 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from freqinout.core.config_backup import ConfigBackupItem, ConfigBackupResult
-from freqinout.core.launch_bundle_store import LaunchBundleStore
+from freqinout.core.launch_bundle_store import LaunchBundleStore, normalize_launch_items
 from freqinout.core.station_launch_planner import LaunchPlan, PlannedInstance, StationLaunchPlanner
 from freqinout.core.launch_orchestrator import LaunchOrchestrator
 from freqinout.core import launch_orchestrator as launch_module
@@ -138,6 +139,134 @@ def test_radio_bundle_roundtrip_preserves_order_and_isolation(tmp_path: Path) ->
     isolated_b = LaunchBundleStore(db_path).get_bundle(2)
     assert _bundle_enabled(isolated_b) is False
     assert [row["name"] for row in _bundle_items(isolated_b)] == ["CommStat", "JS8Call"]
+
+
+@pytest.mark.parametrize(
+    "catalog_action,custom_tools",
+    [
+        ("add", [{"name": "Tool A", "command": "/tools/a"}, {"name": "Tool B", "command": "/tools/b"}]),
+        ("edit", [{"name": "Tool A", "command": "/tools/a-edited"}, {"name": "Tool B", "command": "/tools/b"}]),
+        ("reorder", [{"name": "Tool B", "command": "/tools/b"}, {"name": "Tool A", "command": "/tools/a"}]),
+    ],
+)
+def test_custom_tool_catalog_reconciliation_preserves_all_existing_launch_row_fields(
+    catalog_action: str,
+    custom_tools: list[dict[str, str]],
+) -> None:
+    """Adding/editing/reordering definitions must not rebuild existing recipes."""
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator.settings = SimpleNamespace(get=lambda _key, default=None: default)
+    launch_rows = [
+        {
+            "name": "FLDigi",
+            "instance_key": "fldigi:alpha-custom",
+            "enabled": True,
+            "startup": False,
+            "monitor_health": False,
+            "dependencies": ["FLRig", "Tool A"],
+            "readiness_policy": {"readiness": "api", "port": 7362},
+            "launch_path_override": "/apps/alpha/fldigi",
+            "launch_command_override": "python /scripts/alpha-fldigi.py --profile alpha",
+        },
+        {
+            "name": "Tool A",
+            "instance_key": "custom:tool-a-alpha",
+            "enabled": True,
+            "startup": True,
+            "monitor_health": False,
+            "dependencies": ["FLDigi"],
+            "readiness_policy": {"readiness": "process", "timeout": 8},
+            "launch_path_override": "/apps/alpha/tool-a",
+            "launch_command_override": "python /scripts/alpha-a.py --radio alpha",
+        },
+        {
+            "name": "Tool B",
+            "instance_key": "custom:tool-b-alpha",
+            "enabled": False,
+            "startup": False,
+            "monitor_health": True,
+            "dependencies": ["Tool A"],
+            "readiness_policy": {"readiness": "process", "timeout": 13},
+            "launch_path_override": "/apps/alpha/tool-b",
+            "launch_command_override": "python /scripts/alpha-b.py --radio alpha",
+        },
+        {
+            "name": "VARA",
+            "instance_key": "varac:alpha:vara",
+            "enabled": True,
+            "startup": False,
+            "monitor_health": True,
+            "dependencies": [],
+            "readiness_policy": {
+                "structured_launch": True,
+                "launch_arguments": ["C:\\VARA\\VARA.exe"],
+            },
+            "launch_path_override": "/usr/bin/wine",
+            "launch_command_override": "",
+        },
+    ]
+    existing = [dict(item) for item in launch_rows]
+
+    reconciled = orchestrator.build_default_items(existing, custom_tools=custom_tools)
+
+    by_name = {item["name"]: item for item in reconciled}
+    assert {"FLDigi", "Tool A", "Tool B", "VARA"}.issubset(by_name)
+    for expected in launch_rows:
+        assert by_name[expected["name"]] == expected, f"{catalog_action} changed {expected['name']}"
+
+
+def test_custom_tool_rows_keep_distinct_commands_and_radio_checkbox_state(tmp_path: Path) -> None:
+    db_path = tmp_path / "freqinout.db"
+    _seed_radios(db_path)
+    store = LaunchBundleStore(db_path)
+    alpha_items = [
+        {
+            **_item("Field Backup", startup=True, command="/scripts/alpha-backup"),
+            "instance_key": "custom:field-backup",
+            "monitor_health": False,
+        },
+        {
+            **_item("Net Helper", startup=False, command="/scripts/alpha-net"),
+            "instance_key": "custom:net-helper",
+            "monitor_health": True,
+        },
+    ]
+    bravo_items = [
+        {
+            **_item("Field Backup", startup=False, command="/scripts/bravo-backup"),
+            "instance_key": "custom:field-backup",
+            "monitor_health": True,
+        },
+        {
+            **_item("Net Helper", startup=True, command="/scripts/bravo-net"),
+            "instance_key": "custom:net-helper",
+            "monitor_health": False,
+        },
+    ]
+
+    store.save_bundle(1, True, alpha_items)
+    store.save_bundle(2, False, bravo_items)
+    reopened = LaunchBundleStore(db_path)
+    alpha = reopened.get_bundle(1)
+    bravo = reopened.get_bundle(2)
+
+    assert _bundle_items(alpha) == normalize_launch_items(alpha_items)
+    assert _bundle_items(bravo) == normalize_launch_items(bravo_items)
+
+    plan = StationLaunchPlanner().plan_startup(
+        [
+            {"id": 1, "name": "Alpha", "runtime_active": 1},
+            {"id": 2, "name": "Bravo", "runtime_active": 1},
+        ],
+        {
+            1: {**alpha, "launch_enabled": True},
+            2: {**bravo, "launch_enabled": True},
+        },
+    )
+    assert {(item.name, item.launch_command_override, item.radio_names) for item in plan.instances} == {
+        ("Field Backup", "/scripts/alpha-backup", ("Alpha",)),
+        ("Net Helper", "/scripts/bravo-net", ("Bravo",)),
+    }
 
 
 def test_legacy_migration_is_additive_idempotent_and_leaves_kv_unchanged(tmp_path: Path) -> None:
@@ -762,6 +891,146 @@ def test_fast_light_planner_preserves_instance_specific_native_arguments() -> No
     assert queue[0]["launch_arguments"] == ["--config-dir", "/profiles/flrig-field"]
     assert queue[1]["launch_arguments"][-2:] == ["--xmlrpc-server-port", "7462"]
     assert "launch_arguments" not in queue[0]["readiness_policy"]
+
+
+def test_manual_flrig_launch_uses_selected_radio_config_dir_when_other_instance_runs(monkeypatch) -> None:
+    """FT-710 manual Start must not inherit or suppress its FLRig recipe."""
+    from types import SimpleNamespace
+
+    profiles = [
+        {"id": 1, "name": "FTDX-10", "runtime_active": 1, "flrig_host": "127.0.0.1", "flrig_port": 12345},
+        {"id": 9, "name": "FT-710", "runtime_active": 1, "flrig_host": "127.0.0.1", "flrig_port": 12346},
+    ]
+    first = _item("FLRig", path="/usr/local/bin/flrig", instance_key="fast:ftdx10:flrig")
+    first["readiness_policy"] = {
+        "host": "127.0.0.1", "port": 12345,
+        "launch_arguments": ["--config-dir", "/profiles/ftdx10/flrig"],
+    }
+    selected = _item("FLRig", path="/usr/local/bin/flrig", instance_key="fast:ft710:flrig")
+    selected["readiness_policy"] = {
+        "host": "127.0.0.1", "port": 12346,
+        "launch_arguments": ["--config-dir", "/profiles/ft710/flrig"],
+    }
+    queue_item = StationLaunchPlanner().plan_startup(
+        profiles,
+        {1: {"launch_enabled": True, "items": [first]}, 9: {"launch_enabled": True, "items": [selected]}},
+        scope_radio_id=9,
+        trigger="manual",
+    ).queue()[0]
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        launch_module.subprocess,
+        "Popen",
+        lambda command, **kwargs: captured.update(command=list(command), **kwargs) or SimpleNamespace(),
+    )
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator._active = True
+    orchestrator._cancel_requested = False
+    orchestrator._queue = [queue_item]
+    orchestrator._index = 0
+    orchestrator._results = []
+    orchestrator._blocked_dependency_for = lambda _item: None
+    # A process named FLRig exists for FTDX-10, but the exact FT-710 recipe
+    # (including its --config-dir selector) is not running.
+    orchestrator._program_running = lambda _item: True
+    orchestrator._configured_instance_process_running = lambda _item: False
+    orchestrator._program_ready_for_sequence = lambda _item: False
+    orchestrator._is_self_launch_command = lambda _cmd: False
+    orchestrator._materialize_item_managed_directories = lambda _item: ()
+    orchestrator._infer_launch_cwd = lambda *_args: None
+    orchestrator._schedule_advance_queue = lambda _delay=0: None
+    orchestrator.dependency_status = SimpleNamespace(refresh_now=lambda **_kwargs: None)
+    orchestrator._poll_timer = SimpleNamespace(setInterval=lambda _value: None, start=lambda: None)
+
+    orchestrator._advance_queue()
+
+    assert queue_item["radio_ids"] == [9]
+    assert queue_item["launch_arguments"] == ["--config-dir", "/profiles/ft710/flrig"]
+    assert captured["command"] == ["/usr/local/bin/flrig", "--config-dir", "/profiles/ft710/flrig"]
+
+
+def test_canonical_identity_recovers_recipe_fields_from_damaged_saved_launch_row() -> None:
+    component = SimpleNamespace(
+        component_id="flrig",
+        argv=("/usr/local/bin/flrig", "--config-dir", "/profiles/ft710/flrig"),
+        cwd="/profiles/ft710/flrig",
+        env={"FIO_RADIO": "FT-710"},
+        dependencies=(),
+        launch={"at_startup": False, "monitor_health": True},
+        readiness={"host": "127.0.0.1", "port": 12346},
+    )
+    record = SimpleNamespace(
+        bundle_id="fast-light:ft-710",
+        family_key="fast_light",
+        scope="radio_scoped",
+        components=(component,),
+        launch={},
+    )
+    damaged = {
+        "name": "FLRig",
+        "instance_key": "FLRig",
+        "enabled": True,
+        "startup": True,
+        "monitor_health": False,
+        "launch_path_override": "/usr/local/bin/flrig",
+        "dependencies": [],
+        "readiness_policy": {},
+    }
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator.settings = SimpleNamespace(get=lambda _key, default=None: default)
+    orchestrator.bundle_store = SimpleNamespace(
+        get_bundle=lambda _radio_id, legacy_items=None: {
+            "radio_profile_id": 9,
+            "launch_enabled": True,
+            "items": [damaged],
+        }
+    )
+    orchestrator.multi_radio_store = SimpleNamespace(
+        radio_software_identity_generation=lambda _radio_id: 1,
+        list_radio_software_identity_records=lambda _radio_id: (record,),
+        get_software_instance_manifest=lambda _bundle_id: {
+            "evidence": {
+                "launch_recipe": {
+                    "components": [{
+                        "component_key": "flrig",
+                        "executable": "/usr/local/bin/flrig",
+                        "arguments": ["--config-dir", "/profiles/ft710/flrig"],
+                        "working_directory": "/profiles/ft710/flrig",
+                        "managed_directories": ["/profiles/ft710/flrig"],
+                        "execution_scope": "radio_scoped",
+                    }]
+                }
+            }
+        },
+    )
+
+    bundle = orchestrator.get_radio_launch_bundle(9)
+    recovered = bundle["items"][0]
+
+    assert bundle["canonical_recovery"] is True
+    assert recovered["instance_key"] == "fast-light:ft-710:flrig"
+    assert recovered["startup"] is True
+    assert recovered["monitor_health"] is False
+    assert recovered["readiness_policy"]["launch_arguments"] == [
+        "--config-dir", "/profiles/ft710/flrig",
+    ]
+    assert recovered["readiness_policy"]["working_directory"] == "/profiles/ft710/flrig"
+    assert recovered["readiness_policy"]["managed_directories"] == ["/profiles/ft710/flrig"]
+
+
+def test_canonical_lowercase_component_dependency_still_orders_launch_apps() -> None:
+    profiles = [{"id": 9, "name": "FT-710", "runtime_active": 1}]
+    fldigi = _item("FLDigi", path="/apps/fldigi", instance_key="fast:ft710:fldigi")
+    fldigi["dependencies"] = ["flrig"]
+    flrig = _item("FLRig", path="/apps/flrig", instance_key="fast:ft710:flrig")
+
+    queue = StationLaunchPlanner().plan_startup(
+        profiles,
+        {9: {"launch_enabled": True, "items": [fldigi, flrig]}},
+    ).queue()
+
+    assert [item["name"] for item in queue] == ["FLRig", "FLDigi"]
 
 
 def test_js8_command_override_preserves_one_rig_name_and_rejects_duplicates() -> None:

@@ -1065,6 +1065,19 @@ overrides them. Existing global `launch_control_items` migrate once to the
 default/selected legacy radio with a migration audit. They remain read-only
 fallback until migration is confirmed, then are no longer a write target.
 
+Catalog maintenance is never a recipe rewrite. Adding, editing, removing, or
+reordering a station custom-tool definition must preserve every unrelated
+radio-owned row byte-for-byte, including its instance key, command/path
+override, arguments, working directory, environment, dependencies, readiness,
+execution scope, monitoring choice, and startup choice. A newly assigned custom
+tool snapshots its command into that radio's bundle. Editing a definition may
+update the selected radio's matching assignment, but must not retarget the same
+named assignment on another radio. A custom tool's name is its stable catalog
+identity and is read-only after creation; replacement uses remove/add rather
+than an ambiguous cross-radio rename. Hidden canonical companion rows such as
+VARA and SDR++ remain in the bundle even though they are not rendered as
+independent Launch Control checkboxes.
+
 ### One planner for startup and manual launch
 
 One `StationLaunchPlanner` composes launch requests from active radio bundles.
@@ -1103,6 +1116,22 @@ legacy station-global monitor selections.
 
 Save writes the radio bundle transactionally before the UI reloads it. Switching
 radios or restarting FIO must show the saved checkbox/order state.
+
+The table records which radio it currently renders. On a focus change, FIO
+stashes the old radio before changing focus, loads the new radio bundle, and
+must not sync the still-painted old table into the new cache. Row synchronization
+uses the immutable instance key rather than the display label. This rule applies
+to master launch enablement, `Launch at Startup`, `Monitor Health`, ordering,
+and custom-tool assignments.
+
+For bundles damaged by an earlier lossy catalog rewrite, FIO may recover only
+the derivable launch recipe fields from that radio's committed canonical
+software identity and manifest. Recovery restores the canonical component key,
+executable, arguments, working directory, environment, dependencies, readiness,
+managed-directory evidence, and execution scope while retaining the operator's
+saved enabled/startup/monitor choices. It never copies another radio's row and
+never guesses from a station-wide process name. Runtime may use this recovered
+projection immediately; normal Settings Save persists it.
 
 ### Launch performance acceptance
 
