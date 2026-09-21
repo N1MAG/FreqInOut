@@ -4,12 +4,34 @@ from pathlib import Path
 import pytest
 
 from freqinout.core.guided_launch_recipes import (
+    recipe_resolution_from_mapping,
     recipe_draft_updates,
     resolve_fast_light_managed_recipe,
     resolve_js8_managed_recipe,
 )
 from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.config_autodiscovery import find_app_candidates
+
+
+def test_legacy_recipe_round_trip_does_not_invent_empty_directory_authority() -> None:
+    resolution = recipe_resolution_from_mapping(
+        {
+            "family_key": "fast_light",
+            "status": "qualified_managed",
+            "components": [
+                {
+                    "component_key": "flrig",
+                    "label": "FLRig",
+                    "executable": "/usr/bin/flrig",
+                    "arguments": ["--config-dir", "/home/op/.flrig/instances/FT-710"],
+                    "working_directory": "/home/op/.flrig/instances/FT-710",
+                    "configuration_roots": ["/home/op/.flrig/instances/FT-710"],
+                }
+            ],
+        }
+    )
+
+    assert "managed_directories" not in resolution.components[0].to_mapping()
 
 
 @pytest.mark.parametrize(
@@ -95,6 +117,9 @@ def test_js8_managed_recipe_uses_radio_identity_for_platform_native_data_root(
     assert component.profile_selector == "FT-710"
     assert component.effective_command[1:] == ("--rig-name", "FT-710")
     assert component.data_roots
+    assert component.managed_directories
+    assert len(component.managed_directories) == len(set(component.managed_directories))
+    assert component.configuration_roots[0] not in component.managed_directories
     assert component.data_roots[0].replace("\\", "/").endswith(expected_root)
     for value in (
         *component.configuration_roots,
@@ -358,9 +383,15 @@ def test_fast_light_transceiver_recipe_orders_distinct_components(tmp_path):
     ]
     assert resolution.components[1].dependencies == ("flrig",)
     assert resolution.components[2].execution_scope == "standard"
-    assert resolution.components[2].arguments[0] == "--flmsg-dir"
+    assert resolution.components[2].arguments == (
+        "--flmsg-dir",
+        str(tmp_path / ".nbems" / "instances" / "South"),
+        "--auto-dir",
+        str(tmp_path / ".nbems" / "instances" / "South" / "WRAP" / "auto"),
+    )
     assert resolution.components[3].execution_scope == "station_shared_utility"
     assert resolution.components[3].operator_starts is True
+    assert resolution.components[3].launch_at_startup is False
     assert resolution.components[0].configuration_roots != resolution.components[1].configuration_roots
     updates = recipe_draft_updates(resolution)
     assert updates["configuration_path"].endswith("/.flrig/instances/South")
@@ -504,7 +535,22 @@ def test_atomic_store_projects_qualified_recipe_to_component_launch_rows(tmp_pat
     assert [row[0] for row in rows] == ["FLRig", "FLDigi", "FLMsg", "FLAmp"]
     assert [row[1] for row in rows] == ["/opt/flrig", "/opt/fldigi", "/opt/flmsg", "/opt/flamp"]
     assert json.loads(rows[1][2]) == ["flrig"]
-    assert json.loads(rows[1][3])["launch_arguments"][0] == "--config-dir"
+    readiness_by_app = {row[0]: json.loads(row[3]) for row in rows}
+    assert readiness_by_app["FLDigi"]["launch_arguments"][0] == "--config-dir"
+    assert readiness_by_app["FLRig"]["managed_directories"] == [
+        str(tmp_path / "home" / ".flrig" / "instances" / "Radio-A")
+    ]
+    assert readiness_by_app["FLDigi"]["managed_directories"] == [
+        str(tmp_path / "home" / ".fldigi" / "instances" / "Radio-A"),
+        str(tmp_path / "home" / ".fldigi" / "instances" / "Radio-A" / "logs"),
+        str(tmp_path / "home" / ".nbems" / "instances" / "Radio-A" / "WRAP" / "auto"),
+    ]
+    assert readiness_by_app["FLMsg"]["managed_directories"] == [
+        str(tmp_path / "home" / ".nbems" / "instances" / "Radio-A"),
+        str(tmp_path / "home" / ".nbems" / "instances" / "Radio-A" / "ICS" / "messages"),
+        str(tmp_path / "home" / ".nbems" / "instances" / "Radio-A" / "ICS" / "templates"),
+        str(tmp_path / "home" / ".nbems" / "instances" / "Radio-A" / "WRAP" / "auto"),
+    ]
     saved_radio = store.get_device_profile(int(radio["id"]))
     assert saved_radio["use_flmsg"] == 1
     assert saved_radio["flmsg_path"] == "/opt/flmsg"
@@ -597,3 +643,4 @@ def test_store_retains_warning_and_pending_js8_plans_without_enabling_unsafe_lau
     assert readiness["operator_starts"] is expected_operator_starts
     assert readiness["profile_selector"]
     assert readiness["configuration_roots"] == [updates["configuration_path"]]
+    assert readiness["managed_directories"] == list(resolution.components[0].managed_directories)

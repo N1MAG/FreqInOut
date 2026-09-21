@@ -90,6 +90,25 @@ lock-in. Draft work invokes no external writer. Final Save may invoke only the
 same application-qualified, reviewed, backup/readback/rollback-capable native
 transaction used by Add Radio under GRS-13.
 
+### Canonical Recipe Directory Authority
+
+Software Administration does not own a second directory policy. For every app
+family, it consumes the same reviewed and persisted canonical recipe as Add
+Radio, and that recipe is the sole source of directories FIO creates. Final
+Save creates only those reviewed directories before canonical persistence or
+launch; reload, reconciliation, and launch reuse the recorded directory set.
+Launch may idempotently repair a missing recorded directory for an older saved
+managed instance, but may not derive another location. Existing directories
+and their contents are preserved by directory preparation; only a separately
+qualified reviewed native writer may update an exact file target under the
+normal backup/readback/rollback contract. Operator-selected, adopted, and explicitly
+shared paths are never created as directories unless the recipe names a distinct
+new child. File targets (including executable, configuration, database, log,
+message, archive, launcher, shortcut, and other file paths) are never made into
+directories. An incomplete recipe remains `Needs choice` or `Saved; launch
+setup pending`; Software Administration must not fill the gap from a display
+field, family default, or filesystem guess.
+
 ## Supported Instance Families
 
 ### JS8Call
@@ -131,6 +150,15 @@ FIO must not claim to have created an application-native managed profile when a
 supported writer or installed-version capability has not been verified. The
 current assistant may manage the FIO launch recipe while the native profile
 remains operator-configured and explicitly reviewed.
+
+Runtime status and launch suppression follow the same saved identity shown in
+Software Administration. FLRig, FLDigi, and JS8Call use their persisted
+endpoint plus exact process recipe, so a process belonging to another radio
+cannot block the selected radio's launch. FLMsg uses its exact executable plus
+radio-scoped `--flmsg-dir` and `--auto-dir` arguments. The currently qualified
+FLAmp recipe remains explicitly station-shared and operator-started; it is not
+converted into a concurrent per-radio process merely because more than one
+radio selects Fast Light.
 
 ### Cluster VarAC
 

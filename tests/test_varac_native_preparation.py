@@ -651,6 +651,64 @@ def test_create_cluster_derives_shared_bbs_defaults_under_varac_install(tmp_path
     assert result.presentation["bbs_archive_path"] == str(Path(node["install_path"]) / "BBS" / "Archive")
 
 
+def test_varac_apply_materializes_every_reviewed_cluster_directory_and_preserves_existing_contents(tmp_path) -> None:
+    node, profile = _evidence(tmp_path)
+    operator_bbs = tmp_path / "operator-owned" / "BBS"
+    operator_archive = operator_bbs / "Archive"
+    profile.update(
+        varac_bbs_dir=str(operator_bbs),
+        varac_bbs_archive_dir=str(operator_archive),
+    )
+    operator_bbs.mkdir(parents=True)
+    sentinel = operator_bbs / "retain.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    result = prepare_varac_native_configuration(
+        _draft(),
+        varac_nodes=(node,),
+        device_profiles=(profile,),
+        varac_clusters=(),
+        varac_members=(),
+        managed_root=tmp_path / "managed",
+        generation=31,
+        platform_override="linux-wine",
+    )
+    assert result.ready and result.plan is not None
+    incoming, outbox = result.plan.managed_directories[:2]
+    assert incoming != operator_bbs and outbox != operator_bbs
+
+    applied = apply_varac_native_cluster_plan(result.plan, backup_root=tmp_path / "backups")
+
+    assert applied.ok, applied.error
+    assert incoming.is_dir() and outbox.is_dir()
+    assert operator_bbs.is_dir()
+    assert operator_archive.is_dir()
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+def test_varac_preparation_rejects_operator_shared_bbs_file_without_creating_a_directory(tmp_path) -> None:
+    node, profile = _evidence(tmp_path)
+    operator_file = tmp_path / "operator-owned-bbs-target"
+    operator_file.write_text("do not replace", encoding="utf-8")
+    profile.update(varac_bbs_dir=str(operator_file), varac_bbs_archive_dir=str(operator_file / "Archive"))
+
+    result = prepare_varac_native_configuration(
+        _draft(),
+        varac_nodes=(node,),
+        device_profiles=(profile,),
+        varac_clusters=(),
+        varac_members=(),
+        managed_root=tmp_path / "managed",
+        generation=32,
+        platform_override="linux-wine",
+    )
+
+    assert not result.ready
+    assert result.plan is None
+    assert "directory" in result.error.lower() or "folder" in result.error.lower()
+    assert operator_file.is_file()
+    assert operator_file.read_text(encoding="utf-8") == "do not replace"
+
+
 def test_prepare_rejects_member_mailbox_overlap_with_cluster_shared_bbs(tmp_path) -> None:
     node, profile = _evidence(tmp_path)
     draft = _draft()

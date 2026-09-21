@@ -3660,6 +3660,51 @@ Review shows the selected base, every derived child, why FIO chose it, whether
 FIO manages or only watches it, and that no existing file changes before final
 Save.
 
+### Canonical Recipe Directory Ownership And Creation
+
+The reviewed canonical recipe is the sole authority for every directory that
+FIO creates. The same accepted recipe is persisted, then used by both Add Radio
+and Software Administration for every application family; no screen, family
+row, manifest projection, launch planner, legacy default, or filesystem guess
+may derive an additional FIO-created directory.
+
+Final Save creates only the reviewed canonical-recipe directories, and creates
+them before the transaction commits or any launch is attempted. A launch
+preflight may idempotently repair a missing directory from that same persisted
+authority for an older saved managed instance; it may not derive a new path.
+The resulting canonical recipe records the exact created-directory set and its owners so a
+later reload, manual launch, startup launch, reconciliation, or Software
+Administration session uses that same set without inventing another path.
+
+This authority is deliberately narrow:
+
+- an existing directory remains in place with its contents untouched by the
+  directory-preparation step; a separately qualified, reviewed native writer
+  may still update its exact file target under the normal backup/readback/
+  rollback contract;
+- an operator-selected path, an adopted path, and an intentionally shared
+  station/application path remain operator- or shared-owned unless the reviewed
+  recipe explicitly identifies a distinct new child for FIO to create; and
+- a file target is never created as a directory. This includes executables,
+  configuration/INI files, databases, logs, message files, archives, launchers,
+  shortcuts, and any other file-path target.
+
+If the reviewed recipe does not identify a creatable directory or an existing
+parent needed for a file target, FIO preserves the bundle as `Needs choice` or
+`Saved; launch setup pending`; it does not infer a directory from the target.
+These rules apply identically to the Add Radio route and the standalone
+Software Administration route for every supported app family.
+
+The current family mapping is explicit: managed JS8Call creates its native Qt
+settings parent and radio-scoped data/save/forms directories; managed FLRig,
+FLDigi, and FLMsg create their native radio-name profile and data roots; a
+reviewed Fast Light recipe may create its exact station-standard FLAmp receive
+and transmit children; and a qualified managed VarAC create/join transaction
+creates its exact member mailbox, shared BBS/archive, INI-parent, and distinct
+VARA-runtime directories. CommStat and FIO Spotter are station services and
+authorize no application directory. Adopted/read-only software authorizes no
+directory creation.
+
 ### Family-Specific Native Layout Contracts
 
 #### JS8Call family
@@ -3728,6 +3773,15 @@ and structured launch recipes. FLRig and FLDigi use their documented selectors
 and remain paired to the same radio. A shared binary never causes process-name
 deduplication of radio-scoped components.
 
+Launch suppression is instance-scoped, not application-name-scoped. For
+FLRig, FLDigi, and JS8Call, the persisted application identity and configured
+service endpoint are authoritative even when a selected-radio launch plan
+contains only one row. A same-named process owned by another radio must not
+cause FIO to wait on the selected radio's absent endpoint. FIO launches the
+selected persisted recipe unless its exact executable-and-arguments process is
+already running; an exact process whose endpoint is still starting is polled
+and is never duplicated.
+
 For a new managed instance, the final native roots are derived before Review
 from the final radio label alone. The display name may contain spaces, while
 the native child is a portable radio-name slug using letters, digits, periods,
@@ -3774,6 +3828,13 @@ Administration must show the exact saved executable and `ICS/messages` source
 that those arguments select; it may not show a blank field, an unrelated
 station default, or a draft-only path.
 
+FLMsg has no service endpoint readiness substitute. FIO therefore recognizes
+an already-running managed FLMsg instance only by its exact executable and the
+persisted `--flmsg-dir`/`--auto-dir` argument identity. Another radio's FLMsg
+process does not satisfy that check. A legacy FLMsg row without a qualified
+argument identity remains on the compatibility/operator-review path; FIO does
+not guess and spawn a potentially conflicting second process.
+
 An intentionally shared FLMsg workspace is an explicit advanced choice with a
 declared station owner, concurrency policy, radio bindings, and limited
 attribution. Operating groups may appear in its message ACLs but do not own the
@@ -3803,6 +3864,12 @@ blank. It labels the process/source as station-shared with limited radio
 attribution, stores those claims as non-exclusive, and does not silently enable
 radio-scoped startup. This is a truthful usable configuration, not a reason to
 discard the component during Final Save.
+
+The endpoint-missing relaunch rule for FLRig, FLDigi, and JS8Call never applies
+to this station-shared FLAmp recipe. FLAmp remains one operator-started utility
+and a running shared process suppresses duplicate launch. A future qualified
+isolated FLAmp recipe must define its own exact process identity and readiness
+contract before FIO may launch concurrent instances.
 
 ### GRS-13.4 — Fast Light Projection And Planner Handoff Invariant
 

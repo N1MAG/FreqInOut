@@ -28,6 +28,7 @@ from freqinout.core.js8_storage import (
     qt_config_path_candidates,
     qt_data_root_candidates,
 )
+from freqinout.core.managed_directory_contract import parent_directory_text
 
 
 _KNOWN_JS8_VERSIONS = {
@@ -174,6 +175,10 @@ class GuidedLaunchComponent:
     profile_selector: str = ""
     configuration_roots: tuple[str, ...] = ()
     data_roots: tuple[str, ...] = ()
+    # Exact directory targets this FIO-managed component authorizes FIO to
+    # create.  Configuration/data roots can also be files or shared paths and
+    # therefore must never be inferred as mkdir targets by consumers.
+    managed_directories: tuple[str, ...] = ()
     endpoints: tuple[Mapping[str, Any], ...] = ()
     readiness: Mapping[str, Any] = field(default_factory=dict)
     execution_scope: str = "standard"
@@ -194,7 +199,7 @@ class GuidedLaunchComponent:
         return _command_text(self.effective_command)
 
     def to_mapping(self) -> dict[str, Any]:
-        return {
+        value = {
             "component_key": self.component_key,
             "label": self.label,
             "executable": self.executable,
@@ -214,6 +219,12 @@ class GuidedLaunchComponent:
             "launch_at_startup": self.launch_at_startup,
             "operator_starts": self.operator_starts,
         }
+        # Omit the new field only for imported legacy components.  That keeps
+        # their established fingerprints stable while new managed recipes
+        # persist the exact directory authority explicitly.
+        if self.managed_directories:
+            value["managed_directories"] = list(self.managed_directories)
+        return value
 
 
 @dataclass(frozen=True)
@@ -307,6 +318,7 @@ def recipe_resolution_from_mapping(value: Mapping[str, Any]) -> GuidedLaunchReci
             profile_selector=_text(item.get("profile_selector")),
             configuration_roots=tuple(_text(part) for part in item.get("configuration_roots", ()) if _text(part)),
             data_roots=tuple(_text(part) for part in item.get("data_roots", ()) if _text(part)),
+            managed_directories=tuple(_text(part) for part in item.get("managed_directories", ()) if _text(part)),
             endpoints=tuple(dict(endpoint) for endpoint in item.get("endpoints", ()) if isinstance(endpoint, Mapping)),
             readiness=dict(item.get("readiness") or {}),
             evidence=dict(item.get("evidence") or {}),
@@ -559,6 +571,9 @@ def resolve_js8_managed_recipe(
         working_directory="",
         configuration_roots=(profile_path,),
         data_roots=(data_root, save_root, forms_root),
+        managed_directories=tuple(
+            dict.fromkeys((parent_directory_text(profile_path), data_root, save_root, forms_root))
+        ),
         endpoints=(
             {"name": "JS8Call API", "protocol": "tcp", "host": host, "port": tcp_port},
             {"name": "JS8Call UDP", "protocol": "udp", "host": host, "port": udp_port},
@@ -668,6 +683,7 @@ def resolve_fast_light_managed_recipe(
                 working_directory=flrig_profile,
                 profile_selector=flrig_profile,
                 configuration_roots=(flrig_profile,),
+                managed_directories=(flrig_profile,),
                 endpoints=({"name": "FLRig XML-RPC", "protocol": "tcp", "host": host, "port": flrig_port},),
                 readiness={"kind": "xmlrpc", "host": host, "port": flrig_port, "require_service": True},
                 evidence={"executable": flrig_evidence, "profile": {"source": "generated", "confidence": "isolated", "root": flrig_profile}},
@@ -693,6 +709,7 @@ def resolve_fast_light_managed_recipe(
             profile_selector=fldigi_profile,
             configuration_roots=(fldigi_profile,),
             data_roots=(logs, checkins),
+            managed_directories=(fldigi_profile, logs, checkins),
             endpoints=({"name": "FLDigi XML-RPC", "protocol": "tcp", "host": host, "port": fldigi_port},),
             readiness={"kind": "xmlrpc", "host": host, "port": fldigi_port, "require_service": True},
             evidence={"executable": fldigi_evidence, "profile": {"source": "generated", "confidence": "isolated", "root": fldigi_profile}, "logs": logs, "checkins": checkins},
@@ -718,6 +735,12 @@ def resolve_fast_light_managed_recipe(
                     native["flmsg_templates"],
                     native["flmsg_auto"],
                 ),
+                managed_directories=(
+                    native["flmsg_root"],
+                    native["flmsg_messages"],
+                    native["flmsg_templates"],
+                    native["flmsg_auto"],
+                ),
                 evidence={
                     "source": "nbems_native_radio_root",
                     "confidence": "isolated",
@@ -737,6 +760,7 @@ def resolve_fast_light_managed_recipe(
                 executable=flamp_path,
                 dependencies=("fldigi",),
                 data_roots=(native["flamp_receive"], native["flamp_outgoing"]),
+                managed_directories=(native["flamp_receive"], native["flamp_outgoing"]),
                 evidence={
                     "source": "nbems_station_standard",
                     "confidence": "shared",

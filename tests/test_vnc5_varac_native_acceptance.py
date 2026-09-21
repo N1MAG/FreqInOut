@@ -351,6 +351,17 @@ def test_final_add_radio_save_applies_reviewed_varac_plan_and_hands_session_to_t
         (varac_component["executable"], *varac_component["arguments"])
     ) == latest_prepared.plan.members[-1].launch_command
     vara_component = components["vara"]
+    assert tuple(vara_component["managed_directories"]) == (
+        str(latest_prepared.plan.members[-1].vara_target_runtime_folder),
+    )
+    assert tuple(varac_component["managed_directories"]) == tuple(
+        dict.fromkeys(
+            (
+                str(latest_prepared.plan.members[-1].target_path.parent),
+                *(str(path) for path in latest_prepared.plan.managed_directories),
+            )
+        )
+    )
     assert tuple(
         (vara_component["executable"], *vara_component["arguments"])
     ) == (
@@ -485,6 +496,16 @@ def test_direct_software_admin_native_apply_resolves_hydrated_plan_fingerprint(
     assert completed["_varac_native_external_session"] is session
     assert tuple(completed["launch_argv"]) == latest_prepared.plan.members[-1].launch_command
     assert completed["launch_recipe"]["status"] == "qualified_managed"
+    component = completed["launch_recipe"]["components"][0]
+    assert tuple(component["managed_directories"]) == tuple(
+        dict.fromkeys(
+            (
+                str(latest_prepared.plan.members[-1].target_path.parent),
+                str(latest_prepared.plan.members[-1].vara_target_runtime_folder),
+                *(str(path) for path in latest_prepared.plan.managed_directories),
+            )
+        )
+    )
 
     publisher.current["cluster_ptt_lock"] = False
     SettingsTab._on_varac_native_apply_requested(

@@ -590,6 +590,102 @@ def test_executor_does_not_use_family_status_for_distinct_instance() -> None:
     ) is False
 
 
+@pytest.mark.parametrize("name", ["FLRig", "FLDigi", "JS8Call"])
+def test_selected_radio_endpoint_identity_launches_when_only_other_radio_process_is_running(
+    monkeypatch,
+    name: str,
+) -> None:
+    from types import SimpleNamespace
+
+    captured: dict[str, object] = {}
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = list(command)
+        captured.update(kwargs)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(launch_module.subprocess, "Popen", fake_popen)
+    item = {
+        "name": name,
+        "instance_identity": f"ft-710:{name.casefold()}",
+        "readiness_policy": {
+            "host": "127.0.0.1",
+            "port": {"FLRig": 12346, "FLDigi": 7363, "JS8Call": 2443}[name],
+        },
+    }
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator._active = True
+    orchestrator._cancel_requested = False
+    orchestrator._queue = [item]
+    orchestrator._index = 0
+    orchestrator._results = []
+    orchestrator._blocked_dependency_for = lambda _item: None
+    orchestrator._program_running = lambda _item: True
+    orchestrator._program_ready_for_sequence = lambda _item: False
+    orchestrator._configured_instance_process_running = lambda _item: None
+    orchestrator._resolve_launch_command = lambda _item: ([f"/usr/local/bin/{name.casefold()}"], "test")
+    orchestrator._is_self_launch_command = lambda _cmd: False
+    orchestrator._materialize_item_managed_directories = lambda _item: ()
+    orchestrator._infer_launch_cwd = lambda *_args: None
+    orchestrator._schedule_advance_queue = lambda _delay=0: None
+    orchestrator.dependency_status = SimpleNamespace(refresh_now=lambda **_kwargs: None)
+    orchestrator._poll_timer = SimpleNamespace(setInterval=lambda _value: None, start=lambda: None)
+
+    orchestrator._advance_queue()
+
+    assert captured["command"] == [f"/usr/local/bin/{name.casefold()}"]
+    assert orchestrator._current_item is item
+
+
+def test_selected_radio_endpoint_identity_waits_when_exact_process_is_starting(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    started: list[bool] = []
+    monkeypatch.setattr(
+        launch_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("must not duplicate an exact running process"),
+    )
+    item = {
+        "name": "FLDigi",
+        "instance_identity": "ft-710:fldigi",
+        "launch_path_override": "/usr/local/bin/fldigi",
+        "launch_arguments": ["--config-dir", "/home/bill/.fldigi/instances/FT-710"],
+        "readiness_policy": {"host": "127.0.0.1", "port": 7363, "require_service": True},
+    }
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator._active = True
+    orchestrator._cancel_requested = False
+    orchestrator._queue = [item]
+    orchestrator._index = 0
+    orchestrator._results = []
+    orchestrator._blocked_dependency_for = lambda _item: None
+    orchestrator._program_running = lambda _item: True
+    orchestrator._program_ready_for_sequence = lambda _item: False
+    orchestrator._configured_instance_process_running = lambda _item: True
+    orchestrator._schedule_advance_queue = lambda _delay=0: None
+    orchestrator._poll_timer = SimpleNamespace(
+        setInterval=lambda _value: None,
+        start=lambda: started.append(True),
+    )
+
+    orchestrator._advance_queue()
+
+    assert started == [True]
+    assert orchestrator._current_item is item
+
+
+@pytest.mark.parametrize("name", ["FLMsg", "FLAmp"])
+def test_non_endpoint_fast_light_tools_do_not_use_endpoint_relaunch_recovery(name: str) -> None:
+    assert not LaunchOrchestrator._has_persisted_endpoint_identity(
+        {
+            "name": name,
+            "instance_identity": f"ft-710:{name.casefold()}",
+            "readiness_policy": {"host": "127.0.0.1", "port": 7000},
+        }
+    )
+
+
 def test_executor_requires_dependency_success_for_every_shared_radio() -> None:
     from freqinout.core.launch_orchestrator import LaunchOrchestrator
 

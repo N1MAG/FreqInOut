@@ -9339,6 +9339,9 @@ class MultiRadioStore:
                         "data_roots": [
                             str(value) for value in component.get("data_roots", ()) or ()
                         ],
+                        "managed_directories": [
+                            str(value) for value in component.get("managed_directories", ()) or ()
+                        ],
                         "endpoints": [
                             dict(value) for value in component.get("endpoints", ()) or ()
                             if isinstance(value, Mapping)
@@ -9407,6 +9410,9 @@ class MultiRadioStore:
                         ],
                         "data_roots": [
                             str(value) for value in component.get("data_roots", ()) or ()
+                        ],
+                        "managed_directories": [
+                            str(value) for value in component.get("managed_directories", ()) or ()
                         ],
                         "endpoints": [
                             dict(value) for value in component.get("endpoints", ()) or ()

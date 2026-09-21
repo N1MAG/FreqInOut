@@ -9515,3 +9515,83 @@ other component. Focused identity, launch, status, and radio-scoped Settings
 coverage passes **230 tests** with 2 platform skips. Broader launch, guided-save,
 receiver, multi-rig, and unified-UX integration coverage passes **142 tests**
 with 2 platform skips. Changed Python compilation and `git diff --check` pass.
+
+## 2026-09-21 — Canonical recipe directory ownership contract
+
+Status: specified, implemented, and regression-tested. No runtime data or
+unrelated user files changed.
+
+GRS-13 is now explicit that the reviewed and persisted canonical recipe is the
+sole source of FIO-created directories across both `Settings > Radios > Add
+Radio` and standalone `Settings > Software` / Software Administration, for
+every supported application family. Final Save must create only the reviewed
+directories before canonical commit or launch. Existing directories remain
+in place with their contents preserved; operator-selected and adopted paths are
+not created; a shared path is created only when the accepted recipe explicitly
+authorizes that exact directory; and file targets (such as executables, INIs,
+databases, logs, messages, archive files, launchers, and shortcuts) are never
+created as directories. Missing directory authority remains `Needs choice` or
+`Saved; launch setup pending` rather than being guessed.
+
+Implementation introduces a typed `managed_directories` field on canonical
+launch components. Managed JS8Call, FLRig, FLDigi, FLMsg, and reviewed FLAmp
+recipes now publish their exact directory set. Add Radio and Software
+Administration replace obsolete draft-root mkdir actions with that set before
+native apply and persistence. Managed VarAC remains on its existing qualified
+transaction, which creates only the reviewed member/cluster directories and
+now records those exact targets in its persisted launch recipe. The
+launch bundle persists the directory set, and launch preflight can repair
+missing directories for both new and older saved FLRig/FLDigi/FLMsg/JS8Call
+recipes without deriving another path. Missing targets are created recursively;
+existing directories are idempotent; an existing file, blank target, filesystem
+root, or home-directory target fails closed.
+
+Delegation evidence: `directory_flow_audit` used `gpt-5.6-terra` at medium
+reasoning for the read-only family/path audit; `vnc2_native_writer` used
+`gpt-5.6-terra` at high reasoning for independent safety regression tests. A
+pre-existing documentation delegate supplied the initial wording but did not
+expose reliable runtime model metadata; the primary agent reviewed and finalized
+the governing text and integration.
+
+Acceptance evidence: the focused directory/native suite passes **79 tests**;
+the broader software-identity, guided-save, launch-bundle, launch-control, and
+VarAC regression suite passes **165 tests**. Changed Python compilation and
+`git diff --check` pass.
+
+## 2026-09-21 — Selected-radio launch identity versus station process names
+
+Status: specified, implemented, and regression-tested; production operator
+retest remains open.
+
+Production evidence showed that the persisted FT-710 FLDigi command launched
+successfully when run directly, but FIO did not attempt it while the FT-DX10
+FLDigi process was already running. A selected-radio plan contains only the
+selected radio's row, so the executor had incorrectly treated queue
+cardinality plus the station-wide application process name as proof that the
+selected instance was already starting. It then waited on the absent FT-710
+endpoint without spawning the saved FT-710 recipe.
+
+FLRig, FLDigi, and JS8Call now use the persisted endpoint identity even in a
+one-radio queue. When only another radio's same-named process is visible and
+the selected endpoint is absent, FIO launches the selected recipe. When the
+exact selected executable-and-arguments process is already running, FIO polls
+its endpoint and never launches a duplicate.
+
+The companion Fast Light review preserves the distinct application contracts.
+Managed FLMsg remains radio-scoped through exact `--flmsg-dir` and `--auto-dir`
+arguments, and process matching rejects another radio's NBEMS root. The
+currently qualified FLAmp recipe remains station-shared and operator-started;
+endpoint relaunch recovery cannot create a duplicate FLAmp process.
+
+Delegation evidence: `launch_identity_audit` used `gpt-5.6-terra` at medium
+reasoning for the independent read-only FLRig/FLDigi/JS8Call and FLMsg/FLAmp
+identity audit. The primary agent implemented and reviewed the change.
+
+Acceptance evidence: the focused identity suite passes **77 tests** with 2
+platform skips. The broader managed-directory, guided-save, launch-planner,
+status, receiver, and native VarAC suite passes **200 tests** with 2 platform
+skips. Changed Python compilation and `git diff --check` pass. A whole-suite
+attempt encountered a macOS PySide segmentation fault while an unrelated JS8
+reader thread was alive in the compose-layout test; that exact compose test
+passes independently (**1 test**), so this is recorded as a suite-harness
+limitation rather than launch-change evidence.

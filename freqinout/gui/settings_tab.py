@@ -181,6 +181,7 @@ from freqinout.core.guided_app_config_plan import (
     apply_guided_external_app_config_plan,
     build_guided_external_app_config_plan,
     rollback_guided_external_app_config_apply,
+    with_canonical_managed_directory_actions,
 )
 from freqinout.core.varac_native_preparation import (
     VarACNativePreparationResult,
@@ -10684,14 +10685,20 @@ class SettingsTab(QWidget):
         payload: Mapping[str, Any],
         profile: Mapping[str, Any],
     ) -> GuidedAppConfigPlan | None:
-        """Build the same exact-qualified JS8 writer plan used by Add Radio."""
+        """Build the same canonical directory/native plan used by Add Radio."""
 
+        family = str(payload.get("family_key") or "").strip().lower()
         if (
-            str(payload.get("family_key") or "").strip().lower() != "js8call"
+            family not in {"js8call", "fast_light"}
             or str(payload.get("mode") or "").strip().lower() != "managed"
             or str(payload.get("ownership") or "").strip().lower() != "fio-managed"
         ):
             return None
+        if family == "fast_light":
+            return with_canonical_managed_directory_actions(
+                GuidedAppConfigPlan(actions=(), review_items=()),
+                {family: payload},
+            )
         instance_name = str(payload.get("instance_name") or "JS8Call").strip()
         managed_instance_key = str(
             payload.get("draft_instance_key") or payload.get("instance_key") or instance_name
@@ -10709,7 +10716,7 @@ class SettingsTab(QWidget):
                 PortAssignment("js8call_udp", host, udp_port, udp_port, False, protocol="udp"),
             ),
         )
-        return build_guided_external_app_config_plan(
+        plan = build_guided_external_app_config_plan(
             (proposal,),
             config_root=get_config_dir(),
             app_paths={
@@ -10730,6 +10737,7 @@ class SettingsTab(QWidget):
             ),
             radio_label=str(profile.get("name") or "").strip(),
         )
+        return with_canonical_managed_directory_actions(plan, {family: payload})
 
     def _on_software_instance_add_requested(self, raw_payload: object) -> None:
         """Persist one reviewed instance, radio link, manifest, and launch recipe."""
@@ -30306,7 +30314,7 @@ class SettingsTab(QWidget):
                 # Native VarAC preparation and final transaction own this
                 # family.  Excluding the obsolete generic action keeps the
                 # parent review from claiming it is read/import-only.
-                return GuidedAppConfigPlan(
+                plan = GuidedAppConfigPlan(
                     actions=tuple(action for action in plan.actions if action.app_id != "varac"),
                     review_items=tuple(
                         item for item in plan.review_items
@@ -30318,7 +30326,7 @@ class SettingsTab(QWidget):
                     # blockers remain authoritative for the final review.
                     blocked=bool(plan.blocked),
                 )
-            return plan
+            return with_canonical_managed_directory_actions(plan, retained)
 
         def _apply_guided_app_configuration() -> None:
             plan = _current_guided_app_config_plan()
@@ -34783,6 +34791,15 @@ class SettingsTab(QWidget):
                 if member.wine_prefix
                 else {}
             )
+            varac_managed_directories = tuple(
+                dict.fromkeys(
+                    (
+                        str(member.target_path.parent),
+                        str(member.vara_target_runtime_folder),
+                        *(str(path) for path in result.plan.managed_directories),
+                    )
+                )
+            )
             completed = dict(draft)
             completed.pop("_varac_native_apply_request", None)
             completed.update(
@@ -34809,6 +34826,7 @@ class SettingsTab(QWidget):
                                 "arguments": launch_argv[1:],
                                 "effective_command": launch_argv,
                                 "working_directory": member.working_directory,
+                                "managed_directories": varac_managed_directories,
                                 "environment": launch_environment,
                                 "dependencies": (),
                                 "execution_scope": "standard",
@@ -35161,6 +35179,14 @@ class SettingsTab(QWidget):
                 if result.plan.platform == "linux-wine"
                 else (vara_executable_path,)
             )
+            varac_managed_directories = tuple(
+                dict.fromkeys(
+                    (
+                        str(member.target_path.parent),
+                        *(str(path) for path in result.plan.managed_directories),
+                    )
+                )
+            )
             launch_at_startup = bool(updated_varac.get("launch_at_startup", False))
             updated_varac.update(
                 {
@@ -35186,6 +35212,9 @@ class SettingsTab(QWidget):
                                 "arguments": vara_argv[1:],
                                 "effective_command": vara_argv,
                                 "working_directory": str(member.vara_target_runtime_folder),
+                                "managed_directories": (
+                                    str(member.vara_target_runtime_folder),
+                                ),
                                 "environment": launch_environment,
                                 "dependencies": (),
                                 "execution_scope": "standard",
@@ -35199,6 +35228,7 @@ class SettingsTab(QWidget):
                                 "arguments": launch_argv[1:],
                                 "effective_command": launch_argv,
                                 "working_directory": member.working_directory,
+                                "managed_directories": varac_managed_directories,
                                 "environment": launch_environment,
                                 "dependencies": ("vara",),
                                 "execution_scope": "standard",

@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from freqinout.core.config_autodiscovery import build_lab_radio_proposals
 from freqinout.core.guided_app_config_plan import (
+    GuidedAppConfigAction,
+    GuidedAppConfigPlan,
     apply_guided_external_app_config_plan,
     build_guided_external_app_config_plan,
+    with_canonical_managed_directory_actions,
+)
+from freqinout.core.guided_launch_recipes import (
+    recipe_draft_updates,
+    resolve_fast_light_managed_recipe,
 )
 
 
@@ -58,6 +67,33 @@ def test_guided_external_app_config_apply_defaults_to_no_external_writes(tmp_pat
     assert any(item.action_type == "create_directory" and item.status == "applied" for item in result.items)
     assert any(item.action_type == "update_js8_multisettings" and item.status == "skipped" for item in result.items)
     assert "[MultiSettings/fio-a]" not in js8_ini.read_text(encoding="utf-8")
+
+
+def test_guided_directory_apply_rejects_existing_file_without_replacing_it(tmp_path) -> None:
+    target = tmp_path / "profile"
+    target.write_text("operator data", encoding="utf-8")
+    plan = GuidedAppConfigPlan(
+        actions=(
+            GuidedAppConfigAction(
+                action_id="flrig:profile",
+                app_id="flrig",
+                instance_name="FT-710",
+                action_type="create_directory",
+                target=str(target),
+                summary="Prepare the reviewed FLRig profile directory.",
+                requires_backup=False,
+                writes_external_config=False,
+            ),
+        ),
+        review_items=(),
+    )
+
+    result = apply_guided_external_app_config_plan(plan)
+
+    assert not result.ok
+    assert result.items[0].status == "failed"
+    assert target.is_file()
+    assert target.read_text(encoding="utf-8") == "operator data"
 
 
 def test_guided_external_app_config_apply_writes_js8_only_with_explicit_backup(tmp_path) -> None:
@@ -121,6 +157,55 @@ def test_guided_external_app_config_plan_describes_fast_light_instances(tmp_path
     assert fldigi.details["executable_path"] == "/apps/fldigi"
     assert fldigi.details["expected_port"] == "7362"
     assert "--xmlrpc-server-port 7362" in fldigi.details["launch_args"]
+
+
+def test_canonical_fast_light_recipe_replaces_legacy_dirs_and_materializes_all_selected_apps(tmp_path) -> None:
+    proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
+    base = build_guided_external_app_config_plan(
+        proposals,
+        config_root=tmp_path / "fio-config",
+        app_paths={"flrig": "/apps/flrig", "fldigi": "/apps/fldigi"},
+    )
+    draft = {
+        "family_key": "fast_light",
+        "mode": "managed",
+        "ownership": "fio-managed",
+        "draft_instance_key": "fast-light-internal-key",
+        "instance_name": "FT-710 Fast Light",
+        "owner_label": "FT-710",
+        "radio_role": "tx_rx",
+        "application_path": "/apps/flrig",
+        "secondary_application_path": "/apps/fldigi",
+        "flmsg_application_path": "/apps/flmsg",
+        "flamp_application_path": "/apps/flamp",
+        "use_flmsg": True,
+        "use_flamp": True,
+        "port": 12346,
+        "secondary_port": 7363,
+    }
+    recipe = resolve_fast_light_managed_recipe(
+        draft,
+        managed_root=str(tmp_path / "fio-config" / "managed-instances"),
+        platform="linux",
+        storage_home=tmp_path / "home",
+    )
+    draft.update(recipe_draft_updates(recipe))
+
+    canonical = with_canonical_managed_directory_actions(base, {"fast_light": draft})
+    directory_targets = {
+        action.target for action in canonical.actions if action.action_type == "create_directory"
+    }
+
+    assert str(tmp_path / "home" / ".flrig" / "instances" / "FT-710") in directory_targets
+    assert str(tmp_path / "home" / ".fldigi" / "instances" / "FT-710") in directory_targets
+    assert str(tmp_path / "home" / ".nbems" / "instances" / "FT-710" / "ICS" / "messages") in directory_targets
+    assert str(tmp_path / "home" / ".nbems" / "FLAMP" / "rx") in directory_targets
+    assert not any("fio-config/managed-instances" in target for target in directory_targets)
+
+    applied = apply_guided_external_app_config_plan(canonical)
+
+    assert applied.ok
+    assert all(Path(target).is_dir() for target in directory_targets)
 
 
 def test_guided_external_app_config_plan_describes_js8_profile_and_ports(tmp_path) -> None:

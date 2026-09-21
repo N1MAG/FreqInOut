@@ -9,7 +9,11 @@ from PySide6.QtWidgets import QApplication
 
 from freqinout.core.config_autodiscovery import build_lab_radio_proposals
 from freqinout.core.config_js8_managed import build_js8call_managed_profile_plans
-from freqinout.core.guided_launch_recipes import resolve_fast_light_managed_recipe, resolve_js8_managed_recipe
+from freqinout.core.guided_launch_recipes import (
+    recipe_draft_updates,
+    resolve_fast_light_managed_recipe,
+    resolve_js8_managed_recipe,
+)
 from freqinout.core.software_administration_model import build_software_administration_snapshot
 from freqinout.gui import settings_tab
 from freqinout.gui.software_administration_workspace import SoftwareAdministrationWorkspace
@@ -87,6 +91,12 @@ def test_recipe_roots_align_with_platform_profile_builder_and_canonical_versions
     assert component.data_roots[2] == str(built.forms_dir)
     assert component.data_roots[0] == str(built.application_data_root)
     assert component.effective_command[2] == built.rig_name
+    assert component.managed_directories == (
+        str(built.config_dir),
+        str(built.application_data_root),
+        str(built.save_dir),
+        str(built.forms_dir),
+    )
 
 
 def test_settings_native_plan_keeps_draft_key_internal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -101,6 +111,40 @@ def test_settings_native_plan_keeps_draft_key_internal(monkeypatch: pytest.Monke
     writer_actions = [action for action in plan.actions if action.action_type == "update_js8_multisettings"]
     assert len(writer_actions) == 1
     assert "JS8Call - Radio-A" in str(writer_actions[0].details)
+
+
+def test_settings_native_plan_materializes_fast_light_from_the_saved_recipe(tmp_path: Path) -> None:
+    draft: dict[str, object] = {
+        "family_key": "fast_light",
+        "mode": "managed",
+        "ownership": "fio-managed",
+        "draft_instance_key": "internal-fast-key",
+        "instance_name": "FT-710 Fast Light",
+        "owner_label": "FT-710",
+        "radio_role": "tx_rx",
+        "application_path": "/opt/flrig",
+        "secondary_application_path": "/opt/fldigi",
+        "port": 12346,
+        "secondary_port": 7363,
+    }
+    resolution = resolve_fast_light_managed_recipe(
+        draft,
+        managed_root=str(tmp_path / "private"),
+        platform="linux",
+        storage_home=tmp_path / "home",
+    )
+    draft.update(recipe_draft_updates(resolution))
+
+    plan = settings_tab.SettingsTab._native_plan_for_software_instance_payload(
+        draft,
+        {"name": "FT-710", "device_class": "tx_rx"},
+    )
+
+    assert plan is not None
+    targets = {action.target for action in plan.actions if action.action_type == "create_directory"}
+    assert str(tmp_path / "home" / ".flrig" / "instances" / "FT-710") in targets
+    assert str(tmp_path / "home" / ".fldigi" / "instances" / "FT-710") in targets
+    assert not any(str(tmp_path / "private") in target for target in targets)
 
 
 def test_software_workspace_routes_its_settings_managed_root_into_assistant() -> None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 import sys
-from typing import Mapping, Sequence, Tuple
+from typing import Any, Mapping, Sequence, Tuple
 
 from freqinout.core.config_autodiscovery import APP_DISPLAY_NAMES, RadioInstanceProposal, discover_varac_local_assets
 from freqinout.core.config_backup import (
@@ -19,6 +19,10 @@ from freqinout.core.config_js8_managed import (
     verify_js8call_multisettings_plan,
 )
 from freqinout.core.config_managed_profiles import build_flrig_fldigi_managed_profile_plans
+from freqinout.core.managed_directory_contract import (
+    managed_directories_from_recipe,
+    materialize_managed_directories,
+)
 from freqinout.core.guided_radio_software_model import (
     NativeWriterCapability,
     NativeWriterOperation,
@@ -119,6 +123,92 @@ class GuidedAppConfigApplyResult:
         return any(item.status == "applied" and item.action_type != "create_directory" for item in self.items)
 
 
+def with_canonical_managed_directory_actions(
+    plan: GuidedAppConfigPlan,
+    drafts: Mapping[str, Any],
+) -> GuidedAppConfigPlan:
+    """Replace derived mkdir actions with the exact persisted recipe targets.
+
+    This is the shared Add Radio / Software Administration seam.  It is
+    intentionally limited to managed JS8Call and Fast Light recipes; VarAC's
+    qualified native transaction owns its directory preparation, while
+    operator/adopted integrations never authorize generic directory creation.
+    """
+
+    canonical_actions: list[GuidedAppConfigAction] = []
+    replaced_app_ids: set[str] = set()
+    seen_targets: set[str] = set()
+    for raw_family, raw_draft in drafts.items():
+        if not isinstance(raw_draft, Mapping):
+            continue
+        family = str(raw_family or raw_draft.get("family_key") or "").strip().lower()
+        if family not in {"js8call", "fast_light"}:
+            continue
+        mode = str(raw_draft.get("mode") or "").strip().lower()
+        ownership = str(raw_draft.get("ownership") or "").strip().lower()
+        if mode != "managed" or ownership != "fio-managed":
+            continue
+        recipe = raw_draft.get("launch_recipe")
+        if not isinstance(recipe, Mapping):
+            continue
+        components = tuple(
+            component
+            for component in recipe.get("components", ()) or ()
+            if isinstance(component, Mapping)
+        )
+        replaced_app_ids.update(
+            str(component.get("component_key") or "").strip().lower()
+            for component in components
+            if str(component.get("component_key") or "").strip()
+        )
+        instance_name = str(
+            raw_draft.get("instance_name")
+            or raw_draft.get("owner_label")
+            or raw_draft.get("draft_instance_key")
+            or family
+        ).strip()
+        for component_key, target in managed_directories_from_recipe(recipe):
+            normalized = str(Path(target).expanduser())
+            if normalized in seen_targets:
+                continue
+            seen_targets.add(normalized)
+            canonical_actions.append(
+                GuidedAppConfigAction(
+                    action_id=f"{family}:{component_key}:canonical-dir:{len(canonical_actions) + 1}",
+                    app_id=component_key,
+                    instance_name=instance_name,
+                    action_type="create_directory",
+                    target=target,
+                    summary=(
+                        f"Create the reviewed FIO-managed {APP_DISPLAY_NAMES.get(component_key, component_key)} "
+                        f"folder for {instance_name}."
+                    ),
+                    requires_backup=False,
+                    writes_external_config=False,
+                    details={
+                        "source": "canonical_launch_recipe",
+                        "ownership": "fio-managed",
+                    },
+                )
+            )
+
+    if not replaced_app_ids:
+        return plan
+    retained = tuple(
+        action
+        for action in plan.actions
+        if not (
+            str(action.action_type or "").strip() == "create_directory"
+            and str(action.app_id or "").strip().lower() in replaced_app_ids
+        )
+    )
+    return GuidedAppConfigPlan(
+        actions=(*retained, *canonical_actions),
+        review_items=plan.review_items,
+        blocked=plan.blocked,
+    )
+
+
 def rollback_guided_external_app_config_apply(
     result: GuidedAppConfigApplyResult,
 ) -> GuidedAppConfigApplyResult:
@@ -204,14 +294,11 @@ def build_guided_external_app_config_plan(
             app_paths=paths,
         )
         for plan in fast_plans:
-            for directory in (plan.config_dir, *plan.data_dirs):
-                _add_directory_action(
-                    actions,
-                    seen_dirs,
-                    app_id=plan.app_id,
-                    instance_name=plan.instance_name,
-                    directory=directory,
-                )
+            # These legacy plan objects retain native-writer review details,
+            # but their historical config_root paths are not canonical launch
+            # paths.  Add Radio and Software Administration append mkdir
+            # actions from the already-reviewed launch recipe through
+            # ``with_canonical_managed_directory_actions``.
             actions.append(
                 GuidedAppConfigAction(
                     action_id=f"{plan.instance_name}:{plan.app_id}:write-managed-config",
@@ -357,7 +444,9 @@ def apply_guided_external_app_config_plan(
         target = str(action.target or "").strip()
         if action_type == "create_directory":
             try:
-                Path(target).expanduser().mkdir(parents=True, exist_ok=True)
+                if not target:
+                    raise ValueError("Managed directory target is blank.")
+                materialize_managed_directories((target,))
                 items.append(
                     GuidedAppConfigApplyItem(
                         action_id=action.action_id,
@@ -368,7 +457,7 @@ def apply_guided_external_app_config_plan(
                         detail="Directory ready.",
                     )
                 )
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 items.append(
                     GuidedAppConfigApplyItem(
                         action_id=action.action_id,

@@ -161,3 +161,46 @@ def test_js8call_managed_directories_are_created_idempotently(tmp_path) -> None:
     assert tmp_path / ".config" in first
     assert tmp_path / ".local" / "share" / "JS8Call - Radio-A" / "save" in first
     assert tmp_path / ".local" / "share" / "JS8Call - Radio-A" / "forms" in first
+
+
+def test_js8call_materializes_canonical_qt_and_data_dirs_without_touching_operator_config_root(tmp_path) -> None:
+    proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
+    operator_root = tmp_path / "operator-owned-config-root"
+    plan = build_js8call_managed_profile_plans(
+        proposals,
+        config_root=operator_root,
+        platform="Linux",
+        storage_home=tmp_path,
+    )[0]
+    plan.save_dir.mkdir(parents=True)
+    sentinel = plan.save_dir / "retain.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+
+    materialized = create_js8call_managed_directories((plan,))
+
+    assert materialized == (plan.config_dir, plan.save_dir, plan.forms_dir)
+    assert plan.config_dir == tmp_path / ".config"
+    assert plan.settings_path.parent == plan.config_dir
+    assert not plan.settings_path.exists()
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+    assert not operator_root.exists()
+
+
+def test_js8call_never_converts_settings_file_or_managed_directory_file_target(tmp_path) -> None:
+    proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
+    plan = build_js8call_managed_profile_plans(
+        proposals,
+        config_root=tmp_path / "fio-config",
+        platform="Linux",
+        storage_home=tmp_path,
+    )[0]
+    plan.config_dir.mkdir(parents=True)
+    plan.forms_dir.parent.mkdir(parents=True)
+    plan.forms_dir.write_text("operator file", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        create_js8call_managed_directories((plan,))
+
+    assert plan.forms_dir.is_file()
+    assert plan.forms_dir.read_text(encoding="utf-8") == "operator file"
+    assert not plan.settings_path.exists()

@@ -46,6 +46,46 @@ def test_process_identity_uses_launch_arguments_when_radios_share_one_binary(mon
     )
 
 
+def test_flmsg_process_identity_uses_radio_scoped_nbems_arguments(monkeypatch):
+    record = {
+        "name": "flmsg",
+        "exe": "flmsg",
+        "exe_path": "/usr/local/bin/flmsg",
+        "cmd_tokens": ("flmsg",),
+        "cmd_paths": ("/usr/local/bin/flmsg", "/home/bill/.nbems/instances/FTDX-10"),
+        "cmdline": (
+            "/usr/local/bin/flmsg",
+            "--flmsg-dir",
+            "/home/bill/.nbems/instances/FTDX-10",
+            "--auto-dir",
+            "/home/bill/.nbems/instances/FTDX-10/WRAP/auto",
+        ),
+    }
+    monkeypatch.setattr(SoftwareStatusService, "_shared_proc_records", [record])
+    service = SoftwareStatusService(DummySettings())
+
+    assert service.cached_program_instance_running(
+        "FLMsg",
+        "/usr/local/bin/flmsg",
+        (
+            "--flmsg-dir",
+            "/home/bill/.nbems/instances/FTDX-10",
+            "--auto-dir",
+            "/home/bill/.nbems/instances/FTDX-10/WRAP/auto",
+        ),
+    )
+    assert not service.cached_program_instance_running(
+        "FLMsg",
+        "/usr/local/bin/flmsg",
+        (
+            "--flmsg-dir",
+            "/home/bill/.nbems/instances/FT-710",
+            "--auto-dir",
+            "/home/bill/.nbems/instances/FT-710/WRAP/auto",
+        ),
+    )
+
+
 def test_status_snapshot_does_not_credit_other_radio_family_process(monkeypatch):
     service = SoftwareStatusService(DummySettings())
     monkeypatch.setattr(service, "program_is_running", lambda _name: True)

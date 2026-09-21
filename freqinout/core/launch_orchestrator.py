@@ -20,6 +20,10 @@ from freqinout.core.dependency_status_service import get_dependency_status_servi
 from freqinout.core.launch_bundle_store import LaunchBundleStore, normalize_launch_items
 from freqinout.core.js8_storage import resolve_js8_storage, variant_family_from_version
 from freqinout.core.multi_radio_store import MultiRadioStore
+from freqinout.core.managed_directory_contract import (
+    managed_directories_from_component,
+    materialize_managed_directories,
+)
 from freqinout.core.station_launch_planner import LaunchPlan, StationLaunchPlanner
 
 
@@ -605,6 +609,31 @@ class LaunchOrchestrator(QObject):
                 return bool(info.get("reachable", False))
         return True
 
+    @staticmethod
+    def _has_persisted_endpoint_identity(item: Any) -> bool:
+        """Return whether one launch item owns a concrete service endpoint.
+
+        A selected-radio launch plan contains only that radio's rows, so queue
+        cardinality cannot prove that another radio's same-named process is a
+        different instance.  The persisted identity plus endpoint is the
+        authoritative discriminator for the service-bearing applications.
+        """
+
+        if not isinstance(item, Mapping) or not str(item.get("instance_identity", "") or "").strip():
+            return False
+        name = LaunchOrchestrator._queue_item_name(item)
+        if name not in {"JS8Call", "FLRig", "FLDigi"}:
+            return False
+        policy = item.get("readiness_policy", {})
+        if not isinstance(policy, Mapping):
+            return False
+        host = str(policy.get("host", "") or "").strip()
+        try:
+            port = int(policy.get("port", 0) or 0)
+        except (TypeError, ValueError):
+            return False
+        return bool(host) and 0 < port <= 65535
+
     def _cached_status_for_item(self, item: Any) -> Mapping[str, Any]:
         name = self._queue_item_name(item)
         policy = item.get("readiness_policy", {}) if isinstance(item, Mapping) else {}
@@ -734,10 +763,21 @@ class LaunchOrchestrator(QObject):
                 self.sequence_progress.emit(result)
                 self._schedule_advance_queue(0)
                 return
-            # A different JS8 instance may already be running while this
-            # planned endpoint is absent. Launch this instance instead of
-            # waiting on the unrelated process name.
-            should_launch_distinct = has_distinct_instances and (not ready or not endpoint_scoped)
+            # A selected-radio plan contains only that radio's rows.  A
+            # different radio's same-named process must therefore not make us
+            # wait forever on this radio's absent endpoint.  Only use this
+            # recovery when no exact configured process identity is running;
+            # an exact process may simply still be starting its service.
+            exact_process_running = self._configured_instance_process_running(queue_item)
+            selected_endpoint_requires_launch = (
+                not has_distinct_instances
+                and not ready
+                and self._has_persisted_endpoint_identity(queue_item)
+                and exact_process_running is not True
+            )
+            should_launch_distinct = (
+                has_distinct_instances and (not ready or not endpoint_scoped)
+            ) or selected_endpoint_requires_launch
             if not should_launch_distinct:
                 self._current_name = name
                 self._current_item = queue_item
@@ -761,6 +801,7 @@ class LaunchOrchestrator(QObject):
             self._schedule_advance_queue(0)
             return
         try:
+            self._materialize_item_managed_directories(queue_item)
             creationflags = 0
             if platform.system() == "Windows":
                 creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
@@ -805,6 +846,33 @@ class LaunchOrchestrator(QObject):
             self._results.append(result)
             self.sequence_progress.emit(result)
             self._schedule_advance_queue(0)
+
+    @staticmethod
+    def _materialize_item_managed_directories(item: Any) -> tuple[Path, ...]:
+        """Repair only directory targets authorized by a managed recipe.
+
+        Final Save normally prepares these paths.  The launch preflight keeps
+        older canonical recipes recoverable and prevents an absent ``cwd``
+        from making an application exit without a useful FIO error.  VarAC and
+        shared/operator-start components deliberately authorize no generic
+        directories here.
+        """
+
+        if not isinstance(item, Mapping) or not item.get("instance_identity"):
+            return ()
+        policy = item.get("readiness_policy", {})
+        if not isinstance(policy, Mapping):
+            return ()
+        component_key = {
+            "FLRig": "flrig",
+            "FLDigi": "fldigi",
+            "FLMsg": "flmsg",
+            "JS8Call": "js8call",
+        }.get(LaunchOrchestrator._queue_item_name(item), "")
+        if not component_key:
+            return ()
+        paths = managed_directories_from_component(policy, component_key=component_key)
+        return materialize_managed_directories(paths)
 
     def _persist_planned_js8_storage(self, item: Any) -> None:
         """Persist launch identity without claiming runtime verification.
@@ -1027,7 +1095,9 @@ class LaunchOrchestrator(QObject):
             )
             self.multi_radio_store.save_js8_instance(updated)
 
-    def _program_running(self, item: Any) -> bool:
+    def _configured_instance_process_running(self, item: Any) -> Optional[bool]:
+        """Return exact process state, or ``None`` when it cannot be proven."""
+
         name = self._queue_item_name(item)
         if isinstance(item, Mapping) and item.get("instance_identity"):
             target = str(
@@ -1052,7 +1122,13 @@ class LaunchOrchestrator(QObject):
                         )
                     )
                 except Exception:
-                    return False
+                    return None
+        return None
+
+    def _program_running(self, item: Any) -> bool:
+        exact = self._configured_instance_process_running(item)
+        if exact is not None:
+            return exact
         return bool(self._cached_status_for_item(item).get("running", False))
 
     def _resolve_launch_command(self, item_or_name: Any) -> Tuple[Optional[List[str]], str]:
