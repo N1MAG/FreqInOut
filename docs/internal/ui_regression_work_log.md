@@ -9461,3 +9461,30 @@ tests**. Broader native writer/transaction, Add Radio arrangement/final-save,
 production-shaped audit, Software Administration, and Settings coverage passes
 **299 tests** with 19 platform skips. Changed Python compilation and
 `git diff --check` pass.
+
+## 2026-09-21 — Exact manual launch gates and per-radio process attribution
+
+Status: focused automated gates passed; production operator retest remains
+open.
+
+Production feedback confirmed that both `Monitor Health` and `Launch at
+Startup` were checked, yet `Start Startup Apps` and row `Start` remained
+disabled. The remaining blocker was not the row state: Settings applied the
+primary operating model's unattended-start permission to explicit operator
+actions, and the planner excluded an inactive selected radio. The explicit
+selected-radio path now ignores only those automatic-start gates while keeping
+recipe validation and the one-active-sequence guard. It does not activate the
+radio or change command focus.
+
+The running display and launch executor also used executable/family status as
+their last attribution boundary. That is ambiguous when FT-DX10 and FT-710 run
+the same binaries. Known direct processes now receive one bounded command-line
+inspection, and both health projection and already-running suppression match
+the selected radio's canonical executable plus its exact launch arguments.
+Endpoint connection remains a separate result. The asynchronous status service
+carries this identity through its scoped cache and shows a checking state,
+rather than a station-wide family result, until the exact probe completes.
+
+Focused launch bundle, endpoint status, refresh coordination, and radio-scoped
+Settings coverage passes **204 tests** with 2 platform skips. Changed Python
+compilation and `git diff --check` pass.

@@ -4412,6 +4412,23 @@ def test_launch_table_startup_change_recomputes_startup_button_state() -> None:
     assert "self._update_launch_control_buttons()" in block
 
 
+def test_manual_launch_buttons_are_not_gated_by_unattended_start_policy() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    button_block = source[
+        source.index("def _update_launch_control_buttons")
+        : source.index("def _refresh_launch_control_guidance")
+    ]
+    group_start_block = source[
+        source.index("def _launch_configured_now")
+        : source.index("def _stop_launch_sequence")
+    ]
+
+    assert "launch_allowed" not in button_block
+    assert "launch_allowed" not in group_start_block
+    assert "has_startup_rows and not self.launch_orchestrator.is_active()" in button_block
+    assert "widget.setEnabled(not self.launch_orchestrator.is_active())" in button_block
+
+
 def test_launch_master_is_saved_and_manual_start_does_not_mutate_startup_policy() -> None:
     source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
     master_block = source[

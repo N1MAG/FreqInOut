@@ -288,7 +288,18 @@ class LaunchOrchestrator(QObject):
         trigger: str = "startup",
         bundle_override: Optional[Mapping[str, Any]] = None,
     ) -> LaunchPlan:
-        profiles = self.multi_radio_store.list_runtime_active_device_profiles()
+        # An explicit selected-radio start is allowed to prepare an inactive
+        # radio's applications without silently activating that radio.  Only
+        # unattended station startup is restricted to runtime-active radios.
+        manual_selected_radio = (
+            str(trigger or "").strip().lower() == "manual"
+            and scope_radio_id is not None
+        )
+        profiles = (
+            self.multi_radio_store.list_device_profiles()
+            if manual_selected_radio
+            else self.multi_radio_store.list_runtime_active_device_profiles()
+        )
         launchable_profiles = []
         for profile in profiles:
             radio_id = int(profile.get("id", 0) or 0)
@@ -438,7 +449,10 @@ class LaunchOrchestrator(QObject):
         *,
         bundle_override: Optional[Mapping[str, Any]] = None,
     ) -> bool:
-        if self._active or not self.launch_allowed():
+        # ``launch_allowed`` is the primary operating model's unattended
+        # startup gate.  This method represents an explicit operator action on
+        # one reviewed radio and must remain available independently.
+        if self._active:
             return False
         plan = self.preview_manual_plan(
             int(radio_profile_id),
@@ -1011,7 +1025,20 @@ class LaunchOrchestrator(QObject):
             ).strip()
             if target:
                 try:
-                    return bool(self.status.cached_program_instance_running(name, target))
+                    arguments = item.get("launch_arguments", ())
+                    if not isinstance(arguments, (list, tuple)):
+                        arguments = ()
+                    if not arguments:
+                        return bool(
+                            self.status.cached_program_instance_running(name, target)
+                        )
+                    return bool(
+                        self.status.cached_program_instance_running(
+                            name,
+                            target,
+                            arguments,
+                        )
+                    )
                 except Exception:
                     return False
         return bool(self._cached_status_for_item(item).get("running", False))

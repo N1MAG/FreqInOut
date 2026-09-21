@@ -477,7 +477,7 @@ def test_orchestrator_executes_the_exact_preview_queue(monkeypatch: pytest.Monke
 def test_selected_radio_manual_start_can_override_only_automatic_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
     orchestrator._active = False
-    orchestrator.launch_allowed = lambda: True
+    orchestrator.launch_allowed = lambda: False
     captured: dict[str, object] = {}
     plan = LaunchPlan(
         trigger="manual",
@@ -505,6 +505,23 @@ def test_selected_radio_manual_start_can_override_only_automatic_gate(monkeypatc
     assert captured["bundle_override"] == override
     assert captured["trigger"] == "manual"
     assert captured["queue"] == plan.queue()
+
+
+def test_manual_selected_radio_plan_includes_inactive_radio_but_startup_does_not() -> None:
+    profiles = [{"id": 7, "name": "Field", "runtime_active": 0}]
+    bundles = {
+        7: {
+            "launch_enabled": True,
+            "items": [_item("FLRig", instance_key="flrig:field", path="/usr/local/bin/flrig")],
+        }
+    }
+    planner = StationLaunchPlanner()
+
+    manual = planner.plan_startup(profiles, bundles, scope_radio_id=7, trigger="manual")
+    unattended = planner.plan_startup(profiles, bundles, scope_radio_id=7, trigger="startup")
+
+    assert [instance.name for instance in manual.instances] == ["FLRig"]
+    assert unattended.instances == ()
 
 
 def test_explicit_manual_sequence_preserves_structured_instance_recipe() -> None:
@@ -546,7 +563,12 @@ def test_executor_does_not_use_family_status_for_distinct_instance() -> None:
     orchestrator.status = type(
         "CachedStatus",
         (),
-        {"cached_program_instance_running": lambda _self, _name, target: target == "/apps/alpha/flrig"},
+        {
+            "cached_program_instance_running": lambda _self, _name, target, arguments=(): (
+                target == "/usr/local/bin/flrig"
+                and tuple(arguments) == ("--config-dir", "/profiles/alpha")
+            )
+        },
     )()
     orchestrator._cached_status_for_item = lambda _item: {"running": True}
 
@@ -554,14 +576,16 @@ def test_executor_does_not_use_family_status_for_distinct_instance() -> None:
         {
             "name": "FLRig",
             "instance_identity": "alpha",
-            "launch_path_override": "/apps/alpha/flrig",
+            "launch_path_override": "/usr/local/bin/flrig",
+            "launch_arguments": ["--config-dir", "/profiles/alpha"],
         }
     ) is True
     assert orchestrator._program_running(
         {
             "name": "FLRig",
             "instance_identity": "bravo",
-            "launch_path_override": "/apps/bravo/flrig",
+            "launch_path_override": "/usr/local/bin/flrig",
+            "launch_arguments": ["--config-dir", "/profiles/bravo"],
         }
     ) is False
 

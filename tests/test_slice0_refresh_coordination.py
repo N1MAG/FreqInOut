@@ -81,6 +81,59 @@ def test_endpoint_status_request_returns_cached_state_without_blocking_gui(monke
         service.stop()
 
 
+def test_endpoint_status_carries_exact_radio_identity_without_shared_process_leak(monkeypatch) -> None:
+    app = _app()
+    captured: list[dict[str, object]] = []
+
+    def exact_snapshot(self, **kwargs):
+        captured.append(dict(kwargs))
+        return {
+            "FLRig": {
+                "state": "idle",
+                "tooltip": "Selected FT-710 FLRig is not running",
+                "running": False,
+                "reachable": False,
+            }
+        }
+
+    monkeypatch.setattr(SoftwareStatusService, "status_snapshot", exact_snapshot)
+    service = DependencyStatusService(_Settings())
+    service._timer.stop()
+    service.refresh_now = lambda **_kwargs: service.latest_snapshot()  # type: ignore[method-assign]
+    service.software_status_snapshot = lambda: {
+        "FLRig": {
+            "state": "warn",
+            "tooltip": "Some FLRig process is running",
+            "running": True,
+            "reachable": False,
+        }
+    }
+    identity = {
+        "FLRig": {
+            "target": "/usr/local/bin/flrig",
+            "arguments": ("--config-dir", "/profiles/FT-710"),
+        }
+    }
+    try:
+        first = service.status_snapshot(instance_identities=identity)
+        assert first["FLRig"]["running"] is False
+        assert "Checking the selected radio" in str(first["FLRig"]["tooltip"])
+
+        deadline = time.monotonic() + 1.0
+        latest = first
+        while time.monotonic() < deadline:
+            app.processEvents()
+            latest = service.status_snapshot(instance_identities=identity)
+            if latest["FLRig"].get("tooltip") == "Selected FT-710 FLRig is not running":
+                break
+            time.sleep(0.005)
+
+        assert latest["FLRig"]["running"] is False
+        assert captured[-1]["instance_identities"] == identity
+    finally:
+        service.stop()
+
+
 def test_endpoint_status_requests_coalesce_while_scope_is_pending(monkeypatch) -> None:
     _app()
     calls = 0
@@ -166,7 +219,9 @@ def test_process_inventory_avoids_expensive_details_for_unrelated_processes(monk
     assert unrelated.exe_calls == 0
     assert unrelated.cmdline_calls == 0
     assert direct.exe_calls == 1
-    assert direct.cmdline_calls == 0
+    # Known multi-instance applications need one bounded command-line read so
+    # equal binaries can still be attributed to the correct radio profile.
+    assert direct.cmdline_calls == 1
     assert wrapper.exe_calls == 0
     assert wrapper.cmdline_calls == 1
     assert service.program_is_running("FLDigi") is True

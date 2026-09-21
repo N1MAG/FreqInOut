@@ -36728,12 +36728,6 @@ class SettingsTab(QWidget):
         row = self.launch_control_table.currentRow() if hasattr(self, "launch_control_table") else -1
         has_rows = bool(hasattr(self, "launch_control_table") and self.launch_control_table.rowCount() > 0)
         can_move = has_rows and row >= 0
-        launch_allowed = True
-        if hasattr(self.launch_orchestrator, "launch_allowed"):
-            try:
-                launch_allowed = bool(self.launch_orchestrator.launch_allowed())
-            except Exception:
-                launch_allowed = True
         self.launch_order_up_btn.setEnabled(bool(can_move and row > 0))
         self.launch_order_down_btn.setEnabled(bool(can_move and row < self.launch_control_table.rowCount() - 1))
         self.launch_reset_order_btn.setEnabled(has_rows)
@@ -36749,13 +36743,13 @@ class SettingsTab(QWidget):
                     has_startup_rows = True
                     break
         self.launch_configured_now_btn.setEnabled(
-            has_rows and has_startup_rows and launch_allowed and not self.launch_orchestrator.is_active()
+            has_rows and has_startup_rows and not self.launch_orchestrator.is_active()
         )
         self.launch_stop_btn.setEnabled(self.launch_orchestrator.is_active())
         for row in range(self.launch_control_table.rowCount() if has_rows else 0):
             widget = self.launch_control_table.cellWidget(row, 3)
             if isinstance(widget, QPushButton):
-                widget.setEnabled(launch_allowed and not self.launch_orchestrator.is_active())
+                widget.setEnabled(not self.launch_orchestrator.is_active())
 
     def _refresh_launch_control_guidance(self) -> None:
         if not hasattr(self, "launch_guidance_card"):
@@ -36909,20 +36903,6 @@ class SettingsTab(QWidget):
         self._stash_current_launch_radio_state()
         if hasattr(self.settings, "set"):
             self.settings.set("custom_tool_items", [dict(item) for item in self._custom_tool_items_cache])
-        if hasattr(self.launch_orchestrator, "launch_allowed"):
-            try:
-                if not self.launch_orchestrator.launch_allowed():
-                    reason = ""
-                    if hasattr(self.launch_orchestrator, "launch_block_reason"):
-                        reason = str(self.launch_orchestrator.launch_block_reason() or "").strip()
-                    self._publish_launch_control_feedback(
-                        status="blocked",
-                        summary="Launch blocked: Launch Control is disabled.",
-                        detail=reason or "Launch Control is disabled for the selected radio.",
-                    )
-                    return
-            except Exception:
-                pass
         manual_bundle = {
             # This is an explicit operator action.  Preserve the saved
             # automatic-start switch, but override that one gate for this run.
@@ -37240,7 +37220,31 @@ class SettingsTab(QWidget):
         visible_keys = [key for key, _label in self._current_visible_status_items()]
         if visible_keys != list(self.status_labels.keys()):
             self._rebuild_status_indicators()
-        status_sig: Tuple[object, ...] = (tuple(visible_keys), self._selected_radio_status_endpoint_sig())
+        try:
+            identities = self._selected_radio_process_identities()
+        except Exception:
+            identities = {}
+        identity_sig = tuple(
+            sorted(
+                (
+                    name,
+                    str(values.get("target") or ""),
+                    tuple(values.get("arguments", ()) or ()),
+                    str(values.get("instance_key") or ""),
+                )
+                for name, values in identities.items()
+            )
+        )
+        try:
+            selected_radio_id = self._selected_launch_radio_id()
+        except Exception:
+            selected_radio_id = None
+        status_sig: Tuple[object, ...] = (
+            selected_radio_id,
+            tuple(visible_keys),
+            self._selected_radio_status_endpoint_sig(),
+            identity_sig,
+        )
         now_ts = time.time()
         if (
             not force
@@ -37318,9 +37322,58 @@ class SettingsTab(QWidget):
         except Exception:
             return ("", None, None, "", None)
 
+    def _selected_radio_process_identities(self) -> Dict[str, Dict[str, object]]:
+        """Return exact selected-radio process selectors from its launch bundle."""
+
+        identities: Dict[str, Dict[str, object]] = {}
+        try:
+            radio_id = self._selected_launch_radio_id()
+        except Exception:
+            radio_id = None
+        if not radio_id:
+            return identities
+        scoped_items = self._radio_scoped_launch_items()
+        try:
+            plan = self.launch_orchestrator.preview_radio_recipe_plan(
+                radio_id,
+                bundle_override={"launch_enabled": True, "items": scoped_items},
+            )
+            planned_items = [instance.as_queue_item() for instance in plan.instances]
+        except Exception:
+            # Keep status available while an incomplete recipe is being
+            # repaired.  The fallback can still distinguish recipes whose
+            # canonical launch arguments are already present.
+            planned_items = scoped_items
+        for item in planned_items:
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            readiness = item.get("readiness_policy", {})
+            if not isinstance(readiness, Mapping):
+                readiness = {}
+            arguments = item.get("launch_arguments", readiness.get("launch_arguments", ()))
+            if not isinstance(arguments, (list, tuple)):
+                arguments = ()
+            target = str(
+                item.get("launch_command_override")
+                or item.get("launch_path_override")
+                or ""
+            ).strip()
+            if target or arguments:
+                identities[name] = {
+                    "target": target,
+                    "arguments": tuple(str(value) for value in arguments),
+                    "instance_key": str(item.get("instance_key") or "").strip(),
+                }
+        return identities
+
     def _selected_radio_status_snapshot(self, force: bool = False) -> Dict[str, Dict[str, object]]:
         try:
             js8_host, js8_port, flrig_port, fldigi_host, fldigi_port = self._selected_radio_status_endpoint_sig()
+            try:
+                instance_identities = self._selected_radio_process_identities()
+            except Exception:
+                instance_identities = {}
             status_service = getattr(self, "_status_service", None)
             if status_service is None or not hasattr(status_service, "status_snapshot"):
                 return self._software_status_probe.status_snapshot(
@@ -37330,6 +37383,7 @@ class SettingsTab(QWidget):
                     flrig_port_override=flrig_port,
                     fldigi_host_override=fldigi_host or None,
                     fldigi_port_override=fldigi_port,
+                    instance_identities=instance_identities,
                 )
             return status_service.status_snapshot(
                 force=force,
@@ -37338,6 +37392,7 @@ class SettingsTab(QWidget):
                 flrig_port_override=flrig_port,
                 fldigi_host_override=fldigi_host or None,
                 fldigi_port_override=fldigi_port,
+                instance_identities=instance_identities,
             )
         except Exception:
             return {}

@@ -1048,8 +1048,12 @@ enabled are separate states. Saving a known recipe with startup disabled never
 causes application-start launch.
 
 For a newly created local managed instance, **Launch with FIO** is recommended
-and selected by default, but it has no runtime effect until the radio is saved,
-enabled, and included in the station launch plan. Imported, manual, remote, and
+and selected by default. Unattended launch when FIO opens has no runtime effect
+until the radio is saved, runtime-active, opted into automatic launch, and
+included in the station launch plan. An explicit row **Start** or **Start
+Startup Apps** action may start the selected saved radio's reviewed recipes
+while that radio is inactive; this prepares its applications without silently
+making it the active or command-focus radio. Imported, manual, remote, and
 shared station applications default to operator-start unless the operator
 explicitly opts into FIO launch. Review always shows the effective choice.
 
@@ -1058,6 +1062,23 @@ are deduplicated only by an intentionally shared durable identity. Endpoint-
 scoped applications are never deduplicated by process name alone. Dependency
 examples include FLRig before its linked FLDigi and SDR++ readiness before a
 dependent receive workflow when the operator has requested that ordering.
+
+The radio-level automatic-start switch, the primary operating model's
+unattended-start permission, each row's **Launch at Startup** selection, and an
+explicit manual start are distinct gates. The first two apply only when FIO
+opens. They must never disable row **Start** or **Start Startup Apps**. A manual
+group start requires at least one checked startup row and no launch sequence
+already in progress; a manual row start requires a valid selected-radio recipe
+and no launch sequence already in progress.
+
+Runtime status and already-running suppression are instance-scoped. For
+applications that share one executable, FIO matches the selected radio's
+canonical executable plus its complete profile/config/rig-name argument vector
+(and structured Wine arguments where applicable). A same-family process for
+another radio is not evidence that the selected instance is running. Endpoint
+reachability remains a separate connected/not-connected result. While an exact
+instance probe is pending, the UI shows a checking/unknown state and does not
+substitute station-wide family status.
 
 Launch failure does not corrupt saved configuration. It produces an exact
 per-instance `Needs attention` state and recovery action. Launch success proves
@@ -1283,7 +1304,9 @@ operator-facing guidance.
 1. Every selected external app appears exactly once in Review with a concise
    launch policy or explicit operator-start state; `Show details` exposes the
    exact effective command.
-2. Manual and startup launch plans are identical except for requested scope.
+2. Manual and startup launch plans use the same recipes and ordering. Manual
+   selected-radio scope may include an inactive saved radio; unattended startup
+   includes only runtime-active radios whose automatic gate is enabled.
 3. Shared FLMsg/FLAmp launch once when intentionally shared; separate JS8,
    FLRig, FLDigi, SDR++, or VarAC identities launch separately.
 4. Linux native/Wine, macOS app/binary, and Windows executable commands retain
@@ -1298,6 +1321,12 @@ operator-facing guidance.
 8. Known JS8 and Fast Light recipes require no custom-command input in the
    normal path. Each generated command's selector, working directory, and data
    root match the reviewed atomic claims exactly.
+9. With two radios using the same FLRig, FLDigi, FLMsg, JS8Call, or VarAC
+   executable, a process whose canonical launch arguments belong to radio A
+   cannot mark radio B running and cannot suppress radio B's explicit launch.
+10. Disabling the primary operating model's unattended launch permission or a
+    radio's automatic-start switch leaves the selected radio's explicit row
+    **Start** and **Start Startup Apps** actions available.
 9. One station-shared CommStat process can bind to multiple distinct radio-owned
    JS8 endpoints. It launches once, shows every binding, and is never
    deduplicated or reassigned solely by process name.

@@ -215,6 +215,7 @@ class DependencyStatusService(QObject):
         rigctld_host_override: Optional[str] = None,
         fldigi_port_override: Optional[int] = None,
         fldigi_host_override: Optional[str] = None,
+        instance_identities: Optional[Mapping[str, Mapping[str, object]]] = None,
     ) -> Dict[str, Dict[str, object]]:
         """Return the latest endpoint-scoped snapshot and refresh it asynchronously.
 
@@ -233,6 +234,13 @@ class DependencyStatusService(QObject):
             "fldigi_port_override": fldigi_port_override,
             "fldigi_host_override": fldigi_host_override,
         }
+        exact_identities = {
+            str(name): dict(identity)
+            for name, identity in (instance_identities or {}).items()
+            if isinstance(identity, Mapping)
+        }
+        if exact_identities:
+            overrides["instance_identities"] = exact_identities
         scope = self._endpoint_scope(overrides)
         with self._lock:
             cached = self._scoped_snapshots.get(scope)
@@ -261,7 +269,25 @@ class DependencyStatusService(QObject):
                 with self._lock:
                     self._active_futures.add(future)
                 future.add_done_callback(lambda done, scoped=scope: self._on_scoped_worker_done(scoped, done))
-        return cached.to_software_status_snapshot() if cached is not None else self.software_status_snapshot()
+        if cached is not None:
+            return cached.to_software_status_snapshot()
+        fallback = self.software_status_snapshot()
+        # The shared snapshot intentionally answers only "is any process in
+        # this family running?"  Do not present that answer as selected-radio
+        # state while the exact executable+argument probe is pending.
+        for program_name in (instance_identities or {}):
+            status_key = "JS8Call_API" if str(program_name) == "JS8Call" else str(program_name)
+            if status_key not in fallback:
+                continue
+            fallback[status_key] = {
+                **dict(fallback[status_key]),
+                "state": "idle",
+                "running": False,
+                "reachable": False,
+                "tooltip": f"Checking the selected radio's {program_name} instance…",
+                "stale": True,
+            }
+        return fallback
 
     def refresh_now(self, *, reason: str = "manual", force: bool = False) -> DependencySnapshot:
         with self._lock:

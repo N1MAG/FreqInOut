@@ -212,7 +212,16 @@ class StationLaunchPlanner:
             radio_id = int(profile.get("id", 0) or 0)
             if radio_id <= 0 or (scope_radio_id is not None and radio_id != int(scope_radio_id)):
                 continue
-            if not review_all and int(profile.get("runtime_active", 0) or 0) != 1:
+            explicit_selected_radio = (
+                str(trigger or "").strip().lower() == "manual"
+                and scope_radio_id is not None
+                and radio_id == int(scope_radio_id)
+            )
+            if (
+                not review_all
+                and not explicit_selected_radio
+                and int(profile.get("runtime_active", 0) or 0) != 1
+            ):
                 continue
             bundle = bundles.get(radio_id, {})
             bundle_enabled = _truthy(bundle.get("launch_enabled", False))

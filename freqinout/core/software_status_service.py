@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import socket
 import threading
@@ -254,7 +255,12 @@ class SoftwareStatusService:
                     exe = ""
                     cmdline: Sequence[object] = ()
                     direct_match = name in target_tokens
-                    inspect_command = name in PROCESS_WRAPPER_TOKENS or not name
+                    # Multi-instance applications commonly share one binary
+                    # and differ only by launch arguments (profile/config
+                    # roots, rig name, or VarAC INI).  Inspect command lines
+                    # for the small set of known direct matches as well as
+                    # wrappers so status can attribute a process to one radio.
+                    inspect_command = direct_match or name in PROCESS_WRAPPER_TOKENS or not name
                     if direct_match:
                         try:
                             exe_path = str(proc.exe() or "").strip()
@@ -268,9 +274,9 @@ class SoftwareStatusService:
                             cmdline = ()
                     cmd_paths: List[str] = []
                     cmd_tokens: List[str] = []
-                    for arg in cmdline[:6]:
+                    normalized_cmdline = tuple(str(arg or "").strip() for arg in cmdline[:16])
+                    for path in normalized_cmdline:
                         try:
-                            path = str(arg or "").strip()
                             token = self._basename_token(path)
                         except Exception:
                             path = ""
@@ -288,6 +294,7 @@ class SoftwareStatusService:
                             "exe_path": exe_path,
                             "cmd_tokens": tuple(cmd_tokens),
                             "cmd_paths": tuple(cmd_paths),
+                            "cmdline": normalized_cmdline,
                         }
                     )
                 except Exception:
@@ -381,36 +388,119 @@ class SoftwareStatusService:
             targets = {normalized, f"{normalized}.exe"}
         return any(token in targets for token in self._proc_snapshot)
 
-    def cached_program_instance_running(self, program_name: str, configured_target: str) -> bool:
-        """Match a configured executable/script using only the shared cached records."""
+    @staticmethod
+    def _normalized_process_argument(value: object) -> str:
+        text = str(value or "").strip().strip('"').strip("'")
+        if not text:
+            return ""
+        expanded = os.path.expanduser(os.path.expandvars(text))
+        if re.match(r"^[a-zA-Z]:[\\/]", expanded):
+            return expanded.replace("\\", "/").casefold()
+        if expanded.startswith("/"):
+            return str(Path(expanded).resolve(strict=False)).casefold()
+        return expanded.casefold()
+
+    @classmethod
+    def _process_arguments_match(
+        cls,
+        actual: Sequence[object],
+        expected: Sequence[object],
+    ) -> bool:
+        wanted = tuple(
+            value
+            for value in (cls._normalized_process_argument(item) for item in expected)
+            if value
+        )
+        if not wanted:
+            return True
+        observed = tuple(cls._normalized_process_argument(item) for item in actual)
+        if len(observed) < len(wanted):
+            return False
+        return any(
+            observed[index : index + len(wanted)] == wanted
+            for index in range(len(observed) - len(wanted) + 1)
+        )
+
+    def cached_program_instance_running(
+        self,
+        program_name: str,
+        configured_target: str,
+        expected_arguments: Sequence[object] = (),
+    ) -> bool:
+        """Match one configured process identity from shared cached records.
+
+        Executable-only matching remains available for genuinely distinct
+        binaries.  When canonical launch arguments are supplied, the same
+        executable running for another radio is not accepted.
+        """
         target_text = str(configured_target or "").strip()
-        if not target_text:
+        if not target_text and not expected_arguments:
             return self.cached_program_is_running(program_name)
         try:
             parts = shlex.split(target_text, posix=os.name != "nt")
         except Exception:
             parts = [target_text]
-        path_parts = [Path(os.path.expanduser(os.path.expandvars(value))) for value in parts[:4] if value and not value.startswith("-")]
+        path_parts = [
+            Path(os.path.expanduser(os.path.expandvars(value)))
+            for value in parts[:4]
+            if value and not value.startswith("-")
+        ]
         target_paths = {str(path.resolve(strict=False)).casefold() for path in path_parts if path.is_absolute() or "/" in str(path) or "\\" in str(path)}
-        if not target_paths:
+        if not target_paths and not expected_arguments:
             # A launch recipe may intentionally use a PATH-resolved command
             # (``sdrpp``) or a platform launcher (``open -a SDR++``).  In that
             # case there is no durable filesystem target to compare, so use
             # the cached, program-specific token set rather than forcing a
             # readiness timeout after a successful launch.
             return self.cached_program_is_running(program_name)
+        targets = set(self._target_tokens(program_name))
+        if not targets:
+            normalized = program_name.strip().lower()
+            targets = {normalized, f"{normalized}.exe"}
         cls = type(self)
         for record in cls._shared_proc_records:
+            record_tokens = {
+                str(record.get("name") or ""),
+                str(record.get("exe") or ""),
+                *(str(value or "") for value in record.get("cmd_tokens", ())),
+            }
+            if not record_tokens.intersection(targets):
+                continue
             candidates = [str(record.get("exe_path") or "")]
             candidates.extend(str(value or "") for value in record.get("cmd_paths", ()))
+            target_matches = not target_paths
             for candidate in candidates:
                 if not candidate:
                     continue
                 resolved = str(Path(candidate).resolve(strict=False)).casefold()
                 for target in target_paths:
                     if resolved == target or resolved.startswith(target.rstrip("/\\") + os.sep.casefold()):
-                        return True
+                        target_matches = True
+                        break
+                if target_matches:
+                    break
+            if not target_matches:
+                continue
+            if not self._process_arguments_match(
+                record.get("cmdline", ()),
+                expected_arguments,
+            ):
+                continue
+            return True
         return False
+
+    def program_instance_running(
+        self,
+        program_name: str,
+        configured_target: str,
+        expected_arguments: Sequence[object] = (),
+    ) -> bool:
+        self._refresh_process_snapshot()
+        return self.cached_program_instance_running(
+            program_name,
+            configured_target,
+            expected_arguments,
+        )
 
     def js8_api_reachable(
         self,
@@ -1150,10 +1240,28 @@ class SoftwareStatusService:
         rigctld_host_override: Optional[str] = None,
         fldigi_port_override: Optional[int] = None,
         fldigi_host_override: Optional[str] = None,
+        instance_identities: Optional[Mapping[str, Mapping[str, object]]] = None,
     ) -> Dict[str, Dict[str, object]]:
+        identities = instance_identities if isinstance(instance_identities, Mapping) else {}
+
+        def _running(program_name: str) -> bool:
+            identity = identities.get(program_name, {})
+            if isinstance(identity, Mapping):
+                target = str(identity.get("target") or "").strip()
+                arguments = identity.get("arguments", ())
+                if not isinstance(arguments, (list, tuple)):
+                    arguments = ()
+                if target or arguments:
+                    return self.program_instance_running(
+                        program_name,
+                        target,
+                        arguments,
+                    )
+            return self.program_is_running(program_name)
+
         if force:
             self._refresh_process_snapshot(force=True)
-        running_js8 = self.program_is_running("JS8Call")
+        running_js8 = _running("JS8Call")
         js8_host = (host_override or "").strip() or self._settings_text("js8_host", JS8_DEFAULT_HOST) or JS8_DEFAULT_HOST
         js8_port = int(port_override) if port_override is not None else self._settings_int("js8_port", JS8_DEFAULT_PORT)
         js8_cache_host = str(js8_host or "").strip().lower()
@@ -1166,7 +1274,7 @@ class SoftwareStatusService:
             allow_fallback=False,
             force=force,
         )
-        running_flrig = self.program_is_running("FLRig")
+        running_flrig = _running("FLRig")
         flrig_host = (flrig_host_override or "").strip() or self._settings_text("flrig_host", FLRIG_DEFAULT_HOST) or FLRIG_DEFAULT_HOST
         flrig_port = (
             int(flrig_port_override)
@@ -1181,7 +1289,7 @@ class SoftwareStatusService:
         )
         active_control_via = self._settings_text("control_via", "FLRig").strip().upper()
         rigctld_active = active_control_via == "RIGCTLD" or rigctld_host_override is not None or rigctld_port_override is not None
-        running_rigctld = self.program_is_running("RigCtlD") if rigctld_active else False
+        running_rigctld = _running("RigCtlD") if rigctld_active else False
         rigctld_host = (
             (rigctld_host_override or "").strip()
             or self._settings_text("rig_host", RIGCTLD_DEFAULT_HOST)
@@ -1202,7 +1310,7 @@ class SoftwareStatusService:
             if rigctld_active
             else False
         )
-        running_fldigi = self.program_is_running("FLDigi")
+        running_fldigi = _running("FLDigi")
         fldigi_host = self._resolved_fldigi_host(fldigi_host_override)
         fldigi_port = (
             int(fldigi_port_override)
@@ -1275,7 +1383,7 @@ class SoftwareStatusService:
                     health=self._health_snapshot_for(fldigi_key),
                 )
                 continue
-            running = self.program_is_running(key)
+            running = _running(key)
             tooltip = "Running" if running else "Not running"
             if key == "VarAC" and running:
                 exe = self.find_process_exe("VarAC")

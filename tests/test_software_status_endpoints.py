@@ -18,6 +18,55 @@ class DummySettings:
         return self._values.get(key, default)
 
 
+def test_process_identity_uses_launch_arguments_when_radios_share_one_binary(monkeypatch):
+    record = {
+        "name": "flrig",
+        "exe": "flrig",
+        "exe_path": "/usr/local/bin/flrig",
+        "cmd_tokens": ("flrig",),
+        "cmd_paths": ("/usr/local/bin/flrig", "/profiles/FTDX-10"),
+        "cmdline": (
+            "/usr/local/bin/flrig",
+            "--config-dir",
+            "/profiles/FTDX-10",
+        ),
+    }
+    monkeypatch.setattr(SoftwareStatusService, "_shared_proc_records", [record])
+    service = SoftwareStatusService(DummySettings())
+
+    assert service.cached_program_instance_running(
+        "FLRig",
+        "/usr/local/bin/flrig",
+        ("--config-dir", "/profiles/FTDX-10"),
+    )
+    assert not service.cached_program_instance_running(
+        "FLRig",
+        "/usr/local/bin/flrig",
+        ("--config-dir", "/profiles/FT-710"),
+    )
+
+
+def test_status_snapshot_does_not_credit_other_radio_family_process(monkeypatch):
+    service = SoftwareStatusService(DummySettings())
+    monkeypatch.setattr(service, "program_is_running", lambda _name: True)
+    monkeypatch.setattr(service, "program_instance_running", lambda _name, _target, _args=(): False)
+    monkeypatch.setattr(service, "js8_api_reachable", lambda **_kwargs: False)
+    monkeypatch.setattr(service, "flrig_api_reachable", lambda **_kwargs: False)
+    monkeypatch.setattr(service, "fldigi_api_reachable", lambda **_kwargs: False)
+
+    snapshot = service.status_snapshot(
+        instance_identities={
+            "FLRig": {
+                "target": "/usr/local/bin/flrig",
+                "arguments": ("--config-dir", "/profiles/FT-710"),
+            }
+        }
+    )
+
+    assert snapshot["FLRig"]["running"] is False
+    assert snapshot["FLRig"]["state"] == "idle"
+
+
 def test_flrig_api_reachable_uses_saved_port(monkeypatch):
     import freqinout.radio_interface.rigctl_client as rigctl_client
 
