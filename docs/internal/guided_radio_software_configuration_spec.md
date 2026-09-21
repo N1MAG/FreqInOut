@@ -2729,6 +2729,15 @@ ports per member. For radio `FT-710`, a typical qualified Linux/Wine plan is:
 - working directory: `/home/bill/.wine/drive_c/VarAC`, with the discovered
   `WINEPREFIX` recorded when it is not the platform default.
 
+The corresponding FIO-created VARA runtime must also remain inside the
+discovered Wine drive—for example host folder
+`/home/bill/.wine/drive_c/VARA-ft-710` and native VarAC value
+`C:\VARA-ft-710\VARA.exe`. FIO must not generate
+`Z:\home\...\.freqinout\managed-instances\...\VARA.exe` for this field.
+Each converted or new cluster member receives its own readable, space-free
+runtime sibling; occupied targets are preserved and resolved through the
+existing numbered-sibling allocator.
+
 On Windows, the vector is `[C:\\VarAC\\VarAC.exe,
 C:\\VarAC\\VarAC-FT-710.ini]` and the working directory is the installation
 directory. Linux/Wine and native Windows are release platforms. macOS remains
@@ -2750,6 +2759,13 @@ remains blocking if the same path is claimed as private storage, belongs to a
 different cluster, or would be overwritten without the qualified transaction.
 INI files, incoming/outbox folders, working identities, VARA runtimes, and ports
 remain member-distinct.
+
+Persisted VarAC clusters and memberships are authoritative over the optional
+empty-editor display preference. Any saved topology forces cluster setup
+visible and populated in Settings/Software Administration, even if the prior
+`varac_cluster_mode_enabled` value is false. The control remains on until the
+saved topology is removed; a stale preference may not make a completed Add
+Radio cluster appear absent.
 
 #### Draft, Final Save, And Recovery Boundary
 
@@ -4417,9 +4433,12 @@ Radio plan permanently non-actionable.
 The writer's no-replacement rule remains absolute. Guided preparation owns the
 collision-free name choice before it constructs the immutable plan:
 
-- each VARA runtime created for a converted standalone member or a new cluster
-  member starts with the readable preferred name `VARA` below that member's
-  radio-scoped `varac-native` directory;
+- on Linux/Wine with proven drive evidence, each VARA runtime created for a
+  converted standalone member or a new cluster member starts with the readable
+  preferred name `VARA-<radio-slug>` at the Wine drive root so VarAC receives a
+  native drive-letter path; qualified layouts without that evidence retain the
+  readable preferred name `VARA` below the member's radio-scoped
+  `varac-native` directory;
 - any existing filesystem object at that path—including a directory, file, or
   broken symbolic link—counts as occupied and is never removed, entered,
   copied over, or treated as proof of FIO ownership;

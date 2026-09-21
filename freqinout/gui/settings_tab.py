@@ -11918,6 +11918,28 @@ class SettingsTab(QWidget):
     def _varac_cluster_mode_enabled(self) -> bool:
         return bool(hasattr(self, "varac_cluster_mode_chk") and self.varac_cluster_mode_chk.isChecked())
 
+    def _sync_varac_cluster_mode_from_saved_topology(self) -> bool:
+        """Make saved cluster topology authoritative over the display toggle."""
+
+        checkbox = getattr(self, "varac_cluster_mode_chk", None)
+        if checkbox is None:
+            return False
+        has_saved_topology = bool(self.varac_clusters)
+        changed = has_saved_topology and not checkbox.isChecked()
+        if changed:
+            with QSignalBlocker(checkbox):
+                checkbox.setChecked(True)
+        checkbox.setEnabled(not has_saved_topology)
+        if has_saved_topology:
+            checkbox.setToolTip(
+                "Cluster setup is active because saved VarAC cluster topology exists. Delete the saved clusters before turning it off."
+            )
+        else:
+            checkbox.setToolTip(
+                "Enable this only when one or more radio-owned VarAC instances should participate in coordinated cluster or BBS relay behavior."
+            )
+        return changed
+
     def _on_varac_cluster_mode_toggled(self, _state: int) -> None:
         if self._loading_settings:
             self._refresh_varac_cluster_mode_ui(refresh_tables=False)
@@ -23111,8 +23133,14 @@ class SettingsTab(QWidget):
     ) -> None:
         if not hasattr(self, "varac_clusters_table"):
             return
-        if not self._varac_cluster_mode_enabled():
+        table = self.varac_clusters_table
+        try:
+            self.varac_clusters = list(self.multi_radio_store.list_varac_clusters())
+        except Exception:
+            log.exception("Failed loading VarAC clusters from store.")
             self.varac_clusters = []
+        mode_changed = self._sync_varac_cluster_mode_from_saved_topology()
+        if not self._varac_cluster_mode_enabled():
             self.varac_cluster_members = []
             self.varac_clusters_table.setRowCount(0)
             if hasattr(self, "varac_members_table"):
@@ -23125,12 +23153,8 @@ class SettingsTab(QWidget):
             if refresh_section_titles:
                 self._refresh_section_titles()
             return
-        table = self.varac_clusters_table
-        try:
-            self.varac_clusters = list(self.multi_radio_store.list_varac_clusters())
-        except Exception:
-            log.exception("Failed loading VarAC clusters from store.")
-            self.varac_clusters = []
+        if mode_changed:
+            self._refresh_varac_cluster_mode_ui(refresh_tables=False)
         self._varac_clusters_table_loading = True
         try:
             table.setRowCount(0)

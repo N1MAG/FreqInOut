@@ -9,15 +9,18 @@ from freqinout.core.guided_varac_configuration import (
     recommend_varac_arrangement_from_snapshots,
 )
 from freqinout.core.multi_radio_store import MultiRadioStore
+from freqinout.core.config_varac_managed import apply_varac_native_cluster_plan
 from freqinout.core.varac_native_preparation import (
     native_draft_fingerprint,
     prepare_varac_native_configuration,
 )
 
 
-def _evidence(tmp_path: Path):
-    varac_root = tmp_path / "VarAC"
-    vara_root = tmp_path / "VARA"
+def _evidence(tmp_path: Path, *, inside_wine_drive: bool = False):
+    native_root = tmp_path / "prefix" / "drive_c" if inside_wine_drive else tmp_path
+    varac_root = native_root / "VarAC"
+    vara_root = native_root / "VARA"
+    native_root.mkdir(parents=True, exist_ok=True)
     varac_root.mkdir()
     vara_root.mkdir()
     executable = varac_root / "VarAC.exe"
@@ -119,6 +122,54 @@ def test_prepare_existing_standalone_and_new_member_is_immutable_and_ready(tmp_p
     assert result.presentation["port"] == 8310
     assert result.presentation["secondary_port"] == 8312
     assert not result.plan.members[1].target_path.exists()
+
+
+def test_linux_wine_targets_and_apply_use_native_drive_paths_not_managed_root_z_paths(tmp_path) -> None:
+    node, profile = _evidence(tmp_path, inside_wine_drive=True)
+
+    result = prepare_varac_native_configuration(
+        _draft(),
+        varac_nodes=(node,),
+        device_profiles=(profile,),
+        varac_clusters=(),
+        varac_members=(),
+        managed_root=tmp_path / ".freqinout" / "managed-instances",
+        generation=8,
+        platform_override="linux-wine",
+    )
+
+    assert result.ready
+    assert result.plan is not None
+    drive_root = tmp_path / "prefix" / "drive_c"
+    existing_member, new_member = result.plan.members
+    assert existing_member.vara_target_runtime_folder == drive_root / "VARA-existing-radio"
+    assert new_member.vara_target_runtime_folder == drive_root / "VARA-new-radio"
+    assert new_member.changes["VARAHF_CONFIG"]["VarahfMainPath"] == (
+        r"C:\VARA-new-radio\VARA.exe"
+    )
+    assert existing_member.changes["VARAHF_CONFIG"]["VarahfMainPath"] == (
+        r"C:\VARA-existing-radio\VARA.exe"
+    )
+    assert new_member.launch_command[2] == r"C:\VarAC\VarAC-new-radio.ini"
+    assert not any(
+        value.startswith("Z:\\")
+        for member in result.plan.members
+        for value in (
+            member.changes["VARAHF_CONFIG"]["VarahfMainPath"],
+            member.changes["VARAHF_CONFIG"]["VarahfMonitorPath"],
+        )
+    )
+
+    applied = apply_varac_native_cluster_plan(
+        result.plan,
+        backup_root=tmp_path / "backups",
+    )
+    assert applied.ok, applied.error
+    assert (drive_root / "VARA-existing-radio" / "VARA.exe").is_file()
+    assert (drive_root / "VARA-new-radio" / "VARA.exe").is_file()
+    assert r"VarahfMainPath=C:\VARA-new-radio\VARA.exe" in (
+        Path(new_member.target_path).read_text(encoding="utf-8")
+    )
 
 
 def test_prepare_uses_fresh_numbered_runtime_when_preferred_target_exists(tmp_path) -> None:

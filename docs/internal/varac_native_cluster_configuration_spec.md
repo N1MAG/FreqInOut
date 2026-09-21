@@ -107,10 +107,13 @@ working directory together form the launch identity. FIO never assumes that an
 INI outside the VarAC-visible filesystem can be opened. The prepared plan must
 prove the exact command on the selected platform or remain `Needs attention`.
 Host paths under a Wine `drive_<letter>` are written using that Windows drive;
-other managed host paths use Wine's `Z:` root mapping. FIO retains the host path
-separately for its own file and database access. The native VarAC INI argument,
-`DBCustomFilePath`, and VARA executable paths therefore never receive an
-untranslated Linux path.
+operator-selected data outside the prefix may use Wine's `Z:` root mapping.
+FIO-created VARA runtimes may not: when the qualified VarAC source is inside a
+Wine drive, each generated runtime is placed inside that same drive and stored
+in VarAC as a native drive-letter path such as
+`C:\VARA-ft-710\VARA.exe`. FIO retains the host path separately for its own
+file access. The native VarAC INI argument, `DBCustomFilePath`, and VARA
+executable paths therefore never receive an untranslated Linux path.
 
 ### Controlled native keys
 
@@ -502,16 +505,30 @@ valid. Private storage reuse, a database owned by another cluster, or any
 unapproved overwrite remains a safety blocker. INI, incoming/outbox, working
 identity, VARA runtime, and endpoints must remain distinct.
 
-Managed VARA runtime naming is resolved before the writer plan is built. The
-preferred radio-scoped target is `VARA`; when any filesystem object already
-occupies that name, preparation selects the first absent sibling `VARA-2`,
-`VARA-3`, and so on. Broken symlinks and paths reserved by another member in
-the same plan count as occupied. This allocator is read-only and deterministic
-for unchanged evidence. It never deletes or adopts an occupied target. The
-transactional writer still rejects any target that exists at validation or
-apply time, so a race or stale plan cannot overwrite an arbitrary runtime.
-Every native path and launch projection must use the exact selected sibling;
-consumers may not reconstruct the preferred unsuffixed path.
+Managed VARA runtime naming is resolved before the writer plan is built. On
+Linux/Wine, when the selected VarAC source proves a `drive_<letter>`, the
+preferred target is a readable, space-free sibling at that drive root:
+`VARA-<radio-slug>`. This gives each process a distinct `VARA.ini` while keeping
+the path native to the Windows application. Qualified layouts without Wine-
+drive evidence retain the bounded radio-scoped `varac-native/VARA` target.
+When any filesystem object already occupies the preferred name, preparation
+selects the first absent numbered sibling. Broken symlinks and paths reserved
+by another member in the same plan count as occupied. This allocator is read-
+only and deterministic for unchanged evidence. It never deletes or adopts an
+occupied target. The transactional writer still rejects any target that exists
+at validation or apply time, so a race or stale plan cannot overwrite an
+arbitrary runtime. Every native path and launch projection must use the exact
+selected sibling; consumers may not reconstruct the preferred path.
+
+### Persisted cluster visibility
+
+Saved cluster topology is authoritative application state, not a view
+preference. If one or more cluster records exist, Settings and Software
+Administration must load and show those clusters and memberships even when a
+stale `varac_cluster_mode_enabled` preference is false. The cluster control is
+forced on and cannot be turned off until the saved topology is deleted. A
+display preference may hide an empty cluster editor; it may never suppress a
+persisted cluster or make a successful Add Radio save appear to have failed.
 
 ### Draft and final transaction boundary
 

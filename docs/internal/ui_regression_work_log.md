@@ -9430,3 +9430,34 @@ semantics directly. Focused radio-bundle, shell-health, and radio-scoped
 Settings coverage passes **314 tests**. Broader orchestrator, identity, guided
 recipe, receiver, VarAC, and multi-rig coverage passes **147 tests**. Changed
 Python compilation and `git diff --check` pass.
+
+## 2026-09-21 — Wine-native VARA paths and persisted cluster visibility
+
+Status: focused automated gates passed; production operator retest remains
+open.
+
+Production database evidence showed that Add Radio had successfully saved the
+`FTDX-10 + FT-710 VarAC` cluster and both memberships. The cluster table looked
+empty because a separate stale `varac_cluster_mode_enabled=false` preference
+short-circuited the table load. Saved topology is now authoritative: its rows
+load, the cluster control is forced on, and it cannot be turned off until the
+saved clusters are removed. Empty stations retain the existing optional setup
+toggle.
+
+The same saved plan showed that Linux/Wine preparation intentionally cloned
+VARA below `.freqinout/managed-instances` and translated that host location to
+Wine `Z:`. VarAC is a Windows application and expects its selected VARA
+executable in the Wine filesystem. When source evidence identifies a
+`drive_<letter>`, FIO now allocates distinct, readable `VARA-<radio>` runtime
+siblings inside that drive and writes native values such as
+`C:\VARA-ft-710\VARA.exe`. Existing targets remain untouched and the numbered
+collision allocator plus transactional revalidation remain unchanged.
+
+Production-shaped preparation coverage proves both members use Wine-native
+drive paths and never generated `Z:` executable paths. Settings coverage proves
+a saved cluster and membership remain visible when the stored display
+preference is false. Focused preparation and cluster UI coverage passes **25
+tests**. Broader native writer/transaction, Add Radio arrangement/final-save,
+production-shaped audit, Software Administration, and Settings coverage passes
+**299 tests** with 19 platform skips. Changed Python compilation and
+`git diff --check` pass.

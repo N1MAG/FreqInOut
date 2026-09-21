@@ -233,10 +233,10 @@ def _build_plan(
     new_label = str(draft.get("instance_name") or draft.get("owner_label") or "New VarAC").strip()
     new_slug = _slug(new_label or new_key)
     # VarAC's native multi-instance contract is one executable installation
-    # with one distinct INI beside that installation.  FIO-owned member data
-    # (VARA, incoming and outbox) remains below the managed root.
+    # with one distinct INI beside that installation.  Mailbox data retains
+    # its separately derived station location; the VARA target is selected
+    # after Wine-prefix evidence is available below.
     managed_member_root = managed_root / new_slug / "varac-native"
-    new_vara_target_base = managed_member_root / "VARA"
 
     existing_node: Mapping[str, Any] | None = None
     existing_profile: Mapping[str, Any] | None = None
@@ -314,6 +314,19 @@ def _build_plan(
     source_vara = parse_vara_ini_bytes(source_vara_ini, source_vara_ini.read_bytes())
     source_files = snapshot_vara_runtime_files(source_vara_root)
 
+    # VarAC is a Windows process even when launched through Wine.  Keep every
+    # FIO-created VARA runtime inside the discovered Wine drive so VarAC sees a
+    # native drive-letter path (for example C:\\VARA-ft-710\\VARA.exe), never a
+    # host-root Z: projection below .freqinout.  Fixtures and unusual qualified
+    # layouts without drive_<letter> evidence retain the bounded managed root.
+    wine_drive_root = _wine_drive_root(source_ini.path) if platform_key == "linux-wine" else None
+    vara_target_parent = wine_drive_root or managed_member_root
+    new_vara_target_base = (
+        vara_target_parent / f"VARA-{new_slug}"
+        if wine_drive_root
+        else vara_target_parent / "VARA"
+    )
+
     reserved_vara_targets: list[Path] = []
 
     occupied = _occupied_ports(nodes)
@@ -329,9 +342,14 @@ def _build_plan(
         if existing_number == new_member_number:
             raise ValueError("The existing and new VarAC members need different member numbers.")
         existing_member_id = f"node:{int(existing_node.get('id') or 0)}"
-        existing_target_base = managed_root / _slug(
+        existing_slug = _slug(
             str(existing_profile.get("name") or existing_node.get("name") or existing_member_id)
-        ) / "varac-native" / "VARA"
+        )
+        existing_target_base = (
+            wine_drive_root / f"VARA-{existing_slug}"
+            if wine_drive_root
+            else managed_root / existing_slug / "varac-native" / "VARA"
+        )
         existing_target_root = _next_available_managed_runtime(
             existing_target_base,
             reserved=reserved_vara_targets,
@@ -409,6 +427,7 @@ def _build_plan(
         shared_bbs_archive,
         incoming_path,
         outbox_path,
+        *((wine_drive_root,) if wine_drive_root is not None else ()),
     )
     return build_varac_native_cluster_plan(
         VarACNativeClusterRequest(
@@ -902,6 +921,16 @@ def _wine_prefix(ini_path: Path) -> str:
         if re.fullmatch(r"drive_[a-zA-Z]", part):
             return str(Path(*parts[:index]))
     return str(Path(os.environ.get("WINEPREFIX", "~/.wine")).expanduser())
+
+
+def _wine_drive_root(path: Path) -> Path | None:
+    """Return the concrete Wine drive containing *path*, when evidenced."""
+
+    parts = Path(path).expanduser().absolute().parts
+    for index, part in enumerate(parts):
+        if re.fullmatch(r"drive_[a-zA-Z]", part):
+            return Path(*parts[: index + 1])
+    return None
 
 
 def _native_varac_path(path: Path, *, platform_key: str, wine_prefix: str) -> str:

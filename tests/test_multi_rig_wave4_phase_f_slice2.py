@@ -245,6 +245,58 @@ def test_settings_tab_shows_varac_cluster_and_membership_tables(monkeypatch, tmp
         app.processEvents()
 
 
+def test_saved_varac_topology_overrides_stale_hidden_cluster_preference(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    app = _qapplication_or_skip()
+
+    settings = SettingsManager()
+    settings.set("varac_cluster_mode_enabled", False)
+    store = MultiRadioStore(settings_db_path())
+    primary = store.get_runtime_primary_device_profile() or _create_primary_device(store)
+    store.save_device_profile(
+        {
+            "id": primary["id"],
+            "name": primary["name"],
+            "use_varac": 1,
+            "varac_install_path": "C:/VarAC/Main",
+            "varac_db_path": "C:/VarAC/Main/VarAC.db",
+            "varac_ini_path": "C:/VarAC/Main/VarAC.ini",
+        }
+    )
+    cluster = store.save_varac_cluster(
+        {
+            "name": "Saved Cluster",
+            "cluster_id": "SAVED-A",
+            "shared_db_path": str(tmp_path / "shared" / "VarAC.db"),
+        }
+    )
+    store.set_varac_cluster_member(
+        int(cluster["id"]), int(primary["id"]), instance_number=1, enabled=True
+    )
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    monkeypatch.setattr(SettingsTab, "_maybe_backfill_js8_geo", lambda self: None)
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status", lambda self: None)
+
+    tab = SettingsTab()
+    try:
+        assert tab.varac_cluster_mode_chk.isChecked() is True
+        assert tab.varac_cluster_mode_chk.isEnabled() is False
+        assert any(
+            tab.varac_clusters_table.item(row, 1).text() == "Saved Cluster"
+            for row in range(tab.varac_clusters_table.rowCount())
+        )
+        assert any(
+            tab.varac_members_table.item(row, 1).text() == "Saved Cluster"
+            for row in range(tab.varac_members_table.rowCount())
+        )
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
 def test_settings_tab_persists_device_profile_varac_fields(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
