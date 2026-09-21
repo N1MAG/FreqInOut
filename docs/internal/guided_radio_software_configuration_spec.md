@@ -3398,6 +3398,31 @@ guided-radio, Add Radio, planner, Software Administration, native
 preparation/writer/transaction, and VNC partition passed **288 tests**.
 Changed Python compilation and `git diff --check` pass.
 
+### GRS-12.4 — Discovery Completion Handoff Ownership
+
+The Add Radio discovery worker's successful `finished` payload and its
+`QThread.finished` lifecycle notification are separate queued deliveries to the
+GUI thread. Qt does not guarantee that the result relay is delivered first.
+Thread teardown therefore owns only the worker/thread wrappers; it must not
+remove the dialog completion callback. The result or failure handler alone
+consumes that callback and transitions the current generation out of
+`Discovery in progress`.
+
+This remains true when all discovery phases finish quickly, the thread exits
+before the GUI event queue drains, or unrelated startup/background activity is
+using the UI thread. A late current result must still populate the prepared
+plan. A stale/cancelled result follows the existing generation-fenced refresh
+route. Missing callback ownership is logged as an internal diagnostic and may
+not fail silently. Dialog/application shutdown may explicitly cancel and clear
+outstanding callbacks after its bounded worker shutdown.
+
+Acceptance requires a deterministic ordering regression that delivers
+`QThread.finished` before the queued successful result and proves that the
+callback still runs exactly once. A companion failure case proves the failure
+handler consumes its callback exactly once. The prepare-first and
+production-shaped guided Add Radio widget suites must continue to pass. No
+schema or migration is introduced.
+
 ## GRS-13 — Application-Native Storage, Unified Administration, And Stable Multi-Instance Launch
 
 Status: controlling specification accepted. The GRS-13.1 canonical identity,

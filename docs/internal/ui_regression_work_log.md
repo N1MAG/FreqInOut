@@ -9331,3 +9331,32 @@ Acceptance evidence:
 No production database, orphan metadata, application file, external process,
 radio, commit, or remote was changed. The unrelated installation-guide DOCX
 and rendered guide directory remain preserved and excluded.
+
+## 2026-09-21 — Add Radio discovery completion handoff race
+
+Status: focused and broader automated gates passed.
+
+The attached production log proves discovery itself was healthy: applications,
+Fast Light, JS8 profiles, and VarAC all finished, and the complete request
+finished successfully in **101 ms**. Logging then stopped while the dialog
+remained on `Discovery in progress`. The attached CPU hotspot was recorded
+before Add Radio started and showed ControlFreq tooltip traversal plus MeshCore
+BLE import/connect activity; it is not the discovery blocker.
+
+The defect was a queued-event ownership race. The worker result relay and
+`QThread.finished` were independently queued to SettingsTab. If thread release
+arrived first, it removed both the Qt wrappers and the completion callback. The
+later successful result was silently ignored, leaving the dialog permanently
+in progress.
+
+Thread release now removes only worker/thread ownership. The success or failure
+handler atomically consumes its callback and logs a diagnostic if one is
+unexpectedly absent. Deterministic tests deliver thread release before success
+and prove the result still publishes once; the failure path also consumes its
+callback once. GRS-12.4 and operator help record this lifecycle contract.
+
+Focused final-apply, prepare-first, and production-shaped guided operator UI
+coverage: **40 passed**.
+
+Broader guided discovery/model/proposal, production-shaped audit, VarAC native
+acceptance, final-apply, and real guided widget coverage: **93 passed**.

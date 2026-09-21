@@ -13748,22 +13748,46 @@ class SettingsTab(QWidget):
     def _on_guided_radio_autofill_finished(self, job_id: int, payload: object) -> None:
         """Apply guided discovery results on the SettingsTab GUI thread."""
 
-        callbacks = self._guided_radio_autofill_callbacks.get(int(job_id))
+        callbacks = self._guided_radio_autofill_callbacks.pop(int(job_id), None)
         if callbacks is not None:
+            log.info(
+                "Guided Add Radio discovery result delivered to dialog; job_id=%s.",
+                int(job_id),
+            )
             callbacks[0](payload)
+        else:
+            log.warning(
+                "Guided Add Radio discovery result had no registered completion callback; job_id=%s.",
+                int(job_id),
+            )
 
     def _on_guided_radio_autofill_failed(self, job_id: int, detail: str) -> None:
         """Report guided discovery failure on the SettingsTab GUI thread."""
 
-        callbacks = self._guided_radio_autofill_callbacks.get(int(job_id))
+        callbacks = self._guided_radio_autofill_callbacks.pop(int(job_id), None)
         if callbacks is not None:
+            log.info(
+                "Guided Add Radio discovery failure delivered to dialog; job_id=%s.",
+                int(job_id),
+            )
             callbacks[1](detail)
+        else:
+            log.warning(
+                "Guided Add Radio discovery failure had no registered completion callback; job_id=%s detail=%s.",
+                int(job_id),
+                detail,
+            )
 
     def _on_guided_radio_autofill_released(self, job_id: int) -> None:
         """Release a finished guided discovery job and its dialog callbacks."""
 
+        # QThread.finished and the worker-result relay are independent queued
+        # deliveries to the GUI thread.  The thread-finished delivery may win
+        # that race even though discovery succeeded.  Releasing the callback
+        # here used to discard the later result and leave Add Radio permanently
+        # showing "Discovery in progress".  Result/failure handlers consume the
+        # callback; thread release owns only the Qt job wrappers.
         self._guided_radio_autofill_jobs.pop(int(job_id), None)
-        self._guided_radio_autofill_callbacks.pop(int(job_id), None)
 
     def _on_guided_native_config_finished(self, job_id: int, payload: object) -> None:
         """Continue a guided native save only after returning to the GUI thread."""

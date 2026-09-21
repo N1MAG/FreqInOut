@@ -51,6 +51,47 @@ def test_guided_transaction_suppresses_provisional_radio_and_identity_refreshes(
     SettingsTab._refresh_runtime_projection_ui(host, refresh_multi_radio=True)
 
 
+def test_guided_discovery_thread_release_cannot_discard_later_queued_result() -> None:
+    events = []
+    host = SimpleNamespace(
+        _guided_radio_autofill_jobs={17: (object(), object())},
+        _guided_radio_autofill_callbacks={
+            17: (
+                lambda payload: events.append(("finished", payload)),
+                lambda detail: events.append(("failed", detail)),
+            )
+        },
+    )
+
+    # Qt does not guarantee that QThread.finished is delivered after the
+    # separately queued SettingsTab result relay.
+    SettingsTab._on_guided_radio_autofill_released(host, 17)
+    assert 17 not in host._guided_radio_autofill_jobs
+    assert 17 in host._guided_radio_autofill_callbacks
+
+    SettingsTab._on_guided_radio_autofill_finished(host, 17, {"ready": True})
+
+    assert events == [("finished", {"ready": True})]
+    assert 17 not in host._guided_radio_autofill_callbacks
+
+
+def test_guided_discovery_failure_consumes_callback_once() -> None:
+    events = []
+    host = SimpleNamespace(
+        _guided_radio_autofill_callbacks={
+            23: (
+                lambda payload: events.append(("finished", payload)),
+                lambda detail: events.append(("failed", detail)),
+            )
+        }
+    )
+
+    SettingsTab._on_guided_radio_autofill_failed(host, 23, "scan failed")
+
+    assert events == [("failed", "scan failed")]
+    assert 23 not in host._guided_radio_autofill_callbacks
+
+
 def test_final_native_apply_uses_preapply_review_payload_after_readback_enrichment() -> None:
     reviewed_draft = {"family_key": "varac", "instance_name": "New Radio"}
     reviewed = {
