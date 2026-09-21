@@ -474,6 +474,71 @@ def test_orchestrator_executes_the_exact_preview_queue(monkeypatch: pytest.Monke
     assert captured == {"trigger": "startup", "queue": plan.queue()}
 
 
+def test_selected_radio_manual_start_can_override_only_automatic_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator._active = False
+    orchestrator.launch_allowed = lambda: True
+    captured: dict[str, object] = {}
+    plan = LaunchPlan(
+        trigger="manual",
+        scope_radio_id=7,
+        instances=(
+            PlannedInstance(
+                name="JS8Call",
+                instance_key="js8:field",
+                instance_identity="js8:field",
+                radio_ids=(7,),
+                radio_names=("Field",),
+            ),
+        ),
+    )
+    orchestrator.preview_manual_plan = lambda radio_id, **kwargs: (
+        captured.update(radio_id=radio_id, bundle_override=kwargs.get("bundle_override")) or plan
+    )
+    orchestrator._start_sequence = lambda trigger, queue: (
+        captured.update(trigger=trigger, queue=queue) or True
+    )
+    override = {"launch_enabled": True, "items": [_item("JS8Call", instance_key="js8:field")]}
+
+    assert orchestrator.start_radio_startup_sequence(7, bundle_override=override) is True
+    assert captured["radio_id"] == 7
+    assert captured["bundle_override"] == override
+    assert captured["trigger"] == "manual"
+    assert captured["queue"] == plan.queue()
+
+
+def test_explicit_manual_sequence_preserves_structured_instance_recipe() -> None:
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator._active = False
+    orchestrator.launch_allowed = lambda: True
+    captured: dict[str, object] = {}
+    orchestrator._build_queue = lambda items, startup_only: (
+        captured.update(items=items, startup_only=startup_only) or list(items)
+    )
+    orchestrator._start_sequence = lambda trigger, queue: (
+        captured.update(trigger=trigger, queue=queue) or True
+    )
+    item = {
+        **_item("VarAC", instance_key="varac:field"),
+        "monitor_health": False,
+        "dependencies": ["FLRig"],
+        "readiness_policy": {
+            "working_directory": "/radio/field",
+            "launch_arguments": ["C:\\VarAC\\Field.ini"],
+        },
+        "execution_scope": "standard",
+    }
+
+    assert orchestrator.start_manual_sequence([item]) is True
+    normalized = captured["items"][0]
+    assert normalized["instance_key"] == "varac:field"
+    assert normalized["monitor_health"] is False
+    assert normalized["dependencies"] == ["FLRig"]
+    assert normalized["readiness_policy"]["working_directory"] == "/radio/field"
+    assert normalized["readiness_policy"]["launch_arguments"] == ["C:\\VarAC\\Field.ini"]
+    assert captured["startup_only"] is False
+
+
 def test_executor_does_not_use_family_status_for_distinct_instance() -> None:
     from freqinout.core.launch_orchestrator import LaunchOrchestrator
 

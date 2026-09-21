@@ -9390,3 +9390,43 @@ operator widget coverage: **54 passed**.
 Broader Fast Light identity, canonical Add Radio/Software Administration,
 prepare-first, responsive real-widget, final-apply, and unified guided UX
 coverage: **138 passed**.
+
+## 2026-09-21 — Launch Control action semantics and multi-radio isolation
+
+Status: focused and broader automated gates passed; production operator retest
+remains open.
+
+The Launch Control surface presented three related controls without enforcing
+three independent meanings. Changing only the radio-level automatic-start
+switch did not mark Settings dirty, so it could be lost. `Start Startup Apps`
+used the saved automatic-start gate even though it is an explicit operator
+action, causing a checked startup set to report that nothing was selected when
+automatic startup was off. Row `Start` also passed the selected item through a
+legacy station catalog normalizer, which discarded radio-owned instance
+identity, monitor state, dependencies, working directory/readiness facts, and
+execution scope before launch.
+
+The selected-radio contract is now explicit and consistent:
+
+- `Monitor Health` controls health reporting only and immediately displays
+  `Monitoring off` when unchecked;
+- `Launch at Startup` selects that radio's ordered startup set;
+- `Automatically launch this radio's startup apps when FIO opens` gates only
+  unattended FIO startup and is now a normal dirty, persistable setting;
+- row `Start` launches only that exact selected-radio application recipe now;
+- `Start Startup Apps` launches the checked selected-radio set now without
+  silently enabling automatic startup.
+
+Both explicit start actions now use the canonical selected-radio planner and
+retain executable, arguments, working directory, environment, instance key,
+dependencies, readiness policy, and execution scope. Automatic station startup
+continues to honor every active radio's persisted automatic gate and startup
+rows, deduplicating exact shared identities while keeping distinct rig
+instances separate. An empty saved radio health bundle is authoritative and no
+longer inherits another radio's legacy station-global monitor flags.
+
+The governing reliability specification and operator help now state these
+semantics directly. Focused radio-bundle, shell-health, and radio-scoped
+Settings coverage passes **314 tests**. Broader orchestrator, identity, guided
+recipe, receiver, VarAC, and multi-rig coverage passes **147 tests**. Changed
+Python compilation and `git diff --check` pass.

@@ -1077,6 +1077,30 @@ Automatic startup and `Start Startup Apps` call the same planner:
 - dependencies and configured order are honored;
 - result status names the radio(s) and app instance.
 
+The controls are orthogonal and their labels must describe the exact action:
+
+- `Monitor Health` controls only whether the selected radio's application is
+  included in FIO health reporting. It never changes launch membership and an
+  unchecked row displays `Monitoring off` rather than a stale process result.
+- `Launch at Startup` selects the ordered per-radio startup set. It does not
+  itself authorize unattended launch.
+- `Automatically launch this radio's startup apps when FIO opens` is the
+  per-radio unattended-start gate. Changing only this switch is a dirty,
+  persistable Settings change.
+- Row `Start` is an explicit request to start only that selected radio's exact
+  saved application identity now. It does not mutate `Monitor Health` or
+  `Launch at Startup`.
+- `Start Startup Apps` is an explicit request to start the selected radio's
+  checked startup set now. It intentionally overrides only the per-radio
+  unattended-start gate for that run; it does not turn that gate on.
+
+Every explicit action must retain the canonical instance key, executable,
+arguments, working directory, environment, dependencies, readiness policy, and
+execution scope. It must never rebuild a radio-owned recipe through the legacy
+station-global catalog normalizer. An empty persisted radio bundle is
+authoritative for health filtering and must not fall back to another radio's
+legacy station-global monitor selections.
+
 Save writes the radio bundle transactionally before the UI reloads it. Switching
 radios or restarting FIO must show the saved checkbox/order state.
 
@@ -1101,7 +1125,8 @@ KV values unchanged, and disables legacy fallback after confirmation. A failed
 backup or write changes no launch ownership state.
 
 `StationLaunchPlanner` is the single pure contract for the Settings preview,
-automatic station startup, and selected-radio `Start Startup Apps`. It applies
+automatic station startup, selected-radio `Start Startup Apps`, and row
+`Start`. It applies
 radio-specific path/command and endpoint values, stable dependency ordering,
 exact instance identity and station-wide deduplication. Shared instances retain
 all serving-radio provenance; different JS8Call, FLRig, FLDigi, VarAC, or custom

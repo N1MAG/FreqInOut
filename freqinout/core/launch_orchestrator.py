@@ -17,7 +17,7 @@ from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.dependency_status_service import get_dependency_status_service
-from freqinout.core.launch_bundle_store import LaunchBundleStore
+from freqinout.core.launch_bundle_store import LaunchBundleStore, normalize_launch_items
 from freqinout.core.js8_storage import resolve_js8_storage, variant_family_from_version
 from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.station_launch_planner import LaunchPlan, StationLaunchPlanner
@@ -355,7 +355,12 @@ class LaunchOrchestrator(QObject):
         )
         return self._with_effective_launch_preview(plan)
 
-    def preview_manual_plan(self, radio_profile_id: int) -> LaunchPlan:
+    def preview_manual_plan(
+        self,
+        radio_profile_id: int,
+        *,
+        bundle_override: Optional[Mapping[str, Any]] = None,
+    ) -> LaunchPlan:
         """Preview the selected-radio plan through the startup planner path.
 
         Manual station start changes only the requested radio scope; recipe,
@@ -365,6 +370,7 @@ class LaunchOrchestrator(QObject):
         return self.preview_startup_plan(
             scope_radio_id=int(radio_profile_id),
             trigger="manual",
+            bundle_override=bundle_override,
         )
 
     def preview_radio_recipe_plan(
@@ -426,10 +432,18 @@ class LaunchOrchestrator(QObject):
             return False
         return self._start_sequence("startup", queue)
 
-    def start_radio_startup_sequence(self, radio_profile_id: int) -> bool:
+    def start_radio_startup_sequence(
+        self,
+        radio_profile_id: int,
+        *,
+        bundle_override: Optional[Mapping[str, Any]] = None,
+    ) -> bool:
         if self._active or not self.launch_allowed():
             return False
-        plan = self.preview_manual_plan(int(radio_profile_id))
+        plan = self.preview_manual_plan(
+            int(radio_profile_id),
+            bundle_override=bundle_override,
+        )
         queue = plan.queue()
         if not queue:
             return False
@@ -440,9 +454,11 @@ class LaunchOrchestrator(QObject):
             return False
         if not self.launch_allowed():
             return False
-        base_items = (
-            self.build_default_items(items, custom_tools=self.get_custom_tools()) if items is not None else self.get_launch_items()
-        )
+        # Explicit manual rows are already structured launch recipes.  Running
+        # them back through the legacy catalog builder discarded instance
+        # identity, monitoring, dependencies, working-directory/readiness, and
+        # execution-scope facts that distinguish two radios' app instances.
+        base_items = normalize_launch_items(items) if items is not None else self.get_launch_items()
         queue = self._build_queue(base_items, startup_only=False)
         if not queue:
             return False

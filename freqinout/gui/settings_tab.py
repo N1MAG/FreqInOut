@@ -9461,7 +9461,9 @@ class SettingsTab(QWidget):
         launch_global_row.setContentsMargins(0, 0, 0, 0)
         launch_global_row.setSpacing(8)
         launch_global_row.addWidget(self.launch_hint_label, 1)
-        self.launch_all_with_startup_chk = QCheckBox("Allow startup launch for this radio")
+        self.launch_all_with_startup_chk = QCheckBox(
+            "Automatically launch this radio's startup apps when FIO opens"
+        )
         launch_global_row.addWidget(self.launch_all_with_startup_chk)
         launch_v.addLayout(launch_global_row)
 
@@ -9517,8 +9519,7 @@ class SettingsTab(QWidget):
         self.launch_reset_order_btn.clicked.connect(self._reset_launch_order)
         self.launch_configured_now_btn.clicked.connect(self._launch_configured_now)
         self.launch_stop_btn.clicked.connect(self._stop_launch_sequence)
-        self.launch_all_with_startup_chk.stateChanged.connect(self._refresh_section_titles)
-        self.launch_all_with_startup_chk.stateChanged.connect(self._refresh_launch_startup_preview)
+        self.launch_all_with_startup_chk.stateChanged.connect(self._on_launch_master_changed)
         self.launch_control_table.itemChanged.connect(self._on_launch_table_item_changed)
         self.launch_control_table.itemSelectionChanged.connect(self._update_launch_control_buttons)
         self.launch_orchestrator.sequence_started.connect(self._on_launch_sequence_started)
@@ -14607,10 +14608,13 @@ class SettingsTab(QWidget):
 
     def _summary_launch_control(self) -> str:
         total = len(self._launch_items_cache)
-        enabled = sum(1 for item in self._launch_items_cache if bool(item.get("enabled", False)))
+        monitored = sum(1 for item in self._launch_items_cache if bool(item.get("monitor_health", True)))
         startup = sum(1 for item in self._launch_items_cache if bool(item.get("startup", False)))
         launch_all = bool(hasattr(self, "launch_all_with_startup_chk") and self.launch_all_with_startup_chk.isChecked())
-        return f"{enabled}/{total} enabled, {startup} startup, launch-all {'on' if launch_all else 'off'}"
+        return (
+            f"{monitored}/{total} monitored, {startup} startup, "
+            f"automatic launch {'on' if launch_all else 'off'}"
+        )
 
     def _summary_sop_export(self) -> str:
         preamble_set = bool(
@@ -18106,7 +18110,8 @@ class SettingsTab(QWidget):
         radio_id = self._selected_launch_radio_id()
         if not radio_id:
             self._launch_items_cache = []
-            self.launch_all_with_startup_chk.setChecked(False)
+            with QSignalBlocker(self.launch_all_with_startup_chk):
+                self.launch_all_with_startup_chk.setChecked(False)
             return
         draft = self._launch_radio_bundle_drafts.get(radio_id)
         if not isinstance(draft, dict):
@@ -18116,7 +18121,8 @@ class SettingsTab(QWidget):
                 draft = {}
         items = draft.get("items", []) if isinstance(draft, dict) else []
         self._launch_items_cache = [dict(item) for item in items if isinstance(item, dict)]
-        self.launch_all_with_startup_chk.setChecked(bool(draft.get("launch_enabled", False)))
+        with QSignalBlocker(self.launch_all_with_startup_chk):
+            self.launch_all_with_startup_chk.setChecked(bool(draft.get("launch_enabled", False)))
 
     def _persist_launch_radio_bundles(self) -> bool:
         self._stash_current_launch_radio_state()
@@ -36558,16 +36564,33 @@ class SettingsTab(QWidget):
         if not app_name:
             return
         self._sync_launch_cache_from_table()
-        scoped_items = self._radio_scoped_launch_items()
-        item = next((dict(row) for row in scoped_items if str(row.get("name", "")).strip() == app_name), None)
-        if item is None:
-            item = {"name": app_name}
-            item.update(self._radio_launch_overrides_for_name(app_name, self._launch_bundle_source_profile()))
-        item["enabled"] = True
-        item["startup"] = True
+        radio_id = self._selected_launch_radio_id()
+        if not radio_id:
+            return
+        manual_items: List[Dict[str, object]] = []
+        for row in self._launch_items_cache:
+            if not isinstance(row, dict):
+                continue
+            candidate = dict(row)
+            is_target = str(candidate.get("name", "")).strip() == app_name
+            candidate["enabled"] = bool(is_target)
+            candidate["startup"] = bool(is_target)
+            manual_items.append(candidate)
         if hasattr(self.settings, "set"):
             self.settings.set("custom_tool_items", [dict(row) for row in self._custom_tool_items_cache])
-        if not self.launch_orchestrator.start_manual_sequence([item]):
+        try:
+            started = self.launch_orchestrator.start_radio_startup_sequence(
+                radio_id,
+                bundle_override={"launch_enabled": True, "items": manual_items},
+            )
+        except Exception as exc:
+            self._publish_launch_control_feedback(
+                status="blocked",
+                summary=f"Launch blocked: {app_name} was not started.",
+                detail=str(exc) or "Review this radio's saved software identity before retrying.",
+            )
+            return
+        if not started:
             self._publish_launch_control_feedback(
                 status="blocked",
                 summary=f"Launch blocked: {app_name} was not started.",
@@ -36654,7 +36677,11 @@ class SettingsTab(QWidget):
             self.launch_control_table.setCellWidget(row, 3, start_btn)
 
             status_key = self._launch_control_status_key(name)
-            status_text = self._launch_control_status_text(snapshot.get(status_key, {}))
+            status_text = (
+                self._launch_control_status_text(snapshot.get(status_key, {}))
+                if bool(item.get("monitor_health", True))
+                else "Monitoring off"
+            )
             status_item = QTableWidgetItem(status_text)
             status_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
             self.launch_control_table.setItem(row, 4, status_item)
@@ -36687,9 +36714,14 @@ class SettingsTab(QWidget):
         self.launch_order_down_btn.setEnabled(bool(can_move and row < self.launch_control_table.rowCount() - 1))
         self.launch_reset_order_btn.setEnabled(has_rows)
         has_startup_rows = False
+        visible_names = set(getattr(self, "_launch_visible_names", []))
         if has_rows:
             for item in getattr(self, "_launch_items_cache", []):
-                if isinstance(item, dict) and bool(item.get("startup", False)):
+                if (
+                    isinstance(item, dict)
+                    and str(item.get("name", "")).strip() in visible_names
+                    and bool(item.get("startup", False))
+                ):
                     has_startup_rows = True
                     break
         self.launch_configured_now_btn.setEnabled(
@@ -36736,7 +36768,7 @@ class SettingsTab(QWidget):
         text = (
             f"Selected radio: {radio_name}. Frequency control: {backend_label}. "
             f"Software: {bundle}. Endpoints: {endpoint}. "
-            f"Startup launch: {'enabled' if launch_enabled else 'off'}."
+            f"Automatic launch when FIO opens: {'enabled' if launch_enabled else 'off'}."
         )
         self._set_guidance_card_state(
             self.launch_guidance_card,
@@ -36754,8 +36786,9 @@ class SettingsTab(QWidget):
             ]
             active_text = f" Active radios: {', '.join(active_names)}." if active_names else ""
             self.launch_hint_label.setText(
-                "Configured apps and shared custom tools appear here. Monitor Health controls the top Health indicator; "
-                "Launch at Startup controls what FIO starts automatically."
+                "Configured apps and shared custom tools appear here. Monitor Health only controls health reporting. "
+                "Launch at Startup selects apps for automatic startup and for Start Startup Apps; the radio-level "
+                "automatic switch applies only when FIO opens. A row's Start button starts that app now."
                 + active_text
             )
 
@@ -36813,8 +36846,29 @@ class SettingsTab(QWidget):
         if self._loading_settings or self._launch_table_loading:
             return
         self._sync_launch_cache_from_table()
+        if _item.column() == 1:
+            row = _item.row()
+            name_item = self.launch_control_table.item(row, 0)
+            status_item = self.launch_control_table.item(row, 4)
+            if name_item is not None and status_item is not None:
+                with QSignalBlocker(self.launch_control_table):
+                    if _item.checkState() != Qt.Checked:
+                        status_item.setText("Monitoring off")
+                    else:
+                        snapshot = self._launch_control_status_snapshot()
+                        status_key = self._launch_control_status_key(name_item.text())
+                        status_item.setText(self._launch_control_status_text(snapshot.get(status_key, {})))
         self._mark_settings_dirty()
         self._update_launch_control_buttons()
+        self._refresh_section_titles()
+        self._refresh_launch_startup_preview()
+
+    def _on_launch_master_changed(self, _state: int) -> None:
+        if self._loading_settings:
+            return
+        self._stash_current_launch_radio_state()
+        self._mark_settings_dirty()
+        self._refresh_launch_control_guidance()
         self._refresh_section_titles()
         self._refresh_launch_startup_preview()
 
@@ -36845,11 +36899,28 @@ class SettingsTab(QWidget):
                     return
             except Exception:
                 pass
+        manual_bundle = {
+            # This is an explicit operator action.  Preserve the saved
+            # automatic-start switch, but override that one gate for this run.
+            "launch_enabled": True,
+            "items": [dict(item) for item in self._launch_items_cache if isinstance(item, dict)],
+        }
         # Commit the selected bundle before invoking the shared planner. This
-        # keeps the manual action aligned with the preview and startup paths.
+        # keeps saved startup membership aligned with the automatic preview.
         if not self._persist_launch_radio_bundles():
             return
-        started = self.launch_orchestrator.start_radio_startup_sequence(radio_id)
+        try:
+            started = self.launch_orchestrator.start_radio_startup_sequence(
+                radio_id,
+                bundle_override=manual_bundle,
+            )
+        except Exception as exc:
+            self._publish_launch_control_feedback(
+                status="blocked",
+                summary="Launch blocked: the startup set was not started.",
+                detail=str(exc) or "Review this radio's saved software identity before retrying.",
+            )
+            return
         if not started:
             self._publish_launch_control_feedback(
                 status="blocked",

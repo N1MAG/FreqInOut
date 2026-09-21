@@ -1663,13 +1663,16 @@
   </ul>
 
   <h3 id="settings-launch-control">Launch Control Details</h3>
+  <p>Launch Control is scoped to the radio selected in Settings. Monitoring, automatic startup, and manual start are separate choices; changing one does not silently change either of the others.</p>
   <ul class="section-list">
-    <li><strong>Launch All with FreqInOut</strong>: starts selected station tools when FIO starts. Use this when FIO is the normal front door for your operating session.</li>
-    <li><strong>Enabled</strong>: decides which supported tools FreqInOut may launch from this table.</li>
-    <li><strong>Launch on Startup</strong>: controls which enabled tools should auto-start with the application.</li>
+    <li><strong>Automatically launch this radio's startup apps when FIO opens</strong>: this radio-level switch controls unattended startup only. Turn it on when FIO is the normal front door for this radio's operating session. It does not disable the manual Start controls.</li>
+    <li><strong>Monitor Health</strong>: includes that application in FIO's health reporting for the selected radio. Turning monitoring off does not stop the application and does not change its startup selection.</li>
+    <li><strong>Launch at Startup</strong>: adds that application to this radio's ordered startup set. Automatic launch requires the radio-level switch above. The explicit <code>Start Startup Apps</code> action runs the checked set now even when automatic launch is off.</li>
+    <li><strong>Start</strong>: starts only that row's configured application instance now. It does not select the row for future startup and it does not change health monitoring.</li>
     <li><strong>Order management</strong>: use <code>Up</code>, <code>Down</code>, and <code>Reset Default Order</code> to control startup sequencing. This matters when one tool depends on another, such as JS8Spotter or CommStat needing JS8Call to be ready first.</li>
-    <li><strong>Launch Configured Now</strong>: starts the enabled tools in the displayed order without restarting FIO.</li>
+    <li><strong>Start Startup Apps</strong>: explicitly starts this selected radio's checked <code>Launch at Startup</code> applications in the displayed order without changing the automatic-start switch.</li>
     <li><strong>Stop Launch Sequence</strong>: stops an in-progress launch sequence. It does not necessarily close programs that already started successfully.</li>
+    <li><strong>Multiple radios</strong>: each radio saves its own startup set, monitor choices, order, and automatic-start switch. Shared process identities are launched once; distinct radio-specific identities, profiles, paths, ports, arguments, and working directories remain separate.</li>
     <li><strong>Custom Tool crossover</strong>: Custom Tools configured in <code>Settings &gt; Custom Tools</code> also appear here, which lets you keep station-specific helpers near the same launch workflow as your built-in software stack.</li>
   </ul>
 

@@ -4341,9 +4341,10 @@ def test_launch_control_chip_visibility_uses_shared_profile_rule() -> None:
     assert 'table.setItem(row, 11, QTableWidgetItem("Opt-in" if self._radio_profile_launch_opt_in_enabled(profile) else "Off"))' in source
     assert 'use_launch_control_chk.setChecked(bool((existing or {}).get("use_launch_control", 0)))' in source
     assert '"launch_enabled": preserved_launch_enabled' in source
-    assert "Startup launch:" in source
+    assert "Automatic launch when FIO opens:" in source
     assert '["App", "Monitor Health", "Launch at Startup", "Start", "Status"]' in source
     assert 'self.launch_configured_now_btn = QPushButton("Start Startup Apps")' in source
+    assert '"Automatically launch this radio\'s startup apps when FIO opens"' in source
 
 
 def test_launch_control_source_profile_uses_selected_radio_not_station_default() -> None:
@@ -4409,6 +4410,24 @@ def test_launch_table_startup_change_recomputes_startup_button_state() -> None:
 
     assert "self._sync_launch_cache_from_table()" in block
     assert "self._update_launch_control_buttons()" in block
+
+
+def test_launch_master_is_saved_and_manual_start_does_not_mutate_startup_policy() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    master_block = source[
+        source.index("def _on_launch_master_changed") : source.index("def _launch_configured_now")
+    ]
+    row_start_block = source[
+        source.index("def _start_launch_control_item") : source.index("def _refresh_launch_control_table")
+    ]
+    group_start_block = source[
+        source.index("def _launch_configured_now") : source.index("def _stop_launch_sequence")
+    ]
+
+    assert "self._stash_current_launch_radio_state()" in master_block
+    assert "self._mark_settings_dirty()" in master_block
+    assert 'bundle_override={"launch_enabled": True, "items": manual_items}' in row_start_block
+    assert '"launch_enabled": True' in group_start_block
 
 
 def test_settings_batch_save_includes_radio_software_and_auth_compat_keys() -> None:

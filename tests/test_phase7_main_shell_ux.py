@@ -2208,6 +2208,32 @@ def test_phase7_station_command_health_monitor_flag_filters_unchecked_apps(monke
     assert items == [("JS8Call_API", "JS8"), ("FLRig", "FLRig")]
 
 
+def test_phase7_empty_radio_health_bundle_does_not_fall_back_to_global_radio(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    QApplication.instance() or QApplication([])
+
+    from freqinout.gui.main_window import MainWindow
+
+    window = MainWindow.__new__(MainWindow)
+    window.launch_orchestrator = SimpleNamespace(
+        get_radio_launch_bundle=lambda _radio_id: {"launch_enabled": False, "items": []}
+    )
+    window.settings = SimpleNamespace(
+        get=lambda key, default=None: [{"name": "FLRig", "monitor_health": False}]
+        if key == "launch_control_items"
+        else default
+    )
+
+    items = MainWindow._station_command_health_monitored_items(
+        window,
+        [("FLRig", "FLRig"), ("JS8Call_API", "JS8")],
+        radio_profile_id=22,
+    )
+
+    assert items == [("FLRig", "FLRig"), ("JS8Call_API", "JS8")]
+
+
 def test_phase7_station_command_health_shows_only_unhealthy_components(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))

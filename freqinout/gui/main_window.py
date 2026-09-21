@@ -8673,13 +8673,18 @@ class MainWindow(QMainWindow):
         radio_profile_id: int = 0,
     ) -> list[tuple[str, str]]:
         raw_items = []
+        radio_bundle_loaded = False
         if radio_profile_id > 0:
             try:
                 bundle = self.launch_orchestrator.get_radio_launch_bundle(radio_profile_id)
                 raw_items = bundle.get("items", []) if isinstance(bundle, Mapping) else []
+                radio_bundle_loaded = isinstance(bundle, Mapping)
             except Exception:
                 raw_items = []
-        if not raw_items:
+        # An empty saved radio bundle is authoritative.  Falling back to the
+        # old station-global list here can make one radio's health choices
+        # leak into another radio's header.
+        if not radio_bundle_loaded:
             try:
                 raw_items = self.settings.get("launch_control_items", [])
             except Exception:
