@@ -8117,18 +8117,10 @@ class MultiRadioStore:
                     family_issues.append(
                         f"launch component {component.component_id} dependencies differ"
                     )
-                expected_launch = dict(component.launch)
-                for canonical_key, row_key in (
-                    ("at_startup", "launch_at_startup"),
-                    ("monitor_health", "monitor_health"),
-                ):
-                    if canonical_key in expected_launch and bool(expected_launch[canonical_key]) != bool(
-                        launch_row.get(row_key)
-                    ):
-                        family_issues.append(
-                            f"launch component {component.component_id} policy differs"
-                        )
-                        break
+                # Launch-at-startup and health-monitoring are operator-owned
+                # Launch Control preferences, not immutable software identity.
+                # They may legitimately change after Add Radio and must not be
+                # reported as canonical application/recipe drift.
                 for key, expected_value in component.readiness.items():
                     if key not in readiness or str(readiness.get(key)) != str(expected_value):
                         family_issues.append(

@@ -9488,3 +9488,30 @@ rather than a station-wide family result, until the exact probe completes.
 Focused launch bundle, endpoint status, refresh coordination, and radio-scoped
 Settings coverage passes **204 tests** with 2 platform skips. Changed Python
 compilation and `git diff --check` pass.
+
+## 2026-09-21 — Projection warnings no longer veto valid radio launch plans
+
+Status: implementation complete; production operator retest remains open.
+
+Production launch evidence showed radio 9 was excluded before execution because
+canonical projection review reported Fast Light policy differences, JS8Call and
+VarAC endpoint differences, and a missing/duplicate VARA projection. No process
+recipe had yet been attempted. The parity checker had incorrectly become a
+whole-radio launch gate even though its contract describes bounded database
+evidence for `Needs attention` and explicitly performs no runtime or filesystem
+qualification.
+
+Projection drift is now retained as a family-specific review warning while the
+planner continues with the saved reviewed launch bundle. Launch Control exposes
+the warning during and after a manual sequence. Independent launch-time checks
+remain authoritative and blocking: native VarAC recovery, malformed recipes,
+multi-instance/resource collisions, dependency failures, receive-only safety,
+and concurrent sequences.
+
+`Launch at Startup` and `Monitor Health` are now explicitly treated as mutable
+operator preferences owned by the radio launch bundle. Changing those rows no
+longer manufactures canonical software-identity drift for FLMsg, FLAmp, or any
+other component. Focused identity, launch, status, and radio-scoped Settings
+coverage passes **230 tests** with 2 platform skips. Broader launch, guided-save,
+receiver, multi-rig, and unified-UX integration coverage passes **142 tests**
+with 2 platform skips. Changed Python compilation and `git diff --check` pass.

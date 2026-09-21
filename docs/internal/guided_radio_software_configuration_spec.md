@@ -1080,6 +1080,30 @@ reachability remains a separate connected/not-connected result. While an exact
 instance probe is pending, the UI shows a checking/unknown state and does not
 substitute station-wide family status.
 
+Canonical-to-projection parity is a review and repair signal, not a blanket
+launch veto. A mismatch between a canonical software identity and its
+Software Administration, manifest, or launch projection remains visible as
+`Needs attention`, is logged with the affected family and fields, and is shown
+with manual Launch Control feedback. FIO may continue using an exact reviewed
+launch-bundle recipe when that recipe independently passes launch-time
+validation. One family's projection warning must not suppress valid recipes
+for the other selected families.
+
+Only conditions that make execution unsafe or indeterminate block launch:
+native-writer recovery that could expose an uncommitted external configuration,
+malformed or absent executable/argument facts for the requested component,
+resource/identity collisions, dependency cycles or failed required
+dependencies, receive-only/transmit authority violations, or another launch
+sequence already in progress. Endpoint unreachability before a requested start
+is status evidence, not itself a reason to prevent starting that endpoint's
+application.
+
+`Launch at Startup`, `Monitor Health`, and the radio-level automatic-start
+switch are operator-owned Launch Control preferences. Changing them after Add
+Radio does not change the executable, profile, endpoint, or data identity and
+must not create canonical recipe drift. Their durable source of truth is the
+radio launch bundle.
+
 Launch failure does not corrupt saved configuration. It produces an exact
 per-instance `Needs attention` state and recovery action. Launch success proves
 process readiness only; semantic endpoint verification remains separate.
@@ -1327,6 +1351,12 @@ operator-facing guidance.
 10. Disabling the primary operating model's unattended launch permission or a
     radio's automatic-start switch leaves the selected radio's explicit row
     **Start** and **Start Startup Apps** actions available.
+11. Canonical projection drift produces a visible review warning but does not
+    remove an independently valid launch-bundle recipe from manual or startup
+    planning; genuinely unsafe launch-time conflicts remain blocking.
+12. Editing `Launch at Startup` or `Monitor Health` does not create canonical
+    software-identity drift and does not require rebuilding the application
+    identity.
 9. One station-shared CommStat process can bind to multiple distinct radio-owned
    JS8 endpoints. It launches once, shows every binding, and is never
    deduplicated or reassigned solely by process name.

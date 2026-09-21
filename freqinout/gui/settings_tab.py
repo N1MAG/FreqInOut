@@ -36621,10 +36621,22 @@ class SettingsTab(QWidget):
                 detail="Check the configured launch path or wait for the current launch sequence to finish.",
             )
             return
+        warning = ""
+        try:
+            warning = self.launch_orchestrator.projection_warning_detail(radio_id)
+        except Exception:
+            warning = ""
         self._publish_launch_control_feedback(
             status="in_progress",
             summary=f"Starting {app_name}.",
-            detail="FreqInOut is starting the selected configured application.",
+            detail=(
+                "FreqInOut is starting the selected configured application."
+                + (
+                    " Configuration review warning (launch allowed): " + warning
+                    if warning
+                    else ""
+                )
+            ),
         )
         self._update_launch_control_buttons()
 
@@ -36932,10 +36944,22 @@ class SettingsTab(QWidget):
                 detail="Check Launch at Startup for at least one configured application before using Start Startup Apps.",
             )
             return
+        warning = ""
+        try:
+            warning = self.launch_orchestrator.projection_warning_detail(radio_id)
+        except Exception:
+            warning = ""
         self._publish_launch_control_feedback(
             status="in_progress",
             summary="Launch sequence started.",
-            detail="FreqInOut is starting the selected startup applications for the selected radio.",
+            detail=(
+                "FreqInOut is starting the selected startup applications for the selected radio."
+                + (
+                    " Configuration review warning (launch allowed): " + warning
+                    if warning
+                    else ""
+                )
+            ),
         )
         self._update_launch_control_buttons()
 
@@ -36983,6 +37007,23 @@ class SettingsTab(QWidget):
             )
         self.launch_summary_label.setText(status_txt)
         if trigger == "manual":
+            detail = self._launch_sequence_feedback_detail(
+                launched=launched,
+                already_running=already_running,
+                failed=failed,
+                timeout=timeout,
+                blocked_self=blocked_self,
+                cancelled=cancelled,
+            )
+            projection_warnings = data.get("projection_warnings", {})
+            if isinstance(projection_warnings, Mapping):
+                warning_text = "; ".join(
+                    str(value)
+                    for value in projection_warnings.values()
+                    if str(value).strip()
+                )
+                if warning_text:
+                    detail += " Configuration review warning (launch was allowed): " + warning_text
             self._publish_launch_control_feedback(
                 status=self._launch_sequence_feedback_status(
                     launched=launched,
@@ -37000,14 +37041,7 @@ class SettingsTab(QWidget):
                     blocked_self=blocked_self,
                     cancelled=cancelled,
                 ),
-                detail=self._launch_sequence_feedback_detail(
-                    launched=launched,
-                    already_running=already_running,
-                    failed=failed,
-                    timeout=timeout,
-                    blocked_self=blocked_self,
-                    cancelled=cancelled,
-                ),
+                detail=detail,
             )
         self._update_launch_control_buttons()
 

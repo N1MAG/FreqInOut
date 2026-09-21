@@ -138,6 +138,8 @@ class LaunchOrchestrator(QObject):
         self.planner = StationLaunchPlanner()
         self._runtime_launch_enabled_override: Optional[bool] = None
         self._runtime_launch_block_reason: str = ""
+        self._last_projection_warnings: Dict[int, str] = {}
+        self._sequence_projection_warnings: Dict[int, str] = {}
         self._active = False
         self._cancel_requested = False
         self._trigger = ""
@@ -173,6 +175,12 @@ class LaunchOrchestrator(QObject):
 
     def launch_block_reason(self) -> str:
         return self._runtime_launch_block_reason
+
+    def projection_warning_detail(self, radio_profile_id: Optional[int] = None) -> str:
+        warnings = getattr(self, "_last_projection_warnings", {})
+        if radio_profile_id is not None:
+            return str(warnings.get(int(radio_profile_id), "") or "")
+        return "; ".join(str(value) for value in warnings.values() if str(value).strip())
 
     @staticmethod
     def normalize_custom_tools(raw_items: Any) -> List[Dict[str, str]]:
@@ -300,7 +308,13 @@ class LaunchOrchestrator(QObject):
             if manual_selected_radio
             else self.multi_radio_store.list_runtime_active_device_profiles()
         )
-        launchable_profiles = []
+        if scope_radio_id is not None:
+            profiles = [
+                profile
+                for profile in profiles
+                if int(profile.get("id", 0) or 0) == int(scope_radio_id)
+            ]
+        projection_warnings: Dict[int, str] = {}
         for profile in profiles:
             radio_id = int(profile.get("id", 0) or 0)
             projection_issues = (
@@ -314,19 +328,13 @@ class LaunchOrchestrator(QObject):
                     f"{family}: {', '.join(issues)}"
                     for family, issues in sorted(projection_issues.items())
                 )
-                if scope_radio_id is not None and radio_id == int(scope_radio_id):
-                    raise ValueError(
-                        "Launch is blocked because the saved software identity and its "
-                        f"application/launch projection differ. {detail}"
-                    )
+                projection_warnings[radio_id] = detail
                 log.warning(
-                    "Skipped startup launch for radio %s because canonical software parity needs review: %s",
+                    "Launch proceeding for radio %s with canonical software parity review warning: %s",
                     radio_id,
                     detail,
                 )
-                continue
-            launchable_profiles.append(profile)
-        profiles = launchable_profiles
+        self._last_projection_warnings = projection_warnings
         blockers = self.multi_radio_store.varac_native_launch_blockers()
         if blockers:
             blocked_targets = {
@@ -660,6 +668,9 @@ class LaunchOrchestrator(QObject):
         self._current_item = None
         self._current_cmd = None
         self._current_started_monotonic = 0.0
+        self._sequence_projection_warnings = dict(
+            getattr(self, "_last_projection_warnings", {})
+        )
         try:
             self._wait_timeout_sec = int(
                 self.settings.get("launch_readiness_timeout_sec", DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC)
@@ -671,6 +682,7 @@ class LaunchOrchestrator(QObject):
             {
                 "trigger": trigger,
                 "queue": [dict(item) if isinstance(item, Mapping) else {"name": self._queue_item_name(item)} for item in queue],
+                "projection_warnings": dict(self._sequence_projection_warnings),
             }
         )
         self._schedule_advance_queue(0)
@@ -1398,4 +1410,7 @@ class LaunchOrchestrator(QObject):
             "blocked_dependency": blocked_dependency,
             "cancelled_count": cancelled_count,
             "results": list(self._results),
+            "projection_warnings": dict(
+                getattr(self, "_sequence_projection_warnings", {})
+            ),
         }

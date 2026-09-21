@@ -1204,7 +1204,7 @@ def test_production_shaped_all_family_projections_validate_after_reload(tmp_path
     assert store.validate_radio_software_identity_projections(int(receiver["id"])) == {}
 
 
-def test_launch_recipe_drift_is_family_specific_and_scoped_plan_skips_unrelated_radio(tmp_path, monkeypatch) -> None:
+def test_launch_recipe_drift_warns_without_blocking_scoped_radio(tmp_path, monkeypatch) -> None:
     from types import SimpleNamespace
 
     from freqinout.core.launch_orchestrator import LaunchOrchestrator
@@ -1235,33 +1235,73 @@ def test_launch_recipe_drift_is_family_specific_and_scoped_plan_skips_unrelated_
     assert any("executable differs" in issue for issue in issues["js8call"])
     assert store.validate_radio_software_identity_projections(int(unrelated["id"])) == {}
 
-    # Exercise the real scoped gate and planner input without starting any
-    # process or creating a GUI.  The unaffected radio stays eligible.
+    # Projection drift remains visible, but the exact reviewed launch bundle
+    # stays eligible.  Launch-time recipe/resource validation remains the
+    # blocking boundary.
     orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
     eligible: list[int] = []
-    orchestrator.multi_radio_store = SimpleNamespace(
-        list_runtime_active_device_profiles=lambda: [
+    profiles = [
             {"id": int(affected["id"]), "runtime_active": 1},
             {"id": int(unrelated["id"]), "runtime_active": 1},
-        ],
+    ]
+    orchestrator.multi_radio_store = SimpleNamespace(
+        list_device_profiles=lambda: list(profiles),
+        list_runtime_active_device_profiles=lambda: list(profiles),
         validate_radio_software_identity_projections=lambda radio_id: store.validate_radio_software_identity_projections(radio_id),
         radio_software_identity_generation=lambda _radio_id: 1,
         varac_native_launch_blockers=lambda: [],
     )
     orchestrator.get_radio_launch_bundle = lambda radio_id: {"launch_enabled": False, "items": []}
-    orchestrator.planner = SimpleNamespace(
-        plan_startup=lambda profiles, _bundles, **kwargs: (
-            eligible.extend(int(profile["id"]) for profile in profiles)
-            or LaunchPlan(kwargs.get("trigger", "startup"), kwargs.get("scope_radio_id"), ())
+    def plan_startup(profiles, _bundles, **kwargs):
+        scope = kwargs.get("scope_radio_id")
+        eligible.extend(
+            int(profile["id"])
+            for profile in profiles
+            if scope is None or int(profile["id"]) == int(scope)
         )
+        return LaunchPlan(kwargs.get("trigger", "startup"), scope, ())
+
+    orchestrator.planner = SimpleNamespace(
+        plan_startup=plan_startup
     )
     orchestrator._with_effective_launch_preview = lambda plan: plan
 
-    with pytest.raises(ValueError, match="software identity.*projection differ"):
-        orchestrator.preview_manual_plan(int(affected["id"]))
+    plan = orchestrator.preview_manual_plan(int(affected["id"]))
+    assert plan.scope_radio_id == int(affected["id"])
+    assert eligible == [int(affected["id"])]
+    warning = orchestrator.projection_warning_detail(int(affected["id"]))
+    assert "js8call" in warning
+    assert "executable differs" in warning
+
+    eligible.clear()
     plan = orchestrator.preview_manual_plan(int(unrelated["id"]))
     assert plan.scope_radio_id == int(unrelated["id"])
     assert eligible == [int(unrelated["id"])]
+    assert orchestrator.projection_warning_detail(int(unrelated["id"])) == ""
+
+
+def test_launch_control_preferences_are_not_canonical_recipe_drift(tmp_path) -> None:
+    store = MultiRadioStore(tmp_path / "launch-preferences.db")
+    radio, _record = _persist_js8_projection(store)
+    item = store.get_radio_launch_bundle(int(radio["id"]))["items"][0]
+
+    store.save_radio_launch_bundle(
+        int(radio["id"]),
+        launch_enabled=True,
+        items=[{
+            "name": item["app_name"],
+            "instance_key": item["instance_key"],
+            "enabled": bool(item["enabled"]),
+            "startup": not bool(item["launch_at_startup"]),
+            "monitor_health": not bool(item["monitor_health"]),
+            "path": item["path_override"],
+            "command": item["command_override"],
+            "dependencies": item["dependencies"],
+            "readiness_policy": item["readiness"],
+        }],
+    )
+
+    assert store.validate_radio_software_identity_projections(int(radio["id"])) == {}
 
 
 @pytest.mark.parametrize(
