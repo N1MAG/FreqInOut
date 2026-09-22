@@ -38,6 +38,38 @@ from freqinout.core.message_semantics import (
 from PySide6.QtWidgets import QHeaderView
 
 
+def test_projected_receipt_lines_keep_api_and_directed_sources_distinct() -> None:
+    lines = MessageViewerTab._projected_ref_lines(
+        (
+            {
+                "source_id": "js8:api:radio-a",
+                "receipt_source_label": "JS8Call API · radio-a",
+                "receipt_radio_id": 7,
+                "receipt_app_instance_id": "js8-a",
+                "external_kind": "js8_message",
+                "external_key": "101",
+                "external_path": "",
+                "delete_capability": "delete_source",
+            },
+            {
+                "source_id": "js8:directed_txt:radio-a",
+                "receipt_source_label": "JS8Call DIRECTED.TXT · radio-a",
+                "receipt_radio_id": 7,
+                "receipt_app_instance_id": "js8-a",
+                "external_kind": "js8_message",
+                "external_key": "202",
+                "external_path": "/radio-a/DIRECTED.TXT",
+                "delete_capability": "delete_source",
+            },
+        )
+    )
+
+    assert len(lines) == 2
+    assert "JS8Call API" in lines[0]
+    assert "JS8Call DIRECTED.TXT" in lines[1]
+    assert "/radio-a/DIRECTED.TXT" in lines[1]
+
+
 def _app() -> QApplication:
     return QApplication.instance() or QApplication([])
 

@@ -243,7 +243,7 @@ def test_local_js8_commstat_is_summarized_without_changing_rf_source(tmp_path) -
             SELECT source_family, radio_id, app_instance_id, message_type, display_type,
                    status, severity, subject, summary, entities_json
               FROM message_projection
-             WHERE primary_source_id='js8:radio-a' AND message_id IN (
+             WHERE message_id IN (
                  SELECT message_id FROM message_external_refs WHERE external_key='101'
              )
             """
@@ -403,3 +403,145 @@ def test_native_file_records_project_artifacts_and_skip_by_checkpoint(tmp_path) 
     assert artifact["artifact_type"] == "flamp_transfer"
     assert artifact["q_id"] == "Q123"
     assert artifact["block_id"] == "04"
+
+
+def test_js8_receipts_keep_api_and_directed_sources_but_share_one_station_message(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    conn = _connect(db_path)
+    try:
+        ensure_message_projection_schema(conn)
+        _ensure_js8(conn)
+        conn.executemany(
+            """
+            INSERT INTO js8_messages
+                (id, from_call, to_call, msg_type, utc_str, utc_ts, raw_text,
+                 decoded_text, state, source_key, source_id, source_radio_id,
+                 js8_instance_id, source_path)
+            VALUES (?, 'N1AAA', '@MR08', 'MSG', '2026-09-22 10:00:00',
+                    1790071200, 'same traffic', 'same traffic', 'UNREAD', ?, ?,
+                    '7', 'js8-a', ?)
+            """,
+            (
+                (1, "radio-a-api", 101, ""),
+                (2, "radio-a-directed", 202, "/radio-a/DIRECTED.TXT"),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert project_native_message_sources(db_path, sources=("js8",), force=True) == {"js8": 2}
+    conn = _connect(db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM message_projection").fetchone()[0] == 1
+        refs = conn.execute(
+            """
+            SELECT r.source_id, s.source_label, r.metadata_json
+              FROM message_external_refs r JOIN message_sources s USING(source_id)
+             ORDER BY r.source_id
+            """
+        ).fetchall()
+        assert len(refs) == 2
+        assert {row["source_id"] for row in refs} == {
+            "js8:api:radio-a-api", "js8:directed_txt:radio-a-directed"
+        }
+        assert any("JS8Call API" in row["source_label"] for row in refs)
+        assert any("JS8Call DIRECTED.TXT" in row["source_label"] for row in refs)
+    finally:
+        conn.close()
+
+
+def test_same_js8_text_at_a_different_event_time_is_not_collapsed(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    conn = _connect(db_path)
+    try:
+        ensure_message_projection_schema(conn)
+        _ensure_js8(conn)
+        conn.executemany(
+            """
+            INSERT INTO js8_messages
+                (id, from_call, to_call, msg_type, utc_str, utc_ts, raw_text,
+                 decoded_text, state, source_key, source_id)
+            VALUES (?, 'N1AAA', '@MR08', 'MSG', ?, ?, 'repeat', 'repeat',
+                    'UNREAD', 'radio-a-api', ?)
+            """,
+            (
+                (1, "2026-09-22 10:00:00", 1790071200, 101),
+                (2, "2026-09-22 10:00:01", 1790071201, 102),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    project_native_message_sources(db_path, sources=("js8",), force=True)
+    conn = _connect(db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM message_projection").fetchone()[0] == 2
+    finally:
+        conn.close()
+
+
+def test_spotter_replay_sources_share_presentation_and_keep_both_receipts(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    conn = _connect(db_path)
+    try:
+        ensure_message_projection_schema(conn)
+        _ensure_spotter(conn)
+        conn.executemany(
+            """
+            INSERT INTO spotter_traffic
+                (id, utc_str, utc_ts, from_call, to_call, form_id, spotter_token,
+                 raw_text, decoded_text, state, source_radio_id, js8_instance_id)
+            VALUES (?, '2026-09-22 10:00:00', 1790071200, 'N1AAA', 'N1MAG',
+                    '701C', '#ABCD', 'F!701C 100 ST[UT] GR[DN40] #ABCD',
+                    'decoded', 'UNREAD', ?, ?)
+            """,
+            ((1, "7", "legacy"), (2, "8", "qualified")),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    project_native_message_sources(db_path, sources=("spotter",), force=True)
+    conn = _connect(db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM message_projection").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM message_external_refs").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM message_sources").fetchone()[0] == 2
+    finally:
+        conn.close()
+
+
+def test_identical_flmsg_and_flamp_files_dedupe_within_family_and_keep_folder_receipts(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    records = {}
+    for origin in ("flmsg", "flamp"):
+        family_records = []
+        for radio in ("a", "b"):
+            path = tmp_path / f"{origin}-{radio}" / "message.txt"
+            path.parent.mkdir()
+            path.write_text("same completed message", encoding="utf-8")
+            family_records.append(
+                FileRecord(
+                    path,
+                    origin,
+                    path.stat().st_size,
+                    path.stat().st_mtime,
+                    f"{origin}:radio-{radio}",
+                    f"Radio {radio.upper()} {origin}",
+                )
+            )
+        records[origin] = family_records
+
+    assert project_native_file_records(db_path, records, force=True) == 4
+    conn = _connect(db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM message_projection").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM message_external_refs").fetchone()[0] == 4
+        assert conn.execute("SELECT COUNT(DISTINCT source_id) FROM message_external_refs").fetchone()[0] == 4
+        assert dict(conn.execute(
+            "SELECT source_family, COUNT(*) FROM message_projection GROUP BY source_family"
+        ).fetchall()) == {"flamp": 1, "flmsg": 1}
+    finally:
+        conn.close()

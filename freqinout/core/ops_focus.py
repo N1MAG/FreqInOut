@@ -291,7 +291,7 @@ def index_message_for_ops_focus(
                 canonical_id,
                 at_utc=event_ts or received_ts,
                 schema_ready=identity_schema_ready,
-            )
+        )
             if identity is not None:
                 metadata = dict(metadata)
                 metadata["matched_callsign"] = canonical_id
@@ -391,6 +391,60 @@ def index_message_for_ops_focus(
                 json.dumps(metadata, sort_keys=True),
                 time.time(),
             ),
+        )
+
+
+def remove_message_from_ops_focus(conn: sqlite3.Connection, message_id: object) -> None:
+    """Remove an obsolete projection id and repair affected compact summaries.
+
+    Canonical-identity migrations can re-parent every external receipt away
+    from an older source-scoped message id.  The hot projection row may then be
+    removed, but the compact Ops bridge must not retain or advertise that id.
+    """
+
+    key = _safe_text(message_id).strip()
+    if not key or not _ops_focus_schema_ready(conn):
+        return
+    affected = conn.execute(
+        "SELECT DISTINCT kind, canonical_id FROM ops_focus_message_entities WHERE message_id=?",
+        (key,),
+    ).fetchall()
+    conn.execute("DELETE FROM ops_focus_message_entities WHERE message_id=?", (key,))
+    for row in affected:
+        kind, canonical_id = _safe_text(row[0]), _safe_text(row[1])
+        current = conn.execute(
+            "SELECT latest_message_id, metadata_json FROM ops_focus_entities WHERE kind=? AND canonical_id=?",
+            (kind, canonical_id),
+        ).fetchone()
+        if current is None or _safe_text(current[0]) != key:
+            continue
+        previous = conn.execute(
+            """
+            SELECT p.received_ts, p.event_ts, p.message_id, p.status,
+                   p.source_family, p.group_name,
+                   COALESCE(NULLIF(p.summary,''),NULLIF(p.subject,''),p.body_preview,'')
+              FROM ops_focus_message_entities b
+              JOIN message_projection p ON p.message_id=b.message_id
+             WHERE b.kind=? AND b.canonical_id=? AND b.deleted=0 AND p.deleted=0
+             ORDER BY b.received_ts DESC, b.message_id DESC LIMIT 1
+            """,
+            (kind, canonical_id),
+        ).fetchone()
+        if previous is None:
+            conn.execute(
+                "DELETE FROM ops_focus_entities WHERE kind=? AND canonical_id=? AND latest_message_id=?",
+                (kind, canonical_id, key),
+            )
+            continue
+        conn.execute(
+            """
+            UPDATE ops_focus_entities
+               SET latest_received_ts=?, latest_event_ts=?, latest_message_id=?,
+                   latest_status=?, latest_source=?, latest_group=?, latest_summary=?,
+                   updated_ts=?
+             WHERE kind=? AND canonical_id=? AND latest_message_id=?
+            """,
+            tuple(previous) + (time.time(), kind, canonical_id, key),
         )
 
 

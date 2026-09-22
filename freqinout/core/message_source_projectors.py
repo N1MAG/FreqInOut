@@ -22,6 +22,11 @@ from freqinout.core.message_intelligence import analyze_commstat_fields, analyze
 from freqinout.core.message_semantics import commstat_status_receipt, status_receipt_summary
 from freqinout.core.message_file_metadata import cached_message_file_row_summary
 from freqinout.core.message_file_scanner import FileRecord, file_path_display, file_path_key
+from freqinout.core.message_canonical_identity import (
+    canonical_message_key,
+    canonical_station_message_id,
+    file_content_digest,
+)
 from freqinout.core.message_projection_store import (
     ExternalMessageRef,
     MessageArtifactRecord,
@@ -40,14 +45,56 @@ from freqinout.core.message_projection_store import (
 from freqinout.core.message_projection_writer import ProjectionBundle
 from freqinout.core.sqlite_utils import connect_sqlite, table_exists
 
-PROJECTOR_VERSION = 3
-FILE_PROJECTOR_VERSION = 4
+PROJECTOR_VERSION = 4
+FILE_PROJECTOR_VERSION = 5
 JS8_COMMSTAT_CLASSIFICATION_VERSION = 2
 SPOTTER_PROVENANCE_VERSION = 1
 DEFAULT_SOURCE_NATIVE_LIMIT = 5000
 _PROJECTION_WRITE_LOCK = threading.Lock()
 
 ProjectionBundleSink = Callable[[ProjectionBundle], None]
+
+
+def native_projector_version(source_family: object) -> int:
+    """Return the bounded replay version for one native source family."""
+
+    family = _text(source_family).lower()
+    if family in {"js8", "spotter", "varac", "sitrep", "commstat"}:
+        return PROJECTOR_VERSION
+    return PROJECTOR_VERSION
+
+
+def _js8_receipt_kind(source_key: object, source_path: object) -> str:
+    evidence = f"{_text(source_key)} {_text(source_path)}".lower()
+    if "directed" in evidence:
+        return "directed_txt"
+    if "inbox" in evidence or ".db3" in evidence:
+        return "inbox_db"
+    if "api" in evidence or not _text(source_path):
+        return "api"
+    return "file"
+
+
+def _js8_source_key(row: object) -> str:
+    source_key = _text(_row_value(row, "source_key"))
+    source_path = _text(_row_value(row, "source_path"))
+    kind = _js8_receipt_kind(source_key, source_path)
+    if source_key:
+        return f"{kind}:{source_key}"
+    if source_path:
+        return f"{kind}:legacy:{source_path}"
+    return f"api:{_text(_row_value(row, 'js8_instance_id')) or 'legacy'}"
+
+
+def _js8_source_label(source_key: object, source_path: object) -> str:
+    kind = _js8_receipt_kind(source_key, source_path)
+    label = {
+        "directed_txt": "JS8Call DIRECTED.TXT",
+        "inbox_db": "JS8Call inbox.db3",
+        "api": "JS8Call API",
+        "file": "JS8Call file",
+    }[kind]
+    return _source_label(label, source_key)
 
 
 def _emit_projection_bundle(
@@ -198,7 +245,20 @@ def _file_projection_bundle(
     # paths can render similarly after escaping.  Use the reversible opaque
     # fsencode key for every persisted file-version identity.
     external_key = f"{file_path_key(rec.path)}:{float(rec.mtime or 0.0):.6f}:{int(rec.size or 0)}"
-    message_id = stable_message_id(source_id, external_kind, external_key)
+    file_digest = file_content_digest(rec.path)
+    file_message_identity = (
+        f"{safe_path.name.casefold()}:{file_digest}" if file_digest else ""
+    )
+    message_id = canonical_station_message_id(
+        origin,
+        event_ts=event_ts,
+        from_call=from_call,
+        to_call=to_call,
+        payload=title,
+        message_type=message_type,
+        durable_id=file_message_identity,
+        payload_digest=file_digest,
+    )
     source = MessageSourceRecord(
         source_id=source_id,
         source_family=origin,
@@ -211,8 +271,15 @@ def _file_projection_bundle(
     )
     projection = MessageProjectionRecord(
         message_id=message_id,
-        canonical_key=f"{source_id}:{external_kind}:{external_key}",
-        content_hash=content_hash(FILE_PROJECTOR_VERSION, "file", external_key, status, event_ts, received_ts),
+        canonical_key=canonical_message_key(origin, message_id),
+        content_hash=content_hash(
+            FILE_PROJECTOR_VERSION,
+            "file",
+            file_digest or external_key,
+            status,
+            event_ts,
+            received_ts,
+        ),
         primary_source_id=source_id,
         source_family=origin,
         source_label=source.source_label,
@@ -258,9 +325,14 @@ def _file_projection_bundle(
                 external_path=path_text,
                 external_mtime=float(rec.mtime or 0.0),
                 external_size=int(rec.size or 0),
+                external_hash=file_digest,
                 delete_capability="file_delete",
                 read_capability="fio_read_state",
-                metadata={"origin": origin, "source": "file_scan"},
+                metadata={
+                    "origin": origin,
+                    "source": "file_scan",
+                    "receipt_source_kind": f"{origin}_folder",
+                },
             ),
         ),
         (
@@ -271,7 +343,7 @@ def _file_projection_bundle(
                 source_id=source_id,
                 external_key=external_key,
                 path=path_text,
-                content_hash=content_hash(path_text, rec.mtime, rec.size),
+                content_hash=file_digest or content_hash(path_text, rec.mtime, rec.size),
                 q_id=q_id,
                 block_id=_block_id_from_path(safe_path),
                 transfer_id=q_id,
@@ -472,8 +544,18 @@ def _project_js8_messages(
         if targeted_sources:
             source_marks = ",".join("?" for _ in targeted_sources)
             query += (
-                " AND ('js8:' || COALESCE(NULLIF(source_key,''), "
-                "NULLIF(js8_instance_id,''), 'legacy')) "
+                " AND ('js8:' || CASE "
+                "WHEN COALESCE(source_key,'') != '' THEN "
+                "CASE WHEN LOWER(source_key || ' ' || COALESCE(source_path,'')) LIKE '%directed%' THEN 'directed_txt' "
+                "WHEN LOWER(source_key || ' ' || COALESCE(source_path,'')) LIKE '%inbox%' "
+                "OR LOWER(source_key || ' ' || COALESCE(source_path,'')) LIKE '%.db3%' THEN 'inbox_db' "
+                "WHEN LOWER(source_key) LIKE '%api%' OR COALESCE(source_path,'') = '' THEN 'api' ELSE 'file' END "
+                "|| ':' || source_key "
+                "WHEN COALESCE(source_path,'') != '' THEN "
+                "CASE WHEN LOWER(source_path) LIKE '%directed%' THEN 'directed_txt' "
+                "WHEN LOWER(source_path) LIKE '%inbox%' OR LOWER(source_path) LIKE '%.db3%' THEN 'inbox_db' "
+                "ELSE 'file' END || ':legacy:' || source_path "
+                "ELSE 'api:' || COALESCE(NULLIF(js8_instance_id,''), 'legacy') END) "
                 f"IN ({source_marks})"
             )
             params.extend(targeted_sources)
@@ -483,10 +565,9 @@ def _project_js8_messages(
     projected = 0
     with (nullcontext(conn) if targeted else conn):
         for row in rows:
-            source_key = _text(row["source_key"]) or _text(row["js8_instance_id"]) or "legacy"
+            source_key = _js8_source_key(row)
             source_id = f"js8:{source_key}"
             external_key = _text(row["source_id"]) or _text(row["id"])
-            message_id = stable_message_id(source_id, "js8_message", external_key)
             status = _upper(row["state"]) or "UNREAD"
             raw_body = _text(row["raw_text"])
             decoded_body = _text(row["decoded_text"])
@@ -519,29 +600,47 @@ def _project_js8_messages(
             )
             if commstat is not None:
                 intelligence = commstat["intelligence"]
+            canonical_payload = raw_payload or decoded_payload or body
+            message_id = canonical_station_message_id(
+                "js8",
+                event_ts=event_ts,
+                from_call=row["from_call"],
+                to_call=row["to_call"],
+                payload=canonical_payload,
+                message_type=form_name,
+                durable_id=f"{source_id}:{external_key}" if event_ts <= 0 else "",
+            )
+            receipt_kind = _js8_receipt_kind(source_key, row["source_path"])
             source = MessageSourceRecord(
                 source_id=source_id,
                 source_family="js8",
-                source_label=_source_label("JS8Call", source_key),
+                source_label=_js8_source_label(
+                    _text(row["source_key"]) or _text(row["js8_instance_id"]),
+                    row["source_path"],
+                ),
                 radio_id=_optional_int(row["source_radio_id"]),
                 app_instance_id=_text(row["js8_instance_id"]),
                 endpoint_or_path=_text(row["source_path"]),
                 capabilities={"read": True, "delete": True, "native_open": True},
-                provenance={"source_table": "js8_messages", "source_key": source_key},
+                provenance={
+                    "source_table": "js8_messages",
+                    "source_key": _text(row["source_key"]),
+                    "qualified_source_key": source_key,
+                    "receipt_source_kind": receipt_kind,
+                },
                 last_seen_utc=_utc_from_ts(event_ts),
                 last_ingested_utc=_utc_now(),
             )
             projection = MessageProjectionRecord(
                 message_id=message_id,
-                canonical_key=f"{source_id}:js8_message:{external_key}",
+                canonical_key=canonical_message_key("js8", message_id),
                 content_hash=content_hash(
-                    PROJECTOR_VERSION,
+                    native_projector_version("js8"),
                     JS8_MESSAGE_POLICY_VERSION,
                     JS8_COMMSTAT_CLASSIFICATION_VERSION,
                     "js8",
-                    external_key,
                     status,
-                    body,
+                    canonical_payload,
                 ),
                 primary_source_id=source_id,
                 source_family="js8",
@@ -582,7 +681,7 @@ def _project_js8_messages(
                 classification_version=decision.classification_version,
                 retention_class="normal",
                 search_text=_search_text(row["from_call"], row["to_call"], row["msg_type"], body),
-                projection_version=PROJECTOR_VERSION,
+                projection_version=native_projector_version("js8"),
             )
             _emit_projection_bundle(
                 conn,
@@ -599,6 +698,7 @@ def _project_js8_messages(
                     metadata={
                         "source_table": "js8_messages",
                         "row_id": _text(row["id"]),
+                        "receipt_source_kind": receipt_kind,
                         **({"commstat_subtype": commstat["subtype"]} if commstat is not None else {}),
                     },
                 ),
@@ -859,7 +959,6 @@ def _project_spotter_traffic(conn: sqlite3.Connection, limit: int, force: bool, 
             source_key = _text(row["js8_instance_id"]) or _text(row["source_radio_id"]) or "legacy"
             source_id = f"spotter:{source_key}"
             external_key = _text(row["id"])
-            message_id = stable_message_id(source_id, "spotter_message", external_key)
             status = _upper(row["state"]) or "UNREAD"
             raw_body = _text(row["raw_text"])
             body = _text(row["decoded_text"]) or raw_body
@@ -868,6 +967,15 @@ def _project_spotter_traffic(conn: sqlite3.Connection, limit: int, force: bool, 
             msg_type = _text(row["form_id"])
             if msg_type and not msg_type.startswith("F!"):
                 msg_type = f"F!{msg_type}"
+            message_id = canonical_station_message_id(
+                "spotter",
+                event_ts=event_ts,
+                from_call=row["from_call"],
+                to_call=row["to_call"],
+                payload=raw_body or body,
+                message_type=msg_type,
+                durable_id=f"{source_id}:{external_key}" if event_ts <= 0 else "",
+            )
             intelligence = analyze_spotter_text(
                 analysis_body,
                 form_name=msg_type,
@@ -895,15 +1003,14 @@ def _project_spotter_traffic(conn: sqlite3.Connection, limit: int, force: bool, 
             )
             projection = MessageProjectionRecord(
                 message_id=message_id,
-                canonical_key=f"{source_id}:spotter_message:{external_key}",
+                canonical_key=canonical_message_key("spotter", message_id),
                 content_hash=content_hash(
-                    PROJECTOR_VERSION,
+                    native_projector_version("spotter"),
                     SPOTTER_PROVENANCE_VERSION,
                     "spotter",
-                    external_key,
                     is_imported,
                     status,
-                    body,
+                    raw_body or body,
                 ),
                 primary_source_id=source_id,
                 source_family="spotter",
@@ -938,7 +1045,7 @@ def _project_spotter_traffic(conn: sqlite3.Connection, limit: int, force: bool, 
                 },
                 retention_class="normal",
                 search_text=_search_text(row["from_call"], row["to_call"], msg_type, body),
-                projection_version=PROJECTOR_VERSION,
+                projection_version=native_projector_version("spotter"),
             )
             _emit_projection_bundle(
                 conn,
@@ -951,7 +1058,13 @@ def _project_spotter_traffic(conn: sqlite3.Connection, limit: int, force: bool, 
                     external_key=external_key,
                     delete_capability="delete_source",
                     read_capability="mark_read",
-                    metadata={"source_table": "spotter_traffic", "row_id": external_key},
+                    metadata={
+                        "source_table": "spotter_traffic",
+                        "row_id": external_key,
+                        "receipt_source_kind": (
+                            "js8spotter_import" if is_imported else "fio_spotter_receive"
+                        ),
+                    },
                 ),
                 bundle_sink=bundle_sink,
             )
@@ -1008,11 +1121,19 @@ def _project_varac_messages(conn: sqlite3.Connection, limit: int, force: bool, *
             source_name = _text(row["source"]) or "varac"
             source_id = f"varac:{source_key}:{source_name}"
             external_key = _text(row["guid"]) or _text(row["vmail_guid"]) or _text(row["id"])
-            message_id = stable_message_id(source_id, "varac_message", external_key)
             status = "READ" if _int(row["read_status"]) else ("ALERT" if _int(row["urgent"]) else "UNREAD")
             body = _text(row["body"])
             subject = _text(row["subject"]) or _subject(body)
             event_ts = _float(row["ts"])
+            message_id = canonical_station_message_id(
+                "varac",
+                event_ts=event_ts,
+                from_call=row["from_call"],
+                to_call=row["to_call"],
+                payload="\n".join(part for part in (subject, body) if part),
+                message_type=row["msg_type"],
+                durable_id=external_key if _text(row["guid"]) or _text(row["vmail_guid"]) else "",
+            )
             source = MessageSourceRecord(
                 source_id=source_id,
                 source_family="varac",
@@ -1025,8 +1146,15 @@ def _project_varac_messages(conn: sqlite3.Connection, limit: int, force: bool, *
             )
             projection = MessageProjectionRecord(
                 message_id=message_id,
-                canonical_key=f"{source_id}:varac_message:{external_key}",
-                content_hash=content_hash(PROJECTOR_VERSION, "varac", external_key, status, subject, body),
+                canonical_key=canonical_message_key("varac", message_id),
+                content_hash=content_hash(
+                    native_projector_version("varac"),
+                    "varac",
+                    external_key,
+                    status,
+                    subject,
+                    body,
+                ),
                 primary_source_id=source_id,
                 source_family="varac",
                 source_label=source.source_label,
@@ -1059,7 +1187,7 @@ def _project_varac_messages(conn: sqlite3.Connection, limit: int, force: bool, *
                 operator_attention=status == "ALERT",
                 retention_class="normal",
                 search_text=_search_text(row["from_call"], row["to_call"], row["msg_type"], subject, body),
-                projection_version=PROJECTOR_VERSION,
+                projection_version=native_projector_version("varac"),
             )
             artifacts = []
             file_path = _text(row["file_path"])
@@ -1087,7 +1215,12 @@ def _project_varac_messages(conn: sqlite3.Connection, limit: int, force: bool, *
                     external_path=file_path,
                     delete_capability="delete_source",
                     read_capability="mark_read",
-                    metadata={"source_table": "varac_messages", "source": source_name, "row_id": _text(row["id"])},
+                    metadata={
+                        "source_table": "varac_messages",
+                        "source": source_name,
+                        "row_id": _text(row["id"]),
+                        "receipt_source_kind": f"varac_{source_name.lower()}",
+                    },
                 ),
                 artifacts=artifacts,
                 bundle_sink=bundle_sink,
@@ -1133,10 +1266,18 @@ def _project_sitrep_events(conn: sqlite3.Connection, limit: int, force: bool, *,
         for row in rows:
             source_id = "sitrep:fused"
             external_key = _text(row["report_key"]) or _text(row["id"])
-            message_id = stable_message_id(source_id, "sitrep_event", external_key)
             status = _status_from_condition(row["overall_status"])
             body = _sitrep_body(row)
             event_ts = _float(row["event_ts"])
+            message_id = canonical_station_message_id(
+                "sitrep",
+                event_ts=event_ts,
+                from_call=row["from_call"],
+                to_call=row["target"],
+                payload=body,
+                message_type=row["subtype"],
+                durable_id=external_key if event_ts <= 0 else "",
+            )
             source = MessageSourceRecord(
                 source_id=source_id,
                 source_family="sitrep",
@@ -1148,8 +1289,8 @@ def _project_sitrep_events(conn: sqlite3.Connection, limit: int, force: bool, *,
             )
             projection = MessageProjectionRecord(
                 message_id=message_id,
-                canonical_key=f"{source_id}:sitrep_event:{external_key}",
-                content_hash=content_hash(PROJECTOR_VERSION, "sitrep", external_key, row["updated_ts"], body),
+                canonical_key=canonical_message_key("sitrep", message_id),
+                content_hash=content_hash(native_projector_version("sitrep"), "sitrep", external_key, row["updated_ts"], body),
                 primary_source_id=source_id,
                 source_family="sitrep",
                 source_label=source.source_label,
@@ -1179,7 +1320,7 @@ def _project_sitrep_events(conn: sqlite3.Connection, limit: int, force: bool, *,
                 recommended_action="review" if status in {"YELLOW", "RED"} else "",
                 retention_class="operational",
                 search_text=_search_text(row["from_call"], row["target"], row["report_group"], body),
-                projection_version=PROJECTOR_VERSION,
+                projection_version=native_projector_version("sitrep"),
             )
             _emit_projection_bundle(
                 conn,
@@ -1248,10 +1389,20 @@ def _project_commstat_artifacts(conn: sqlite3.Connection, limit: int, force: boo
         for row in rows:
             source_id = "commstat:artifacts"
             external_key = _text(row["artifact_key"]) or _text(row["id"])
-            message_id = stable_message_id(source_id, "commstat_artifact", external_key)
             status = _upper(row["status_label"]) or _upper(row["alert_color"]) or "INFO"
             body = _text(row["body_text"]) or _text(row["remarks_text"]) or _text(row["title"])
             event_ts = _float(row["event_ts"])
+            message_id = canonical_station_message_id(
+                "commstat",
+                event_ts=event_ts,
+                from_call=row["from_call"],
+                to_call=row["target"],
+                payload="\n".join(
+                    part for part in (_text(row["title"]), body) if part
+                ),
+                message_type=row["subtype"] or row["artifact_kind"],
+                durable_id=external_key if event_ts <= 0 else "",
+            )
             source = MessageSourceRecord(
                 source_id=source_id,
                 source_family="commstat",
@@ -1264,8 +1415,8 @@ def _project_commstat_artifacts(conn: sqlite3.Connection, limit: int, force: boo
             )
             projection = MessageProjectionRecord(
                 message_id=message_id,
-                canonical_key=f"{source_id}:commstat_artifact:{external_key}",
-                content_hash=content_hash(PROJECTOR_VERSION, "commstat", external_key, row["updated_ts"], status, body),
+                canonical_key=canonical_message_key("commstat", message_id),
+                content_hash=content_hash(native_projector_version("commstat"), "commstat", external_key, row["updated_ts"], status, body),
                 primary_source_id=source_id,
                 source_family="commstat",
                 source_label=source.source_label,
@@ -1295,7 +1446,7 @@ def _project_commstat_artifacts(conn: sqlite3.Connection, limit: int, force: boo
                 recommended_action="review" if status in {"YELLOW", "RED", "ALERT", "WARNING"} else "",
                 retention_class="operational",
                 search_text=_search_text(row["from_call"], row["target"], row["report_group"], row["title"], body),
-                projection_version=PROJECTOR_VERSION,
+                projection_version=native_projector_version("commstat"),
             )
             _emit_projection_bundle(
                 conn,

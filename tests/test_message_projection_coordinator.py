@@ -22,7 +22,9 @@ from freqinout.core.message_projection_coordinator import (
     reconcile_native_source_changes,
 )
 from freqinout.core.message_projection_queue import (
+    DirtyProjectionItem,
     claim_ready,
+    enqueue_dirty,
     ensure_source_dirty_triggers,
     queue_diagnostics,
     release_owner_leases_conn,
@@ -172,6 +174,47 @@ def test_unchanged_reconciliation_has_no_dml_after_state_exists(tmp_path, monkey
         )
     finally:
         worker.close()
+
+
+def test_pre_v4_js8_dirty_identity_is_retired_without_tombstoning_receipt(tmp_path) -> None:
+    db_path = _db(tmp_path)
+    _insert_messages(db_path, 1)
+    worker = MessageProjectionCoordinator(db_path)
+    try:
+        assert worker.run_once(reconcile=False).committed == 1
+    finally:
+        worker.close()
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE message_external_refs SET source_id='js8:test' WHERE external_key='1'"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    enqueue_dirty(
+        db_path,
+        DirtyProjectionItem(
+            source_id="js8:test",
+            source_family="js8",
+            external_kind="js8_message",
+            external_key="1",
+            projector_version=3,
+        ),
+    )
+
+    worker = MessageProjectionCoordinator(db_path)
+    try:
+        result = worker.run_once(reconcile=False)
+        assert result.committed == 1
+    finally:
+        worker.close()
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute("SELECT deleted FROM message_projection").fetchone()[0] == 0
+        assert queue_diagnostics(db_path)["depth"] == 0
+    finally:
+        conn.close()
 
 
 def test_one_new_row_projects_one_identity_without_fixed_replay(tmp_path, monkeypatch) -> None:

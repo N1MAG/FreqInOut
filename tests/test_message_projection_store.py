@@ -520,6 +520,7 @@ def test_load_projected_external_refs_for_messages_bulk_loads_by_message(tmp_pat
     )
 
     assert refs_by_message[first.message_id][0]["external_key"] == "first"
+    assert refs_by_message[first.message_id][0]["receipt_source_label"] == source.source_label
     assert refs_by_message[second.message_id][0]["external_key"] == "second"
 
 

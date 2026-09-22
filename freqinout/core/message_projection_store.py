@@ -910,6 +910,18 @@ def upsert_message_projection(conn: sqlite3.Connection, message: MessageProjecti
 
 def upsert_external_ref(conn: sqlite3.Connection, ref: ExternalMessageRef, *, updated_utc: str | None = None) -> str:
     stamp = updated_utc or utc_now_iso()
+    previous = conn.execute(
+        """
+        SELECT message_id FROM message_external_refs
+         WHERE source_id=? AND external_kind=? AND external_key=?
+        """,
+        (
+            _sanitize_sql_text(ref.source_id),
+            _sanitize_sql_text(ref.external_kind),
+            _sanitize_sql_text(ref.external_key),
+        ),
+    ).fetchone()
+    previous_message_id = _sanitize_sql_text(previous[0]) if previous is not None else ""
     conn.execute(
         """
         INSERT INTO message_external_refs (
@@ -944,7 +956,141 @@ def upsert_external_ref(conn: sqlite3.Connection, ref: ExternalMessageRef, *, up
             _sanitize_sql_text(stamp),
         ),
     )
+    if previous_message_id and previous_message_id != _sanitize_sql_text(ref.message_id):
+        _merge_relinked_projection(
+            conn,
+            previous_message_id=previous_message_id,
+            message_id=_sanitize_sql_text(ref.message_id),
+            source_id=_sanitize_sql_text(ref.source_id),
+            external_key=_sanitize_sql_text(ref.external_key),
+        )
     return ref.message_id
+
+
+def _merge_relinked_projection(
+    conn: sqlite3.Connection,
+    *,
+    previous_message_id: str,
+    message_id: str,
+    source_id: str,
+    external_key: str,
+) -> None:
+    """Merge state and remove an orphan left by canonical-id correction.
+
+    Re-keying never deletes a source receipt: the unique external reference has
+    already moved to ``message_id``.  Only the superseded presentation row is
+    removed once no references remain attached to it.
+    """
+
+    if not previous_message_id or not message_id or previous_message_id == message_id:
+        return
+    prior = conn.execute(
+        """
+        SELECT read_state, status, pinned, archived, deleted, deleted_utc
+          FROM message_projection WHERE message_id=?
+        """,
+        (previous_message_id,),
+    ).fetchone()
+    current = conn.execute(
+        "SELECT 1 FROM message_projection WHERE message_id=?",
+        (message_id,),
+    ).fetchone()
+    if prior is not None and current is not None:
+        conn.execute(
+            """
+            UPDATE message_projection
+               SET read_state=CASE
+                       WHEN LOWER(COALESCE(?,''))='read' THEN 'read'
+                       ELSE read_state END,
+                   status=CASE
+                       WHEN LOWER(COALESCE(?,''))='read'
+                            AND UPPER(COALESCE(status,'')) IN ('NEW','UNREAD')
+                       THEN COALESCE(NULLIF(?,''),'READ') ELSE status END,
+                   pinned=CASE WHEN COALESCE(?,0)=1 THEN 1 ELSE pinned END,
+                   archived=CASE WHEN COALESCE(?,0)=1 THEN 1 ELSE archived END,
+                   deleted=CASE WHEN COALESCE(?,0)=1 THEN 1 ELSE deleted END,
+                   deleted_utc=CASE
+                       WHEN COALESCE(?,0)=1 AND COALESCE(?, '') != '' THEN ?
+                       ELSE deleted_utc END
+             WHERE message_id=?
+            """,
+            (
+                prior[0], prior[0], prior[1], prior[2], prior[3], prior[4],
+                prior[4], prior[5], prior[5], message_id,
+            ),
+        )
+    # Artifacts tied to this exact receipt follow its new canonical message.
+    conn.execute(
+        """
+        UPDATE message_artifacts SET message_id=?
+         WHERE message_id=? AND COALESCE(source_id,'')=? AND COALESCE(external_key,'')=?
+        """,
+        (message_id, previous_message_id, source_id, external_key),
+    )
+    remaining = conn.execute(
+        "SELECT 1 FROM message_external_refs WHERE message_id=? LIMIT 1",
+        (previous_message_id,),
+    ).fetchone()
+    if remaining is not None:
+        return
+    # The old id is now presentation-only debris.  Move dependent active state
+    # and retained artifacts before removing it; audit rows remain immutable.
+    conn.execute(
+        "UPDATE message_artifacts SET message_id=? WHERE message_id=?",
+        (message_id, previous_message_id),
+    )
+    conn.execute(
+        "UPDATE message_delete_queue SET message_id=? WHERE message_id=? AND state IN ('queued','running')",
+        (message_id, previous_message_id),
+    )
+    if _table_exists(conn, "fio_spotter_watch_matches"):
+        duplicate_watch_ids = [
+            int(row[0])
+            for row in conn.execute(
+                """
+                SELECT old.watch_id
+                  FROM fio_spotter_watch_matches old
+                 WHERE old.message_id=?
+                   AND EXISTS (
+                       SELECT 1 FROM fio_spotter_watch_matches current
+                        WHERE current.watch_id=old.watch_id AND current.message_id=?
+                   )
+                """,
+                (previous_message_id, message_id),
+            ).fetchall()
+        ]
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO fio_spotter_watch_matches(watch_id, message_id, matched_ts)
+            SELECT watch_id, ?, matched_ts FROM fio_spotter_watch_matches WHERE message_id=?
+            """,
+            (message_id, previous_message_id),
+        )
+        conn.execute(
+            "DELETE FROM fio_spotter_watch_matches WHERE message_id=?",
+            (previous_message_id,),
+        )
+        for watch_id in duplicate_watch_ids:
+            conn.execute(
+                """
+                UPDATE fio_spotter_watches
+                   SET match_count=MAX(0, COALESCE(match_count,0)-1)
+                 WHERE id=?
+                """,
+                (watch_id,),
+            )
+    from freqinout.core.ops_focus import (
+        index_message_for_ops_focus,
+        remove_message_from_ops_focus,
+    )
+
+    remove_message_from_ops_focus(conn, previous_message_id)
+    conn.execute("DELETE FROM message_projection WHERE message_id=?", (previous_message_id,))
+    refreshed = conn.execute(
+        "SELECT * FROM message_projection WHERE message_id=?", (message_id,)
+    ).fetchone()
+    if refreshed is not None:
+        index_message_for_ops_focus(conn, refreshed)
 
 
 def upsert_message_artifact(conn: sqlite3.Connection, artifact: MessageArtifactRecord, *, updated_utc: str | None = None) -> str:
@@ -1692,10 +1838,15 @@ def load_projected_message_detail(db_path: str | Path, message_id: str) -> dict[
         ).fetchone()
         refs = conn.execute(
             """
-            SELECT *
-             FROM message_external_refs
-             WHERE message_id=?
-             ORDER BY source_id, external_kind, external_key
+            SELECT r.*, s.source_label AS receipt_source_label,
+                   s.source_family AS receipt_source_family,
+                   s.radio_id AS receipt_radio_id,
+                   s.app_instance_id AS receipt_app_instance_id,
+                   s.endpoint_or_path AS receipt_endpoint_or_path
+              FROM message_external_refs r
+              LEFT JOIN message_sources s ON s.source_id=r.source_id
+             WHERE r.message_id=?
+             ORDER BY r.source_id, r.external_kind, r.external_key
              LIMIT ?
             """,
             (clean_id, MAX_PROJECTED_MESSAGE_DETAIL_ROWS),
@@ -1736,10 +1887,15 @@ def load_projected_external_refs_for_messages(
             placeholders = ",".join("?" for _ in chunk)
             rows = conn.execute(
                 f"""
-                SELECT *
-                  FROM message_external_refs
-                 WHERE message_id IN ({placeholders})
-                 ORDER BY source_id, external_kind, external_key
+                SELECT r.*, s.source_label AS receipt_source_label,
+                       s.source_family AS receipt_source_family,
+                       s.radio_id AS receipt_radio_id,
+                       s.app_instance_id AS receipt_app_instance_id,
+                       s.endpoint_or_path AS receipt_endpoint_or_path
+                  FROM message_external_refs r
+                  LEFT JOIN message_sources s ON s.source_id=r.source_id
+                 WHERE r.message_id IN ({placeholders})
+                 ORDER BY r.source_id, r.external_kind, r.external_key
                 """,
                 tuple(chunk),
             ).fetchall()

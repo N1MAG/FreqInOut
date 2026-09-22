@@ -21,6 +21,7 @@ from freqinout.core.message_projection_queue import (
     DirtyProjectionItem,
     SourceProjectionState,
     claim_ready,
+    complete_dirty_conn,
     enqueue_dirty_conn,
     get_source_state_conn,
     queue_diagnostics,
@@ -37,6 +38,7 @@ from freqinout.core.message_projection_writer import (
 from freqinout.core.perf_metrics import emit_span
 from freqinout.core.message_source_projectors import (
     PROJECTOR_VERSION,
+    native_projector_version,
     prepare_native_message_bundles,
 )
 from freqinout.core.scheduler_serial_executor import DaemonSerialExecutor
@@ -56,7 +58,20 @@ _SOURCE_SPECS: Mapping[str, Mapping[str, str]] = {
         "family": "js8",
         "table": "js8_messages",
         "kind": "js8_message",
-        "source_id": "'js8:' || COALESCE(NULLIF(source_key,''), NULLIF(js8_instance_id,''), 'legacy')",
+        "source_id": (
+            "'js8:' || CASE "
+            "WHEN COALESCE(source_key,'') != '' THEN "
+            "CASE WHEN LOWER(source_key || ' ' || COALESCE(source_path,'')) LIKE '%directed%' THEN 'directed_txt' "
+            "WHEN LOWER(source_key || ' ' || COALESCE(source_path,'')) LIKE '%inbox%' "
+            "OR LOWER(source_key || ' ' || COALESCE(source_path,'')) LIKE '%.db3%' THEN 'inbox_db' "
+            "WHEN LOWER(source_key) LIKE '%api%' OR COALESCE(source_path,'') = '' THEN 'api' ELSE 'file' END "
+            "|| ':' || source_key "
+            "WHEN COALESCE(source_path,'') != '' THEN "
+            "CASE WHEN LOWER(source_path) LIKE '%directed%' THEN 'directed_txt' "
+            "WHEN LOWER(source_path) LIKE '%inbox%' OR LOWER(source_path) LIKE '%.db3%' THEN 'inbox_db' "
+            "ELSE 'file' END || ':legacy:' || source_path "
+            "ELSE 'api:' || COALESCE(NULLIF(js8_instance_id,''), 'legacy') END"
+        ),
         "watermark": "id",
         "key": "CAST(COALESCE(source_id,id) AS TEXT)",
         "version": "printf('%s:%s:%s:%s',COALESCE(id,0),COALESCE(read_ts,0),COALESCE(state,''),COALESCE(flag_state,0))",
@@ -181,6 +196,9 @@ def reconcile_native_source_changes(
             if spec is None:
                 continue
             family = spec["family"]
+            # ``PROJECTOR_VERSION`` remains the compatibility override used by
+            # repair tooling/tests; family versions may advance independently.
+            target_projector = max(PROJECTOR_VERSION, native_projector_version(family))
             table = spec["table"]
             source_id = f"native:{table}"
             exists = conn.execute(
@@ -197,7 +215,7 @@ def reconcile_native_source_changes(
                                 source_id=source_id,
                                 source_family=family,
                                 availability_state="unavailable",
-                                projector_version=PROJECTOR_VERSION,
+                                projector_version=target_projector,
                                 classifier_version=JS8_MESSAGE_POLICY_VERSION if family == "js8" else 0,
                             ),
                         )
@@ -206,7 +224,7 @@ def reconcile_native_source_changes(
             version_changed = bool(
                 state
                 and (
-                    state.projector_version != PROJECTOR_VERSION
+                    state.projector_version != target_projector
                     or state.classifier_version != target_classifier
                 )
             )
@@ -238,7 +256,7 @@ def reconcile_native_source_changes(
                                 source_id=source_id,
                                 source_family=family,
                                 high_water_key=str(high_water),
-                                projector_version=PROJECTOR_VERSION,
+                                projector_version=target_projector,
                                 classifier_version=target_classifier,
                                 availability_state="available",
                             ),
@@ -255,7 +273,7 @@ def reconcile_native_source_changes(
                             external_key=str(row["external_key"] or row["id"]),
                             source_version=str(row["source_version"] or row["discovery_key"]),
                             operation=spec.get("operation", "upsert"),
-                            projector_version=PROJECTOR_VERSION,
+                            projector_version=target_projector,
                         ),
                     )
                 last_id = int(rows[-1]["discovery_key"] or high_water)
@@ -266,7 +284,7 @@ def reconcile_native_source_changes(
                         source_family=family,
                         high_water_key=str(last_id),
                         source_generation=str(last_id),
-                        projector_version=PROJECTOR_VERSION,
+                        projector_version=target_projector,
                         classifier_version=target_classifier,
                         availability_state="available",
                         diagnostics={"last_batch": len(rows)},
@@ -455,10 +473,20 @@ class MessageProjectionCoordinator:
                 replace(bundle, dirty_keys=(item.stable_key,), dirty_owner=self.owner)
             )
         missing_items = tuple(item for item in missing if isinstance(item, DirtyProjectionItem))
-        delete_items = deletes + missing_items
+        stale_aliases = tuple(
+            item for item in missing_items if self._obsolete_source_identity(item)
+        )
+        delete_items = deletes + tuple(item for item in missing_items if item not in stale_aliases)
         committed = deferred = deleted = 0
         max_transaction_ms = 0.0
         states: list[str] = []
+        if stale_aliases:
+            completed_stale = self._complete_stale_claims(stale_aliases)
+            committed += completed_stale
+            if completed_stale != len(stale_aliases):
+                deferred += len(stale_aliases) - completed_stale
+                self._retry(items=stale_aliases, code="stale_identity_cleanup")
+            states.append("committed" if completed_stale == len(stale_aliases) else "deferred")
         if owned_bundles:
             result: ProjectionWriteResult = self._writer.submit(
                 owned_bundles, cancel_event=event
@@ -508,7 +536,7 @@ class MessageProjectionCoordinator:
             states.append(delete_result.state)
             if not delete_result.completed:
                 self._retry(items=delete_items, code=delete_result.state)
-        handled = {item.stable_key for item in delete_items}
+        handled = {item.stable_key for item in delete_items + stale_aliases}
         handled.update(
             key for bundle in owned_bundles for key in bundle.dirty_keys
         )
@@ -527,6 +555,34 @@ class MessageProjectionCoordinator:
             max_transaction_ms=max_transaction_ms,
             state=state,
         )
+
+    @staticmethod
+    def _obsolete_source_identity(item: DirtyProjectionItem) -> bool:
+        """Recognize pre-v4 JS8 dirty keys without treating them as deletes."""
+
+        if item.operation == "delete" or item.source_family != "js8":
+            return False
+        source_id = str(item.source_id or "")
+        if not source_id.startswith("js8:"):
+            return False
+        suffix = source_id[len("js8:") :]
+        return not suffix.startswith(("api:", "directed_txt:", "inbox_db:", "file:"))
+
+    def _complete_stale_claims(self, items: Sequence[DirtyProjectionItem]) -> int:
+        if not items:
+            return 0
+        conn = connect_sqlite_runtime_write(
+            self.db_path, timeout=0.25, busy_timeout_ms=250
+        )
+        try:
+            with conn:
+                return complete_dirty_conn(
+                    conn,
+                    [item.stable_key for item in items],
+                    owner=self.owner,
+                )
+        finally:
+            conn.close()
 
     def _record_watch_matches(
         self,

@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from freqinout.core.message_file_scanner import FileRecord
+from freqinout.core.message_canonical_identity import (
+    canonical_message_key,
+    canonical_station_message_id,
+)
 from freqinout.core.message_projection_store import (
     ExternalMessageRef,
     MessageProjectionCheckpoint,
@@ -182,11 +186,22 @@ def _projection_bundle(
     source_id = _source_id(row, payload, summary, family)
     external_kind = _external_kind(row, payload, family)
     external_key = _external_key(row, payload, summary, family)
-    message_id = stable_message_id(source_id, external_kind, external_key)
-    canonical_key = f"{source_id}:{external_kind}:{external_key}"
     body_preview = _body_preview(row, payload, summary)
     event_ts = _float(getattr(summary, "event_ts", 0.0)) or _float(getattr(row, "rcv_ts", 0.0))
     received_ts = _float(getattr(summary, "received_ts", 0.0)) or _float(getattr(row, "rcv_ts", 0.0))
+    from_call = str(getattr(summary, "from_call", "") or getattr(row, "from_call", "") or "")
+    to_call = str(getattr(summary, "to_target", "") or getattr(row, "to_call", "") or "")
+    message_type = str(getattr(row, "msg_type", "") or getattr(summary, "form_type", "") or "")
+    message_id = canonical_station_message_id(
+        family,
+        event_ts=event_ts,
+        from_call=from_call,
+        to_call=to_call,
+        payload=body_preview or getattr(row, "title", ""),
+        message_type=message_type,
+        durable_id=f"{source_id}:{external_key}" if event_ts <= 0 else "",
+    )
+    canonical_key = canonical_message_key(family, message_id)
     source = MessageSourceRecord(
         source_id=source_id,
         source_family=family,
@@ -219,13 +234,13 @@ def _projection_bundle(
         source_label=source.source_label,
         radio_id=source.radio_id,
         app_instance_id=source.app_instance_id,
-        message_type=str(getattr(row, "msg_type", "") or getattr(summary, "form_type", "") or ""),
+        message_type=message_type,
         display_type=str(getattr(row, "display_type", "") or ""),
         status=status,
         severity=severity,
         read_state=_read_state(status),
-        from_call=str(getattr(summary, "from_call", "") or getattr(row, "from_call", "") or ""),
-        to_call=str(getattr(summary, "to_target", "") or getattr(row, "to_call", "") or ""),
+        from_call=from_call,
+        to_call=to_call,
         group_name=str(getattr(summary, "group", "") or "").lstrip("@").upper(),
         scope=_first_text(payload, "scope", "report_group"),
         state_code=_map_hint_attr(summary, "state"),

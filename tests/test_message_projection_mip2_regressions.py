@@ -144,6 +144,84 @@ def test_varac_endpoint_identity_is_scoped_for_duplicate_ids_and_guids(tmp_path)
         conn.close()
 
 
+def test_same_varac_message_keeps_endpoint_receipts_under_one_station_message(tmp_path) -> None:
+    db_path = _db_with_sources(tmp_path, varac=True)
+    conn = _connect(db_path)
+    try:
+        _insert_varac(conn, ingest_key="endpoint-a", row_id=7, guid="shared-guid", body="Same")
+        _insert_varac(conn, ingest_key="endpoint-b", row_id=7, guid="shared-guid", body="Same")
+        conn.commit()
+    finally:
+        conn.close()
+
+    coordinator = MessageProjectionCoordinator(db_path)
+    try:
+        result = coordinator.run_once(reconcile=False)
+        assert result.committed == 2
+    finally:
+        coordinator.close()
+
+    conn = _connect(db_path)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM message_projection WHERE source_family='varac'"
+        ).fetchone()[0] == 1
+        refs = conn.execute(
+            "SELECT source_id FROM message_external_refs WHERE external_kind='varac_message'"
+        ).fetchall()
+        assert {row["source_id"] for row in refs} == {
+            "varac:endpoint-a:inbox", "varac:endpoint-b:inbox"
+        }
+    finally:
+        conn.close()
+
+
+def test_deleting_one_varac_receipt_does_not_hide_same_message_from_peer_source(tmp_path) -> None:
+    db_path = _db_with_sources(tmp_path, varac=True)
+    conn = _connect(db_path)
+    try:
+        _insert_varac(conn, ingest_key="endpoint-a", row_id=7, guid="shared-guid", body="Same")
+        _insert_varac(conn, ingest_key="endpoint-b", row_id=7, guid="shared-guid", body="Same")
+        conn.commit()
+    finally:
+        conn.close()
+    coordinator = MessageProjectionCoordinator(db_path)
+    try:
+        assert coordinator.run_once(reconcile=False).committed == 2
+    finally:
+        coordinator.close()
+
+    writer = ProjectionBundleWriter(db_path)
+    try:
+        result = writer.write_deletions(
+            [
+                ProjectionDeleteRequest(
+                    source_id="varac:endpoint-a:inbox",
+                    external_kind="varac_message",
+                    external_key="shared-guid",
+                )
+            ]
+        )
+        assert result.completed
+    finally:
+        writer.close()
+
+    conn = _connect(db_path)
+    try:
+        projection = conn.execute(
+            "SELECT deleted FROM message_projection WHERE source_family='varac'"
+        ).fetchone()
+        assert projection["deleted"] == 0
+        refs = conn.execute(
+            "SELECT source_id, metadata_json FROM message_external_refs ORDER BY source_id"
+        ).fetchall()
+        assert len(refs) == 2
+        assert '"source_present":false' in refs[0]["metadata_json"]
+        assert "source_present" not in refs[1]["metadata_json"]
+    finally:
+        conn.close()
+
+
 def test_varac_delete_is_scoped_to_the_deleted_endpoint(tmp_path) -> None:
     """Deleting one duplicate VarAC endpoint must not tombstone its peer."""
 

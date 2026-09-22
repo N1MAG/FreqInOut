@@ -626,12 +626,13 @@ class ProjectionBundleWriter:
                             )
                         delay = min(self._busy_retry_seconds, delay * 2.0)
                 changed_ids: list[str] = []
+                receipt_changed = False
                 for request in items:
                     if self._cancelled(cancel_event):
                         raise InterruptedError("projection deletion cancelled")
                     rows = conn.execute(
                         """
-                        SELECT DISTINCT message_id FROM message_external_refs
+                        SELECT message_id, metadata_json FROM message_external_refs
                          WHERE source_id=? AND external_kind=? AND external_key=?
                         """,
                         (
@@ -642,6 +643,58 @@ class ProjectionBundleWriter:
                     ).fetchall()
                     for row in rows:
                         message_id = _clean_text(row[0])
+                        try:
+                            receipt_metadata = json.loads(_clean_text(row[1]) or "{}")
+                        except Exception:
+                            receipt_metadata = {}
+                        if not isinstance(receipt_metadata, dict):
+                            receipt_metadata = {}
+                        receipt_metadata["source_present"] = False
+                        receipt_metadata["source_deleted_utc"] = time.strftime(
+                            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                        )
+                        conn.execute(
+                            """
+                            UPDATE message_external_refs
+                               SET metadata_json=?, updated_utc=?
+                             WHERE source_id=? AND external_kind=? AND external_key=?
+                            """,
+                            (
+                                _clean_json(receipt_metadata),
+                                receipt_metadata["source_deleted_utc"],
+                                _clean_text(request.source_id),
+                                _clean_text(request.external_kind),
+                                _clean_text(request.external_key),
+                            ),
+                        )
+                        receipt_changed = True
+                        peer_rows = conn.execute(
+                            """
+                            SELECT metadata_json FROM message_external_refs
+                             WHERE message_id=?
+                               AND NOT (source_id=? AND external_kind=? AND external_key=?)
+                            """,
+                            (
+                                message_id,
+                                _clean_text(request.source_id),
+                                _clean_text(request.external_kind),
+                                _clean_text(request.external_key),
+                            ),
+                        ).fetchall()
+                        has_present_peer = False
+                        for peer in peer_rows:
+                            try:
+                                peer_metadata = json.loads(_clean_text(peer[0]) or "{}")
+                            except Exception:
+                                peer_metadata = {}
+                            if not isinstance(peer_metadata, dict) or peer_metadata.get("source_present", True) is not False:
+                                has_present_peer = True
+                                break
+                        if has_present_peer:
+                            # The canonical station message remains present via
+                            # another source receipt.  Keep this deleted-source
+                            # reference as immutable provenance.
+                            continue
                         cur = conn.execute(
                             """
                             UPDATE message_projection
@@ -674,7 +727,7 @@ class ProjectionBundleWriter:
                                 "DELETE FROM message_projection_dirty WHERE dirty_key=?",
                                 (_clean_text(request.dirty_key),),
                             )
-                if changed_ids:
+                if changed_ids or receipt_changed:
                     conn.execute(
                         """UPDATE message_projection_generation
                               SET generation=generation+1, updated_utc=? WHERE singleton=1""",

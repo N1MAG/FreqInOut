@@ -21703,16 +21703,40 @@ class MessageViewerTab(QWidget):
             return lines
         for ref in iterator:
             try:
+                source_id = str(ref["source_id"] or "").strip()
+                source_label = str(ref["receipt_source_label"] or "").strip()
+                radio_id = str(ref["receipt_radio_id"] or "").strip()
+                app_instance_id = str(ref["receipt_app_instance_id"] or "").strip()
                 kind = str(ref["external_kind"] or "").strip()
                 key = str(ref["external_key"] or "").strip()
                 path = str(ref["external_path"] or "").strip()
                 delete_cap = str(ref["delete_capability"] or "").strip()
             except Exception:
+                source_id = str(getattr(ref, "source_id", "") or "").strip()
+                source_label = str(getattr(ref, "receipt_source_label", "") or "").strip()
+                radio_id = str(getattr(ref, "receipt_radio_id", "") or "").strip()
+                app_instance_id = str(getattr(ref, "receipt_app_instance_id", "") or "").strip()
                 kind = str(getattr(ref, "external_kind", "") or "").strip()
                 key = str(getattr(ref, "external_key", "") or "").strip()
                 path = str(getattr(ref, "external_path", "") or "").strip()
                 delete_cap = str(getattr(ref, "delete_capability", "") or "").strip()
-            parts = [part for part in (kind, key, path, f"delete={delete_cap}" if delete_cap else "") if part]
+            source = source_label or source_id
+            source_context = " · ".join(
+                part for part in (
+                    source,
+                    f"radio {radio_id}" if radio_id else "",
+                    app_instance_id,
+                ) if part
+            )
+            parts = [
+                part for part in (
+                    source_context,
+                    kind,
+                    key,
+                    path,
+                    f"delete={delete_cap}" if delete_cap else "",
+                ) if part
+            ]
             if parts:
                 lines.append(" | ".join(parts))
         return lines

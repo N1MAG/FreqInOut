@@ -10275,3 +10275,51 @@ receiver, JS8, managed-directory, Fast Light repair, VarAC, refresh-coordination
 and status suite passes **123 tests with 2 platform skips**. Changed-file
 compilation and `git diff --check` pass. Linux operator qualification remains
 open.
+
+## 2026-09-22 — canonical station-message identity and receipt-preserving dedupe
+
+Status: specified and surgically implemented; production upgrade qualification
+is open.
+
+The supplied production database proved that the duplicated Spotter Inbox/All
+rows were durable duplicate projections, not a Qt paint issue. The duplicate
+rows were inserted during one historical replay after JS8 discovery changed
+from an unqualified source to qualified `DIRECTED.TXT` source keys. Their RF
+event times and payloads matched older rows, but the projector included source
+identity and source row ID in `message_id`; the writer then moved neither the
+old reference nor the old presentation. Duplicate application processes were
+therefore not the direct cause of the displayed pairs, and the version-2 to
+version-3 configuration migration was not itself the message duplication
+mechanism.
+
+Projection identity is now station-message identity within every message
+family. JS8 API, `DIRECTED.TXT`, `inbox.db3`, FIO Spotter/import, VarAC
+Incoming/mailboxes, CommStat/SitRep source references, FLMsg folders, and FLAmp
+receive/Q locations retain distinct `message_sources` and
+`message_external_refs`. Matching receipts share one canonical Inbox/All row,
+and message detail labels each retained source rather than presenting an
+ambiguous primary source. Different event times or different payloads remain
+distinct. Completed FLMsg and FLAmp files use form/protocol identity plus
+content digest for family-local idempotency rather than a hidden FIO parent
+path or modification time.
+
+The serialized projection writer now treats a source re-key as an atomic
+relink. It preserves read/pin/archive/delete state, re-parents artifacts and
+active queue/watch state, repairs the compact Ops index, and removes an old
+projection only when no external references remain. Projector version 4 and
+file projector version 5 trigger bounded background repair; UI queries do not
+perform migration work.
+
+Production-copy qualification projected 8,872 JS8 rows, 2,064 Spotter rows, 72
+VarAC rows, 6,427 SitRep rows, and 5,683 CommStat rows without an orphan
+projection. The reported KR1FLE-to-W8UFO Spotter pair became one canonical row
+with two retained external receipts. Focused source/projector/writer/coordinator
+coverage and adjacent store/read-model/file-arrival tests pass **95 tests**
+after adding API-versus-`DIRECTED.TXT`, repeated-event, Spotter replay, VarAC
+multi-mailbox, source-delete-with-peer-receipt, FLMsg/FLAmp multi-folder, and
+source-relink state-preservation cases. The distinct-receipt detail rendering
+case also passes independently. Changed-file compilation and `git diff
+--check` pass. The existing macOS/PySide reader suite still terminates in its
+native paint-event segmentation fault when run as one process after nine
+passing cases; there was no Python assertion failure before that host-native
+crash.

@@ -21,10 +21,23 @@ _SOURCE_TRIGGER_SPECS = {
     "js8_messages": {
         "family": "js8",
         "kind": "js8_message",
-        "source_id": "'js8:' || COALESCE(NULLIF({row}.source_key,''), NULLIF({row}.js8_instance_id,''), 'legacy')",
+        "source_id": (
+            "'js8:' || CASE "
+            "WHEN COALESCE({row}.source_key,'') != '' THEN "
+            "CASE WHEN LOWER({row}.source_key || ' ' || COALESCE({row}.source_path,'')) LIKE '%directed%' THEN 'directed_txt' "
+            "WHEN LOWER({row}.source_key || ' ' || COALESCE({row}.source_path,'')) LIKE '%inbox%' "
+            "OR LOWER({row}.source_key || ' ' || COALESCE({row}.source_path,'')) LIKE '%.db3%' THEN 'inbox_db' "
+            "WHEN LOWER({row}.source_key) LIKE '%api%' OR COALESCE({row}.source_path,'') = '' THEN 'api' ELSE 'file' END "
+            "|| ':' || {row}.source_key "
+            "WHEN COALESCE({row}.source_path,'') != '' THEN "
+            "CASE WHEN LOWER({row}.source_path) LIKE '%directed%' THEN 'directed_txt' "
+            "WHEN LOWER({row}.source_path) LIKE '%inbox%' OR LOWER({row}.source_path) LIKE '%.db3%' THEN 'inbox_db' "
+            "ELSE 'file' END || ':legacy:' || {row}.source_path "
+            "ELSE 'api:' || COALESCE(NULLIF({row}.js8_instance_id,''), 'legacy') END"
+        ),
         "key": "CAST(COALESCE({row}.source_id, {row}.id) AS TEXT)",
         "version": "printf('%s:%s:%s:%s', COALESCE({row}.id,0), COALESCE({row}.read_ts,0), COALESCE({row}.state,''), COALESCE({row}.flag_state,0))",
-        "required": {"id", "source_key", "source_id", "js8_instance_id", "read_ts", "state", "flag_state"},
+        "required": {"id", "source_key", "source_id", "js8_instance_id", "source_path", "read_ts", "state", "flag_state"},
     },
     "spotter_traffic": {
         "family": "spotter",

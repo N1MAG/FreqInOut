@@ -331,6 +331,60 @@ def test_writer_ignores_volatile_source_ingested_time_but_writes_source_correcti
         writer.close()
 
 
+def test_writer_relinks_receipt_and_removes_only_orphaned_old_presentation(tmp_path) -> None:
+    db_path = _prepared_writer(tmp_path)
+    source = _source()
+    old = MessageProjectionRecord(
+        **{
+            **_message("source-scoped-old").__dict__,
+            "read_state": "read",
+            "status": "READ",
+            "pinned": True,
+        }
+    )
+    ref = ExternalMessageRef(
+        message_id=old.message_id,
+        source_id=source.source_id,
+        external_kind="js8_message",
+        external_key="101",
+    )
+    writer = ProjectionBundleWriter(db_path)
+    try:
+        assert writer.write_batch((ProjectionBundle(source, old, (ref,)),)).completed
+        canonical = MessageProjectionRecord(
+            **{
+                **_message("station-canonical").__dict__,
+                "canonical_key": "station:js8:station-canonical",
+            }
+        )
+        moved_ref = ExternalMessageRef(
+            message_id=canonical.message_id,
+            source_id=ref.source_id,
+            external_kind=ref.external_kind,
+            external_key=ref.external_key,
+        )
+        assert writer.write_batch((ProjectionBundle(source, canonical, (moved_ref,)),)).completed
+    finally:
+        writer.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM message_projection WHERE message_id=?", (old.message_id,)
+        ).fetchone()[0] == 0
+        row = conn.execute(
+            "SELECT read_state, status, pinned FROM message_projection WHERE message_id=?",
+            (canonical.message_id,),
+        ).fetchone()
+        assert row == ("read", "READ", 1)
+        assert conn.execute(
+            "SELECT message_id FROM message_external_refs WHERE source_id=? AND external_kind=? AND external_key=?",
+            (ref.source_id, ref.external_kind, ref.external_key),
+        ).fetchone()[0] == canonical.message_id
+    finally:
+        conn.close()
+
+
 def test_projection_writer_registry_returns_one_writer_per_database(tmp_path) -> None:
     first_path = tmp_path / "first.sqlite"
     second_path = tmp_path / "second.sqlite"

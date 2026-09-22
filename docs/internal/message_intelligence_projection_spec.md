@@ -79,6 +79,71 @@ Recommended keys:
 - Mesh/Reticulum/MQTT/APRS: protocol message id when available; fallback
   source timestamp plus content hash.
 
+## Canonical Identity And Receipt Separation
+
+The station-library identity and the receipt identity are deliberately
+different. A source-qualified external reference answers **where FIO observed
+the traffic**; the canonical `message_id` answers **which station message the
+operator should see**. A replay, source-key migration, second receiver, or
+second application source must not create another Inbox/All row for the same
+event, and deduplication must never erase the evidence that it was observed by
+more than one source.
+
+This guard applies to every supported message family. In particular, FIO must
+retain distinct source records and external references for:
+
+- JS8Call live API, `DIRECTED.TXT`, `inbox.db3`, and any explicitly imported
+  JS8 history; API and file receipts for the same RF event may share one
+  canonical message but are never represented as the same source;
+- FIO Spotter local receive rows and imported JS8Spotter history;
+- each VarAC Incoming/mailbox/database source and member identity;
+- CommStat source references and the fused CommStat artifact;
+- SitRep source references and the fused SitRep event;
+- each radio/profile-owned FLMsg message folder;
+- each radio/profile-owned FLAmp receive/Q/reconstruction source; and
+- BBS, BBS archive, MeshCore, Meshtastic, Reticulum, MQTT, APRS, local, and
+  import sources as their adapters are projected.
+
+Canonical identity is family-scoped and source-independent. Prefer a durable
+protocol/message identifier plus a payload fingerprint. When none exists, use
+the normalized exact event envelope: event second, sender, recipient/group,
+and canonical payload. File families use the completed-file content digest plus
+their protocol/form identity (for example the filename or FLAmp Q identity);
+parent path, profile, radio, modification time, and folder remain
+receipt/artifact metadata rather than station-message identity. This prevents
+unrelated forms that happen to contain identical placeholder bytes from being
+collapsed. Two events with the same text at different event times remain
+distinct. A durable identifier reused with a different payload remains
+distinct and is flagged by its source adapter rather than silently losing
+either record. An event without a trustworthy event time remains
+source/reference-scoped unless a protocol-level durable identity proves that
+two receipts describe the same message; missing time is never treated as
+midnight and used to collapse unrelated traffic.
+
+Reprojection from an older source-scoped identity is an atomic relink:
+
+1. create or update the canonical station message;
+2. move only the matching external reference and its artifacts;
+3. preserve operator-owned read, pin, archive, and deletion state;
+4. retain all distinct source/reference metadata; and
+5. remove the old presentation row only after it has no external references,
+   including removal from compact Ops indexes.
+
+If one native source later removes its receipt, FIO marks that reference as no
+longer present but keeps it as provenance. The canonical message remains
+visible while any other linked receipt is still present; a source-scoped
+delete must never hide a peer radio/application's surviving receipt.
+
+Projector identity-version changes replay in bounded background batches. They
+must not scan sources on the GUI thread or make Messages first paint wait for
+historical repair.
+
+Message detail must list every retained receipt using its human source label,
+radio and application instance when known, external kind/key, and native path
+or endpoint. A single canonical row must therefore never make API versus file,
+VarAC mailbox, CommStat source, FLMsg folder, or FLAmp receive/Q provenance
+ambiguous to the operator.
+
 ## Canonical Message Projection
 
 `message_projection` is the hot table used by inbox, map context, attention

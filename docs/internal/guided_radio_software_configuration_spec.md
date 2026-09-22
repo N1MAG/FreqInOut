@@ -4161,6 +4161,17 @@ markup, does not execute attachments, and presents unknown/binary content as an
 attachment. A changed file is a new revision. Repeated observation of identical
 content is idempotent while preserving every distinct receipt/provenance event.
 
+That idempotency is universal rather than a FIO Spotter exception. JS8Call API,
+`DIRECTED.TXT`, and `inbox.db3` are separate source identities; CommStat fused
+artifacts retain their source-reference set; every VarAC Incoming/mailbox,
+FLMsg folder, and FLAmp receive/Q location remains separately attributable.
+When two such sources contain the same qualified event, the station library
+shows one canonical message with multiple receipts. Source labels, radio and
+application-instance IDs, endpoint/path, native external key, receive time, and
+operating-group context remain available for each receipt. A source discovery
+rename or migration from an unqualified source key to a qualified key relinks
+the receipt and cannot leave a second presentation row behind.
+
 FIO-owned outgoing work uses a radio-scoped local outbox and an explicit
 destination resource. Handoff to FLMsg, FLAmp, VarAC, BBS, or another service
 uses a temporary file and atomic promotion where supported, records the result,
