@@ -1094,9 +1094,13 @@ Execution has one fail-closed runtime preflight shared by automatic startup,
 selected-radio start, row `Start`, and manual launch:
 
 - before the first process spawn, FIO completes a fresh asynchronous
-  station-wide process inventory; a cold, stale, pending, failed, or timed-out
-  inventory is unknown evidence and must never be interpreted as “not
-  running”;
+  launch-owned station-wide process inventory; an in-flight timer/startup
+  inventory is queued ahead of, but cannot satisfy, this gate. A cold, stale,
+  pending, failed, unrelated, or timed-out inventory is unknown evidence and
+  must never be interpreted as “not running”;
+- the dedicated launch inventory runs off the GUI thread and performs a bounded
+  full command-line attribution pass. Routine UI/timer inventories retain the
+  low-cost direct-name/wrapper filter;
 - process-only applications are matched by the canonical executable plus the
   radio-owned launch arguments/profile selector, so another radio's process is
   neither credited nor duplicated;
@@ -1108,6 +1112,11 @@ selected-radio start, row `Start`, and manual launch:
 - Linux process inventory inspects exact and delimiter-qualified native names
   such as `flamp-2.2.14`, then requires the saved executable argv and the same
   radio-owned selectors before crediting that process;
+- if one or more family processes are visible but the launch-owned inventory
+  cannot attribute all of them to configured identities, the requested row
+  fails closed. This applies equally to native FLAmp/FLMsg processes and Wine
+  VarAC/VARA children; another instance is launchable only after all existing
+  family processes are attributed to other persisted rows;
 - FLRig, FLDigi, and JS8Call additionally receive a fresh configured-host/port
   probe for that exact radio endpoint before a spawn is authorized;
 - a reachable configured endpoint is `already running` even when the process

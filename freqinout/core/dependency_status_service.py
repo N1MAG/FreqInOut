@@ -176,6 +176,7 @@ class DependencyStatusService(QObject):
         self._active_futures: set[Future] = set()
         self._sequence = 0
         self._worker_pending = False
+        self._queued_process_refresh_reason = ""
         self._stopped = False
         self._cancel_token = CancellationToken()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fio-dependency-status")
@@ -292,18 +293,28 @@ class DependencyStatusService(QObject):
         return fallback
 
     def refresh_now(self, *, reason: str = "manual", force: bool = False) -> DependencySnapshot:
+        requested_reason = str(reason or "manual")
         with self._lock:
             if self._stopped:
                 return self._latest_snapshot
             # A forced refresh bypasses freshness, not the single-flight rule.
             # Queueing another whole process walk behind an in-flight one only
             # makes the returned snapshot older and delays scoped requests.
+            # Launch safety is the exception: an unrelated timer/startup walk
+            # is not launch-owned evidence, so retain one coalesced dedicated
+            # walk behind it rather than letting the caller accept that result.
             if self._worker_pending:
+                if force and requested_reason.startswith("launch-preflight:"):
+                    self._queued_process_refresh_reason = requested_reason
                 return self._latest_snapshot
             self._worker_pending = True
             self._sequence += 1
             sequence = self._sequence
-        future = self._executor.submit(self._build_process_snapshot, sequence, str(reason or "manual"))
+        future = self._executor.submit(
+            self._build_process_snapshot,
+            sequence,
+            requested_reason,
+        )
         with self._lock:
             self._active_futures.add(future)
         future.add_done_callback(self._on_worker_done)
@@ -314,6 +325,7 @@ class DependencyStatusService(QObject):
         with self._lock:
             self._stopped = True
             self._worker_pending = False
+            self._queued_process_refresh_reason = ""
             self._scoped_pending.clear()
             futures = tuple(self._active_futures)
         self._cancel_token.cancel()
@@ -339,15 +351,23 @@ class DependencyStatusService(QObject):
         try:
             snapshot = future.result()
         except OperationCancelled:
-            with self._lock:
-                self._worker_pending = False
+            self._release_failed_process_refresh()
             return
         except Exception as exc:
             log.warning("DEPENDENCY_STATUS|refresh_failed|error=%s", exc)
-            with self._lock:
-                self._worker_pending = False
+            self._release_failed_process_refresh()
             return
         self._snapshot_ready.emit(snapshot)
+
+    def _release_failed_process_refresh(self) -> None:
+        queued_reason = ""
+        with self._lock:
+            self._worker_pending = False
+            if not self._stopped:
+                queued_reason = self._queued_process_refresh_reason
+            self._queued_process_refresh_reason = ""
+        if queued_reason:
+            self.refresh_now(reason=queued_reason, force=True)
 
     def _on_scoped_worker_done(self, scope: str, future: Future) -> None:
         with self._lock:
@@ -370,15 +390,20 @@ class DependencyStatusService(QObject):
 
     @Slot(object)
     def _publish_snapshot(self, snapshot: DependencySnapshot) -> None:
+        queued_reason = ""
         with self._lock:
             if self._stopped:
                 return
             if snapshot.scope == LEGACY_PRIMARY_DEPENDENCY_SCOPE:
                 self._latest_snapshot = snapshot
                 self._worker_pending = False
+                queued_reason = self._queued_process_refresh_reason
+                self._queued_process_refresh_reason = ""
             else:
                 self._scoped_snapshots[snapshot.scope] = snapshot
                 self._scoped_pending.discard(snapshot.scope)
+        if queued_reason:
+            self.refresh_now(reason=queued_reason, force=True)
         self.snapshot_changed.emit(snapshot)
 
     @staticmethod
@@ -451,6 +476,14 @@ class DependencyStatusService(QObject):
         started = time.perf_counter()
         checked_at = time.time()
         probe = SoftwareStatusService(self.settings)
+        # Launch authorization needs complete command-line attribution. Keep
+        # routine timer/UI inventories cheap, but make the launch-owned walk
+        # inspect every process off the GUI thread before absence can authorize
+        # a spawn.
+        probe._refresh_process_snapshot(
+            force=True,
+            inspect_all=str(reason or "").startswith("launch-preflight:"),
+        )
         statuses: Dict[str, DependencyStatus] = {}
         for status_key in STATUS_KEYS:
             self._cancel_token.checkpoint()

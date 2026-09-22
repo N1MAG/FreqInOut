@@ -253,7 +253,12 @@ class SoftwareStatusService:
                     return True
         return False
 
-    def _refresh_process_snapshot(self, *, force: bool = False) -> None:
+    def _refresh_process_snapshot(
+        self,
+        *,
+        force: bool = False,
+        inspect_all: bool = False,
+    ) -> None:
         cls = type(self)
         with cls._shared_proc_lock:
             now = time.monotonic()
@@ -287,7 +292,12 @@ class SoftwareStatusService:
                     # roots, rig name, or VarAC INI).  Inspect command lines
                     # for the small set of known direct matches as well as
                     # wrappers so status can attribute a process to one radio.
-                    inspect_command = direct_match or name in PROCESS_WRAPPER_TOKENS or not name
+                    inspect_command = (
+                        bool(inspect_all)
+                        or direct_match
+                        or name in PROCESS_WRAPPER_TOKENS
+                        or not name
+                    )
                     if direct_match:
                         try:
                             exe_path = str(proc.exe() or "").strip()
@@ -414,6 +424,31 @@ class SoftwareStatusService:
             normalized = program_name.strip().lower()
             targets = {normalized, f"{normalized}.exe"}
         return any(token in targets for token in self._proc_snapshot)
+
+    def cached_program_process_count(self, program_name: str) -> int:
+        """Count cached process records carrying this program's family token."""
+
+        cls = type(self)
+        self._proc_snapshot = cls._shared_proc_snapshot
+        self._proc_records = cls._shared_proc_records
+        self._proc_snapshot_ts = cls._shared_proc_snapshot_ts
+        targets = set(self._target_tokens(program_name))
+        if not targets:
+            normalized = str(program_name or "").strip().casefold()
+            targets = {normalized, f"{normalized}.exe"}
+        count = 0
+        for record in self._proc_records:
+            record_tokens = {
+                str(record.get("name") or "").casefold(),
+                str(record.get("exe") or "").casefold(),
+                *(
+                    str(value or "").casefold()
+                    for value in record.get("cmd_tokens", ())
+                ),
+            }
+            if record_tokens.intersection(targets):
+                count += 1
+        return count
 
     @staticmethod
     def _normalized_process_argument(value: object) -> str:

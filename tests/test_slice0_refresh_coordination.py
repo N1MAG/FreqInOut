@@ -8,7 +8,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from freqinout.core.dependency_status_service import DependencyStatusService
+from freqinout.core.dependency_status_service import (
+    DependencySnapshot,
+    DependencyStatusService,
+)
 from freqinout.core.software_status_service import SoftwareStatusService
 
 
@@ -187,6 +190,44 @@ def test_forced_process_refresh_still_obeys_single_flight() -> None:
         service.stop()
 
 
+def test_launch_preflight_refresh_is_queued_behind_unrelated_worker() -> None:
+    app = _app()
+    service = DependencyStatusService(_Settings())
+    service._timer.stop()
+    started = threading.Event()
+    release = threading.Event()
+    calls: list[str] = []
+
+    def controlled_build(sequence: int, reason: str) -> DependencySnapshot:
+        calls.append(reason)
+        if reason == "timer":
+            started.set()
+            release.wait(1.0)
+        return DependencySnapshot(
+            generated_at=time.time(),
+            reason=reason,
+            sequence=sequence,
+        )
+
+    service._build_process_snapshot = controlled_build  # type: ignore[method-assign]
+    try:
+        service.refresh_now(reason="timer")
+        assert started.wait(0.5)
+        service.refresh_now(reason="launch-preflight:startup", force=True)
+        assert calls == ["timer"]
+
+        release.set()
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and len(calls) < 2:
+            app.processEvents()
+            time.sleep(0.005)
+
+        assert calls == ["timer", "launch-preflight:startup"]
+    finally:
+        release.set()
+        service.stop()
+
+
 def test_process_inventory_avoids_expensive_details_for_unrelated_processes(monkeypatch) -> None:
     class _Process:
         def __init__(self, name: str, cmdline: list[str] | None = None):
@@ -237,3 +278,69 @@ def test_process_inventory_avoids_expensive_details_for_unrelated_processes(monk
     assert service.program_is_running("FLDigi") is True
     assert service.program_is_running("FLAmp") is True
     assert service.program_is_running("CommStat") is True
+
+    service._refresh_process_snapshot(force=True, inspect_all=True)
+    assert unrelated.cmdline_calls == 1
+
+
+def test_launch_inventory_attributes_wine_child_command_lines(monkeypatch) -> None:
+    class _Process:
+        def __init__(self, name: str, cmdline: list[str]):
+            self.info = {"name": name}
+            self._cmdline = cmdline
+
+        def exe(self) -> str:
+            return "/usr/lib/wine/wine64-preloader"
+
+        def cmdline(self) -> list[str]:
+            return list(self._cmdline)
+
+    processes = [
+        _Process(
+            "wine64-preloader",
+            [
+                "/usr/lib/wine/wine64-preloader",
+                "/home/bill/.wine/drive_c/VarAC/VarAC.exe",
+                "C:\\VarAC\\VarAC-ft-710.ini",
+            ],
+        ),
+        _Process(
+            "wine64-preloader",
+            [
+                "/usr/lib/wine/wine64-preloader",
+                "/home/bill/.wine/drive_c/VARA-ft-710/VARA.exe",
+            ],
+        ),
+    ]
+    monkeypatch.setattr(
+        "freqinout.core.software_status_service.psutil.process_iter",
+        lambda attrs: processes,
+    )
+    SoftwareStatusService._shared_proc_snapshot_ts = 0.0
+    service = SoftwareStatusService(_Settings())
+
+    service._refresh_process_snapshot(force=True, inspect_all=True)
+
+    assert service.cached_program_process_count("VarAC") == 1
+    assert service.cached_program_process_count("VARA") == 1
+    assert service.cached_program_instance_running(
+        "VarAC",
+        "wine",
+        (
+            "/home/bill/.wine/drive_c/VarAC/VarAC.exe",
+            "C:\\VarAC\\VarAC-ft-710.ini",
+        ),
+    ) is True
+    assert service.cached_program_instance_running(
+        "VarAC",
+        "wine",
+        (
+            "/home/bill/.wine/drive_c/VarAC/VarAC.exe",
+            "C:\\VarAC\\VarAC-ftdx-10.ini",
+        ),
+    ) is False
+    assert service.cached_program_instance_running(
+        "VARA",
+        "wine",
+        ("/home/bill/.wine/drive_c/VARA-ft-710/VARA.exe",),
+    ) is True

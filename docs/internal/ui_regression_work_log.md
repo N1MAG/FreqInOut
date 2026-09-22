@@ -10230,3 +10230,48 @@ receiver, JS8, managed-directory, Fast Light repair, VarAC, refresh-coordination
 and status suites pass **121 tests with 2 platform skips**. Changed-file
 compilation and `git diff --check` pass. Linux operator qualification remains
 open.
+
+## 2026-09-22 — launch-owned inventory and unattributed-process fail-close
+
+Status: specified and surgically implemented; Linux operator qualification is
+open.
+
+The attached `freqinout (63).log` proved that title normalization was not the
+shared production cause. At 16:16:24 the orchestrator accepted process
+preflight sequence 4 after a timer inventory had completed at 16:16:08, then
+launched both existing FLAmp identities at 16:16:45 and 16:16:52. Earlier runs
+in the same log also launched additional VarAC and VARA processes. Endpoint
+owners FLRig, FLDigi, and JS8Call were correctly protected by their second
+endpoint gate; process-only rows had no equivalent barrier after exact argv
+attribution returned false.
+
+The shared failure had two parts. Dependency-status single-flight coalescing
+allowed an unrelated in-flight timer/startup inventory to satisfy the launch
+sequence merely because its sequence number was newer. Routine inventory also
+deliberately avoided command-line reads for unrecognized native names, which
+left Wine child processes and some native aliases unattributed. Exact-match
+false was then treated as proof of absence and reached `Popen`.
+
+Launch execution now accepts only the exact `launch-preflight:<trigger>`
+snapshot requested by that sequence. If a routine worker is active, one
+dedicated launch refresh is coalesced behind it and the orchestrator waits. The
+launch-owned walk performs its complete argv attribution off the GUI thread;
+routine timer/UI inventory remains low cost. Finally, visible family processes
+that cannot all be attributed to configured rows fail closed for FLAmp, FLMsg,
+VarAC, VARA, endpoint apps, and custom tools. A genuinely missing second radio
+instance remains launchable when all existing same-family processes are
+attributed to other rows.
+
+Delegation evidence: the existing `gpt-5.6-luna` launch-safety reviewer
+performed a bounded read-only audit of the new production log and current
+implementation. It independently identified the unrelated-snapshot acceptance,
+limited Wine/native process inventory, and fail-open exact-attribution branch.
+The primary agent reviewed and integrated those findings; the reviewer made no
+file changes.
+
+Acceptance passes the complete launch-bundle and software-status suites with
+**80 passed and 2 platform skips**. The broader multi-rig, launch-identity,
+receiver, JS8, managed-directory, Fast Light repair, VarAC, refresh-coordination,
+and status suite passes **123 tests with 2 platform skips**. Changed-file
+compilation and `git diff --check` pass. Linux operator qualification remains
+open.

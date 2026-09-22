@@ -441,7 +441,12 @@ identity is intentionally shared.
 
 Launch execution is conservative when runtime evidence is incomplete. Before
 automatic or manual launch may spawn any application, FIO must publish a fresh
-station-wide process inventory. Process-only applications are identified by
+launch-owned station-wide process inventory. An unrelated timer/startup status
+walk cannot satisfy this gate; if one is already running, FIO queues and waits
+for one dedicated launch-preflight generation. That off-thread launch walk
+inspects command lines for every process so native aliases, desktop wrappers,
+and Wine child processes cannot disappear behind the routine low-cost process
+filter. Process-only applications are identified by
 their saved executable and radio-specific arguments. Presentation-only window
 titles are never part of process identity: FLMsg is matched by its native radio
 root, while FLAmp is matched by its config root plus ARQ and XML-RPC endpoint
@@ -453,6 +458,14 @@ not permission to launch another copy. Cold, pending, failed, or timed-out
 evidence fails closed and identifies duplicate prevention as the reason. These
 checks must run off the GUI thread and are identical for startup, selected-radio
 start, row Start, and manual launch.
+
+Observed family evidence that cannot be attributed to every configured
+instance is `unknown`, not `absent`. FIO fails that row closed with a
+duplicate-prevention result. A missing second instance may launch only when the
+fresh inventory attributes every already-running family process to another
+persisted instance and proves that the requested identity is absent. This rule
+also covers VarAC and VARA hosted by Wine, whose wrapper argv/process names may
+change after creation.
 
 On Linux, native process discovery must recognize a delimiter-qualified
 version/variant name (for example `flamp-2.2.14`) when its argv executable is

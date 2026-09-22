@@ -175,6 +175,7 @@ class LaunchOrchestrator(QObject):
         self._sequence_preflight_started_wall = 0.0
         self._process_preflight_pending = False
         self._process_preflight_baseline_sequence = 0
+        self._process_preflight_reason = ""
         self._process_preflight_generation = 0
         self._wait_timeout_sec = DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
         self._poll_timer = QTimer(self)
@@ -1113,6 +1114,7 @@ class LaunchOrchestrator(QObject):
         self._process_preflight_pending = True
         self._process_preflight_generation += 1
         preflight_generation = self._process_preflight_generation
+        self._process_preflight_reason = f"launch-preflight:{trigger}"
         try:
             latest = self.dependency_status.latest_snapshot()
             self._process_preflight_baseline_sequence = int(
@@ -1143,7 +1145,7 @@ class LaunchOrchestrator(QObject):
         # owners receive an additional configured-port preflight below.
         try:
             self.dependency_status.refresh_now(
-                reason=f"launch-preflight:{trigger}",
+                reason=self._process_preflight_reason,
                 force=True,
             )
         except Exception as exc:
@@ -1170,9 +1172,12 @@ class LaunchOrchestrator(QObject):
             snapshot = self.dependency_status.latest_snapshot()
             sequence = int(getattr(snapshot, "sequence", 0) or 0)
             scope = str(getattr(snapshot, "scope", "") or "")
+            reason = str(getattr(snapshot, "reason", "") or "")
         except Exception:
             return False
         if scope != LEGACY_PRIMARY_DEPENDENCY_SCOPE:
+            return False
+        if reason != str(getattr(self, "_process_preflight_reason", "") or ""):
             return False
         if sequence <= int(self._process_preflight_baseline_sequence or 0):
             return False
@@ -1189,6 +1194,10 @@ class LaunchOrchestrator(QObject):
         if not self._active or not self._process_preflight_pending:
             return
         if str(getattr(snapshot, "scope", "") or "") != LEGACY_PRIMARY_DEPENDENCY_SCOPE:
+            return
+        if str(getattr(snapshot, "reason", "") or "") != str(
+            getattr(self, "_process_preflight_reason", "") or ""
+        ):
             return
         self._accept_completed_launch_preflight()
 
@@ -1407,6 +1416,32 @@ class LaunchOrchestrator(QObject):
                 self.sequence_progress.emit(result)
                 self._schedule_advance_queue(0)
                 return
+        unattributed_process = self._unattributed_process_blocker(
+            queue_item,
+            exact_process_running,
+        )
+        if unattributed_process:
+            log.warning(
+                "LaunchOrchestrator: skipped duplicate-risk %s launch: %s",
+                name,
+                unattributed_process,
+            )
+            result = self._result_for(
+                queue_item,
+                status="failed",
+                detail=unattributed_process,
+            )
+            self._results.append(result)
+            if sequence_identity:
+                self._sequence_claimed_identities = getattr(
+                    self,
+                    "_sequence_claimed_identities",
+                    set(),
+                )
+                self._sequence_claimed_identities.add(sequence_identity)
+            self.sequence_progress.emit(result)
+            self._schedule_advance_queue(0)
+            return
         if self._program_running(queue_item):
             same_name_identities = {
                 str(value.get("instance_identity", "") or "")
@@ -2050,6 +2085,69 @@ class LaunchOrchestrator(QObject):
                     return None
         return None
 
+    def _unattributed_process_blocker(
+        self,
+        item: Any,
+        exact_process_running: Optional[bool],
+    ) -> str:
+        """Fail closed when family processes cannot be fully attributed.
+
+        A fresh launch-owned inventory can prove that no family process exists.
+        It cannot safely prove one requested instance absent when one or more
+        family processes were observed but their argv did not match every
+        configured row. This is especially important for Wine launchers, which
+        may replace the original wrapper argv after process creation.
+        """
+
+        if exact_process_running is True:
+            return ""
+        name = self._queue_item_name(item)
+        status = getattr(self, "status", None)
+        counter = getattr(status, "cached_program_process_count", None)
+        if not callable(counter):
+            return ""
+        try:
+            process_count = int(counter(name))
+        except Exception:
+            return (
+                "process attribution is unavailable after launch preflight; "
+                "duplicate launch skipped"
+            )
+        if process_count <= 0:
+            return ""
+
+        attributed: set[str] = set()
+        for candidate in getattr(self, "_queue", ()):
+            if self._queue_item_name(candidate) != name:
+                continue
+            try:
+                if self._configured_instance_process_running(candidate) is not True:
+                    continue
+            except Exception:
+                continue
+            if isinstance(candidate, Mapping):
+                identity = str(candidate.get("instance_identity", "") or "").strip()
+                target = str(
+                    candidate.get("launch_command_override", "")
+                    or candidate.get("launch_path_override", "")
+                    or ""
+                ).strip()
+                arguments = candidate.get("launch_arguments", ())
+                if not isinstance(arguments, (list, tuple)):
+                    arguments = ()
+                attributed.add(
+                    identity
+                    or repr((name, target, tuple(str(value) for value in arguments)))
+                )
+            else:
+                attributed.add(str(candidate))
+        if process_count <= len(attributed):
+            return ""
+        return (
+            f"{name} process evidence is present but could not be attributed "
+            "to every configured instance; duplicate launch skipped"
+        )
+
     @staticmethod
     def _process_identity_arguments(
         name: str,
@@ -2420,6 +2518,7 @@ class LaunchOrchestrator(QObject):
         self._endpoint_preflight_requested = set()
         self._sequence_claimed_identities = set()
         self._sequence_preflight_started_wall = 0.0
+        self._process_preflight_reason = ""
         self.sequence_finished.emit(summary)
 
     def _build_summary(self, cancelled: bool) -> Dict[str, Any]:

@@ -864,7 +864,9 @@ def test_start_sequence_forces_and_waits_for_new_process_snapshot(
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
     from freqinout.core.settings_manager import SettingsManager
 
-    snapshots = [SimpleNamespace(sequence=4, scope="legacy_primary")]
+    snapshots = [
+        SimpleNamespace(sequence=4, scope="legacy_primary", reason="timer")
+    ]
     refresh_calls: list[dict[str, object]] = []
     scheduled: list[int] = []
     orchestrator = LaunchOrchestrator(SettingsManager())
@@ -881,7 +883,21 @@ def test_start_sequence_forces_and_waits_for_new_process_snapshot(
     assert refresh_calls == [{"reason": "launch-preflight:startup", "force": True}]
     assert scheduled == []
 
-    snapshots.append(SimpleNamespace(sequence=5, scope="legacy_primary"))
+    snapshots.append(
+        SimpleNamespace(sequence=5, scope="legacy_primary", reason="timer")
+    )
+    orchestrator._on_launch_preflight_snapshot_changed(snapshots[-1])
+
+    assert orchestrator._process_preflight_pending is True
+    assert scheduled == []
+
+    snapshots.append(
+        SimpleNamespace(
+            sequence=6,
+            scope="legacy_primary",
+            reason="launch-preflight:startup",
+        )
+    )
     orchestrator._on_launch_preflight_snapshot_changed(snapshots[-1])
 
     assert orchestrator._process_preflight_pending is False
@@ -1555,6 +1571,98 @@ def test_existing_flmsg_process_identity_ignores_presentation_title(monkeypatch)
 
     item["launch_arguments"][1] = "/home/bill/.nbems/instances/FTDX-10"
     assert orchestrator._configured_instance_process_running(item) is False
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        (
+            "FLAmp",
+            [
+                "--config-dir", "/home/bill/.nbems/instances/FT-710",
+                "--arq-server-address", "127.0.0.1",
+                "--arq-server-port", "7323",
+                "--xmlrpc-server-address", "127.0.0.1",
+                "--xmlrpc-server-port", "7363",
+            ],
+        ),
+        (
+            "VarAC",
+            [
+                "/home/bill/.wine/drive_c/VarAC/VarAC.exe",
+                "C:\\VarAC\\VarAC-ft-710.ini",
+            ],
+        ),
+        ("VARA", ["/home/bill/.wine/drive_c/VARA-ft-710/VARA.exe"]),
+    ],
+)
+def test_unattributed_process_family_fails_closed_before_spawn(
+    monkeypatch,
+    tmp_path: Path,
+    name: str,
+    arguments: list[str],
+) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / name))
+    monkeypatch.setattr(
+        launch_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail(
+            "unattributed process evidence must never authorize a duplicate"
+        ),
+    )
+    from freqinout.core.settings_manager import SettingsManager
+
+    item = {
+        "name": name,
+        "instance_identity": f"ft-710:{name.casefold()}",
+        "launch_path_override": "/usr/local/bin/flamp" if name == "FLAmp" else "wine",
+        "launch_arguments": list(arguments),
+        "execution_scope": "radio_scoped",
+        "readiness_policy": {},
+    }
+    orchestrator = LaunchOrchestrator(SettingsManager())
+    orchestrator.status = SimpleNamespace(
+        cached_program_instance_running=lambda *_args, **_kwargs: False,
+        cached_program_process_count=lambda _name: 1,
+    )
+    orchestrator._active = True
+    orchestrator._process_preflight_pending = False
+    orchestrator._cancel_requested = False
+    orchestrator._queue = [item]
+    orchestrator._index = 0
+    orchestrator._results = []
+    orchestrator._blocked_dependency_for = lambda _item: None
+    orchestrator._schedule_advance_queue = lambda _delay=0: None
+
+    orchestrator._advance_queue()
+
+    assert orchestrator._results[0]["status"] == "failed"
+    assert "duplicate launch skipped" in orchestrator._results[0]["detail"]
+
+
+def test_missing_distinct_flamp_instance_launches_when_running_family_is_attributed() -> None:
+    running = {
+        "name": "FLAmp",
+        "instance_identity": "fast-light:ftdx-10:flamp",
+        "launch_path_override": "/usr/local/bin/flamp",
+        "launch_arguments": ["--config-dir", "/profiles/FTDX-10"],
+    }
+    missing = {
+        "name": "FLAmp",
+        "instance_identity": "fast-light:ft-710:flamp",
+        "launch_path_override": "/usr/local/bin/flamp",
+        "launch_arguments": ["--config-dir", "/profiles/FT-710"],
+    }
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator._queue = [running, missing]
+    orchestrator.status = SimpleNamespace(
+        cached_program_process_count=lambda _name: 1,
+    )
+    orchestrator._configured_instance_process_running = (
+        lambda item: item is running
+    )
+
+    assert orchestrator._unattributed_process_blocker(missing, False) == ""
 
 
 def test_canonical_lowercase_component_dependency_still_orders_launch_apps() -> None:
