@@ -12,9 +12,12 @@ from freqinout.core.config_paths import get_config_dir
 from freqinout.core.sqlite_utils import connect_sqlite
 from freqinout.core.system_timezone import detect_system_timezone_name
 from freqinout.core.multi_radio_store import (
+    CURRENT_MULTI_RIG_MIGRATION_VERSION,
     detect_existing_fio_usage,
     ensure_multi_rig_migration,
     ensure_multi_radio_settings_schema,
+    get_multi_rig_migration_deferred,
+    get_multi_rig_migration_version,
     is_multi_rig_migration_current,
     mirror_legacy_settings_into_runtime_active_device,
     set_multi_rig_migration_deferred,
@@ -24,6 +27,10 @@ from freqinout.core.multi_radio_store import (
 APP_NAME = "FreqInOut"
 _DEFERRED_MIGRATION_LOGGED = False
 _DEFERRED_MIGRATION_LOG_LOCK = threading.Lock()
+
+# Each entry must be qualified as an additive, non-destructive transition before
+# it is added here. Version 0 remains the explicit single-radio adoption gate.
+_AUTOMATIC_INCREMENTAL_MULTI_RIG_MIGRATIONS = {(2, 3)}
 
 
 class SettingsManager:
@@ -54,8 +61,40 @@ class SettingsManager:
             legacy_config_exists=legacy_config_imported,
         )
         self._purge_legacy_autoquery_keys()
+        migration_version = get_multi_rig_migration_version(self._conn)
+        migration_deferred = get_multi_rig_migration_deferred(self._conn)
+        automatic_incremental = (
+            (migration_version, CURRENT_MULTI_RIG_MIGRATION_VERSION)
+            in _AUTOMATIC_INCREMENTAL_MULTI_RIG_MIGRATIONS
+            and not migration_deferred
+        )
         if is_multi_rig_migration_current(self._conn):
             log.debug("SettingsManager: multi-rig migration marker is current.")
+        elif existing_fio_usage and automatic_incremental:
+            try:
+                result = ensure_multi_rig_migration(
+                    self._conn,
+                    self._data,
+                    target_version=CURRENT_MULTI_RIG_MIGRATION_VERSION,
+                )
+                self.reload()
+                log.info(
+                    "SettingsManager: applied qualified additive multi-rig migration v%s to v%s.",
+                    result.from_version,
+                    result.to_version,
+                )
+            except Exception:
+                # Keep the older marker in place so runtime construction remains
+                # fail-closed; startup must never claim a partial migration.
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+                log.exception(
+                    "SettingsManager: qualified additive multi-rig migration v%s to v%s failed safely.",
+                    migration_version,
+                    CURRENT_MULTI_RIG_MIGRATION_VERSION,
+                )
         elif existing_fio_usage:
             global _DEFERRED_MIGRATION_LOGGED
             with _DEFERRED_MIGRATION_LOG_LOCK:

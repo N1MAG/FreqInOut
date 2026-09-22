@@ -726,7 +726,6 @@ def build_station_readiness_report(
         flrig_enabled = _profile_software_enabled(profile, "flrig")
         fldigi_enabled = _profile_software_enabled(profile, "fldigi")
         spotter_enabled = _profile_software_enabled(profile, "js8spotter")
-        commstat_enabled = _profile_software_enabled(profile, "commstat")
         varac_enabled = _profile_software_enabled(profile, "varac")
 
         if backend == "js8call" or js8_enabled:
@@ -758,20 +757,6 @@ def build_station_readiness_report(
                         state_key="needs_setup",
                     )
                 )
-        if commstat_enabled and not _text(profile, "commstat_launch_path"):
-            issues.append(
-                ReadinessIssue(
-                    severity="recommended",
-                    section_key="radio_profiles",
-                    scope=scope,
-                    radio_id=radio_id,
-                    integration_key="commstat",
-                    message=f"{name}: CommStat launch path missing",
-                    resolution_hint="Set the CommStat launch path if this radio should launch or track CommStat with its JS8 stack.",
-                    deep_link_target=_issue_deep_link("radio_profiles", radio_id),
-                    state_key="degraded",
-                )
-            )
         if backend == "flrig" or flrig_enabled:
             if not _int_text(profile.get("flrig_port")):
                 issues.append(

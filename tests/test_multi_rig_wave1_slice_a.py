@@ -441,6 +441,7 @@ def test_mirror_legacy_settings_without_launch_key_keeps_launch_control_off(monk
     active = store.get_runtime_active_device_profile()
     assert active is not None
     assignment = store.list_effective_assignments()[0]
+    assert assignment["operating_profile_name"]
 
     mirror_legacy_settings_into_runtime_active_device(
         settings._conn,  # type: ignore[arg-type]
@@ -659,9 +660,82 @@ def test_multi_rig_guardrail_warnings_surface_js8_multi_endpoint_and_path_mismat
     assert "legacy js8net fallback can attach to only one endpoint" in legacy.message
     mismatch = next(warning for warning in structured if warning.warning_type == "js8_profile_directed_path_mismatch")
     assert mismatch.affected_radio_names == ("FIO-A",)
-    assert "DIRECTED.TXT is outside this radio's JS8 profile folder" in mismatch.message
-    assert any("legacy js8net fallback can attach to only one endpoint" in warning for warning in warnings)
-    assert any("DIRECTED.TXT is outside this radio's JS8 profile folder" in warning for warning in warnings)
+    assert "DIRECTED.TXT does not match this radio's JS8 profile identity" in mismatch.message
+    assert not any("legacy js8net fallback can attach to only one endpoint" in warning for warning in warnings)
+    assert any("DIRECTED.TXT does not match this radio's JS8 profile identity" in warning for warning in warnings)
+
+
+def test_multi_rig_guardrails_accept_linux_js8_config_and_data_roots_for_same_profile(monkeypatch, tmp_path):
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    profile = store.save_device_profile(
+        {
+            "name": "FIO-A",
+            "runtime_active": 1,
+            "use_js8call": 1,
+            "js8_host": "127.0.0.1",
+            "js8_port": 2442,
+            "js8_profile_path": "/home/operator/.config/JS8Call - FIO-A.ini",
+            "js8_directed_path": "/home/operator/.local/share/JS8Call - FIO-A/DIRECTED.TXT",
+        }
+    )
+    with settings._conn:  # type: ignore[attr-defined]
+        settings._conn.execute("UPDATE device_profiles SET runtime_active=1 WHERE id=?", (int(profile["id"]),))  # type: ignore[attr-defined]
+
+    warnings = collect_multi_rig_guardrail_warnings(settings._conn)  # type: ignore[arg-type]
+
+    assert not any(warning.warning_type == "js8_profile_directed_path_mismatch" for warning in warnings)
+
+
+def test_multi_rig_guardrails_accept_windows_js8_config_and_data_roots_for_same_profile(monkeypatch, tmp_path):
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    profile = store.save_device_profile(
+        {
+            "name": "FIO-A",
+            "runtime_active": 1,
+            "use_js8call": 1,
+            "js8_host": "127.0.0.1",
+            "js8_port": 2442,
+            "js8_profile_path": r"C:\Users\operator\AppData\Roaming\JS8Call - FIO-A.ini",
+            "js8_directed_path": r"C:\Users\operator\AppData\Local\JS8Call - FIO-A\DIRECTED.TXT",
+        }
+    )
+    with settings._conn:  # type: ignore[attr-defined]
+        settings._conn.execute("UPDATE device_profiles SET runtime_active=1 WHERE id=?", (int(profile["id"]),))  # type: ignore[attr-defined]
+
+    warnings = collect_multi_rig_guardrail_warnings(settings._conn)  # type: ignore[arg-type]
+
+    assert not any(warning.warning_type == "js8_profile_directed_path_mismatch" for warning in warnings)
+
+
+def test_multi_rig_guardrails_allow_varac_cluster_shared_database(monkeypatch, tmp_path):
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    shared_db = str(tmp_path / "cluster" / "VarAC.db")
+    first = store.save_device_profile(
+        {"name": "VarAC A", "runtime_active": 1, "use_varac": 1, "varac_db_path": shared_db}
+    )
+    second = store.save_device_profile(
+        {"name": "VarAC B", "runtime_active": 1, "use_varac": 1, "varac_db_path": shared_db}
+    )
+    cluster = store.save_varac_cluster(
+        {"name": "Shared VarAC", "cluster_id": "SHARED", "shared_db_path": shared_db}
+    )
+    store.set_varac_cluster_member(int(cluster["id"]), int(first["id"]), instance_number=1, enabled=True)
+    store.set_varac_cluster_member(int(cluster["id"]), int(second["id"]), instance_number=2, enabled=True)
+    with settings._conn:  # type: ignore[attr-defined]
+        settings._conn.execute(  # type: ignore[attr-defined]
+            "UPDATE device_profiles SET runtime_active=1 WHERE id IN (?, ?)",
+            (int(first["id"]), int(second["id"])),
+        )
+
+    warnings = collect_multi_rig_guardrail_warnings(settings._conn)  # type: ignore[arg-type]
+
+    assert not any(warning.warning_type == "duplicate_varac_db_path" for warning in warnings)
 
 
 def test_migration_key_map_targets_exist_in_schema():

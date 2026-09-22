@@ -1361,7 +1361,7 @@
       </tr>
       <tr>
         <td>FreqInOut Settings</td>
-        <td>Theme, Text Size (Normal/Medium/Large), Frequency Control mode, scheduler enable, Software Used checkboxes, operating status, setup readiness, and enforcement/prompt timers</td>
+        <td>Station-wide identity, appearance, operating groups, diagnostics, shared services, and compatibility defaults. Radio-specific schedule enforcement and prompt timers are configured under <code>Radios &gt; Schedule Control</code>.</td>
       </tr>
       <tr>
         <td><a href="#settings-radios">Radio Profile</a></td>
@@ -1528,17 +1528,14 @@
     <li><strong>Frequency Control</strong>: tells FIO which tool should be treated as the main way to read or guide the radio frequency. Choose <code>FLRig</code> when FLRig is your radio-control bridge, <code>JS8Call</code> when JS8Call is the practical source of radio state, or <code>Manual</code> when FIO should advise without assuming it can control the radio.</li>
     <li><strong>Use FreqInOut Scheduler</strong>: turns schedule help on or off. When enabled, FIO watches the active schedule and helps the station move to the expected frequency, mode, or offset according to your enforcement choices.</li>
     <li><strong>Software Used</strong>: check only the programs this station actually uses. This keeps readiness warnings focused. For example, do not check CommStat or JS8Spotter unless you want FIO to expect their launcher or forms settings.</li>
-    <li><strong>Frequency Timer</strong>: decides how FIO responds when the radio frequency does not match the active schedule. <code>On Schedule Change</code> is more automatic. <code>Prompt</code> asks the operator first.</li>
-    <li><strong>FLDigi Mode Timer</strong>: does the same kind of checking for the FLDigi mode. This is separate because the frequency may be correct while the FLDigi mode still needs attention.</li>
-    <li><strong>JS8 Offset Timer</strong>: checks whether the JS8 offset matches the expected operating plan. Use <code>Prompt</code> if you often move the offset by hand during live JS8 work.</li>
-    <li><strong>Prompt Interval</strong>: controls how often FIO reminds you after you choose prompt-based help. Short intervals are useful during active operations; longer intervals are quieter when you intentionally stay off plan.</li>
+    <li><strong>Per-radio timers</strong>: open <code>Configuration &gt; Radios</code>, choose the radio, and open <code>Schedule Control</code>. Frequency, FLDigi mode, JS8 offset, prompt interval, scheduler automation, and default hold duration belong to that radio and are not edited on Main.</li>
     <li><strong>Operating Status</strong>: quick status lights for the station tools FIO is watching. These are a setup and awareness aid, not a guarantee that the external program itself is healthy in every way.</li>
     <li><strong>Setup Readiness</strong>: a plain-language checklist. It points out missing companion fields after you start configuring a workflow.</li>
   </ul>
 
   <h3 id="settings-scheduler-behavior">Scheduler Behavior Examples</h3>
   <p><strong>Overview</strong>: the scheduler keeps each radio aligned with its current operating plan, including frequency, mode, and digital offset. When the station differs from the plan, FIO either applies the configured correction or requests operator confirmation.</p>
-  <p><strong>Operating model</strong>: FIO owns the active plan while the scheduler is enabled, but it does not override active transmit protection or multi-rig shared-resource protection. Mismatches are handled according to the policies selected in Configuration.</p>
+  <p><strong>Operating model</strong>: FIO owns the active plan while the scheduler is enabled, but it does not override active transmit protection or multi-rig shared-resource protection. Mismatches are handled according to the policies selected for that radio under <code>Configuration &gt; Radios &gt; Schedule Control</code>.</p>
   <p><strong>Where the plan comes from</strong>: routine HF schedule rows are the baseline. Net schedule rows can take priority during a named net. Active SOP layers can take priority when an SOP is active. ControlFreq shows the current plan and the next likely change; HF Daily, HF Nets, SOP Builder, and Radio Profiles are where you correct the plan itself.</p>
   <table>
     <thead>
@@ -1870,7 +1867,7 @@
     <li>If a button appears disabled, confirm required row selection or required fields.</li>
     <li>If schedule behavior is unexpected, check <code>Schedule Status</code> first (paused/off-schedule/manual mode reasons).</li>
     <li>If a Configuration section stays highlighted, open that section and look for a missing companion field such as <code>DIRECTED.TXT</code>, an endpoint port, a forms path, or <code>Incoming Files</code>.</li>
-    <li>If FLDigi offset returns unexpectedly, check <code>Configuration &gt; Main &gt; FreqInOut Settings</code> for FLDigi enforcement mode (<code>On Schedule Change</code> vs <code>Prompt</code>) and confirm whether a new schedule row transition occurred.</li>
+    <li>If FLDigi offset returns unexpectedly, open <code>Configuration &gt; Radios</code>, choose the affected radio, and check <code>Schedule Control</code> for its FLDigi enforcement mode (<code>On Schedule Change</code> vs <code>Prompt</code>). Then confirm whether a new schedule row transition occurred.</li>
     <li>If message actions are missing (for example <code>+BBS</code>), verify required Configuration paths are configured.</li>
     <li>If VarAC does not launch from Launch Control on Linux, first clear <code>VarAC Launch Command</code> and test auto-launch from <code>VarAC Install Folder</code>. If needed, then set a custom Wine command using absolute paths.</li>
     <li>If JS8Spotter/CommStat launch too early, keep JS8Call earlier in Launch Control order; FreqInOut now waits for JS8 API readiness before proceeding.</li>

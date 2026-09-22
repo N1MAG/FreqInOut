@@ -4138,6 +4138,15 @@ class SettingsTab(QWidget):
         left_column_layout.setSpacing(10)
         left_column_layout.addLayout(top_preferences_grid)
 
+        # Retain the legacy station-level widgets only as a compatibility
+        # projection for old single-radio settings. Multi-rig timer policy is
+        # edited on the selected radio's Schedule Control surface.
+        self.legacy_station_timer_controls = QWidget(self)
+        self.legacy_station_timer_controls.setObjectName("legacyStationTimerControls")
+        legacy_timer_layout = QVBoxLayout(self.legacy_station_timer_controls)
+        legacy_timer_layout.setContentsMargins(0, 0, 0, 0)
+        legacy_timer_layout.setSpacing(10)
+
         def build_timer_row(title_label: QLabel, heading_text: str, enforce_combo: QComboBox, prompt_combo: QComboBox) -> QWidget:
             wrapper = QWidget()
             wrapper_layout = QVBoxLayout(wrapper)
@@ -4167,7 +4176,7 @@ class SettingsTab(QWidget):
         self.freq_prompt_combo.setMinimumWidth(170)
         self.freq_prompt_combo.currentIndexChanged.connect(self._on_enforcement_changed)
         self._disable_prompt_hint_item(self.freq_prompt_combo)
-        left_column_layout.addWidget(
+        legacy_timer_layout.addWidget(
             build_timer_row(self.freq_timer_label, "Frequency Timer", self.freq_enforce_combo, self.freq_prompt_combo)
         )
 
@@ -4182,7 +4191,7 @@ class SettingsTab(QWidget):
         self.fldigi_prompt_combo.setMinimumWidth(170)
         self.fldigi_prompt_combo.currentIndexChanged.connect(self._on_enforcement_changed)
         self._disable_prompt_hint_item(self.fldigi_prompt_combo)
-        left_column_layout.addWidget(
+        legacy_timer_layout.addWidget(
             build_timer_row(
                 self.fldigi_timer_label,
                 "FLDigi Mode Timer",
@@ -4202,9 +4211,11 @@ class SettingsTab(QWidget):
         self.js8_prompt_combo.setMinimumWidth(170)
         self.js8_prompt_combo.currentIndexChanged.connect(self._on_enforcement_changed)
         self._disable_prompt_hint_item(self.js8_prompt_combo)
-        left_column_layout.addWidget(
+        legacy_timer_layout.addWidget(
             build_timer_row(self.js8_timer_label, "JS8 Offset Timer", self.js8_enforce_combo, self.js8_prompt_combo)
         )
+        self.legacy_station_timer_controls.setVisible(False)
+        left_column_layout.addWidget(self.legacy_station_timer_controls)
         left_column_layout.addStretch()
 
         log_warn_tip = (
@@ -11524,18 +11535,7 @@ class SettingsTab(QWidget):
         if normalized == "plans" and not str(assignment.get("operating_profile_name", "") or "").strip():
             return "eligible_warning"
         if normalized in {"control", "connections"}:
-            related = {
-                "flrig",
-                "fldigi",
-                "flmsg",
-                "flamp",
-                "rigctld",
-                "js8call",
-                "js8spotter",
-                "commstat",
-                "varac",
-            }
-            if any(str(getattr(issue, "integration_key", "") or "").strip().lower() in related for issue in issues):
+            if self._radio_profile_guided_issues_for_task(normalized, profile, issues):
                 return "eligible_warning"
         if normalized == "review" and issues:
             return "eligible_warning"
@@ -11580,22 +11580,7 @@ class SettingsTab(QWidget):
                 return "Test Control"
             return "Ready"
         if normalized in {"control", "connections"}:
-            related = {
-                "flrig",
-                "fldigi",
-                "flmsg",
-                "flamp",
-                "rigctld",
-                "js8call",
-                "js8spotter",
-                "commstat",
-                "varac",
-            }
-            related_issues = [
-                issue
-                for issue in issues
-                if str(getattr(issue, "integration_key", "") or "").strip().lower() in related
-            ]
+            related_issues = self._radio_profile_guided_issues_for_task(normalized, profile, issues)
             if any(str(getattr(issue, "severity", "") or "").strip().lower() == "required" for issue in related_issues):
                 return "Needs Setup"
             return "Needs Review" if related_issues else "Ready"
@@ -17783,7 +17768,11 @@ class SettingsTab(QWidget):
                 return ()
             with sqlite3.connect(db_path) as conn:
                 warnings = tuple(collect_multi_rig_guardrail_warnings(conn))
-            return warnings + self._js8_storage_collisions()
+            return tuple(
+                warning
+                for warning in warnings + self._js8_storage_collisions()
+                if str(getattr(warning, "severity", "warning") or "warning").strip().lower() != "info"
+            )
         except Exception as exc:
             self._last_multi_rig_guardrail_collection_error = str(exc) or exc.__class__.__name__
             log.exception("SettingsTab: failed to collect structured multi-rig guardrail warnings.")
@@ -18191,13 +18180,62 @@ class SettingsTab(QWidget):
         except Exception:
             log.exception("Failed loading effective assignment map from store.")
             return mapping
+        missing_names = any(
+            isinstance(row, dict)
+            and not str(row.get("operating_profile_name", "") or "").strip()
+            for row in rows
+        )
+        operating_names: Dict[int, str] = {}
+        if missing_names:
+            try:
+                cached_profiles = getattr(self, "operating_profiles", None)
+                profiles = (
+                    cached_profiles
+                    if isinstance(cached_profiles, list) and cached_profiles
+                    else self.multi_radio_store.list_operating_profiles()
+                )
+                operating_names = {
+                    int(profile.get("id", 0) or 0): str(profile.get("name", "") or "").strip()
+                    for profile in profiles
+                    if isinstance(profile, dict) and int(profile.get("id", 0) or 0) > 0
+                }
+            except Exception:
+                log.exception("Failed enriching effective assignments with Operating Model names.")
         for row in rows:
             if not isinstance(row, dict):
                 continue
             device_id = int(row.get("device_profile_id", 0) or 0)
             if device_id > 0:
-                mapping[device_id] = dict(row)
+                assignment = dict(row)
+                if not str(assignment.get("operating_profile_name", "") or "").strip():
+                    operating_profile_id = int(assignment.get("operating_profile_id", 0) or 0)
+                    operating_name = operating_names.get(operating_profile_id, "")
+                    if operating_name:
+                        assignment["operating_profile_name"] = operating_name
+                mapping[device_id] = assignment
         return mapping
+
+    @staticmethod
+    def _radio_profile_guided_issues_for_task(
+        key: str,
+        profile: Mapping[str, Any],
+        issues: Sequence[Any],
+    ) -> List[Any]:
+        """Assign each integration issue to either Rig Control or Connections."""
+        normalized = str(key or "").strip().lower()
+        backend = str(profile.get("control_backend", "") or "").strip().lower()
+        control_key = backend if backend in {"flrig", "rigctld", "js8call"} else ""
+        supported = {"flrig", "fldigi", "flmsg", "flamp", "rigctld", "js8call", "js8spotter", "commstat", "varac"}
+        selected: List[Any] = []
+        for issue in issues:
+            integration_key = str(getattr(issue, "integration_key", "") or "").strip().lower()
+            if integration_key not in supported:
+                continue
+            if normalized == "control" and integration_key == control_key:
+                selected.append(issue)
+            elif normalized == "connections" and integration_key != control_key:
+                selected.append(issue)
+        return selected
 
     def _selected_device_profile_ids(self) -> List[int]:
         if not hasattr(self, "device_profiles_table"):

@@ -449,6 +449,13 @@ Readiness states have precise meanings:
 - `Operator managed`: FIO observes but does not rewrite it.
 - `Needs attention`: collision, drift, ambiguous storage, or identity mismatch.
 
+GRS-15 in `guided_radio_software_configuration_spec.md` additionally governs
+readiness ownership and operator-facing review counts. Station-shared services
+must not create impossible per-radio path requirements; task badges may reflect
+only concerns correctable in that task; standard JS8 configuration/data-root
+separation and intentional VarAC cluster database sharing are valid; and
+informational compatibility notices remain visible without degrading a radio.
+
 A slow or failed instance remains isolated in its endpoint worker/readiness lane
 and cannot delay other radios or receiver endpoints.
 

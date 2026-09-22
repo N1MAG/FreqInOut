@@ -4279,11 +4279,12 @@ def _effective_assignment_for_device(conn: sqlite3.Connection, device_profile_id
     placeholders = ", ".join(["?"] * len(EFFECTIVE_ASSIGNMENT_STATES))
     cur = conn.execute(
         f"""
-        SELECT *
-          FROM operating_profile_assignments
-         WHERE device_profile_id=?
-           AND assignment_state IN ({placeholders})
-      ORDER BY id ASC
+        SELECT a.*, o.name AS operating_profile_name
+          FROM operating_profile_assignments a
+          JOIN operating_profiles o ON o.id=a.operating_profile_id
+         WHERE a.device_profile_id=?
+           AND a.assignment_state IN ({placeholders})
+      ORDER BY a.id ASC
          LIMIT 1
         """,
         (int(device_profile_id), *tuple(EFFECTIVE_ASSIGNMENT_STATES)),

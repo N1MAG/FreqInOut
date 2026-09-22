@@ -16,6 +16,9 @@ maintainer review and implementation. Operator-assisted live release
 qualification remains **open and blocked**. No existing application
 configuration may be replaced, relinked, cloned, cleaned up, or reused through
 this flow until the exact operation is explicitly chosen and its gate passes.
+GRS-15's bounded readiness-projection and qualified v2-to-v3 incremental
+migration implementation gate passed on 2026-09-22; its Linux operator visual
+retest remains open and does not close the broader GRS-13 release gate.
 
 Governing delivery contract: `project_delivery_rules.md`
 
@@ -4847,3 +4850,79 @@ the old runtime, running-process deferral, Windows migration no-op, native
 Windows structured round-trip coverage, changed-file compilation, and diff
 hygiene. Live Linux/Wine and Windows execution remain the external platform
 qualification gate.
+
+## GRS-15 — Canonical Readiness Projection And Incremental Upgrade Continuity
+
+Production evidence from a correctly configured two-radio station showed the
+FT-710 as degraded even though its radio identity, application endpoints,
+native paths, operating-model assignment, frequency plan, and cluster
+membership were populated. The same database was already on the adopted
+multi-rig baseline but one additive migration version behind the running code;
+startup therefore suppressed both radio runtimes and repeatedly fell back to
+temporary profile-backed control clients. These are FIO projection and upgrade
+continuity defects. They are not operator configuration defects.
+
+Readiness follows resource ownership and reports one concern only in the task
+that can correct it:
+
+- station-shared CommStat has one station process identity plus per-radio JS8
+  endpoint bindings. A radio profile never needs a private CommStat launch path,
+  and absence of a nonexistent radio-owned path cannot degrade Rig Control,
+  Connections, JS8Call, or the radio summary;
+- Rig Control reports only the selected radio's control-backend identity and
+  endpoint concerns. Connections reports application endpoint/binding concerns.
+  One integration issue must not mark both tasks merely because both tasks use
+  a common broad family list;
+- Schedule Control is ready when the effective assignment names a valid
+  `operating_profile_id`. Presentation resolves its human name from the
+  canonical operating-profile store; the absence of a denormalized display
+  name on the assignment row is not an unassigned state. Frequency, FLDigi
+  mode, JS8 offset, reminder interval, scheduler enable, and default hold
+  duration are radio-owned Schedule Control policy. Configuration Main does not
+  expose a second editable timer policy; legacy station values remain a hidden
+  compatibility projection only; and
+- informational compatibility notices remain available in details and logs but
+  do not increment the operator-facing count of items that need review.
+
+Guardrails compare canonical meaning rather than unrelated parent directories.
+For JS8Call, a standard native profile may place its INI below the platform
+configuration root and its `DIRECTED.TXT` below the platform application-data
+root. FIO verifies that both paths resolve to the same saved rig/profile
+identity; it does not require one path to contain the other. For VarAC, an
+effective database shared by enabled members of the same saved cluster is an
+intentional cluster resource and is excluded from duplicate-radio warnings
+when it matches that cluster's `shared_db_path`. Sharing outside that exact
+membership remains a warning.
+
+An already adopted multi-rig database must remain runnable across additive
+schema/seed migrations. The specifically qualified version-2 to version-3
+migration is additive: it creates the receive-only operating-model baseline and
+updates the migration marker without rewriting radio identities, application
+paths, assignments, launch preferences, cluster topology, or operator data.
+Startup applies that qualified incremental migration automatically before
+runtime construction. The version-0 single-radio adoption boundary remains
+explicit and operator-reviewed; this rule does not authorize arbitrary future
+automatic migrations. A future version transition must be independently named
+and qualified before joining the automatic incremental set.
+
+Acceptance requires production-shaped two-radio tests proving:
+
+1. a CommStat-enabled radio with a valid station binding has no missing-launch-
+   path readiness issue;
+2. Rig Control and Connections badges are driven by their own issue domains;
+3. an effective operating-profile ID produces Schedule Control `Ready` and the
+   canonical profile name after reload;
+4. standard JS8 configuration/data-root separation produces no storage warning,
+   while cross-radio identity reuse still does;
+5. one cluster-owned VarAC database produces no duplicate warning, while the
+   same path shared outside a common enabled cluster still does;
+6. informational notices do not contribute to the review-required count; and
+7. restarting a version-2 adopted database applies only the qualified version-3
+   additive migration, preserves existing radio/application/assignment data,
+   restores all active runtime IDs, and leaves an unmigrated version-0 station
+   untouched pending explicit adoption.
+
+Focused readiness, Settings, guardrail, migration/runtime-status, and adjacent
+multi-rig tests, changed-file compilation, and `git diff --check` must pass.
+No production database or external application file is modified by automated
+test or implementation qualification.

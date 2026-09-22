@@ -85,20 +85,41 @@ def _normalized_path_key(path: Any) -> Optional[str]:
     return str(Path(text).expanduser()).rstrip("/\\").lower()
 
 
-def _path_is_within(parent: Any, child: Any) -> bool:
-    parent_text = _coerce_text(parent, "")
-    child_text = _coerce_text(child, "")
-    if not parent_text or not child_text:
-        return True
-    try:
-        parent_path = Path(parent_text).expanduser()
-        child_path = Path(child_text).expanduser()
-        child_path.relative_to(parent_path)
-        return True
-    except Exception:
-        parent_key = _normalized_path_key(parent_text) or ""
-        child_key = _normalized_path_key(child_text) or ""
-        return bool(parent_key and child_key and (child_key == parent_key or child_key.startswith(parent_key + "/")))
+def _js8_profile_scope(path: Any, *, directed: bool = False) -> str:
+    """Return the instance identity encoded by a JS8 config or data path.
+
+    Native JS8Call keeps configuration under the platform config root and
+    message files under the data root.  Those roots are deliberately siblings
+    on Linux (``~/.config`` and ``~/.local/share``), so containment is not a
+    useful ownership test.  The application/rig directory or INI stem is the
+    stable scope shared by both locations.
+    """
+    text = _coerce_text(path, "")
+    if not text:
+        return ""
+    # Normalize separators lexically so Windows paths are handled correctly
+    # even when readiness is inspected from a non-Windows host.
+    parts = [part for part in text.replace("\\", "/").rstrip("/").split("/") if part]
+    if not parts:
+        return ""
+    leaf = parts[-1]
+    if leaf.casefold().endswith(".ini") and not directed:
+        return leaf[:-4].strip().casefold()
+    if directed or leaf.casefold() == "directed.txt":
+        parts = parts[:-1]
+        if not parts:
+            return ""
+        leaf = parts[-1]
+    # SaveDir is commonly a child of the per-rig profile directory.
+    if leaf.casefold() in {"save", "data", "logs", "log"} and len(parts) > 1:
+        leaf = parts[-2]
+    return leaf.strip().casefold()
+
+
+def _js8_paths_share_profile_scope(profile_path: Any, directed_path: Any) -> bool:
+    profile_scope = _js8_profile_scope(profile_path)
+    directed_scope = _js8_profile_scope(directed_path, directed=True)
+    return bool(profile_scope and directed_scope and profile_scope == directed_scope)
 
 
 def _js8_endpoint_guidance(rows: Iterable[Mapping[str, Any]]) -> list[MultiRigGuardrailWarning]:
@@ -142,7 +163,7 @@ def _js8_profile_path_warnings(rows: Iterable[Mapping[str, Any]]) -> list[MultiR
         directed_path = _coerce_text(row.get("js8_directed_path"), "")
         if not profile_path or not directed_path:
             continue
-        if _path_is_within(profile_path, directed_path):
+        if _js8_paths_share_profile_scope(profile_path, directed_path):
             continue
         radio_id = int(row.get("id", 0) or 0)
         radio_name = _coerce_text(row.get("name"), "") or f"Radio {radio_id}"
@@ -155,12 +176,42 @@ def _js8_profile_path_warnings(rows: Iterable[Mapping[str, Any]]) -> list[MultiR
                 affected_radio_names=(radio_name,),
                 severity="warning",
                 message=(
-                    f"{radio_name}: JS8Call DIRECTED.TXT is outside this radio's JS8 profile folder. "
+                    f"{radio_name}: JS8Call DIRECTED.TXT does not match this radio's JS8 profile identity. "
                     "Review JS8Call Settings so traffic imports stay scoped to the correct radio."
                 ),
             )
         )
     return warnings
+
+
+def _varac_shared_db_is_cluster_scoped(
+    conn: sqlite3.Connection,
+    matches: Iterable[Mapping[str, Any]],
+    db_path: str,
+) -> bool:
+    """Whether every duplicated DB user is an enabled member of one matching cluster."""
+    if not (_table_exists(conn, "varac_clusters") and _table_exists(conn, "varac_cluster_members")):
+        return False
+    radio_ids = {int(row.get("id", 0) or 0) for row in matches}
+    if not radio_ids or 0 in radio_ids:
+        return False
+    cluster_members: dict[int, set[int]] = {}
+    for row in _fetchall_dicts(
+        conn,
+        """
+        SELECT c.id AS cluster_id, c.shared_db_path, m.device_profile_id
+          FROM varac_clusters c
+          JOIN varac_cluster_members m ON m.cluster_id=c.id
+         WHERE m.enabled=1
+        """,
+    ):
+        if _normalized_path_key(row.get("shared_db_path")) != db_path:
+            continue
+        cluster_id = int(row.get("cluster_id", 0) or 0)
+        member_id = int(row.get("device_profile_id", 0) or 0)
+        if cluster_id and member_id:
+            cluster_members.setdefault(cluster_id, set()).add(member_id)
+    return any(radio_ids.issubset(member_ids) for member_ids in cluster_members.values())
 
 
 def _duplicate_value_warnings(
@@ -268,14 +319,22 @@ def collect_multi_rig_guardrail_warnings(conn: sqlite3.Connection) -> tuple[Mult
             else None,
         )
     )
+    varac_db_warnings = _duplicate_value_warnings(
+        rows,
+        warning_type="duplicate_varac_db_path",
+        resource_type="VarAC database path",
+        value_getter=lambda row: _normalized_path_key(row.get("varac_db_path"))
+        if _coerce_bool_int(row.get("use_varac"), False)
+        else None,
+    )
+    rows_by_id = {int(row.get("id", 0) or 0): row for row in rows}
     warnings.extend(
-        _duplicate_value_warnings(
-            rows,
-            warning_type="duplicate_varac_db_path",
-            resource_type="VarAC database path",
-            value_getter=lambda row: _normalized_path_key(row.get("varac_db_path"))
-            if _coerce_bool_int(row.get("use_varac"), False)
-            else None,
+        warning
+        for warning in varac_db_warnings
+        if not _varac_shared_db_is_cluster_scoped(
+            conn,
+            tuple(rows_by_id[radio_id] for radio_id in warning.affected_radio_ids if radio_id in rows_by_id),
+            warning.resource_value,
         )
     )
     warnings.extend(
@@ -303,5 +362,14 @@ def collect_multi_rig_guardrail_warnings(conn: sqlite3.Connection) -> tuple[Mult
 
 def format_multi_rig_guardrail_warnings(
     warnings: Iterable[MultiRigGuardrailWarning],
+    *,
+    include_info: bool = False,
 ) -> tuple[str, ...]:
-    return tuple(dict.fromkeys(warning.message for warning in warnings))
+    """Format review-required warnings, optionally including informational notices."""
+    return tuple(
+        dict.fromkeys(
+            warning.message
+            for warning in warnings
+            if include_info or _coerce_text(warning.severity, "warning").casefold() != "info"
+        )
+    )

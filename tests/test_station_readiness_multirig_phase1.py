@@ -335,7 +335,7 @@ def test_build_station_readiness_report_tracks_js8_bundle_even_when_backend_is_f
     assert "TriMode Desk: JS8Call port missing" in messages
     assert "Spotter MCF forms folder missing" in messages
     assert "TriMode Desk: JS8Spotter launch path missing" not in messages
-    assert "TriMode Desk: CommStat launch path missing" in messages
+    assert "TriMode Desk: CommStat launch path missing" not in messages
 
 
 def test_build_station_readiness_report_accepts_radio_scoped_spotter_forms_path() -> None:

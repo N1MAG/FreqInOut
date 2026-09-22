@@ -10028,3 +10028,65 @@ preparation, a true pre-canonical FT-DX10-shaped assignment, exact FLRig and
 FLDigi argument preservation, custom Launch Control rows/preferences, other-
 radio isolation, no repair-time directory creation, rollback, and stale-plan
 rejection.
+
+## 2026-09-22 — FT-710 false-review and incremental runtime continuity correction
+
+Status: GRS-15 specified, surgically implemented, and production-copy
+validated. No production database or external radio-application file was
+modified. Linux operator visual retest remains open.
+
+The attached two-radio production database confirmed that FT-710's radio,
+application, operating-model, frequency-plan, and VarAC-cluster configuration
+was populated. Five visible review/degraded states came from one impossible
+per-radio CommStat launch-path requirement even though CommStat is a
+station-shared process. Schedule Control separately treated the absence of a
+denormalized operating-model name as an absent assignment despite a valid
+`operating_profile_id`. Rig Control and Connections also consumed the same
+broad integration list, so one issue marked both tasks.
+
+Readiness now follows ownership. CommStat no longer requires a radio-owned
+launch path; the effective-assignment store projects the canonical Operating
+Model name; and guided Rig Control owns only the selected control backend while
+Connections owns the remaining application integrations. Standard JS8 native
+layouts are compared by saved profile identity across platform configuration
+and data roots rather than directory containment. Windows separators are
+handled lexically. A shared VarAC database is accepted only when every affected
+active radio is an enabled member of one matching persisted cluster.
+Informational JS8 compatibility notices remain structured evidence but no
+longer increment the review-required guardrail count.
+
+The duplicate timer editor was removed from Configuration Main. Frequency,
+FLDigi mode, JS8 offset, prompt cadence, scheduler enable, and default hold are
+presented as selected-radio Schedule Control policy. The old station widgets
+remain hidden solely to preserve legacy single-radio load/save compatibility;
+they are no longer a competing operator-facing authority. The Help guide now
+routes timer review and troubleshooting to the affected radio.
+
+The same database carried migration version 2 while the build required version
+3. Runtime construction therefore failed closed for both otherwise-active
+radios and the scheduler repeatedly used profile-backed fallback clients. The
+qualified additive v2-to-v3 transition now runs automatically before runtime
+construction, creates only the receive-only Operating Model baseline, and
+preserves existing radios, paths, assignments, launch policy, and topology.
+Version-0 single-radio adoption remains explicit. The automatic transition is
+an allowlisted `(2, 3)` pair rather than a general future-migration bypass, and
+failure rolls back before subsequent Settings writes.
+
+Delegation evidence: `readiness_ui_fix` and `guardrail_fix` were each dispatched
+to `gpt-5.6-terra` at medium reasoning for bounded implementation and focused
+tests. The primary `gpt-6-astra` reviewed both diffs, moved Operating Model name
+projection into the canonical store query, added cross-platform JS8 path
+handling, implemented and rollback-hardened the incremental migration, updated
+the governing specifications/work log, and performed final integration.
+
+Acceptance evidence: the integrated readiness, migration/runtime-status,
+schedule guard, Settings task-ownership/timer-routing, and guardrail selections pass **49
+tests** with 12 platform skips. A disposable copy of the attached database
+produces zero FT-710 readiness issues, retains only the informational JS8
+multi-endpoint notice, produces zero review-required guardrails, migrates from
+v2 to v3, and restores active runtime IDs `(1, 9)` without changing either
+radio. The broader related run reached **237 passed, 12 skipped** with two
+pre-existing unrelated failures: legacy JS8Spotter linked-row mirroring and a
+brittle Guided Add Radio source-string assertion. Those failures are recorded
+and were not waived as evidence for this slice. Changed-file compilation and
+`git diff --check` are required before handoff.

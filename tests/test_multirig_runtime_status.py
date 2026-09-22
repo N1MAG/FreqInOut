@@ -6,7 +6,11 @@ from pathlib import Path
 
 from freqinout.core.background_ingest import BackgroundIngestController
 import freqinout.core.station_runtime_manager as station_runtime_manager_mod
+import freqinout.core.settings_manager as settings_manager_mod
 from freqinout.core.multi_radio_store import (
+    CURRENT_MULTI_RIG_MIGRATION_VERSION,
+    DEFAULT_RECEIVE_ONLY_OPERATING_SYSTEM_KEY,
+    MULTI_RIG_MIGRATION_VERSION_KEY,
     MultiRadioStore,
     ensure_multi_radio_settings_schema,
     ensure_multi_rig_migration,
@@ -125,6 +129,85 @@ def test_migrated_status_after_explicit_migration(monkeypatch, tmp_path):
     assert status.existing_fio_usage_detected is True
     assert status.primary_device_profile_id is not None
     assert status.active_device_profile_ids == (status.primary_device_profile_id,)
+
+
+def test_adopted_v2_database_applies_qualified_v3_increment_without_disabling_runtimes(
+    monkeypatch,
+    tmp_path,
+):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    initial_settings = SettingsManager()
+    store = MultiRadioStore()
+    radio = store.save_device_profile(
+        {
+            "name": "FT-710",
+            "runtime_active": 1,
+            "runtime_primary": 1,
+            "control_backend": "flrig",
+            "flrig_host": "127.0.0.1",
+            "flrig_port": 12346,
+            "notes": "preserve this operator value",
+        }
+    )
+    before = store.get_device_profile(int(radio["id"]))
+    assert before is not None
+
+    with initial_settings._conn:  # type: ignore[union-attr]
+        initial_settings._conn.execute(  # type: ignore[union-attr]
+            "DELETE FROM operating_profiles WHERE system_key=?",
+            (DEFAULT_RECEIVE_ONLY_OPERATING_SYSTEM_KEY,),
+        )
+        initial_settings._conn.execute(  # type: ignore[union-attr]
+            "INSERT OR REPLACE INTO kv(key, value) VALUES(?, ?)",
+            (MULTI_RIG_MIGRATION_VERSION_KEY, json.dumps(2)),
+        )
+
+    restarted = SettingsManager()
+    after = store.get_device_profile(int(radio["id"]))
+    status = build_multi_rig_runtime_status(store)
+
+    assert restarted.get(MULTI_RIG_MIGRATION_VERSION_KEY) == CURRENT_MULTI_RIG_MIGRATION_VERSION
+    assert after is not None
+    assert after["name"] == before["name"]
+    assert after["flrig_host"] == before["flrig_host"]
+    assert after["flrig_port"] == before["flrig_port"]
+    assert after["notes"] == before["notes"]
+    assert status.startup_mode == STARTUP_MIGRATED
+    assert status.active_device_profile_ids == (int(radio["id"]),)
+    assert any(
+        row.get("system_key") == DEFAULT_RECEIVE_ONLY_OPERATING_SYSTEM_KEY
+        for row in store.list_operating_profiles()
+    )
+
+
+def test_failed_qualified_increment_rolls_back_and_keeps_v2_runtime_gate(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    initial_settings = SettingsManager()
+    store = MultiRadioStore()
+    radio = store.save_device_profile(
+        {"name": "FT-710", "runtime_active": 1, "runtime_primary": 1, "notes": "preserve"}
+    )
+    with initial_settings._conn:  # type: ignore[union-attr]
+        initial_settings._conn.execute(  # type: ignore[union-attr]
+            "INSERT OR REPLACE INTO kv(key, value) VALUES(?, ?)",
+            (MULTI_RIG_MIGRATION_VERSION_KEY, json.dumps(2)),
+        )
+
+    def fail_after_partial_write(conn, *_args, **_kwargs):
+        conn.execute("UPDATE device_profiles SET notes='partial' WHERE id=?", (int(radio["id"]),))
+        raise RuntimeError("simulated additive migration failure")
+
+    monkeypatch.setattr(settings_manager_mod, "ensure_multi_rig_migration", fail_after_partial_write)
+    restarted = SettingsManager()
+    after = store.get_device_profile(int(radio["id"]))
+    status = build_multi_rig_runtime_status(store)
+
+    assert restarted.get(MULTI_RIG_MIGRATION_VERSION_KEY) == 2
+    assert after is not None and after["notes"] == "preserve"
+    assert status.startup_mode == STARTUP_EXISTING_UNMIGRATED
+    assert status.active_device_profile_ids == ()
 
 
 def test_migration_assigns_existing_single_rig_schedules_to_default_radio(monkeypatch, tmp_path):

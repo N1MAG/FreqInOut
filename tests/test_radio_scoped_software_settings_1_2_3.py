@@ -5451,6 +5451,49 @@ def test_observer_profile_tasks_point_to_receiver_setup_without_app_warning() ->
     assert SettingsTab._radio_profile_guided_task_role(tab, "apps", transceiver, None) == "eligible_warning"
 
 
+def test_effective_assignment_map_enriches_missing_operating_model_name() -> None:
+    tab = SettingsTab.__new__(SettingsTab)
+    tab.multi_radio_store = types.SimpleNamespace(
+        list_effective_assignments=lambda: [
+            {"device_profile_id": 7, "operating_profile_id": 3, "operating_profile_name": ""}
+        ],
+        list_operating_profiles=lambda: [{"id": 3, "name": "Evening Net"}],
+    )
+
+    assert SettingsTab._effective_assignment_map(tab) == {
+        7: {"device_profile_id": 7, "operating_profile_id": 3, "operating_profile_name": "Evening Net"}
+    }
+
+
+def test_guided_task_issue_ownership_keeps_control_and_connections_distinct() -> None:
+    tab = SettingsTab.__new__(SettingsTab)
+    tab._effective_assignment_map = lambda: {7: {"operating_profile_id": 3, "operating_profile_name": "Evening Net"}}
+    profile = {"id": 7, "control_backend": "flrig"}
+    flrig_issue = types.SimpleNamespace(radio_id=7, integration_key="flrig", severity="required")
+    js8_issue = types.SimpleNamespace(radio_id=7, integration_key="js8call", severity="required")
+
+    connections_only = types.SimpleNamespace(issues=(js8_issue,))
+    assert SettingsTab._radio_profile_guided_task_state_label(tab, "control", profile, connections_only) == "Ready"
+    assert SettingsTab._radio_profile_guided_task_role(tab, "control", profile, connections_only) == "success_muted"
+    assert SettingsTab._radio_profile_guided_task_state_label(tab, "connections", profile, connections_only) == "Needs Setup"
+
+    report = types.SimpleNamespace(issues=(flrig_issue, js8_issue))
+    assert SettingsTab._radio_profile_guided_task_state_label(tab, "control", profile, report) == "Needs Setup"
+    assert SettingsTab._radio_profile_guided_task_state_label(tab, "connections", profile, report) == "Needs Setup"
+
+
+def test_main_hides_legacy_timer_editors_and_guide_routes_policy_to_selected_radio() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    main_block = source[source.index("# FreqInOut settings") : source.index("log_warn_tip =")]
+    guide = Path("docs/guide.html").read_text(encoding="utf-8")
+
+    assert 'self.legacy_station_timer_controls.setObjectName("legacyStationTimerControls")' in main_block
+    assert main_block.count("legacy_timer_layout.addWidget(") == 3
+    assert "self.legacy_station_timer_controls.setVisible(False)" in main_block
+    assert "Radio-specific schedule enforcement and prompt timers are configured under" in guide
+    assert "Configuration &gt; Radios &gt; Schedule Control" in guide
+
+
 def test_observer_receiver_setup_task_opens_receiver_editor_directly() -> None:
     from freqinout.gui.settings_tab import SettingsTab
 
