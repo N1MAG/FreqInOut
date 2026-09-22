@@ -207,6 +207,7 @@ class DependencyStatusService(QObject):
         self,
         *,
         force: bool = False,
+        force_process_snapshot: bool = True,
         port_override: Optional[int] = None,
         host_override: Optional[str] = None,
         flrig_port_override: Optional[int] = None,
@@ -265,6 +266,7 @@ class DependencyStatusService(QObject):
                     scope,
                     overrides,
                     bool(force),
+                    bool(force_process_snapshot),
                 )
                 with self._lock:
                     self._active_futures.add(future)
@@ -393,13 +395,18 @@ class DependencyStatusService(QObject):
         scope: str,
         overrides: Mapping[str, object],
         force: bool,
+        force_process_snapshot: bool,
     ) -> DependencySnapshot:
         started = time.perf_counter()
         self._cancel_token.checkpoint()
         checked_at = time.time()
         probe = SoftwareStatusService(self.settings)
         kwargs = {str(key): value for key, value in overrides.items()}
-        rows = probe.status_snapshot(force=bool(force), **kwargs)
+        rows = probe.status_snapshot(
+            force=bool(force),
+            force_process_snapshot=bool(force_process_snapshot),
+            **kwargs,
+        )
         self._cancel_token.checkpoint()
         statuses: Dict[str, DependencyStatus] = {}
         for key in STATUS_KEYS:

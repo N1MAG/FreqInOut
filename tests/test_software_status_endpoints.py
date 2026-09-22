@@ -134,6 +134,26 @@ def test_status_snapshot_does_not_credit_other_radio_family_process(monkeypatch)
     assert snapshot["FLRig"]["state"] == "idle"
 
 
+def test_forced_endpoint_snapshot_reuses_launch_preflight_process_inventory(monkeypatch):
+    service = SoftwareStatusService(DummySettings())
+    refresh_modes: list[bool] = []
+
+    def record_refresh(*, force: bool = False) -> None:
+        refresh_modes.append(bool(force))
+        service._proc_snapshot = []
+        service._proc_records = []
+
+    monkeypatch.setattr(service, "_refresh_process_snapshot", record_refresh)
+    monkeypatch.setattr(service, "js8_api_reachable", lambda **_kwargs: False)
+    monkeypatch.setattr(service, "flrig_api_reachable", lambda **_kwargs: False)
+    monkeypatch.setattr(service, "fldigi_api_reachable", lambda **_kwargs: False)
+
+    service.status_snapshot(force=True, force_process_snapshot=False)
+
+    assert refresh_modes
+    assert not any(refresh_modes)
+
+
 def test_flrig_api_reachable_uses_saved_port(monkeypatch):
     import freqinout.radio_interface.rigctl_client as rigctl_client
 

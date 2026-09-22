@@ -1090,6 +1090,30 @@ Automatic startup and `Start Startup Apps` call the same planner:
 - dependencies and configured order are honored;
 - result status names the radio(s) and app instance.
 
+Execution has one fail-closed runtime preflight shared by automatic startup,
+selected-radio start, row `Start`, and manual launch:
+
+- before the first process spawn, FIO completes a fresh asynchronous
+  station-wide process inventory; a cold, stale, pending, failed, or timed-out
+  inventory is unknown evidence and must never be interpreted as “not
+  running”;
+- process-only applications are matched by the canonical executable plus the
+  radio-owned launch arguments/profile selector, so another radio's process is
+  neither credited nor duplicated;
+- FLRig, FLDigi, and JS8Call additionally receive a fresh configured-host/port
+  probe for that exact radio endpoint before a spawn is authorized;
+- a reachable configured endpoint is `already running` even when the process
+  command line cannot be attributed safely; FIO must not launch a second
+  process onto an occupied endpoint;
+- when the exact configured process is present but its configured endpoint is
+  not ready, FIO reports the process/port mismatch and skips launch. It must not
+  start a duplicate or consume the normal 90-second post-spawn readiness wait;
+- endpoint evidence that does not complete within the bounded preflight window
+  fails that row closed with a duplicate-prevention explanation; and
+- once an instance identity is launched or credited during a sequence, a
+  repeated copy of that same identity is skipped even if the asynchronous
+  station cache has not yet observed the new process.
+
 The controls are orthogonal and their labels must describe the exact action:
 
 - `Monitor Health` controls only whether the selected radio's application is
@@ -1139,6 +1163,13 @@ projection immediately; normal Settings Save persists it.
   process snapshot.
 - Runtime status comes from the shared cached dependency-status service and
   refreshes asynchronously.
+- Launch safety may force one asynchronous process inventory and bounded
+  endpoint probes, but no process walk or endpoint I/O runs on the GUI thread.
+  Endpoint probes reuse that inventory and must not force another whole process
+  walk per radio/app endpoint.
+- A pre-existing process/port mismatch terminates that row after the bounded
+  endpoint preflight rather than waiting through the post-spawn readiness
+  timeout or launching another copy.
 - Automatic startup launches the same app set the review UI previews.
 - Manual and automatic paths pass the same planner-contract tests.
 - Two radios with a shared app launch it once; two distinct configured instances

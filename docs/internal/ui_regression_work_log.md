@@ -10131,3 +10131,60 @@ unrelated to these paths. Changed Python compilation and `git diff --check`
 pass. An isolated real-Qt navigation/resize soak also passed with a 628 ms first
 usable shell, 11.6 ms maximum event-loop lag, and 12 ms shutdown. Linux
 production retest remains required before push.
+
+## 2026-09-22 — launch-at-startup duplicate-instance fail-closed correction
+
+Status: specified and surgically implemented; Linux operator qualification is
+open.
+
+The operator observed multiple copies of every configured startup application.
+The attached `freqinout (62).log` also showed that the restarted FIO process had
+a cold dependency cache and that endpoint/process discovery remained
+asynchronous. Code review confirmed the race: LaunchOrchestrator read the cold
+shared cache as `running=False`, reached `Popen`, and only then requested an
+asynchronous forced refresh. A matching process with an unavailable configured
+port could separately consume the 90-second post-spawn readiness timeout even
+though spawning another copy was never safe.
+
+The same log contains a separate FIO shell-startup regression: database setup
+used 10.8 seconds, Settings construction used 43.5 seconds, SOP construction
+used 4.8 seconds, Ops Center construction used 9.1 seconds, and an additional
+approximately 39-second interval preceded the measured widget construction.
+That startup-construction problem occurs before Launch Control runs and is not
+silently combined with this duplicate-process safety patch; it remains a
+separate open production-performance gate.
+
+All startup and manual launch paths now share a fail-closed preflight. FIO waits
+for publication of a fresh asynchronous station process inventory before the
+first spawn. FLRig, FLDigi, and JS8Call then receive a current configured-port
+probe for the exact radio endpoint. A live endpoint is credited as already
+running; an exact running process with a non-ready endpoint is reported as a
+process/port mismatch; pending or timed-out evidence skips launch rather than
+authorizing a duplicate. Sequence-local identity claims also prevent a repeated
+row from racing the post-launch cache refresh. The existing planner still keeps
+two radios' genuinely distinct executable/argument/endpoint identities
+separate.
+
+Delivery packages:
+
+- `gpt-6-astra` high-reasoning primary agent: concurrency/lifecycle design,
+  LaunchOrchestrator implementation, integration, specification, and exit gate.
+- `gpt-5.6-luna` at medium reasoning: independent read-only audit of the cold
+  cache race, endpoint identity boundaries, and missing regression cases. The
+  audit made no file changes and its findings were reviewed before integration.
+
+Focused launch, planner, dependency-status, endpoint, Fast Light repair, JS8,
+VarAC, receiver, managed-directory, and multi-rig acceptance passes **187 tests
+with 4 platform skips**. Coverage includes cold process evidence, pending
+FLRig/FLDigi/JS8 endpoint evidence, occupied-port suppression, exact-process
+verification, process/port mismatch fail-closed behavior, distinct-radio
+launch, and reuse of one process inventory across endpoint probes. Two broader
+adjacent runs reached **320 passed, 2 skipped** and **273 passed** respectively;
+each retained one previously documented unrelated failure (the brittle Guided
+Add Radio source-string assertion and legacy JS8Spotter linked-row mirroring).
+Changed Python compilation and `git diff --check` pass; Ruff is unavailable in
+the project virtual environment. A project-wide pytest attempt reached the
+unrelated Compose acceptance area and then exited with a native Qt segmentation
+fault while an existing JS8 reader thread was active, so that full-suite gate is
+not claimed. The focused implementation gate passes; Linux operator
+qualification remains open.

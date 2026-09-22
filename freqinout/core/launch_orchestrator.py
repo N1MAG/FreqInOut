@@ -16,7 +16,10 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.software_status_service import SoftwareStatusService
-from freqinout.core.dependency_status_service import get_dependency_status_service
+from freqinout.core.dependency_status_service import (
+    LEGACY_PRIMARY_DEPENDENCY_SCOPE,
+    get_dependency_status_service,
+)
 from freqinout.core.launch_bundle_store import LaunchBundleStore, normalize_launch_items
 from freqinout.core.js8_storage import resolve_js8_storage, variant_family_from_version
 from freqinout.core.guided_launch_recipes import managed_instance_window_title
@@ -53,6 +56,9 @@ DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC = 90
 LAUNCH_READINESS_INITIAL_POLL_MS = 2000
 LAUNCH_READINESS_RELAXED_POLL_MS = 5000
 LAUNCH_READINESS_RELAX_AFTER_SEC = 30.0
+LAUNCH_PROCESS_PREFLIGHT_TIMEOUT_SEC = 15.0
+LAUNCH_ENDPOINT_PREFLIGHT_TIMEOUT_SEC = 15.0
+LAUNCH_ENDPOINT_PREFLIGHT_POLL_MS = 250
 
 
 LAUNCH_APP_META: Dict[str, Dict[str, Any]] = {
@@ -162,10 +168,24 @@ class LaunchOrchestrator(QObject):
         self._current_item: Any = None
         self._current_cmd: Optional[List[str]] = None
         self._current_started_monotonic = 0.0
+        self._current_phase = ""
+        self._endpoint_preflight_verified: set[str] = set()
+        self._endpoint_preflight_requested: set[str] = set()
+        self._sequence_claimed_identities: set[str] = set()
+        self._sequence_preflight_started_wall = 0.0
+        self._process_preflight_pending = False
+        self._process_preflight_baseline_sequence = 0
+        self._process_preflight_generation = 0
         self._wait_timeout_sec = DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(LAUNCH_READINESS_INITIAL_POLL_MS)
         self._poll_timer.timeout.connect(self._poll_current_readiness)
+        try:
+            self.dependency_status.snapshot_changed.connect(
+                self._on_launch_preflight_snapshot_changed
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def is_truthy(val: Any) -> bool:
@@ -1011,10 +1031,21 @@ class LaunchOrchestrator(QObject):
             return False
         return bool(host) and 0 < port <= 65535
 
-    def _cached_status_for_item(self, item: Any) -> Mapping[str, Any]:
+    def _cached_status_for_item(
+        self,
+        item: Any,
+        *,
+        force: bool = False,
+    ) -> Mapping[str, Any]:
         name = self._queue_item_name(item)
         policy = item.get("readiness_policy", {}) if isinstance(item, Mapping) else {}
-        kwargs: Dict[str, Any] = {"force": False}
+        kwargs: Dict[str, Any] = {
+            "force": bool(force),
+            # The sequence-level preflight already published one fresh process
+            # inventory.  A forced scoped request here means “probe this
+            # endpoint now,” not “walk every process again.”
+            "force_process_snapshot": False,
+        }
         if name == "JS8Call" and isinstance(policy, Mapping):
             kwargs["host_override"] = str(policy.get("host", "") or "") or None
             try:
@@ -1074,6 +1105,21 @@ class LaunchOrchestrator(QObject):
         self._current_item = None
         self._current_cmd = None
         self._current_started_monotonic = 0.0
+        self._current_phase = ""
+        self._endpoint_preflight_verified = set()
+        self._endpoint_preflight_requested = set()
+        self._sequence_claimed_identities = set()
+        self._sequence_preflight_started_wall = time.time()
+        self._process_preflight_pending = True
+        self._process_preflight_generation += 1
+        preflight_generation = self._process_preflight_generation
+        try:
+            latest = self.dependency_status.latest_snapshot()
+            self._process_preflight_baseline_sequence = int(
+                getattr(latest, "sequence", 0) or 0
+            )
+        except Exception:
+            self._process_preflight_baseline_sequence = 0
         self._sequence_projection_warnings = dict(
             getattr(self, "_last_projection_warnings", {})
         )
@@ -1091,11 +1137,138 @@ class LaunchOrchestrator(QObject):
                 "projection_warnings": dict(self._sequence_projection_warnings),
             }
         )
+        # A cold or stale process cache is unknown evidence, not proof that an
+        # application is absent.  Force one station-wide inventory and wait for
+        # its publication before any launch command can reach Popen.  Endpoint
+        # owners receive an additional configured-port preflight below.
+        try:
+            self.dependency_status.refresh_now(
+                reason=f"launch-preflight:{trigger}",
+                force=True,
+            )
+        except Exception as exc:
+            self._fail_launch_preflight(
+                f"could not start process inventory: {exc}"
+            )
+            return True
+        QTimer.singleShot(
+            int(LAUNCH_PROCESS_PREFLIGHT_TIMEOUT_SEC * 1000.0),
+            lambda generation=preflight_generation: self._on_launch_preflight_timeout(
+                generation
+            ),
+        )
+        # Test doubles and an already-completed refresh can publish before the
+        # queued signal is delivered.  Re-check the immutable snapshot without
+        # walking the process table on the GUI thread.
+        self._accept_completed_launch_preflight()
+        return True
+
+    def _accept_completed_launch_preflight(self) -> bool:
+        if not self._active or not self._process_preflight_pending:
+            return False
+        try:
+            snapshot = self.dependency_status.latest_snapshot()
+            sequence = int(getattr(snapshot, "sequence", 0) or 0)
+            scope = str(getattr(snapshot, "scope", "") or "")
+        except Exception:
+            return False
+        if scope != LEGACY_PRIMARY_DEPENDENCY_SCOPE:
+            return False
+        if sequence <= int(self._process_preflight_baseline_sequence or 0):
+            return False
+        self._process_preflight_pending = False
+        log.info(
+            "LaunchOrchestrator: process preflight complete for %s launch (sequence=%s)",
+            self._trigger or "unknown",
+            sequence,
+        )
         self._schedule_advance_queue(0)
         return True
 
+    def _on_launch_preflight_snapshot_changed(self, snapshot: object) -> None:
+        if not self._active or not self._process_preflight_pending:
+            return
+        if str(getattr(snapshot, "scope", "") or "") != LEGACY_PRIMARY_DEPENDENCY_SCOPE:
+            return
+        self._accept_completed_launch_preflight()
+
+    def _on_launch_preflight_timeout(self, generation: int) -> None:
+        if generation != self._process_preflight_generation:
+            return
+        if not self._active or not self._process_preflight_pending:
+            return
+        self._fail_launch_preflight(
+            "fresh process inventory was not available before the safety deadline"
+        )
+
+    def _fail_launch_preflight(self, detail: str) -> None:
+        if not self._active:
+            return
+        self._process_preflight_pending = False
+        message = f"launch safety preflight failed; nothing was started: {detail}"
+        log.error("LaunchOrchestrator: %s", message)
+        for item in self._queue:
+            result = self._result_for(item, status="failed", detail=message)
+            self._results.append(result)
+            self.sequence_progress.emit(result)
+        self._finish_sequence(cancelled=False)
+
+    @staticmethod
+    def _sequence_identity_key(item: Any) -> str:
+        if not isinstance(item, Mapping):
+            return ""
+        identity = str(item.get("instance_identity", "") or "").strip()
+        return f"instance:{identity}" if identity else ""
+
+    @staticmethod
+    def _endpoint_preflight_key(item: Any) -> str:
+        if not LaunchOrchestrator._has_persisted_endpoint_identity(item):
+            return ""
+        policy = item.get("readiness_policy", {})
+        identity = str(item.get("instance_identity", "") or "").strip()
+        name = LaunchOrchestrator._queue_item_name(item)
+        host = str(policy.get("host", "") or "").strip().casefold()
+        try:
+            port = int(policy.get("port", 0) or 0)
+        except (TypeError, ValueError):
+            port = 0
+        return f"{identity}|{name}|{host}|{port}"
+
+    def _configured_endpoint_preflight_state(
+        self,
+        item: Any,
+        endpoint_key: str,
+    ) -> str:
+        self._endpoint_preflight_requested = getattr(
+            self,
+            "_endpoint_preflight_requested",
+            set(),
+        )
+        force = endpoint_key not in self._endpoint_preflight_requested
+        if force:
+            self._endpoint_preflight_requested.add(endpoint_key)
+        info = self._cached_status_for_item(item, force=force)
+        try:
+            checked_at = float(info.get("checked_at", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            checked_at = 0.0
+        source = str(info.get("source", "") or "").strip().lower()
+        # The endpoint result must belong to this launch attempt.  A prior
+        # cached failure must not authorize a spawn after an app was started
+        # outside FIO, and the cold process fallback is never endpoint proof.
+        evidence_complete = (
+            source == "endpoint"
+            and checked_at
+            >= float(getattr(self, "_sequence_preflight_started_wall", 0.0) or 0.0)
+        )
+        if not evidence_complete:
+            return "pending"
+        return "occupied" if bool(info.get("reachable", False)) else "clear"
+
     def _advance_queue(self) -> None:
         if not self._active:
+            return
+        if bool(getattr(self, "_process_preflight_pending", False)):
             return
         if self._cancel_requested:
             self._finish_sequence(cancelled=True)
@@ -1107,6 +1280,18 @@ class LaunchOrchestrator(QObject):
         name = self._queue_item_name(queue_item)
         self._index += 1
         if not name:
+            self._schedule_advance_queue(0)
+            return
+        sequence_identity = self._sequence_identity_key(queue_item)
+        claimed_identities = getattr(self, "_sequence_claimed_identities", set())
+        if sequence_identity and sequence_identity in claimed_identities:
+            result = self._result_for(
+                queue_item,
+                status="already_running",
+                detail="already handled by this launch sequence",
+            )
+            self._results.append(result)
+            self.sequence_progress.emit(result)
             self._schedule_advance_queue(0)
             return
         blocked_dependency = self._blocked_dependency_for(queue_item)
@@ -1136,6 +1321,92 @@ class LaunchOrchestrator(QObject):
             )
             self._schedule_advance_queue(0)
             return
+        exact_process_running = self._configured_instance_process_running(queue_item)
+        endpoint_key = self._endpoint_preflight_key(queue_item)
+        if (
+            endpoint_key
+            and endpoint_key not in getattr(self, "_endpoint_preflight_verified", set())
+        ):
+            endpoint_state = self._configured_endpoint_preflight_state(
+                queue_item,
+                endpoint_key,
+            )
+            if endpoint_state == "pending":
+                log.info(
+                    "LaunchOrchestrator: verifying configured endpoint before %s launch",
+                    name,
+                )
+                self._current_name = name
+                self._current_item = queue_item
+                self._current_cmd = None
+                self._current_phase = "endpoint_preflight"
+                self._current_started_monotonic = time.monotonic()
+                self._poll_timer.setInterval(LAUNCH_ENDPOINT_PREFLIGHT_POLL_MS)
+                self._poll_timer.start()
+                return
+            self._endpoint_preflight_verified = getattr(
+                self,
+                "_endpoint_preflight_verified",
+                set(),
+            )
+            self._endpoint_preflight_verified.add(endpoint_key)
+            if endpoint_state == "occupied":
+                log.info(
+                    "LaunchOrchestrator: skipped %s launch because its configured endpoint is active",
+                    name,
+                )
+                if name == "JS8Call":
+                    try:
+                        self._persist_ready_js8_identity(
+                            queue_item,
+                            self._cached_status_for_item(queue_item),
+                        )
+                    except Exception as storage_exc:
+                        log.warning(
+                            "LaunchOrchestrator: JS8 endpoint persistence failed: %s",
+                            storage_exc,
+                        )
+                result = self._result_for(
+                    queue_item,
+                    status="already_running",
+                    detail="configured endpoint is already active",
+                )
+                self._results.append(result)
+                if sequence_identity:
+                    self._sequence_claimed_identities = getattr(
+                        self,
+                        "_sequence_claimed_identities",
+                        set(),
+                    )
+                    self._sequence_claimed_identities.add(sequence_identity)
+                self.sequence_progress.emit(result)
+                self._schedule_advance_queue(0)
+                return
+            if exact_process_running is True:
+                log.warning(
+                    "LaunchOrchestrator: skipped duplicate %s launch; exact process is "
+                    "running but its configured endpoint is not ready",
+                    name,
+                )
+                result = self._result_for(
+                    queue_item,
+                    status="failed",
+                    detail=(
+                        "configured process is running but its endpoint is not ready; "
+                        "duplicate launch skipped"
+                    ),
+                )
+                self._results.append(result)
+                if sequence_identity:
+                    self._sequence_claimed_identities = getattr(
+                        self,
+                        "_sequence_claimed_identities",
+                        set(),
+                    )
+                    self._sequence_claimed_identities.add(sequence_identity)
+                self.sequence_progress.emit(result)
+                self._schedule_advance_queue(0)
+                return
         if self._program_running(queue_item):
             same_name_identities = {
                 str(value.get("instance_identity", "") or "")
@@ -1153,6 +1424,13 @@ class LaunchOrchestrator(QObject):
                         log.warning("LaunchOrchestrator: JS8 ready-state persistence failed: %s", storage_exc)
                 result = self._result_for(queue_item, status="already_running", detail="already running")
                 self._results.append(result)
+                if sequence_identity:
+                    self._sequence_claimed_identities = getattr(
+                        self,
+                        "_sequence_claimed_identities",
+                        set(),
+                    )
+                    self._sequence_claimed_identities.add(sequence_identity)
                 self.sequence_progress.emit(result)
                 self._schedule_advance_queue(0)
                 return
@@ -1161,7 +1439,6 @@ class LaunchOrchestrator(QObject):
             # wait forever on this radio's absent endpoint.  Only use this
             # recovery when no exact configured process identity is running;
             # an exact process may simply still be starting its service.
-            exact_process_running = self._configured_instance_process_running(queue_item)
             selected_endpoint_requires_launch = (
                 not has_distinct_instances
                 and not ready
@@ -1175,6 +1452,7 @@ class LaunchOrchestrator(QObject):
                 self._current_name = name
                 self._current_item = queue_item
                 self._current_cmd = None
+                self._current_phase = "readiness"
                 self._current_started_monotonic = time.monotonic()
                 self._poll_timer.setInterval(LAUNCH_READINESS_INITIAL_POLL_MS)
                 self._poll_timer.start()
@@ -1218,6 +1496,13 @@ class LaunchOrchestrator(QObject):
                 env=environment,
             )
             self._schedule_process_window_title(queue_item, process)
+            if sequence_identity:
+                self._sequence_claimed_identities = getattr(
+                    self,
+                    "_sequence_claimed_identities",
+                    set(),
+                )
+                self._sequence_claimed_identities.add(sequence_identity)
             if name == "JS8Call":
                 try:
                     self._persist_planned_js8_storage(queue_item)
@@ -1237,6 +1522,7 @@ class LaunchOrchestrator(QObject):
             self._current_name = name
             self._current_item = queue_item
             self._current_cmd = cmd
+            self._current_phase = "readiness"
             self._current_started_monotonic = time.monotonic()
             self._poll_timer.setInterval(LAUNCH_READINESS_INITIAL_POLL_MS)
             self._poll_timer.start()
@@ -1513,6 +1799,108 @@ class LaunchOrchestrator(QObject):
             self._schedule_advance_queue(0)
             return
         elapsed = max(0.0, time.monotonic() - self._current_started_monotonic)
+        if self._current_phase == "endpoint_preflight":
+            item = self._current_item or name
+            endpoint_key = self._endpoint_preflight_key(item)
+            state = self._configured_endpoint_preflight_state(item, endpoint_key)
+            if state != "pending":
+                self._poll_timer.stop()
+                self._endpoint_preflight_verified = getattr(
+                    self,
+                    "_endpoint_preflight_verified",
+                    set(),
+                )
+                self._endpoint_preflight_verified.add(endpoint_key)
+                sequence_identity = self._sequence_identity_key(item)
+                if state == "occupied":
+                    log.info(
+                        "LaunchOrchestrator: skipped %s launch because its configured endpoint is active",
+                        name,
+                    )
+                    if name == "JS8Call":
+                        try:
+                            self._persist_ready_js8_identity(
+                                item,
+                                self._cached_status_for_item(item),
+                            )
+                        except Exception as storage_exc:
+                            log.warning(
+                                "LaunchOrchestrator: JS8 endpoint persistence failed: %s",
+                                storage_exc,
+                            )
+                    result = self._result_for(
+                        item,
+                        status="already_running",
+                        detail="configured endpoint is already active",
+                    )
+                    self._results.append(result)
+                    if sequence_identity:
+                        self._sequence_claimed_identities = getattr(
+                            self,
+                            "_sequence_claimed_identities",
+                            set(),
+                        )
+                        self._sequence_claimed_identities.add(sequence_identity)
+                    self.sequence_progress.emit(result)
+                else:
+                    exact_process_running = self._configured_instance_process_running(item)
+                    if exact_process_running is True:
+                        log.warning(
+                            "LaunchOrchestrator: skipped duplicate %s launch; exact process is "
+                            "running but its configured endpoint is not ready",
+                            name,
+                        )
+                        result = self._result_for(
+                            item,
+                            status="failed",
+                            detail=(
+                                "configured process is running but its endpoint is not ready; "
+                                "duplicate launch skipped"
+                            ),
+                        )
+                        self._results.append(result)
+                        if sequence_identity:
+                            self._sequence_claimed_identities = getattr(
+                                self,
+                                "_sequence_claimed_identities",
+                                set(),
+                            )
+                            self._sequence_claimed_identities.add(sequence_identity)
+                        self.sequence_progress.emit(result)
+                    else:
+                        # _advance_queue already consumed this item.  Revisit it
+                        # once with fresh negative endpoint evidence so the normal
+                        # identity, dependency, and command safety checks still run.
+                        self._index = max(0, self._index - 1)
+                self._current_name = None
+                self._current_item = None
+                self._current_cmd = None
+                self._current_phase = ""
+                self._schedule_advance_queue(0)
+                return
+            if elapsed >= LAUNCH_ENDPOINT_PREFLIGHT_TIMEOUT_SEC:
+                self._poll_timer.stop()
+                log.warning(
+                    "LaunchOrchestrator: skipped %s launch because configured endpoint verification timed out",
+                    name,
+                )
+                result = self._result_for(
+                    item,
+                    status="failed",
+                    detail=(
+                        "configured endpoint could not be verified; launch was skipped "
+                        "to prevent a duplicate instance"
+                    ),
+                )
+                self._results.append(result)
+                self.sequence_progress.emit(result)
+                self._current_name = None
+                self._current_item = None
+                self._current_cmd = None
+                self._current_phase = ""
+                self._schedule_advance_queue(0)
+                return
+            return
         desired_interval = (
             LAUNCH_READINESS_RELAXED_POLL_MS
             if elapsed >= LAUNCH_READINESS_RELAX_AFTER_SEC
@@ -1538,6 +1926,7 @@ class LaunchOrchestrator(QObject):
             self._current_name = None
             self._current_item = None
             self._current_cmd = None
+            self._current_phase = ""
             self._schedule_advance_queue(int(delay_sec * 1000.0))
             return
         if elapsed >= float(self._wait_timeout_sec):
@@ -1552,6 +1941,7 @@ class LaunchOrchestrator(QObject):
             self._current_name = None
             self._current_item = None
             self._current_cmd = None
+            self._current_phase = ""
             self._schedule_advance_queue(0)
 
     def _persist_ready_js8_identity(self, item: Any, status: Mapping[str, Any]) -> None:
@@ -1991,6 +2381,8 @@ class LaunchOrchestrator(QObject):
             )
         summary = self._build_summary(cancelled=cancelled)
         self._active = False
+        self._process_preflight_pending = False
+        self._process_preflight_generation += 1
         self._cancel_requested = False
         self._trigger = ""
         self._queue = []
@@ -1999,6 +2391,11 @@ class LaunchOrchestrator(QObject):
         self._current_item = None
         self._current_cmd = None
         self._current_started_monotonic = 0.0
+        self._current_phase = ""
+        self._endpoint_preflight_verified = set()
+        self._endpoint_preflight_requested = set()
+        self._sequence_claimed_identities = set()
+        self._sequence_preflight_started_wall = 0.0
         self.sequence_finished.emit(summary)
 
     def _build_summary(self, cancelled: bool) -> Dict[str, Any]:

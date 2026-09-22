@@ -770,6 +770,12 @@ def test_selected_radio_endpoint_identity_launches_when_only_other_radio_process
     orchestrator._program_running = lambda _item: True
     orchestrator._program_ready_for_sequence = lambda _item: False
     orchestrator._configured_instance_process_running = lambda _item: None
+    orchestrator._sequence_preflight_started_wall = 100.0
+    orchestrator._cached_status_for_item = lambda _item, force=False: {
+        "source": "endpoint",
+        "checked_at": 101.0,
+        "reachable": False,
+    }
     orchestrator._resolve_launch_command = lambda _item: ([f"/usr/local/bin/{name.casefold()}"], "test")
     orchestrator._is_self_launch_command = lambda _cmd: False
     orchestrator._materialize_item_managed_directories = lambda _item: ()
@@ -784,7 +790,7 @@ def test_selected_radio_endpoint_identity_launches_when_only_other_radio_process
     assert orchestrator._current_item is item
 
 
-def test_selected_radio_endpoint_identity_waits_when_exact_process_is_starting(monkeypatch) -> None:
+def test_selected_radio_endpoint_identity_verifies_port_before_crediting_exact_process(monkeypatch) -> None:
     from types import SimpleNamespace
 
     started: list[bool] = []
@@ -810,6 +816,13 @@ def test_selected_radio_endpoint_identity_waits_when_exact_process_is_starting(m
     orchestrator._program_running = lambda _item: True
     orchestrator._program_ready_for_sequence = lambda _item: False
     orchestrator._configured_instance_process_running = lambda _item: True
+    orchestrator._sequence_preflight_started_wall = 100.0
+    orchestrator._cached_status_for_item = lambda _item, force=False: {
+        "source": "process",
+        "checked_at": 0.0,
+        "stale": True,
+        "reachable": False,
+    }
     orchestrator._schedule_advance_queue = lambda _delay=0: None
     orchestrator._poll_timer = SimpleNamespace(
         setInterval=lambda _value: None,
@@ -820,6 +833,191 @@ def test_selected_radio_endpoint_identity_waits_when_exact_process_is_starting(m
 
     assert started == [True]
     assert orchestrator._current_item is item
+    assert orchestrator._current_phase == "endpoint_preflight"
+
+
+def test_executor_never_spawns_before_fresh_process_preflight(monkeypatch) -> None:
+    monkeypatch.setattr(
+        launch_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("cold process evidence must never authorize launch"),
+    )
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator._active = True
+    orchestrator._process_preflight_pending = True
+    orchestrator._cancel_requested = False
+    orchestrator._queue = [{"name": "FLMsg", "instance_identity": "fast:alpha:flmsg"}]
+    orchestrator._index = 0
+    orchestrator._results = []
+
+    orchestrator._advance_queue()
+
+    assert orchestrator._index == 0
+    assert orchestrator._results == []
+
+
+def test_start_sequence_forces_and_waits_for_new_process_snapshot(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    from freqinout.core.settings_manager import SettingsManager
+
+    snapshots = [SimpleNamespace(sequence=4, scope="legacy_primary")]
+    refresh_calls: list[dict[str, object]] = []
+    scheduled: list[int] = []
+    orchestrator = LaunchOrchestrator(SettingsManager())
+    orchestrator.dependency_status = SimpleNamespace(
+        latest_snapshot=lambda: snapshots[-1],
+        refresh_now=lambda **kwargs: refresh_calls.append(dict(kwargs)) or snapshots[-1],
+    )
+    orchestrator._schedule_advance_queue = lambda delay=0: scheduled.append(int(delay))
+
+    assert orchestrator._start_sequence(
+        "startup",
+        [{"name": "FLMsg", "instance_identity": "fast:alpha:flmsg"}],
+    ) is True
+    assert refresh_calls == [{"reason": "launch-preflight:startup", "force": True}]
+    assert scheduled == []
+
+    snapshots.append(SimpleNamespace(sequence=5, scope="legacy_primary"))
+    orchestrator._on_launch_preflight_snapshot_changed(snapshots[-1])
+
+    assert orchestrator._process_preflight_pending is False
+    assert scheduled == [0]
+
+
+@pytest.mark.parametrize("name", ["FLRig", "FLDigi", "JS8Call"])
+def test_endpoint_owner_waits_for_current_port_evidence_before_spawn(
+    monkeypatch,
+    name: str,
+) -> None:
+    monkeypatch.setattr(
+        launch_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("pending endpoint evidence must never authorize launch"),
+    )
+    started: list[bool] = []
+    item = {
+        "name": name,
+        "instance_identity": f"radio-a:{name.casefold()}",
+        "launch_path_override": f"/usr/local/bin/{name.casefold()}",
+        "readiness_policy": {
+            "host": "127.0.0.1",
+            "port": {"FLRig": 12345, "FLDigi": 7362, "JS8Call": 2442}[name],
+        },
+    }
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator._active = True
+    orchestrator._process_preflight_pending = False
+    orchestrator._cancel_requested = False
+    orchestrator._queue = [item]
+    orchestrator._index = 0
+    orchestrator._results = []
+    orchestrator._sequence_preflight_started_wall = 100.0
+    orchestrator._blocked_dependency_for = lambda _item: None
+    orchestrator._configured_instance_process_running = lambda _item: False
+    orchestrator._cached_status_for_item = lambda _item, force=False: {
+        "source": "process",
+        "checked_at": 0.0,
+        "stale": True,
+        "reachable": False,
+    }
+    orchestrator._schedule_advance_queue = lambda _delay=0: None
+    orchestrator._poll_timer = SimpleNamespace(
+        setInterval=lambda _value: None,
+        start=lambda: started.append(True),
+    )
+
+    orchestrator._advance_queue()
+
+    assert started == [True]
+    assert orchestrator._current_phase == "endpoint_preflight"
+    assert orchestrator._current_item is item
+
+
+def test_current_configured_endpoint_is_treated_as_already_running(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    monkeypatch.setattr(
+        launch_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("an occupied configured endpoint must not be relaunched"),
+    )
+    from freqinout.core.settings_manager import SettingsManager
+
+    item = {
+        "name": "FLRig",
+        "instance_identity": "radio-a:flrig",
+        "launch_path_override": "/usr/local/bin/flrig",
+        "readiness_policy": {"host": "127.0.0.1", "port": 12345},
+    }
+    orchestrator = LaunchOrchestrator(SettingsManager())
+    orchestrator._active = True
+    orchestrator._process_preflight_pending = False
+    orchestrator._cancel_requested = False
+    orchestrator._queue = [item]
+    orchestrator._index = 0
+    orchestrator._results = []
+    orchestrator._sequence_preflight_started_wall = 100.0
+    orchestrator._blocked_dependency_for = lambda _item: None
+    orchestrator._configured_instance_process_running = lambda _item: False
+    orchestrator._cached_status_for_item = lambda _item, force=False: {
+        "source": "endpoint",
+        "checked_at": 101.0,
+        "reachable": True,
+    }
+    orchestrator._schedule_advance_queue = lambda _delay=0: None
+
+    orchestrator._advance_queue()
+
+    assert orchestrator._results[0]["status"] == "already_running"
+    assert orchestrator._results[0]["detail"] == "configured endpoint is already active"
+
+
+def test_exact_process_with_unready_port_is_not_duplicated_or_held(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    monkeypatch.setattr(
+        launch_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("a process/port mismatch must not spawn another copy"),
+    )
+    from freqinout.core.settings_manager import SettingsManager
+
+    item = {
+        "name": "FLDigi",
+        "instance_identity": "radio-a:fldigi",
+        "launch_path_override": "/usr/local/bin/fldigi",
+        "launch_arguments": ["--config-dir", "/profiles/radio-a"],
+        "readiness_policy": {"host": "127.0.0.1", "port": 7362},
+    }
+    orchestrator = LaunchOrchestrator(SettingsManager())
+    orchestrator._active = True
+    orchestrator._process_preflight_pending = False
+    orchestrator._cancel_requested = False
+    orchestrator._queue = [item]
+    orchestrator._index = 0
+    orchestrator._results = []
+    orchestrator._sequence_preflight_started_wall = 100.0
+    orchestrator._blocked_dependency_for = lambda _item: None
+    orchestrator._configured_instance_process_running = lambda _item: True
+    orchestrator._cached_status_for_item = lambda _item, force=False: {
+        "source": "endpoint",
+        "checked_at": 101.0,
+        "reachable": False,
+    }
+    orchestrator._schedule_advance_queue = lambda _delay=0: None
+
+    orchestrator._advance_queue()
+
+    assert orchestrator._current_item is None
+    assert orchestrator._results[0]["status"] == "failed"
+    assert "duplicate launch skipped" in orchestrator._results[0]["detail"]
 
 
 @pytest.mark.parametrize("name", ["FLMsg", "FLAmp"])
@@ -954,6 +1152,12 @@ def test_manual_flrig_launch_uses_selected_radio_config_dir_when_other_instance_
     orchestrator._program_running = lambda _item: True
     orchestrator._configured_instance_process_running = lambda _item: False
     orchestrator._program_ready_for_sequence = lambda _item: False
+    orchestrator._sequence_preflight_started_wall = 100.0
+    orchestrator._cached_status_for_item = lambda _item, force=False: {
+        "source": "endpoint",
+        "checked_at": 101.0,
+        "reachable": False,
+    }
     orchestrator._is_self_launch_command = lambda _cmd: False
     orchestrator._materialize_item_managed_directories = lambda _item: ()
     orchestrator._infer_launch_cwd = lambda *_args: None

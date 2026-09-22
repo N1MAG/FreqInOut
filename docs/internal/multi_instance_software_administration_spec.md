@@ -439,6 +439,18 @@ Endpoint-scoped applications are not deduplicated merely because their process
 names match. Shared tools are deduplicated only when their persisted instance
 identity is intentionally shared.
 
+Launch execution is conservative when runtime evidence is incomplete. Before
+automatic or manual launch may spawn any application, FIO must publish a fresh
+station-wide process inventory. Process-only applications are identified by
+their saved executable and radio-specific arguments. FLRig, FLDigi, and
+JS8Call also require a fresh probe of the selected instance's configured host
+and port. A reachable configured endpoint is treated as already active; an
+exact running process with an unreachable configured endpoint is a mismatch,
+not permission to launch another copy. Cold, pending, failed, or timed-out
+evidence fails closed and identifies duplicate prevention as the reason. These
+checks must run off the GUI thread and are identical for startup, selected-radio
+start, row Start, and manual launch.
+
 Readiness states have precise meanings:
 
 - `Configured`: durable settings exist.

@@ -1234,6 +1234,7 @@ class SoftwareStatusService:
         self,
         *,
         force: bool = False,
+        force_process_snapshot: bool = True,
         port_override: Optional[int] = None,
         host_override: Optional[str] = None,
         flrig_port_override: Optional[int] = None,
@@ -1261,7 +1262,7 @@ class SoftwareStatusService:
                     )
             return self.program_is_running(program_name)
 
-        if force:
+        if force and force_process_snapshot:
             self._refresh_process_snapshot(force=True)
         running_js8 = _running("JS8Call")
         js8_host = (host_override or "").strip() or self._settings_text("js8_host", JS8_DEFAULT_HOST) or JS8_DEFAULT_HOST
