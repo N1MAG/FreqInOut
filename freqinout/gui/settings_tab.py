@@ -197,6 +197,7 @@ from freqinout.core.varac_native_transaction import (
     recover_unfinished_varac_native_applies,
     rollback_varac_native_external_session,
 )
+from freqinout.core.varac_runtime_repair import repair_managed_varac_wine_runtime_paths
 from freqinout.core.guided_launch_recipes import (
     canonical_js8_version,
     managed_instance_window_title,
@@ -1129,7 +1130,17 @@ class _VarACNativeApplyWorker(QObject):
                 self.finished.emit(rollback_varac_native_external_session(store, self.session))
                 return
             if self.action == "recover":
-                self.finished.emit(recover_unfinished_varac_native_applies(store))
+                journals = recover_unfinished_varac_native_applies(store)
+                status = SoftwareStatusService({})
+                repairs = repair_managed_varac_wine_runtime_paths(
+                    store,
+                    backup_root=Path(self.db_path).parent / "backups" / "varac-native-repair",
+                    process_running=bool(
+                        status.program_is_running("VarAC")
+                        or status.program_is_running("VARA")
+                    ),
+                )
+                self.finished.emit({"journals": journals, "repairs": repairs})
                 return
             raise ValueError(f"Unsupported native VarAC worker action: {self.action}")
         except Exception as exc:
@@ -34897,15 +34908,41 @@ class SettingsTab(QWidget):
                 action="recover",
                 db_path=self.multi_radio_store.db_path,
             ),
-            on_finished=lambda rows: log.info(
-                "Native VarAC startup recovery resolved %d journal row(s).",
-                len(rows) if isinstance(rows, tuple) else 0,
-            ),
+            on_finished=self._log_varac_native_recovery_result,
             on_failed=lambda detail: log.error(
                 "Native VarAC startup recovery needs operator attention: %s",
                 detail,
             ),
         )
+
+    @staticmethod
+    def _log_varac_native_recovery_result(result: object) -> None:
+        journals = result.get("journals", ()) if isinstance(result, Mapping) else ()
+        repairs = result.get("repairs", ()) if isinstance(result, Mapping) else ()
+        log.info(
+            "Native VarAC startup recovery resolved %d journal row(s) and evaluated %d managed runtime repair(s).",
+            len(journals) if isinstance(journals, tuple) else 0,
+            len(repairs) if isinstance(repairs, tuple) else 0,
+        )
+        for row in repairs if isinstance(repairs, tuple) else ():
+            if not isinstance(row, Mapping):
+                continue
+            state = str(row.get("state") or "unknown")
+            node_id = int(row.get("node_id") or 0)
+            detail = str(row.get("detail") or "")
+            if state in {"needs-attention", "deferred", "failed", "recovery-required"}:
+                log.warning(
+                    "Managed VarAC runtime repair node=%s state=%s detail=%s",
+                    node_id,
+                    state,
+                    detail or "review Software Administration > VarAC",
+                )
+            else:
+                log.info(
+                    "Managed VarAC runtime repair node=%s state=%s",
+                    node_id,
+                    state,
+                )
 
     @staticmethod
     def _publish_varac_native_presentation(publisher: object, presentation: Mapping[str, Any]) -> bool:

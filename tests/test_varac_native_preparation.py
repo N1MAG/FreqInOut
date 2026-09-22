@@ -16,7 +16,7 @@ from freqinout.core.varac_native_preparation import (
 )
 
 
-def _evidence(tmp_path: Path, *, inside_wine_drive: bool = False):
+def _evidence(tmp_path: Path, *, inside_wine_drive: bool = True):
     native_root = tmp_path / "prefix" / "drive_c" if inside_wine_drive else tmp_path
     varac_root = native_root / "VarAC"
     vara_root = native_root / "VARA"
@@ -96,15 +96,15 @@ def test_prepare_existing_standalone_and_new_member_is_immutable_and_ready(tmp_p
     assert result.plan.members[0].vara_target_runtime_folder != result.plan.members[1].vara_target_runtime_folder
     assert result.plan.members[0].vara_changes["Setup"]["TCP Command Port"] == "8300"
     assert result.plan.members[1].vara_changes["Setup"]["TCP Command Port"] == "8310"
-    assert result.plan.native_shared_db_path.startswith("Z:\\")
+    assert result.plan.native_shared_db_path.startswith("C:\\")
     assert (
         result.plan.members[1].changes["OTHER"]["DBCustomFilePath"]
         == result.plan.native_shared_db_path
     )
     assert result.plan.members[1].changes["VARAHF_CONFIG"]["VarahfMainPath"].startswith(
-        "Z:\\"
+        "C:\\"
     )
-    assert result.plan.members[1].launch_command[2].startswith("Z:\\")
+    assert result.plan.members[1].launch_command[2].startswith("C:\\")
     member = result.plan.members[1]
     assert result.presentation["application_path"] == str(
         Path(node["install_path"]) / "VarAC.exe"
@@ -172,10 +172,30 @@ def test_linux_wine_targets_and_apply_use_native_drive_paths_not_managed_root_z_
     )
 
 
+def test_linux_wine_rejects_source_without_verified_wine_drive_instead_of_generating_z_runtime(tmp_path) -> None:
+    node, profile = _evidence(tmp_path, inside_wine_drive=False)
+
+    result = prepare_varac_native_configuration(
+        _draft(),
+        varac_nodes=(node,),
+        device_profiles=(profile,),
+        varac_clusters=(),
+        varac_members=(),
+        managed_root=tmp_path / ".freqinout" / "managed-instances",
+        generation=9,
+        platform_override="linux-wine",
+    )
+
+    assert not result.ready
+    assert result.plan is None
+    assert "verified Wine drive_<letter>" in result.error
+    assert "Z:\\" not in result.error
+
+
 def test_prepare_uses_fresh_numbered_runtime_when_preferred_target_exists(tmp_path) -> None:
     node, profile = _evidence(tmp_path)
     managed_root = tmp_path / "managed"
-    occupied = managed_root / "new-radio" / "varac-native" / "VARA"
+    occupied = tmp_path / "prefix" / "drive_c" / "VARA-new-radio"
     occupied.mkdir(parents=True)
     sentinel = occupied / "operator-owned.txt"
     sentinel.write_text("preserve", encoding="utf-8")
@@ -203,7 +223,7 @@ def test_prepare_uses_fresh_numbered_runtime_when_preferred_target_exists(tmp_pa
 
     assert first.ready and second.ready
     assert first.plan is not None and second.plan is not None
-    expected = managed_root / "new-radio" / "varac-native" / "VARA-2"
+    expected = tmp_path / "prefix" / "drive_c" / "VARA-new-radio-2"
     assert first.plan.members[-1].vara_target_runtime_folder == expected
     assert second.plan.members[-1].vara_target_runtime_folder == expected
     assert first.presentation["vara_runtime_path"] == str(expected)
@@ -231,18 +251,18 @@ def test_prepare_reserves_distinct_runtime_names_for_same_radio_label(tmp_path) 
     assert result.ready
     assert result.plan is not None
     assert result.plan.members[0].vara_target_runtime_folder == (
-        managed_root / "new-radio" / "varac-native" / "VARA"
+        tmp_path / "prefix" / "drive_c" / "VARA-new-radio"
     )
     assert result.plan.members[1].vara_target_runtime_folder == (
-        managed_root / "new-radio" / "varac-native" / "VARA-2"
+        tmp_path / "prefix" / "drive_c" / "VARA-new-radio-2"
     )
 
 
 def test_prepare_treats_broken_runtime_symlink_as_occupied(tmp_path) -> None:
     node, profile = _evidence(tmp_path)
     managed_root = tmp_path / "managed"
-    occupied = managed_root / "new-radio" / "varac-native" / "VARA"
-    occupied.parent.mkdir(parents=True)
+    occupied = tmp_path / "prefix" / "drive_c" / "VARA-new-radio"
+    occupied.parent.mkdir(parents=True, exist_ok=True)
     try:
         occupied.symlink_to(tmp_path / "missing-runtime", target_is_directory=True)
     except (NotImplementedError, OSError) as exc:
@@ -262,7 +282,7 @@ def test_prepare_treats_broken_runtime_symlink_as_occupied(tmp_path) -> None:
     assert result.ready
     assert result.plan is not None
     assert result.plan.members[-1].vara_target_runtime_folder == (
-        managed_root / "new-radio" / "varac-native" / "VARA-2"
+        tmp_path / "prefix" / "drive_c" / "VARA-new-radio-2"
     )
     assert occupied.is_symlink()
 

@@ -233,6 +233,18 @@ canonical persistence, Launch Control, and Software Administration must show the
 same values after reload; Software Administration may not reopen as a blank
 parallel configuration.
 
+Compatibility recovery is part of that same projection, not a second editor.
+For a saved radio without a canonical VarAC record, Software Administration and
+Launch Control may reconstruct an exact structured launch vector from the one
+linked node; they never shell-parse its legacy display command. On Linux/Wine,
+an exact older FIO-managed `.freqinout`/Z: VARA runtime is repaired by the
+bounded qualified startup transaction defined by GRS-14.5, or reconciled when
+the native INI already names an existing drive-local runtime. Success updates
+the node, manifest, canonical identity, and launch row together while retaining
+the old folder. Deferred or unqualified repair remains visible as diagnostic
+evidence and never borrows another radio's runtime. Windows remains native and
+does not enter the Wine-layout repair path.
+
 The conditional arrangement matrix in
 `guided_radio_software_configuration_spec.md` is authoritative. A fresh station
 may preselect standalone. When standalone node(s) exist but no cluster exists,

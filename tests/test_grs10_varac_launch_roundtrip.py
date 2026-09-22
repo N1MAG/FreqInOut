@@ -15,6 +15,7 @@ from freqinout.core.launch_bundle_store import LaunchBundleStore
 from freqinout.core.launch_orchestrator import LaunchOrchestrator
 from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.station_launch_planner import StationLaunchPlanner
+from freqinout.core.varac_launch_recipe import legacy_varac_structured_launch
 
 
 def _profile(store: MultiRadioStore) -> dict[str, object]:
@@ -50,6 +51,156 @@ def _structured_item(*, executable: str, arguments: list[str], cwd: str, environ
             "window_title": "VarAC — Radio A",
         },
     }
+
+
+def test_legacy_linux_wine_varac_row_is_recovered_without_shell_parsing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import freqinout.core.launch_orchestrator as launch_module
+
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator.multi_radio_store = SimpleNamespace(
+        get_device_profile=lambda _radio_id: {"id": 1, "varac_node_id": 7},
+        get_varac_node=lambda _node_id: {
+            "id": 7,
+            "install_path": "/home/bill/.wine/drive_c/VarAC",
+            "ini_path": "/home/bill/.wine/drive_c/VarAC/VarAC.ini",
+        },
+        radio_software_identity_generation=lambda _radio_id: 0,
+    )
+    monkeypatch.setattr(launch_module.platform, "system", lambda: "Linux")
+    original = {
+        "name": "VarAC",
+        "instance_key": "VarAC",
+        "enabled": True,
+        "startup": False,
+        "monitor_health": True,
+        "launch_path_override": "wine /home/bill/.wine/drive_c/VarAC/VarAC.exe C:\\VarAC\\VarAC.ini",
+        "readiness_policy": {"execution_scope": "standard"},
+    }
+
+    restored = orchestrator._restore_canonical_launch_items(1, [original])
+
+    assert len(restored) == 1
+    row = restored[0]
+    assert row["enabled"] is True
+    assert row["startup"] is False
+    assert row["monitor_health"] is True
+    assert row["launch_path_override"] == "wine"
+    assert row["launch_command_override"] == ""
+    assert row["readiness_policy"]["structured_launch"] is True
+    assert row["readiness_policy"]["launch_arguments"] == [
+        "/home/bill/.wine/drive_c/VarAC/VarAC.exe",
+        r"C:\VarAC\VarAC.ini",
+    ]
+    assert row["readiness_policy"]["working_directory"] == "/home/bill/.wine/drive_c/VarAC"
+    assert row["readiness_policy"]["environment"] == {"WINEPREFIX": "/home/bill/.wine"}
+
+
+def test_existing_canonical_varac_recipe_is_not_replaced_by_legacy_node_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import freqinout.core.launch_orchestrator as launch_module
+
+    canonical = _structured_item(
+        executable="wine-custom",
+        arguments=["/custom/VarAC.exe", r"D:\Profiles\Radio.ini"],
+        cwd="/custom",
+        environment={"WINEPREFIX": "/custom-prefix"},
+    )
+    record = SimpleNamespace(
+        family_key="varac",
+        bundle_id="varac:radio-a",
+        components=(),
+        launch={},
+        scope="standard",
+    )
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator.multi_radio_store = SimpleNamespace(
+        get_device_profile=lambda _radio_id: {"id": 1, "varac_node_id": 7},
+        get_varac_node=lambda _node_id: {
+            "id": 7,
+            "install_path": "/home/bill/.wine/drive_c/VarAC",
+            "ini_path": "/home/bill/.wine/drive_c/VarAC/VarAC.ini",
+        },
+        radio_software_identity_generation=lambda _radio_id: 3,
+        list_radio_software_identity_records=lambda _radio_id: (record,),
+        get_software_instance_manifest=lambda _bundle_id: {},
+    )
+    monkeypatch.setattr(launch_module.platform, "system", lambda: "Linux")
+
+    assert orchestrator._restore_canonical_launch_items(1, [canonical]) == [canonical]
+
+
+def test_legacy_windows_varac_recipe_uses_native_argv_and_working_directory() -> None:
+    recipe = legacy_varac_structured_launch(
+        {
+            "install_path": r"C:\Program Files\VarAC",
+            "ini_path": r"C:\Program Files\VarAC\VarAC-FT710.ini",
+        },
+        platform_name="Windows",
+    )
+
+    assert recipe == {
+        "executable": r"C:\Program Files\VarAC\VarAC.exe",
+        "launch_arguments": [r"C:\Program Files\VarAC\VarAC-FT710.ini"],
+        "working_directory": r"C:\Program Files\VarAC",
+        "environment": {},
+    }
+
+
+def test_legacy_windows_varac_row_restores_native_structured_recipe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import freqinout.core.launch_orchestrator as launch_module
+
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator.multi_radio_store = SimpleNamespace(
+        get_device_profile=lambda _radio_id: {"id": 4, "varac_node_id": 9},
+        get_varac_node=lambda _node_id: {
+            "id": 9,
+            "install_path": r"C:\Program Files\VarAC",
+            "ini_path": r"C:\Program Files\VarAC\VarAC-FT710.ini",
+        },
+        radio_software_identity_generation=lambda _radio_id: 0,
+    )
+    monkeypatch.setattr(launch_module.platform, "system", lambda: "Windows")
+
+    restored = orchestrator._restore_canonical_launch_items(
+        4,
+        [
+            {
+                "name": "VarAC",
+                "instance_key": "VarAC",
+                "enabled": True,
+                "startup": True,
+                "monitor_health": True,
+                "launch_command_override": (
+                    r'"C:\Program Files\VarAC\VarAC.exe" '
+                    r'"C:\Program Files\VarAC\VarAC-FT710.ini"'
+                ),
+                "readiness_policy": {},
+            }
+        ],
+    )[0]
+
+    assert restored["launch_path_override"] == r"C:\Program Files\VarAC\VarAC.exe"
+    assert restored["launch_command_override"] == ""
+    assert restored["readiness_policy"]["launch_arguments"] == [
+        r"C:\Program Files\VarAC\VarAC-FT710.ini"
+    ]
+    assert restored["readiness_policy"]["working_directory"] == r"C:\Program Files\VarAC"
+    assert restored["readiness_policy"]["environment"] == {}
+
+
+def test_legacy_linux_wine_varac_recipe_refuses_host_root_z_projection() -> None:
+    assert legacy_varac_structured_launch(
+        {
+            "install_path": "/opt/VarAC",
+            "ini_path": "/var/lib/freqinout/VarAC.ini",
+        },
+        platform_name="Linux",
+    ) is None
 
 
 @pytest.mark.parametrize(

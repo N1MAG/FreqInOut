@@ -38,9 +38,10 @@ from freqinout.core.varac_native_transaction import (
 
 
 def _evidence(tmp_path: Path) -> tuple[dict[str, object], dict[str, object]]:
-    varac_root = tmp_path / "VarAC"
-    vara_root = tmp_path / "VARA"
-    varac_root.mkdir()
+    native_root = tmp_path / "prefix" / "drive_c"
+    varac_root = native_root / "VarAC"
+    vara_root = native_root / "VARA"
+    varac_root.mkdir(parents=True)
     vara_root.mkdir()
     (varac_root / "VarAC.exe").write_bytes(b"fixture VarAC version 13.2.7")
     (vara_root / "VARA.exe").write_bytes(b"fixture VARA executable")
@@ -119,7 +120,7 @@ def test_prepare_is_cross_platform_and_explicit_about_sender_and_runtime(
     assert result.plan.platform == platform
     assert result.plan.email_gateway_sender_member_id == expected_sender
     assert result.plan.members[0].target_path == Path(node["ini_path"])
-    assert result.plan.members[1].target_path == tmp_path / "VarAC" / "VarAC-new-radio.ini"
+    assert result.plan.members[1].target_path == Path(node["install_path"]) / "VarAC-new-radio.ini"
     assert result.plan.members[0].vara_target_runtime_folder != result.plan.members[1].vara_target_runtime_folder
     assert result.plan.members[1].vara_target_path == result.plan.members[1].vara_target_runtime_folder / "VARA.ini"
     assert result.plan.members[1].launch_command[0] == ("wine" if platform == "linux-wine" else str(node["install_path"]) + "/VarAC.exe")

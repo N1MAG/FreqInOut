@@ -27,6 +27,7 @@ from freqinout.core.managed_directory_contract import (
 )
 from freqinout.core.process_window_title import set_process_window_title
 from freqinout.core.station_launch_planner import LaunchPlan, StationLaunchPlanner
+from freqinout.core.varac_launch_recipe import legacy_varac_structured_launch
 
 
 LAUNCH_APP_ORDER: List[str] = [
@@ -311,21 +312,29 @@ class LaunchOrchestrator(QObject):
         This is an in-memory projection: normal Settings Save persists it.
         """
 
+        restored = [dict(item) for item in items if isinstance(item, dict)]
         try:
-            if (
-                self.multi_radio_store.radio_software_identity_generation(int(radio_profile_id))
-                <= 0
-            ):
-                return items
+            generation = self.multi_radio_store.radio_software_identity_generation(
+                int(radio_profile_id)
+            )
+            if generation <= 0:
+                return self._restore_legacy_varac_launch_item(
+                    int(radio_profile_id), restored
+                )
             records = self.multi_radio_store.list_radio_software_identity_records(
                 int(radio_profile_id)
             )
         except Exception:
-            return items
+            return restored
         if not records:
-            return items
+            return self._restore_legacy_varac_launch_item(
+                int(radio_profile_id), restored
+            )
+        if not any(record.family_key == "varac" for record in records):
+            restored = self._restore_legacy_varac_launch_item(
+                int(radio_profile_id), restored
+            )
 
-        restored = [dict(item) for item in items if isinstance(item, dict)]
         consumed: set[int] = set()
         removed: set[int] = set()
         component_names = {
@@ -488,6 +497,69 @@ class LaunchOrchestrator(QObject):
                     consumed.add(selected_index)
 
         return [row for index, row in enumerate(restored) if index not in removed]
+
+    def _restore_legacy_varac_launch_item(
+        self,
+        radio_profile_id: int,
+        items: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Recover a legacy VarAC row without parsing its shell command.
+
+        Older radio bundles stored ``wine ... C:\\VarAC\\VarAC.ini`` as one
+        command string.  POSIX shell parsing consumes those backslashes.  The
+        linked VarAC node already owns the exact executable and INI identity,
+        so project it into the existing structured readiness seam while
+        retaining the operator's enabled/startup/monitor choices.
+        """
+
+        restored = [dict(item) for item in items if isinstance(item, dict)]
+        try:
+            profile = self.multi_radio_store.get_device_profile(int(radio_profile_id))
+            node_id = int((profile or {}).get("varac_node_id") or 0)
+            node = self.multi_radio_store.get_varac_node(node_id) if node_id > 0 else None
+            recipe = (
+                legacy_varac_structured_launch(
+                    node,
+                    platform_name=platform.system(),
+                )
+                if isinstance(node, Mapping)
+                else None
+            )
+        except Exception:
+            return restored
+        if not isinstance(recipe, Mapping):
+            return restored
+
+        matches = [
+            index
+            for index, row in enumerate(restored)
+            if str(row.get("name", "") or "").strip().casefold() == "varac"
+        ]
+        if not matches:
+            return restored
+        selected = matches[0]
+        base = dict(restored[selected])
+        readiness = base.get("readiness_policy", {})
+        readiness = dict(readiness) if isinstance(readiness, Mapping) else {}
+        readiness.update(
+            {
+                "structured_launch": True,
+                "executable": str(recipe.get("executable") or ""),
+                "launch_arguments": list(recipe.get("launch_arguments") or ()),
+                "working_directory": str(recipe.get("working_directory") or ""),
+                "environment": dict(recipe.get("environment") or {}),
+                "legacy_identity_recovered": True,
+            }
+        )
+        base.update(
+            {
+                "launch_path_override": str(recipe.get("executable") or ""),
+                "launch_command_override": "",
+                "readiness_policy": readiness,
+            }
+        )
+        restored[selected] = base
+        return restored
 
     def get_radio_launch_bundle(self, radio_profile_id: int) -> Dict[str, Any]:
         bundle = self.bundle_store.get_bundle(

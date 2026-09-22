@@ -4673,9 +4673,10 @@ collision-free name choice before it constructs the immutable plan:
 - on Linux/Wine with proven drive evidence, each VARA runtime created for a
   converted standalone member or a new cluster member starts with the readable
   preferred name `VARA-<radio-slug>` at the Wine drive root so VarAC receives a
-  native drive-letter path; qualified layouts without that evidence retain the
-  readable preferred name `VARA` below the member's radio-scoped
-  `varac-native` directory;
+  native drive-letter path; a Linux/Wine source without concrete
+  `drive_<letter>` evidence is not writer-qualified and remains a non-destructive
+  `Needs attention` state. FIO must never substitute a host-root
+  `Z:\...\.freqinout` executable/runtime path;
 - any existing filesystem object at that path—including a directory, file, or
   broken symbolic link—counts as occupied and is never removed, entered,
   copied over, or treated as proof of FIO ownership;
@@ -4793,3 +4794,56 @@ choice and that unrelated existing clusters retain the ordinary Join wording.
 Companion store coverage must prove that a retained orphan manifest cannot
 block the replacement application's reviewed endpoint or path while the orphan
 remains available for diagnostics.
+
+### GRS-14.5 — Legacy Structured Launch And Managed Wine Runtime Repair
+
+Operator evidence from a saved two-radio station exposed two compatibility
+faults left by pre-GRS-14 data. The legacy FT-DX10 VarAC launch was stored as
+one free-form string (`wine ... C:\VarAC\VarAC.ini`), so POSIX shell parsing
+removed the Windows backslashes. Earlier managed cluster saves could also put
+a VARA runtime below `.freqinout` and write a `Z:\...\.freqinout...\VARA.exe`
+path into VarAC. Both are repairable compatibility defects; neither authorizes
+replacement or deletion of operator files.
+
+Legacy launch recovery has one exact rule:
+
+- when the radio has no canonical VarAC identity, FIO derives a structured
+  recipe only from its uniquely linked persisted VarAC node and preserves the
+  existing enabled, launch-at-startup, and monitor choices;
+- Linux/Wine argv is exactly `wine`, the host path to `VarAC.exe`, and one
+  native Windows INI selector, with the verified `WINEPREFIX` and install
+  working directory stored separately. The INI selector is never passed
+  through shell parsing;
+- Windows argv is the native `VarAC.exe` plus the native member INI selector,
+  with the native install working directory and no Wine environment; and
+- an existing canonical VarAC record remains authoritative. Compatibility
+  recovery must not replace its executable, argv, working directory,
+  environment, or operator override.
+
+An older FIO-managed Linux/Wine VARA runtime is repaired automatically on the
+bounded startup worker only when all evidence is exact: one linked profile and
+node, `native_management_state=managed`, a supported exact writer version, a
+readable nonsymlink source runtime/INI, and a VarAC INI inside a verified Wine
+drive. If the native INI already names an existing drive-local VARA runtime,
+FIO reconciles only its stale database projections. If the INI is blank or
+names the obsolete Z: runtime, the qualified `update-member` writer copies the
+runtime to the first unused `drive_c/VARA-<radio-slug>[-N]`, backs up and
+rewrites the allowlisted keys, reads them back, and commits the node, manifest,
+canonical identity, and Launch Control projections in one compensated
+transaction. The prior runtime is never deleted, renamed, overwritten, or
+treated as disposable.
+
+Running VarAC/VARA defers the repair without writes. Missing, ambiguous,
+symlinked, version-unqualified, or otherwise incomplete evidence produces a
+diagnostic `Needs attention` result and no forward mutation. Windows never
+runs this Wine-layout migration; normal Windows preparation and persistence
+continue to use native executable, INI, runtime, and working-directory paths.
+
+Acceptance requires exact legacy argv tests on Linux/Wine and Windows, a guard
+that canonical structured recipes are unchanged, rejection of new Linux/Wine
+plans without drive evidence, full repair/reconciliation tests across the node,
+manifest, canonical identity, and Launch Control projections, preservation of
+the old runtime, running-process deferral, Windows migration no-op, native
+Windows structured round-trip coverage, changed-file compilation, and diff
+hygiene. Live Linux/Wine and Windows execution remain the external platform
+qualification gate.

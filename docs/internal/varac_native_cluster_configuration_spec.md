@@ -509,8 +509,10 @@ Managed VARA runtime naming is resolved before the writer plan is built. On
 Linux/Wine, when the selected VarAC source proves a `drive_<letter>`, the
 preferred target is a readable, space-free sibling at that drive root:
 `VARA-<radio-slug>`. This gives each process a distinct `VARA.ini` while keeping
-the path native to the Windows application. Qualified layouts without Wine-
-drive evidence retain the bounded radio-scoped `varac-native/VARA` target.
+the path native to the Windows application. A Linux/Wine layout without
+concrete `drive_<letter>` evidence remains launch-pending or needs attention;
+FIO must not substitute a radio-scoped host path that VarAC would see through
+Wine as an unsafe `Z:` executable path.
 When any filesystem object already occupies the preferred name, preparation
 selects the first absent numbered sibling. Broken symlinks and paths reserved
 by another member in the same plan count as occupied. This allocator is read-
@@ -753,3 +755,40 @@ common executable, install working directory, database, BBS, and archive are
 exclusive. Conversion must reload both manifests with only those named shared
 claims nonexclusive, while preserving member-local exclusivity and rejecting a
 duplicate member. No schema or destructive data migration is introduced.
+
+## VNC-10 — Legacy Launch And Managed Wine Runtime Repair
+
+Status: specified and automated implementation gate passed 2026-09-21; live
+Windows and Linux/Wine qualification remains open.
+
+Legacy VarAC launch text is compatibility evidence, not a shell command to
+reparse. On Linux/Wine, FIO projects it to a structured vector containing
+`wine`, the host `VarAC.exe`, and the exact Wine-native member INI path as
+separate arguments, with the verified Wine prefix and installation working
+directory. On native Windows, the vector contains the native `VarAC.exe` and
+native member INI path and uses the native installation directory. A saved
+canonical VarAC identity always wins; compatibility recovery may fill a missing
+canonical identity but must never overwrite one.
+
+For an exact FIO-managed VarAC 13.2.7 Linux/Wine node whose persisted VARA
+runtime is outside the proven Wine drive, startup recovery may repair it
+without an operator dialog only when all evidence is unambiguous and VarAC and
+VARA are stopped. The normal native transaction copies the readable,
+non-symlink source to the first absent drive-local `VARA-<radio-slug>` sibling,
+rewrites only the qualified VarAC key, backs up and reads back the result, and
+then updates the node, manifest, canonical Software Administration identity,
+and Launch Control projection in the same persistence boundary. Existing
+startup and monitoring choices are preserved. The old runtime remains in
+place; repair never deletes, adopts, or replaces an occupied folder.
+
+If the native INI already identifies a valid drive-local VARA executable, FIO
+reconciles stale database projections without changing the native file. A
+running process defers repair. Missing, conflicting, unsupported, symlinked,
+or otherwise ambiguous evidence produces one actionable needs-attention result
+and no mutation. Native Windows never runs the Wine-layout migration; its
+qualified preparation, persistence, and structured launch remain native.
+
+Regression evidence covers Linux/Wine and Windows structured launch, the
+canonical-over-legacy precedence guard, transactional copy/rewrite/readback,
+reconcile-only recovery, running-process deferral, old-runtime retention,
+four-projection persistence, and native-Windows migration no-op behavior.

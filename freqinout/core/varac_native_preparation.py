@@ -48,6 +48,19 @@ class VarACNativePreparationResult:
         return self.state == "ready" and self.plan is not None
 
 
+@dataclass(frozen=True)
+class VarACManagedRuntimeRepair:
+    """One unambiguous legacy managed-runtime correction."""
+
+    state: str
+    node_id: int
+    radio_profile_id: int
+    target_runtime: Path | None = None
+    target_ini: Path | None = None
+    plan: VarACNativeClusterPlan | None = None
+    why: str = ""
+
+
 def native_draft_fingerprint(draft: Mapping[str, Any]) -> str:
     """Fingerprint operator intent while excluding host-generated native facts.
 
@@ -87,6 +100,124 @@ def native_draft_fingerprint(draft: Mapping[str, Any]) -> str:
     }
     encoded = json.dumps(clean, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def prepare_managed_varac_runtime_repair(
+    node: Mapping[str, Any],
+    profile: Mapping[str, Any],
+    *,
+    membership: Mapping[str, Any] | None = None,
+    cluster: Mapping[str, Any] | None = None,
+    platform_override: str = "",
+) -> VarACManagedRuntimeRepair:
+    """Prepare a bounded repair for the obsolete Linux host-root VARA layout.
+
+    A native path already pointing at a verified Wine runtime needs only an
+    FIO projection reconciliation. A blank or Z: path from the old writer is
+    repaired through the qualified update-member writer with backup/readback.
+    """
+
+    node_id = int(node.get("id") or 0)
+    radio_id = int(profile.get("id") or 0)
+    platform_key = _platform_key(platform_override)
+    if platform_key != "linux-wine":
+        return VarACManagedRuntimeRepair("not-applicable", node_id, radio_id)
+    if str(node.get("native_management_state") or "operator").strip().casefold() != "managed":
+        return VarACManagedRuntimeRepair("not-applicable", node_id, radio_id)
+    writer_key = str(node.get("native_writer_key") or "")
+    version = next((value for value in DEFAULT_SUPPORTED_VARAC_VERSIONS if value in writer_key), "")
+    if not version:
+        return VarACManagedRuntimeRepair(
+            "needs-attention", node_id, radio_id,
+            why="The saved managed VarAC writer version is not qualified.",
+        )
+    try:
+        source_ini_path = _required_file(node.get("ini_path"), "existing VarAC.ini")
+        source_ini = parse_varac_ini_bytes(source_ini_path, source_ini_path.read_bytes())
+        drive_root = _wine_drive_root(source_ini_path)
+        if drive_root is None:
+            raise ValueError("The saved VarAC.ini is not inside a verified Wine drive_<letter> folder.")
+        wine_prefix = _wine_prefix(source_ini_path)
+        configured = _value(_section(source_ini.values, "VARAHF_CONFIG"), "VarahfMainPath")
+        configured_host = (
+            Path(varac_path_to_host_path(configured, ini_path=source_ini_path)).expanduser()
+            if configured else None
+        )
+        if (
+            configured_host is not None
+            and _wine_drive_root(configured_host) == drive_root
+            and configured_host.name.casefold() == "vara.exe"
+            and configured_host.is_file()
+            and configured_host.with_name("VARA.ini").is_file()
+        ):
+            target_runtime = configured_host.parent
+            stored_runtime = Path(str(node.get("vara_runtime_path") or "")).expanduser()
+            if stored_runtime.absolute() == target_runtime.absolute():
+                return VarACManagedRuntimeRepair("current", node_id, radio_id)
+            return VarACManagedRuntimeRepair(
+                "reconcile", node_id, radio_id,
+                target_runtime=target_runtime,
+                target_ini=target_runtime / "VARA.ini",
+                why="The native INI is correct; FIO's older saved runtime projection is stale.",
+            )
+
+        source_runtime = Path(str(node.get("vara_runtime_path") or "")).expanduser()
+        if not source_runtime.is_dir() or source_runtime.is_symlink():
+            raise ValueError("The legacy managed VARA runtime is unavailable or unsafe to copy.")
+        source_vara_ini = _required_file(source_runtime / "VARA.ini", "source VARA.ini")
+        source_vara = parse_vara_ini_bytes(source_vara_ini, source_vara_ini.read_bytes())
+        source_files = snapshot_vara_runtime_files(source_runtime)
+        executable = _resolve_varac_executable(node.get("install_path"))
+        member_number = _positive_int((membership or {}).get("instance_number")) or 1
+        source_ports = _source_vara_ports(source_ini, source_vara)
+        target_base = drive_root / f"VARA-{_slug(str(profile.get('name') or node.get('name') or node_id))}"
+        target_runtime = _next_available_managed_runtime(target_base, reserved=())
+        member = _member(
+            member_id=f"node:{node_id}", source_ini=source_ini,
+            target_ini=source_ini_path, member_number=member_number,
+            executable=executable, source_vara_root=source_runtime,
+            source_vara=source_vara, source_files=source_files,
+            target_vara_root=target_runtime, ports=source_ports,
+            platform_key=platform_key,
+        )
+        shared_db = str((cluster or {}).get("shared_db_path") or node.get("db_path") or "").strip()
+        if not shared_db:
+            raise ValueError("The managed VarAC database path is unavailable.")
+        shared_bbs = str(
+            (cluster or {}).get("shared_bbs_path")
+            or profile.get("varac_bbs_dir")
+            or executable.parent / "BBS"
+        )
+        shared_archive = str(
+            (cluster or {}).get("shared_bbs_archive_path")
+            or profile.get("varac_bbs_archive_dir")
+            or Path(shared_bbs) / "Archive"
+        )
+        plan = build_varac_native_cluster_plan(
+            VarACNativeClusterRequest(
+                version=version, platform=platform_key, operation="update-member",
+                members=(member,), shared_db_path=shared_db,
+                shared_bbs_path=shared_bbs,
+                shared_bbs_archive_path=shared_archive,
+                native_shared_db_path=_native_varac_path(
+                    Path(shared_db), platform_key=platform_key, wine_prefix=wine_prefix
+                ),
+                allowed_roots=_minimal_roots(
+                    drive_root, source_ini_path.parent, source_runtime, target_runtime,
+                    Path(shared_db).expanduser().parent, Path(shared_bbs).expanduser(),
+                    Path(shared_archive).expanduser(),
+                ),
+                ptt_lock_enabled=bool((cluster or {}).get("ptt_lock_enabled", False)),
+                wine_executable="wine",
+            )
+        )
+        return VarACManagedRuntimeRepair(
+            "ready", node_id, radio_id, target_runtime=target_runtime,
+            target_ini=target_runtime / "VARA.ini", plan=plan,
+            why="Move the obsolete managed VARA runtime into the verified Wine drive.",
+        )
+    except (OSError, ValueError, VarACNativeConfigurationError) as exc:
+        return VarACManagedRuntimeRepair("needs-attention", node_id, radio_id, why=str(exc))
 
 
 def prepare_varac_native_configuration(
@@ -318,8 +449,15 @@ def _build_plan(
     # FIO-created VARA runtime inside the discovered Wine drive so VarAC sees a
     # native drive-letter path (for example C:\\VARA-ft-710\\VARA.exe), never a
     # host-root Z: projection below .freqinout.  Fixtures and unusual qualified
-    # layouts without drive_<letter> evidence retain the bounded managed root.
+    # A qualified Linux/Wine plan requires concrete drive_<letter> evidence.
+    # Falling back to FIO's host-side managed root makes VarAC persist a Z:
+    # path that is fragile and violates the native application layout.
     wine_drive_root = _wine_drive_root(source_ini.path) if platform_key == "linux-wine" else None
+    if platform_key == "linux-wine" and wine_drive_root is None:
+        raise ValueError(
+            "The selected VarAC.ini is not inside a verified Wine drive_<letter> folder; "
+            "choose the Wine VarAC instance before FIO prepares a VARA runtime."
+        )
     vara_target_parent = wine_drive_root or managed_member_root
     new_vara_target_base = (
         vara_target_parent / f"VARA-{new_slug}"
@@ -949,9 +1087,9 @@ def _native_varac_path(path: Path, *, platform_key: str, wine_prefix: str) -> st
         if drive_match:
             suffix = "\\".join(relative.parts[1:])
             return f"{drive_match.group(1).upper()}:\\{suffix}" if suffix else f"{drive_match.group(1).upper()}:\\"
-    # Wine's default Z: mapping exposes the host root.  This keeps generated
-    # managed paths usable even when the FIO configuration root is outside the
-    # selected prefix's drive_c directory.
+    # Z: remains valid for operator-owned data such as a shared BBS/NAS path,
+    # but managed executable/configuration identities are rejected by the
+    # preparation precondition before reaching this fallback.
     return "Z:\\" + "\\".join(candidate.parts[1:])
 
 
@@ -976,7 +1114,9 @@ def _affected_radio_names(draft: Mapping[str, Any], plan: VarACNativeClusterPlan
 
 
 __all__ = [
+    "VarACManagedRuntimeRepair",
     "VarACNativePreparationResult",
     "native_draft_fingerprint",
+    "prepare_managed_varac_runtime_repair",
     "prepare_varac_native_configuration",
 ]

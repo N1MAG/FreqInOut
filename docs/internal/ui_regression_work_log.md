@@ -1,5 +1,49 @@
 # UI Regression Work Log
 
+## 2026-09-21 — Legacy VarAC argv and managed Wine-runtime recovery
+
+Observable acceptance route: restart FIO with an older saved FT-DX10/FT-710
+VarAC configuration, then use Launch Control and Software Administration. A
+legacy FT-DX10 `C:\VarAC\VarAC.ini` selector must remain one exact argv item;
+an older FIO-managed FT-710 `Z:\...\.freqinout...\VARA.exe` runtime must move
+to a new unused Wine-drive runtime (or reconcile to an already-correct native
+runtime), with every FIO projection aligned and the old folder retained.
+
+The implementation adds a read-only structured legacy launch projection and a
+bounded Linux/Wine startup repair. The repair requires one linked managed node,
+an exact qualified writer, a readable nonsymlink source, and a VarAC INI inside
+a verified Wine drive. It defers while VarAC/VARA is running, uses the existing
+journaled backup/readback/rollback transaction for external changes, updates
+the node, manifest, canonical identity, and Launch Control together, and never
+deletes or overwrites the old runtime. New Linux/Wine preparation now refuses
+to manufacture a host-root Z: executable path. Windows retains native
+`VarAC.exe + member INI` argv and never enters the Wine migration.
+
+Work packages and exact model ownership:
+
+- `gpt-6-astra`, high reasoning: evidence analysis, compatibility architecture,
+  transaction/projection implementation, specifications/help/work-log updates,
+  delegated-diff review/correction, acceptance testing, and integration.
+- `gpt-5.6-terra`, low reasoning: independent read-only cross-platform and
+  transaction-safety audit. The primary accepted its finding that legacy
+  recovery must never overwrite an existing canonical recipe and added the
+  guard/regression.
+- `gpt-5.6-terra`, low reasoning: independent read-only specification and test
+  audit. The primary added full four-projection, reconcile-only,
+  running-process, and Windows acceptance coverage from that review.
+
+Primary review also corrected a persistence-boundary mismatch found by the new
+production-shaped test: raw store launch rows use `app_name`,
+`launch_at_startup`, and `readiness`, so repair now normalizes those fields
+before rewriting and preserves enabled/startup/monitor choices.
+
+Acceptance evidence: changed-file compilation passed; focused VarAC native,
+transaction, arrangement, structured-launch, launch-bundle, and recovery suite
+`126 passed`; Software Administration/identity/persistence/operator-route suite
+`70 passed`; `git diff --check` passed. The implementation gate is closed.
+Live Linux/Wine repair and native Windows launch remain the external operator
+qualification gate.
+
 ## 2026-09-21 — Radio-visible FLMsg, FLAmp, and VarAC instance titles
 
 Observable acceptance route: create or repair two radio-managed Fast Light /
