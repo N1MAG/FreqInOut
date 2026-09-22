@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +12,7 @@ from freqinout.core.guided_launch_recipes import (
     resolve_fast_light_managed_recipe,
 )
 from freqinout.core.multi_radio_store import MultiRadioStore
+from freqinout.core.launch_orchestrator import LaunchOrchestrator
 from freqinout.core.software_identity_bundle import (
     build_guided_identity_records,
     identity_record_from_mapping,
@@ -292,3 +294,163 @@ def test_legacy_flmsg_flamp_repair_is_component_scoped_and_preserves_preferences
 
     with pytest.raises(ValueError, match="changed after review"):
         store.apply_fast_light_message_component_repair(plan)
+
+
+def test_precanonical_legacy_assignment_repairs_without_replacing_fast_light_profile(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    store = MultiRadioStore(tmp_path / "legacy.sqlite")
+    fast = store.save_fast_light_config(
+        {
+            "system_key": "legacy-dx10-fast-light",
+            "name": "FT-DX10 Fast Light",
+            "flrig_path": "/usr/local/bin/flrig",
+            "flrig_host": "127.0.0.1",
+            "flrig_port": 12345,
+            "fldigi_path": "/usr/local/bin/fldigi",
+            "fldigi_host": "127.0.0.1",
+            "fldigi_port": 7362,
+        }
+    )
+    radio = store.save_device_profile(
+        {
+            "system_key": "ft-dx10",
+            "name": "FT-DX10",
+            "fast_light_config_id": fast["id"],
+            "use_flrig": 1,
+            "use_fldigi": 1,
+            "use_flmsg": 1,
+            "use_flamp": 1,
+            "flrig_host": "127.0.0.1",
+            "flrig_port": 12345,
+            "fldigi_host": "127.0.0.1",
+            "fldigi_port": 7362,
+            "flmsg_path": "/usr/local/bin/flmsg",
+            "flamp_path": "/usr/local/bin/flamp",
+        }
+    )
+    other = store.save_device_profile({"system_key": "other", "name": "Other"})
+    store.save_radio_launch_bundle(
+        int(radio["id"]),
+        launch_enabled=True,
+        items=[
+            {
+                "name": "FLRig",
+                "instance_key": "FLRig",
+                "enabled": True,
+                "startup": True,
+                "monitor_health": True,
+                "launch_path_override": "/usr/local/bin/flrig",
+                "readiness_policy": {
+                    "executable": "/usr/local/bin/flrig",
+                    "launch_arguments": ["--config-dir", str(home / ".flrig")],
+                },
+            },
+            {
+                "name": "FLDigi",
+                "instance_key": "FLDigi",
+                "enabled": True,
+                "startup": False,
+                "monitor_health": True,
+                "launch_path_override": "/usr/local/bin/fldigi",
+                "readiness_policy": {
+                    "executable": "/usr/local/bin/fldigi",
+                    "launch_arguments": ["--xmlrpc-server-port", "7362"],
+                },
+            },
+            {
+                "name": "FLMsg",
+                "instance_key": "FLMsg",
+                "enabled": True,
+                "startup": False,
+                "monitor_health": True,
+                "launch_path_override": "/usr/local/bin/flmsg",
+                "readiness_policy": {"executable": "/usr/local/bin/flmsg"},
+            },
+            {
+                "name": "FLAmp",
+                "instance_key": "FLAmp",
+                "enabled": True,
+                "startup": True,
+                "monitor_health": True,
+                "launch_path_override": "/usr/local/bin/flamp",
+                "readiness_policy": {"executable": "/usr/local/bin/flamp"},
+            },
+            {
+                "name": "Custom Tool",
+                "instance_key": "custom:dx10",
+                "enabled": True,
+                "startup": False,
+                "monitor_health": False,
+                "launch_path_override": "/opt/custom",
+                "readiness_policy": {},
+            },
+        ],
+    )
+    store.save_radio_launch_bundle(
+        int(other["id"]), launch_enabled=True, items=[{"name": "Other", "instance_key": "other"}]
+    )
+    other_before = store.get_radio_launch_bundle(int(other["id"]))
+
+    assert store.fast_light_message_component_repair_needed(int(radio["id"]))
+    plan = store.prepare_fast_light_message_component_repair(
+        int(radio["id"]), platform="linux", storage_home=home
+    )
+    assert plan.bootstrap_legacy
+    assert not (home / ".nbems/instances/FT-DX10").exists()
+    store.apply_fast_light_message_component_repair(plan)
+
+    assert not store.fast_light_message_component_repair_needed(int(radio["id"]))
+    records = store.list_radio_software_identity_records(int(radio["id"]))
+    assert [record.family_key for record in records] == ["fast_light"]
+    components = {item.component_id: item for item in records[0].components}
+    assert components["flrig"].argv == (
+        "/usr/local/bin/flrig",
+        "--config-dir",
+        str(home / ".flrig"),
+    )
+    assert components["fldigi"].argv[:3] == (
+        "/usr/local/bin/fldigi",
+        "--xmlrpc-server-port",
+        "7362",
+    )
+    assert "--config-dir" not in components["fldigi"].argv
+    assert "--arq-server-port" in components["fldigi"].argv
+    launch = store.get_radio_launch_bundle(int(radio["id"]))
+    items = {item["app_name"]: item for item in launch["items"]}
+    assert items["FLAmp"]["launch_at_startup"] == 1
+    assert items["FLDigi"]["launch_at_startup"] == 0
+    assert items["Custom Tool"]["monitor_health"] == 0
+    assert store.get_radio_launch_bundle(int(other["id"])) == other_before
+    assert not (home / ".nbems/instances/FT-DX10").exists()
+
+
+def test_launch_preparation_automatically_applies_unambiguous_component_repair() -> None:
+    calls: list[object] = []
+    store = SimpleNamespace(
+        list_device_profiles=lambda: [{"id": 7, "name": "FT-DX10"}],
+        list_runtime_active_device_profiles=lambda: [{"id": 7, "name": "FT-DX10"}],
+        fast_light_message_component_repair_needed=lambda _radio_id: True,
+        prepare_fast_light_message_component_repair=lambda _radio_id: "repair-plan",
+        apply_fast_light_message_component_repair=lambda plan: calls.append(plan),
+        radio_software_identity_generation=lambda _radio_id: 1,
+        validate_radio_software_identity_projections=lambda _radio_id: {},
+        varac_native_launch_blockers=lambda: [],
+    )
+    planned = object()
+    orchestrator = SimpleNamespace(
+        multi_radio_store=store,
+        planner=SimpleNamespace(plan_startup=lambda *_args, **_kwargs: planned),
+        get_radio_launch_bundle=lambda _radio_id: {"items": []},
+        _with_effective_launch_preview=lambda plan: plan,
+    )
+
+    result = LaunchOrchestrator.preview_startup_plan(
+        orchestrator,
+        scope_radio_id=7,
+        trigger="manual",
+    )
+
+    assert result is planned
+    assert calls == ["repair-plan"]

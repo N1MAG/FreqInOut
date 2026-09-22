@@ -462,6 +462,19 @@ class SoftwareTaskEditor(QWidget):
             self.dirty_label.setVisible(has_editable_fields)
             self.save_button.setVisible(has_editable_fields)
             self.save_button.setEnabled(self._radio_id is not None and has_editable_fields)
+            if component_repair_available:
+                self.identity_notice_label.setText(
+                    "This radio uses an older or incomplete Fast Light launch identity. "
+                    "Repair only FLMsg/FLAmp wiring while retaining the saved FLRig and "
+                    "FLDigi identity, endpoints, and unrelated launch choices."
+                )
+                self.identity_notice_label.setToolTip("")
+                self.identity_notice_label.show()
+                self.task_action_button.setText("Repair FLMsg / FLAmp components…")
+                self.task_action_button.setProperty(
+                    "software_action", "repair_fast_light_message_components"
+                )
+                self.task_action_button.show()
 
     def _add_field(self, field: SoftwareEditorField) -> None:
         value = _value_at(self._state, field.key)

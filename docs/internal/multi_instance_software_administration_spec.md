@@ -61,12 +61,23 @@ generation in one transaction. A compact task Save must never patch one of
 those projections independently.
 
 For legacy or incomplete FLMsg/FLAmp data, expose **Repair FLMsg/FLAmp
-components** instead of Replace instance. This component-scoped review
-preserves FLRig/FLDigi executable, native profile, endpoint, and launch
-identity (allowing only additive FLDigi ARQ-pairing arguments for FLAmp), all
-unrelated families, and Launch Control preferences. It writes no external app
-files and uses one optimistic atomic transaction with generation check,
+components** instead of Replace instance. The action remains visible for a
+pre-canonical radio when exactly one saved Fast Light configuration is linked;
+absence of a newer identity record is never, by itself, a reason to hide
+recovery. This component-scoped repair preserves the exact saved FLRig and
+FLDigi executable/profile/endpoint/launch facts, allowing only additive FLDigi
+NBEMS/ARQ companion arguments. It preserves all unrelated families and Launch
+Control preferences, writes no external application files, and uses one
+optimistic atomic transaction with generation and source-fingerprint checks,
 complete readback, parity validation, and rollback on failure.
+
+Launch preparation automatically applies that same transaction when the
+linked application, radio, executable paths, saved launch rows, and a
+conflict-free ARQ port are unambiguous. The visible Repair action remains the
+fallback for inspection and recovery after later system changes. Missing
+executables, multiple candidate identities, endpoint conflicts, or a source
+change after review defer automation and present the precise issue; they never
+trigger a guessed replacement of the whole Fast Light profile.
 
 ## Product Outcome
 

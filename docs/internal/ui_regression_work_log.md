@@ -9810,3 +9810,46 @@ status suites pass **149 tests** with 4 platform skips. Coverage proves override
 recovery, exact FT-710 FLAmp launch while an FTDX-10 instance is running,
 fail-closed behavior for an unrecoverable name-only row, and canonical FLAmp
 directory repair. Changed Python compilation and `git diff --check` pass.
+
+## 2026-09-21 — automatic pre-canonical Fast Light child repair
+
+Status: specified and surgically implemented; Linux production operator retest
+remains open. No third-party application file is read, moved, or rewritten.
+
+The legacy FT-DX10 could retain a linked Fast Light application and generic
+FLMsg/FLAmp launch rows while having no newer canonical Fast Light identity.
+The earlier recovery detector returned false in exactly that state, the Repair
+action was hidden, and qualified FLAmp launch correctly refused the generic
+row. This left a valid older station without a safe forward path.
+
+Pre-canonical radios now derive an in-memory repair baseline from the one linked
+Fast Light application, selected radio fields, and that radio's exact saved
+launch rows. The repair bootstraps only FIO-owned manifest/canonical
+projections, retains FLRig byte-for-byte, retains FLDigi's existing arguments
+and adds only its NBEMS/ARQ companion pairs, qualifies FLMsg/FLAmp, and preserves
+every Launch Control preference, custom tool, unrelated identity, and other
+radio. A source fingerprint plus identity generation and manifest timestamp
+reject any change between preparation and commit. Missing executables,
+ambiguous ownership, and port conflicts remain explicit recovery conditions.
+
+Launch preparation automatically commits this repair when the evidence is
+unambiguous. Software Administration still exposes the component Repair action
+for both canonical and pre-canonical configurations, so later operator or
+filesystem changes have a consistent recovery surface. External directories
+remain subject to the established launch-time managed-directory contract; the
+repair itself creates nothing.
+
+Delegation evidence: `component_repair_audit` used `gpt-5.6-luna` at low
+reasoning for an independent read-only audit of repair eligibility, legacy
+state, and regression boundaries. The primary `gpt-6-astra` agent implemented
+the store, launch, UI, specification, help, and regression changes.
+
+Acceptance evidence: component repair, GRS-13 canonical identity/UI, launch
+bundle and selected-radio isolation, managed-directory, Software
+Administration editor/persistence/workspace/model/layout, guided recipe/UI,
+guided radio model, and proposal suites pass **243 tests**. Changed Python
+compilation and `git diff --check` pass. Coverage includes automatic launch
+preparation, a true pre-canonical FT-DX10-shaped assignment, exact FLRig and
+FLDigi argument preservation, custom Launch Control rows/preferences, other-
+radio isolation, no repair-time directory creation, rollback, and stale-plan
+rejection.

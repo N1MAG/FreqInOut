@@ -86,6 +86,33 @@ def test_canonical_fast_light_exposes_narrow_message_component_repair() -> None:
         _APP.processEvents()
 
 
+def test_legacy_fast_light_exposes_repair_without_disabling_existing_form() -> None:
+    editor = SoftwareTaskEditor()
+    try:
+        editor.set_context(
+            family_key="fast_light",
+            family_title="Fast Light",
+            task_key="flamp",
+            radio_id=7,
+            radio_name="FT-DX10",
+            state={"flamp_path": "/usr/local/bin/flamp"},
+        )
+        editor.set_canonical_identity_managed(
+            False,
+            component_repair_available=True,
+        )
+        editor.show()
+        _APP.processEvents()
+
+        assert editor.form_widget.isEnabled()
+        assert editor.task_action_button.isVisible()
+        assert editor.task_action_button.text() == "Repair FLMsg / FLAmp components…"
+        assert "older or incomplete" in editor.identity_notice_label.text()
+    finally:
+        editor.deleteLater()
+        _APP.processEvents()
+
+
 def test_component_repair_visibility_detects_stale_software_admin_message_path() -> None:
     assert {"flmsg", "flamp_signing", "message_folders", "launch"}.issubset(
         FAST_LIGHT_COMPONENT_REPAIR_TASK_KEYS

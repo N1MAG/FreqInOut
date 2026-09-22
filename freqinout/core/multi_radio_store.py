@@ -5,7 +5,7 @@ import json
 import re
 import sqlite3
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
@@ -8283,6 +8283,7 @@ class MultiRadioStore:
 
         from freqinout.core.fast_light_component_repair import (
             build_fast_light_component_repair_plan,
+            build_legacy_fast_light_repair_inputs,
         )
 
         radio_id = int(radio_profile_id)
@@ -8291,11 +8292,34 @@ class MultiRadioStore:
             raise KeyError(f"Unknown radio profile id: {radio_id}")
         records = self.list_radio_software_identity_records(radio_id)
         fast_light = next((record for record in records if record.family_key == "fast_light"), None)
-        if fast_light is None:
-            raise ValueError("The selected radio has no canonical Fast Light identity to repair.")
-        manifest = self.get_software_instance_manifest(fast_light.bundle_id)
-        if not isinstance(manifest, Mapping):
-            raise ValueError("The selected Fast Light identity has no saved manifest to repair.")
+        legacy_bootstrap = fast_light is None
+        manifest: Mapping[str, Any] | None = None
+        application: Mapping[str, Any] | None = None
+        source_fingerprint = ""
+        if fast_light is not None:
+            manifest = self.get_software_instance_manifest(fast_light.bundle_id)
+            if not isinstance(manifest, Mapping):
+                raise ValueError("The selected Fast Light identity has no saved manifest to repair.")
+        else:
+            application_id = _coerce_int(profile.get("fast_light_config_id"), 0)
+            application = self.get_fast_light_config(application_id) if application_id else None
+            if not isinstance(application, Mapping):
+                raise ValueError(
+                    "The radio has no unambiguous linked Fast Light configuration to repair."
+                )
+            matching = [
+                row
+                for row in self.list_software_instance_manifests()
+                if isinstance(row, Mapping)
+                and _coerce_text(row.get("family_key"), "") == "fast_light"
+                and _coerce_text(row.get("application_system_key"), "")
+                == _coerce_text(application.get("system_key"), "")
+            ]
+            if len(matching) > 1:
+                raise ValueError(
+                    "The linked Fast Light configuration has multiple saved identities; resolve that ambiguity before repair."
+                )
+            manifest = matching[0] if matching else None
 
         manifests = self.list_software_instance_manifests()
         occupied_ports: set[int] = set()
@@ -8314,7 +8338,11 @@ class MultiRadioStore:
                     if row.get("family_key") == "fast_light" and "arq" in label:
                         explicit_arq_by_application[application_key] = port
 
-        target_application_key = _coerce_text(manifest.get("application_system_key", ""), "")
+        target_application_key = _coerce_text(
+            (manifest or {}).get("application_system_key", "")
+            or (application or {}).get("system_key", ""),
+            "",
+        )
         arq_port = explicit_arq_by_application.get(target_application_key, 0)
         if not arq_port:
             # Older manifests have no ARQ claim.  Reserve one deterministic
@@ -8352,15 +8380,71 @@ class MultiRadioStore:
         if not arq_port:
             raise ValueError("FIO could not allocate a distinct FLAmp ARQ port for this radio.")
 
-        return build_fast_light_component_repair_plan(
+        launch_bundle = self.get_radio_launch_bundle(radio_id)
+        if legacy_bootstrap:
+            assert isinstance(application, Mapping)
+            manifest, records, source_fingerprint = build_legacy_fast_light_repair_inputs(
+                profile=profile,
+                application=application,
+                launch_bundle=launch_bundle,
+                arq_port=arq_port,
+                platform=platform,
+                storage_home=storage_home,
+                existing_manifest=manifest,
+            )
+        assert isinstance(manifest, Mapping)
+        plan = build_fast_light_component_repair_plan(
             profile=profile,
             manifest=manifest,
             identity_records=records,
             identity_generation=self.radio_software_identity_generation(radio_id),
-            launch_bundle=self.get_radio_launch_bundle(radio_id),
+            launch_bundle=launch_bundle,
             arq_port=arq_port,
             platform=platform,
             storage_home=storage_home,
+        )
+        return replace(
+            plan,
+            bootstrap_legacy=legacy_bootstrap,
+            source_fingerprint=source_fingerprint,
+        )
+
+    def fast_light_message_component_repair_needed(self, radio_profile_id: int) -> bool:
+        """Return whether launch-critical legacy FLMsg/FLAmp wiring is repairable.
+
+        This is intentionally based only on persisted FIO state.  It performs
+        no discovery, filesystem writes, or application launch.
+        """
+
+        radio_id = int(radio_profile_id or 0)
+        profile = self.get_device_profile(radio_id) if radio_id > 0 else None
+        if not isinstance(profile, Mapping):
+            return False
+        selected_flmsg = bool(_coerce_int(profile.get("use_flmsg"), 0))
+        selected_flamp = bool(_coerce_int(profile.get("use_flamp"), 0))
+        if not (selected_flmsg or selected_flamp):
+            return False
+        records = self.list_radio_software_identity_records(radio_id)
+        record = next((item for item in records if item.family_key == "fast_light"), None)
+        if record is None:
+            return bool(_coerce_int(profile.get("fast_light_config_id"), 0))
+        components = {item.component_id.casefold(): item for item in record.components}
+        flmsg = components.get("flmsg")
+        flamp = components.get("flamp")
+        if selected_flmsg and (flmsg is None or "--auto-dir" in flmsg.argv):
+            return True
+        if selected_flamp and (
+            flamp is None
+            or "--config-dir" not in flamp.argv
+            or "--arq-server-port" not in flamp.argv
+            or not flamp.cwd
+        ):
+            return True
+        return any(
+            str(item.get("app_name") or "").strip().casefold() == "flamp"
+            and "station-shared" in str(item.get("instance_key") or "").casefold()
+            for item in self.get_radio_launch_bundle(radio_id).get("items", ()) or ()
+            if isinstance(item, Mapping)
         )
 
     def apply_fast_light_message_component_repair(self, plan: Any) -> Dict[str, Any]:
@@ -8375,12 +8459,13 @@ class MultiRadioStore:
         before_by_family = {
             record.family_key: identity_record_to_mapping(record) for record in before_records
         }
+        bootstrap_legacy = bool(getattr(plan, "bootstrap_legacy", False))
         before_fast_light = before_by_family.get("fast_light")
-        if not isinstance(before_fast_light, Mapping):
+        if not bootstrap_legacy and not isinstance(before_fast_light, Mapping):
             raise ValueError("The selected radio no longer has a Fast Light identity.")
         before_components = {
             str(item.get("component_id") or "").casefold(): dict(item)
-            for item in before_fast_light.get("components", ()) or ()
+            for item in (before_fast_light or {}).get("components", ()) or ()
             if isinstance(item, Mapping)
         }
 
@@ -8390,12 +8475,42 @@ class MultiRadioStore:
                     "The Fast Light identity changed after review. Refresh Software Administration and review the repair again."
                 )
             current_manifest = self.get_software_instance_manifest(plan.manifest_instance_key)
-            if not isinstance(current_manifest, Mapping) or str(
-                current_manifest.get("updated_utc") or ""
-            ) != str(plan.manifest_updated_utc or ""):
+            if str((current_manifest or {}).get("updated_utc") or "") != str(
+                plan.manifest_updated_utc or ""
+            ):
                 raise ValueError(
                     "The Fast Light manifest changed after review. Refresh Software Administration and review the repair again."
                 )
+            if bootstrap_legacy:
+                from freqinout.core.fast_light_component_repair import (
+                    legacy_repair_source_fingerprint,
+                )
+
+                if any(record.family_key == "fast_light" for record in before_records):
+                    raise ValueError(
+                        "The Fast Light identity changed after review. Refresh Software Administration and review the repair again."
+                    )
+                current_profile = self.get_device_profile(radio_id)
+                application_id = _coerce_int((current_profile or {}).get("fast_light_config_id"), 0)
+                current_application = (
+                    self.get_fast_light_config(application_id) if application_id else None
+                )
+                if not isinstance(current_profile, Mapping) or not isinstance(
+                    current_application, Mapping
+                ):
+                    raise ValueError(
+                        "The linked Fast Light configuration changed after review. Refresh and review the repair again."
+                    )
+                current_source = legacy_repair_source_fingerprint(
+                    current_profile,
+                    current_application,
+                    self.get_radio_launch_bundle(radio_id),
+                    current_manifest,
+                )
+                if current_source != str(plan.source_fingerprint or ""):
+                    raise ValueError(
+                        "The legacy Fast Light configuration changed after review. Refresh Software Administration and review the repair again."
+                    )
 
             saved_profile = self.save_device_profile(plan.profile)
             saved_manifest = self.save_software_instance_manifest(plan.manifest)
@@ -8424,13 +8539,13 @@ class MultiRadioStore:
                 for item in after_fast_light.get("components", ()) or ()
                 if isinstance(item, Mapping)
             }
-            if after_components.get("flrig") != before_components.get("flrig"):
+            if not bootstrap_legacy and after_components.get("flrig") != before_components.get("flrig"):
                 raise ValueError("Component repair changed FLRig identity; nothing was saved.")
             prior_fldigi = dict(before_components.get("fldigi") or {})
             next_fldigi = dict(after_components.get("fldigi") or {})
             prior_fldigi.pop("argv", None)
             next_fldigi.pop("argv", None)
-            if next_fldigi != prior_fldigi:
+            if not bootstrap_legacy and next_fldigi != prior_fldigi:
                 raise ValueError(
                     "Component repair changed FLDigi outside its required FLMsg/FLAmp pairing arguments; nothing was saved."
                 )

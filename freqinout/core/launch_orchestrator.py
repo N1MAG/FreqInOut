@@ -578,6 +578,40 @@ class LaunchOrchestrator(QObject):
         projection_warnings: Dict[int, str] = {}
         for profile in profiles:
             radio_id = int(profile.get("id", 0) or 0)
+            repair_detector = getattr(
+                self.multi_radio_store,
+                "fast_light_message_component_repair_needed",
+                None,
+            )
+            if (
+                radio_id > 0
+                and callable(repair_detector)
+                and repair_detector(radio_id)
+            ):
+                try:
+                    repair = self.multi_radio_store.prepare_fast_light_message_component_repair(
+                        radio_id
+                    )
+                    self.multi_radio_store.apply_fast_light_message_component_repair(repair)
+                    log.info(
+                        "Automatically repaired legacy FLMsg/FLAmp launch identity for radio %s.",
+                        radio_id,
+                    )
+                except (KeyError, ValueError) as exc:
+                    # Ambiguous or incomplete evidence remains an operator
+                    # recovery task in Software Administration.  Launch
+                    # planning continues so its existing blocker/warning is
+                    # still precise and no unrelated app is suppressed.
+                    log.warning(
+                        "Automatic FLMsg/FLAmp repair deferred for radio %s: %s",
+                        radio_id,
+                        exc,
+                    )
+                except Exception:
+                    log.exception(
+                        "Automatic FLMsg/FLAmp repair failed for radio %s; existing launch review remains available.",
+                        radio_id,
+                    )
             projection_issues = (
                 self.multi_radio_store.validate_radio_software_identity_projections(radio_id)
                 if radio_id > 0

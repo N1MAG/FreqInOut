@@ -9,6 +9,8 @@ reviewed result.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 import os
 from pathlib import Path
 import shlex
@@ -26,6 +28,9 @@ from freqinout.core.software_identity_bundle import (
 
 
 _MESSAGE_COMPONENTS = frozenset({"flmsg", "flamp"})
+_FLDIGI_COMPANION_FLAGS = frozenset(
+    {"--arq-server-address", "--arq-server-port", "--flmsg-dir", "--auto-dir"}
+)
 
 
 def _text(value: object) -> str:
@@ -120,6 +125,227 @@ def _first_root(component: Mapping[str, Any], key: str) -> str:
     return _text(roots[0]) if isinstance(roots, (tuple, list)) and roots else ""
 
 
+def _merge_argument_pairs(
+    original: Sequence[object], proposed: Sequence[object], flags: frozenset[str]
+) -> list[str]:
+    """Replace only named option/value pairs, preserving every other argument."""
+
+    wanted: dict[str, str] = {}
+    proposed_args = [str(value) for value in proposed]
+    index = 0
+    while index < len(proposed_args):
+        flag = proposed_args[index]
+        if flag in flags and index + 1 < len(proposed_args):
+            wanted[flag] = proposed_args[index + 1]
+            index += 2
+        else:
+            index += 1
+    merged: list[str] = []
+    original_args = [str(value) for value in original]
+    index = 0
+    while index < len(original_args):
+        flag = original_args[index]
+        if flag in flags:
+            index += 2 if index + 1 < len(original_args) else 1
+            continue
+        merged.append(flag)
+        index += 1
+    for flag in ("--arq-server-address", "--arq-server-port", "--flmsg-dir", "--auto-dir"):
+        if flag in wanted:
+            merged.extend((flag, wanted[flag]))
+    return merged
+
+
+def legacy_repair_source_fingerprint(
+    profile: Mapping[str, Any],
+    application: Mapping[str, Any],
+    launch_bundle: Mapping[str, Any],
+    manifest: Mapping[str, Any] | None = None,
+) -> str:
+    """Fence a legacy repair against any saved-source change after review."""
+
+    payload = {
+        "profile": dict(profile),
+        "application": dict(application),
+        "launch_bundle": dict(launch_bundle),
+        "manifest": dict(manifest or {}),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def build_legacy_fast_light_repair_inputs(
+    *,
+    profile: Mapping[str, Any],
+    application: Mapping[str, Any],
+    launch_bundle: Mapping[str, Any],
+    arq_port: int,
+    platform: object | None = None,
+    storage_home: Path | None = None,
+    existing_manifest: Mapping[str, Any] | None = None,
+) -> tuple[Mapping[str, Any], tuple[Any, ...], str]:
+    """Build an in-memory canonical baseline from one unambiguous legacy assignment.
+
+    Nothing is persisted here.  Saved launch rows take precedence over newly
+    derived defaults so FLRig/FLDigi identity is retained during the repair.
+    """
+
+    application_key = _text(application.get("system_key"))
+    if not application_key:
+        raise ValueError("The linked Fast Light application has no stable identity.")
+    bundle_id = _text((existing_manifest or {}).get("instance_key")) or f"fast_light:{application_key}"
+    use_flmsg = bool(int(profile.get("use_flmsg", 0) or 0))
+    use_flamp = bool(int(profile.get("use_flamp", 0) or 0))
+    paths = {
+        "flrig": _text(application.get("flrig_path") or profile.get("flrig_path")),
+        "fldigi": _text(application.get("fldigi_path") or profile.get("fldigi_path")),
+        "flmsg": _text(profile.get("flmsg_path") or application.get("flmsg_path")),
+        "flamp": _text(profile.get("flamp_path") or application.get("flamp_path")),
+    }
+    for key, label, selected in (
+        ("flrig", "FLRig", bool(int(profile.get("use_flrig", 0) or 0))),
+        ("fldigi", "FLDigi", bool(int(profile.get("use_fldigi", 0) or 0))),
+        ("flmsg", "FLMsg", use_flmsg),
+        ("flamp", "FLAmp", use_flamp),
+    ):
+        if selected and not paths[key]:
+            raise ValueError(f"The saved {label} executable is missing; choose it before repair.")
+
+    draft = {
+        "family_key": "fast_light",
+        "mode": "managed",
+        "draft_instance_key": bundle_id,
+        "instance_key": bundle_id,
+        "application_system_key": application_key,
+        "instance_name": _text(profile.get("name")) or "Radio",
+        "owner_label": _text(profile.get("name")) or "Radio",
+        "radio_role": "observer" if _text(profile.get("device_class")).casefold() == "observer" else "transceiver",
+        "application_path": paths["flrig"],
+        "secondary_application_path": paths["fldigi"],
+        "flmsg_application_path": paths["flmsg"],
+        "flamp_application_path": paths["flamp"],
+        "use_flmsg": use_flmsg,
+        "use_flamp": use_flamp,
+        "host": _text(profile.get("flrig_host") or application.get("flrig_host")) or "127.0.0.1",
+        "port": int(profile.get("flrig_port") or application.get("flrig_port") or 0),
+        "secondary_port": int(profile.get("fldigi_port") or application.get("fldigi_port") or 0),
+        "arq_port": int(arq_port),
+    }
+    resolution = resolve_fast_light_managed_recipe(
+        draft, managed_root="", platform=platform, storage_home=storage_home or Path.home()
+    )
+    if not resolution.persistable:
+        raise ValueError(resolution.recovery_action or "FIO could not derive a safe legacy repair.")
+    updates = recipe_draft_updates(resolution)
+    baseline_recipe = dict(updates["launch_recipe"])
+    components = _component_index(baseline_recipe.get("components", ()) or ())
+    launch_by_name = {
+        _text(item.get("app_name") or item.get("name")).casefold(): item
+        for item in launch_bundle.get("items", ()) or ()
+        if isinstance(item, Mapping)
+    }
+    for key in tuple(components):
+        item = launch_by_name.get(key)
+        if not isinstance(item, Mapping):
+            continue
+        readiness = item.get("readiness", item.get("readiness_policy", {}))
+        readiness = dict(readiness) if isinstance(readiness, Mapping) else {}
+        component = dict(components[key])
+        executable = _text(
+            item.get("path_override")
+            or item.get("launch_path_override")
+            or readiness.get("executable")
+            or component.get("executable")
+        )
+        arguments = [str(value) for value in readiness.get("launch_arguments", ()) or ()]
+        component_readiness = {
+            name: value
+            for name, value in readiness.items()
+            if name
+            not in {
+                "executable",
+                "launch_arguments",
+                "working_directory",
+                "profile_selector",
+                "configuration_roots",
+                "data_roots",
+                "managed_directories",
+                "endpoints",
+                "effective_command",
+                "effective_command_text",
+                "environment",
+                "execution_scope",
+                "operator_starts",
+            }
+        }
+        component.update(
+            {
+                "executable": executable,
+                "arguments": arguments,
+                "working_directory": _text(readiness.get("working_directory")),
+                "profile_selector": _text(readiness.get("profile_selector")),
+                "configuration_roots": list(readiness.get("configuration_roots", ()) or ()),
+                "data_roots": list(readiness.get("data_roots", ()) or ()),
+                "managed_directories": list(readiness.get("managed_directories", ()) or ()),
+                "endpoints": list(readiness.get("endpoints", ()) or ()),
+                "effective_command": [executable, *arguments] if executable else [],
+                "effective_command_text": shlex.join([executable, *arguments]) if executable else "",
+                "readiness": component_readiness,
+                "operator_starts": bool(readiness.get("operator_starts", not executable)),
+            }
+        )
+        components[key] = component
+    baseline_recipe["components"] = [
+        components[_text(item.get("component_key")).casefold()]
+        for item in baseline_recipe.get("components", ()) or ()
+        if isinstance(item, Mapping) and _text(item.get("component_key")).casefold() in components
+    ]
+    from freqinout.core.guided_launch_recipes import recipe_resolution_from_mapping
+
+    baseline_recipe = recipe_resolution_from_mapping(baseline_recipe).to_mapping()
+    draft.update(updates)
+    draft.update(
+        {
+            "launch_recipe": baseline_recipe,
+            "launch_recipe_fingerprint": baseline_recipe["fingerprint"],
+            "management_mode": _text((existing_manifest or {}).get("management_mode")) or "fio_managed",
+            "configuration_path": _text((existing_manifest or {}).get("configuration_path")),
+            "storage_path": _text((existing_manifest or {}).get("data_root")),
+            "secondary_storage_path": _text(profile.get("fldigi_checkin_dir")),
+            "flmsg_message_path": _text(profile.get("flmsg_message_path")),
+            "flamp_receive_path": _text(profile.get("flamp_message_path")),
+            "ports": list(updates.get("ports", ())),
+            "resource_claims": list(updates.get("resource_claims", ())),
+        }
+    )
+    records = build_guided_identity_records(profile, {"fast_light": draft}, ("fast_light",))
+    manifest = dict(existing_manifest or {})
+    manifest.update(
+        {
+            "instance_key": bundle_id,
+            "family_key": "fast_light",
+            "application_system_key": application_key,
+            "management_mode": draft["management_mode"],
+            "provenance": _text(manifest.get("provenance")) or "legacy_repair",
+            "executable_path": paths["flrig"],
+            "configuration_path": draft["configuration_path"],
+            "configuration_root": draft["configuration_path"],
+            "data_root": draft["storage_path"],
+            "ports": draft["ports"],
+            "resource_claims": draft["resource_claims"],
+            "evidence": {
+                **dict(manifest.get("evidence") or {}),
+                "launch_recipe": baseline_recipe,
+                "launch_recipe_fingerprint": baseline_recipe["fingerprint"],
+                "legacy_repair_bootstrap": True,
+            },
+        }
+    )
+    return manifest, records, legacy_repair_source_fingerprint(
+        profile, application, launch_bundle, existing_manifest
+    )
+
+
 @dataclass(frozen=True)
 class FastLightComponentRepairPlan:
     radio_profile_id: int
@@ -133,6 +359,8 @@ class FastLightComponentRepairPlan:
     launch_enabled: bool
     launch_items: tuple[Mapping[str, Any], ...]
     changed_components: tuple[str, ...]
+    bootstrap_legacy: bool = False
+    source_fingerprint: str = ""
 
     @property
     def summary(self) -> str:
@@ -244,8 +472,30 @@ def build_fast_light_component_repair_plan(
     if flrig_component:
         proposed_components["flrig"] = dict(flrig_component)
     repaired_fldigi = dict(fldigi_component)
-    for key in ("arguments", "effective_command", "effective_command_text"):
-        repaired_fldigi[key] = proposed_components["fldigi"].get(key)
+    fldigi_arguments = _merge_argument_pairs(
+        fldigi_component.get("arguments", ()) or (),
+        proposed_components["fldigi"].get("arguments", ()) or (),
+        _FLDIGI_COMPANION_FLAGS,
+    )
+    fldigi_executable = _text(repaired_fldigi.get("executable"))
+    repaired_fldigi["arguments"] = fldigi_arguments
+    repaired_fldigi["effective_command"] = [fldigi_executable, *fldigi_arguments]
+    repaired_fldigi["effective_command_text"] = shlex.join(
+        [fldigi_executable, *fldigi_arguments]
+    )
+    repaired_fldigi_readiness = dict(repaired_fldigi.get("readiness") or {})
+    if "launch_arguments" in repaired_fldigi_readiness:
+        repaired_fldigi_readiness["launch_arguments"] = list(fldigi_arguments)
+    if "effective_command" in repaired_fldigi_readiness:
+        repaired_fldigi_readiness["effective_command"] = [
+            fldigi_executable,
+            *fldigi_arguments,
+        ]
+    if "effective_command_text" in repaired_fldigi_readiness:
+        repaired_fldigi_readiness["effective_command_text"] = shlex.join(
+            [fldigi_executable, *fldigi_arguments]
+        )
+    repaired_fldigi["readiness"] = repaired_fldigi_readiness
     proposed_components["fldigi"] = repaired_fldigi
 
     ordered_component_keys = [
@@ -449,4 +699,9 @@ def build_fast_light_component_repair_plan(
     )
 
 
-__all__ = ["FastLightComponentRepairPlan", "build_fast_light_component_repair_plan"]
+__all__ = [
+    "FastLightComponentRepairPlan",
+    "build_fast_light_component_repair_plan",
+    "build_legacy_fast_light_repair_inputs",
+    "legacy_repair_source_fingerprint",
+]

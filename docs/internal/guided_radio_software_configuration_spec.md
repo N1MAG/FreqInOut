@@ -3963,15 +3963,30 @@ invariant without requiring a migration of unrelated existing rows.
 
 For valid Fast Light identities with legacy or incomplete FLMsg/FLAmp data,
 Software Administration MUST expose **Repair FLMsg/FLAmp components**, a
-narrower action than Replace instance. It preserves FLRig/FLDigi executable,
-native profile, endpoint, and launch identity; it may correct FLMsg/FLAmp's
-qualified native selectors and radio-visible title arguments, and only the
-additive FLDigi NBEMS/ARQ-pairing arguments needed by those components.
-Unrelated families and Launch
-Control preferences remain unchanged. No external application files may be
-written. One optimistic generation-checked atomic transaction merges only
-FLMsg/FLAmp canonical, manifest, and launch rows, then performs complete
-readback/parity validation and rolls back on any error.
+narrower action than Replace instance. A radio that predates canonical
+identity rows remains eligible when it has exactly one linked Fast Light
+application and unambiguous saved launch facts; the UI MUST NOT hide repair
+merely because the canonical record or manifest is absent. The transaction may
+bootstrap those FIO-owned projections from the linked application, radio, and
+launch rows, but it may not guess an executable, native profile, or endpoint.
+
+The repair preserves the exact FLRig/FLDigi executable, native profile,
+endpoint, and launch identity; it may correct FLMsg/FLAmp's qualified native
+selectors and radio-visible title arguments, and only the additive FLDigi
+NBEMS/ARQ-pairing arguments needed by those components. Unrelated families and
+Launch Control preferences remain unchanged. No external application files may
+be written. One optimistic generation- and source-fingerprint-checked atomic
+transaction merges only the necessary profile, canonical, manifest, and launch
+projections, performs complete readback/parity validation, and rolls back on
+any error.
+
+Launch preparation MUST automatically apply this transaction when every input
+is unambiguous and the ARQ port is conflict-free. Manual Repair remains visible
+as the explicit fallback after later filesystem or configuration changes. If
+an executable is missing, candidate ownership is ambiguous, a port conflicts,
+or persisted evidence changes after preparation, automation defers with a
+specific recovery message and does not replace the complete Fast Light
+instance or borrow another radio's process.
 
 #### GRS-13.4b — Radio-visible child window identity
 

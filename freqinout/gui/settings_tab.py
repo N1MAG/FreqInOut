@@ -10223,6 +10223,13 @@ class SettingsTab(QWidget):
         if ident <= 0:
             return False
         try:
+            persisted_detector = getattr(
+                self.multi_radio_store,
+                "fast_light_message_component_repair_needed",
+                None,
+            )
+            if callable(persisted_detector) and persisted_detector(ident):
+                return True
             record = next(
                 (
                     item
@@ -10233,6 +10240,7 @@ class SettingsTab(QWidget):
             )
             if record is None:
                 return False
+            profile = self._device_profile_by_id(ident) or {}
             components = {item.component_id.casefold(): item for item in record.components}
             flmsg = components.get("flmsg")
             flamp = components.get("flamp")
@@ -10244,7 +10252,6 @@ class SettingsTab(QWidget):
                 or not flamp.cwd
             ):
                 return True
-            profile = self._device_profile_by_id(ident) or {}
             if str(getattr(record, "management_mode", "") or "").casefold() == "fio_managed":
                 radio_name = str(profile.get("name") or "Radio").strip() or "Radio"
 
