@@ -1828,7 +1828,7 @@ class OperatorHistoryTab(QWidget):
                 QMessageBox.warning(
                     self,
                     "Sync to VarAC",
-                    "Configure VarAC Install Folder in Settings before syncing callsign tags.",
+                    "Configure VarAC Install Folder in Configuration before syncing callsign tags.",
                 )
             return False
         except Exception as exc:

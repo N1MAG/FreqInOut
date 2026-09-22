@@ -180,7 +180,7 @@ def test_phase5_freqplanner_workspace_foundation_source_wiring() -> None:
     assert 'self.save_plan_btn = QPushButton("Save Plan")' in planner_source
     assert 'self.save_sop_plan_btn = QPushButton("Save SOP Plan")' in planner_source
     assert 'self.delete_plan_btn = QPushButton("Delete Plan")' in planner_source
-    assert 'self.assign_plan_btn = QPushButton("Assign in Settings")' in planner_source
+    assert 'self.assign_plan_btn = QPushButton("Assign in Configuration")' in planner_source
     assert 'self.make_active_plan_btn = QPushButton("Make Active")' not in planner_source
     assert 'self.use_ad_hoc_plan_btn = QPushButton("Use Ad Hoc")' not in planner_source
     assert "self.save_plan_btn.clicked.connect(self._on_save_plan_clicked)" in planner_source
@@ -188,7 +188,7 @@ def test_phase5_freqplanner_workspace_foundation_source_wiring() -> None:
     assert "self.delete_plan_btn.clicked.connect(self._on_delete_plan_clicked)" in planner_source
     assert "self.assign_plan_btn.clicked.connect(self._on_assign_plan_clicked)" in planner_source
     assert "Save or update the visible HF Daily + HF Nets + SOP projection" in planner_source
-    assert "Settings > Assign Schedule" in planner_source
+    assert "Configuration > Radios > Schedule Assignment" in planner_source
     assert "Choose the radio and save with RF Guard." in planner_source
     assert 'self.frequency_plan_summary_label.setObjectName("freqPlannerFrequencyPlanSummary")' in planner_source
     assert 'self.frequency_plan_action_hint_label.setObjectName("freqPlannerFrequencyPlanActionHint")' in planner_source
@@ -232,14 +232,14 @@ def test_phase5_schedule_tabs_use_frequency_plan_target_language() -> None:
     assert "Frequency Plans" in guide_source
     assert "Assigned Plans" in guide_source
     assert "build, review, edit, and assign named Frequency Plans" in guide_source
-    assert "where to be, when to be there, and what to do when you get there" in guide_source
+    assert "combines saved Daily and Net schedules with SOP guidance" in guide_source
     assert "Update Plan Only" in guide_source
-    assert "ControlFreq reflects results from Settings, assigned Frequency Plans" in guide_source
+    assert "Ops Center reflects results from Configuration, assigned Frequency Plans" in guide_source
     assert "Map consumes operator data, Frequency Plan and schedule-source data" in guide_source
     assert "selected radio profile and its assigned current plan" in guide_source
     assert "Plan Context Cue" in guide_source
     assert "This cue is informational only." in guide_source
-    assert "HF Frequency Schedule, Net Schedules, FreqPlanner, SOP Builder, Messages, ControlFreq, and Map" in guide_source
+    assert "HF Daily, HF Nets, Plan Builder, SOP Builder, Inbox, Ops Center, and Map" in guide_source
     assert "does not change the active radio, send QSY commands, hold or resume the scheduler" in guide_source
 
 

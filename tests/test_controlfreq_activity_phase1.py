@@ -1038,9 +1038,45 @@ def test_controlfreq_sparse_views_size_around_rows_and_collapse_details():
     assert "self._fit_table_height_to_rows(table, min_rows=1, max_rows=6, empty_rows=1)" in controlfreq_source
     assert "self._fit_table_height_to_rows(self.schedule_table, min_rows=0, max_rows=8, empty_rows=1)" in controlfreq_source
     assert "self._fit_table_height_to_rows(self.prop_table, min_rows=0, max_rows=6, empty_rows=0)" in controlfreq_source
-    assert "box.setMaximumHeight(min(height, 460 if details_visible else 230))" in controlfreq_source
+    assert "box.setMaximumHeight(16777215)" in controlfreq_source
+    assert "box.setMinimumHeight(height)" in controlfreq_source
+    assert "self.prop_band_ladder_container.setMinimumHeight(max(card_heights))" in controlfreq_source
     assert "def _set_schedule_splitter_content_sizes" in controlfreq_source
     assert "self._set_schedule_splitter_content_sizes()" in controlfreq_source
+
+
+def test_controlfreq_propagation_cards_do_not_clip_at_large_text_scale(monkeypatch, tmp_path) -> None:
+    from PySide6.QtWidgets import QFrame
+
+    app = _app()
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    monkeypatch.setattr(ControlFreqTab, "_refresh_all", lambda self, *args, **kwargs: None)
+    tab = ControlFreqTab(defer_initial_refresh=True)
+    try:
+        tab.resize(1700, 900)
+        tab.setStyleSheet("font-size: 20px;")
+        tab._set_prop_summary(
+            "RF Readiness: use 20M (80) now toward Region R04; watch 40M (44) night."
+        )
+        tab._render_prop_band_ladder(
+            [("20M", 80), ("40M", 44)],
+            target_label="Region R04",
+            evidence_label="modeled + observed outcomes",
+        )
+        tab._sync_propagation_box_height()
+        tab.show()
+        app.processEvents()
+
+        cards = tab.prop_band_ladder_container.findChildren(
+            QFrame, "controlfreqBandLadderCard"
+        )
+        assert len(cards) == 2
+        assert tab.prop_box.maximumHeight() == 16777215
+        assert tab.prop_box.height() >= tab.prop_box.sizeHint().height()
+        assert all(card.height() >= card.layout().sizeHint().height() for card in cards)
+    finally:
+        tab.deleteLater()
+        app.processEvents()
 
 
 def test_controlfreq_dashboard_uses_distinct_visual_grammars_and_details_disclosures() -> None:

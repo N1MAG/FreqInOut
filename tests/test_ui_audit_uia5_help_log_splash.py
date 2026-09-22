@@ -7,8 +7,8 @@ import inspect
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, Qt, QEventLoop, QTimer
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QEvent, Qt, QEventLoop, QTimer, QUrl
+from PySide6.QtGui import QFont, QTextDocument
 from PySide6.QtWidgets import QApplication, QBoxLayout, QWidget
 
 from freqinout.gui.bounded_snapshot_worker import SnapshotWorkerController
@@ -40,8 +40,12 @@ def test_help_reflows_navigation_and_keeps_content_scroll_owned() -> None:
     _app()
     tab = HelpTab()
     try:
+        assert _wait_until(lambda: bool(tab._document_html))
+        assert tab.toc_list.count() > 0
+        assert "Loading the FreqInOut guide" not in tab.viewer.toPlainText()
         for width, height in ((1920, 1080), (1000, 700), (900, 560)):
             tab.resize(width, height)
+            tab._update_responsive_layout()
             _app().processEvents()
             assert tab.viewer.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
         assert tab._help_layout.direction() == QBoxLayout.TopToBottom
@@ -67,6 +71,11 @@ def test_help_topic_theme_and_resize_paths_use_one_cached_document_snapshot(monk
     try:
         assert _wait_until(lambda: bool(tab._document_html))
         assert calls == ["read"]
+        assert "Loading the FreqInOut guide" not in tab.viewer.toPlainText()
+        assert "Guide body" in tab.viewer.toPlainText()
+        assert tab.toc_list.count() == 1
+        assert "Start" in tab.toc_list.item(0).text()
+        assert tab.viewer.document().baseUrl() == QUrl.fromLocalFile(str(tab._doc_path))
         generation = tab._document_generation
         tab.open_anchor("start")
         tab.resize(900, 560)
@@ -74,6 +83,64 @@ def test_help_topic_theme_and_resize_paths_use_one_cached_document_snapshot(monk
         _app().processEvents()
         assert calls == ["read"]
         assert tab._document_generation == generation
+    finally:
+        tab.shutdown()
+        tab.close()
+        tab.deleteLater()
+
+
+def test_help_resolves_local_images_for_viewer_and_pdf_export(tmp_path) -> None:
+    guide = tmp_path / "docs" / "guide.html"
+    logo = tmp_path / "assets" / "logo.png"
+    logo.parent.mkdir(parents=True)
+    guide.parent.mkdir(parents=True)
+    logo.write_bytes(b"png-placeholder")
+    source = (
+        '<img src="../assets/logo.png">'
+        '<img src="https://example.invalid/remote.png">'
+        '<img src="data:image/png;base64,abc">'
+    )
+
+    resolved = HelpTab._resolve_local_image_urls(source, guide)
+
+    assert QUrl.fromLocalFile(str(logo)).toString() in resolved
+    assert 'src="../assets/logo.png"' not in resolved
+    assert 'src="https://example.invalid/remote.png"' in resolved
+    assert 'src="data:image/png;base64,abc"' in resolved
+
+
+def test_loaded_help_document_uses_absolute_logo_url() -> None:
+    _app()
+    tab = HelpTab()
+    try:
+        assert _wait_until(lambda: bool(tab._document_html))
+        rendered_html = tab.viewer.document().toHtml()
+        expected = QUrl.fromLocalFile(
+            str((tab._doc_path.parent / "../assets/FreqInOut_logo.png").resolve())
+        ).toString()
+        assert expected in rendered_html
+        resource = tab.viewer.document().resource(
+            QTextDocument.ImageResource,
+            QUrl(expected),
+        )
+        assert resource is not None
+        assert not resource.isNull()
+    finally:
+        tab.shutdown()
+        tab.close()
+        tab.deleteLater()
+
+
+def test_operating_groups_help_anchor_is_selectable_in_rendered_guide() -> None:
+    _app()
+    tab = HelpTab()
+    try:
+        assert _wait_until(lambda: bool(tab._document_html))
+        tab.open_anchor("settings-hf-groups-details")
+        selected = tab.toc_list.currentItem()
+        assert selected is not None
+        assert selected.data(Qt.UserRole) == "settings-hf-groups-details"
+        assert "Operating Groups Details" in selected.text()
     finally:
         tab.shutdown()
         tab.close()

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 from PySide6.QtCore import QEvent, Qt, QUrl
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QImage, QTextDocument
 from PySide6.QtPrintSupport import QPrinter
 from PySide6.QtWidgets import (
     QWidget,
@@ -114,6 +114,48 @@ class HelpTab(QWidget):
     def _read_document_snapshot(path: Path) -> str:
         return path.read_text(encoding="utf-8", errors="ignore")
 
+    @staticmethod
+    def _resolve_local_image_urls(html_text: str, document_path: Path) -> str:
+        """Give Qt's viewer and PDF printer explicit URLs for local guide images."""
+
+        base_dir = Path(document_path).resolve().parent
+        pattern = re.compile(
+            r'(?P<prefix><img\b[^>]*?\bsrc\s*=\s*)(?P<quote>["\'])(?P<src>.*?)(?P=quote)',
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+
+        def replace(match: re.Match[str]) -> str:
+            source = html.unescape(match.group("src")).strip()
+            if not source or source.startswith(("data:", "file:", "http:", "https:", "qrc:", "#")):
+                return match.group(0)
+            candidate = Path(source)
+            if not candidate.is_absolute():
+                candidate = base_dir / candidate
+            candidate = candidate.resolve()
+            if not candidate.is_file():
+                return match.group(0)
+            quote = match.group("quote")
+            return f'{match.group("prefix")}{quote}{QUrl.fromLocalFile(str(candidate)).toString()}{quote}'
+
+        return pattern.sub(replace, str(html_text))
+
+    @staticmethod
+    def _register_local_image_resources(document: QTextDocument, html_text: str) -> None:
+        """Keep local images resident so QTextDocument printing cannot drop them."""
+
+        for source in re.findall(
+            r'<img\b[^>]*?\bsrc\s*=\s*["\']([^"\']+)["\']',
+            str(html_text),
+            flags=re.IGNORECASE | re.DOTALL,
+        ):
+            url = QUrl(html.unescape(source).strip())
+            if not url.isLocalFile():
+                continue
+            image = QImage(url.toLocalFile())
+            if image.isNull():
+                continue
+            document.addResource(QTextDocument.ImageResource, url, image)
+
     def _request_document_load(self) -> None:
         self._document_generation += 1
         generation = self._document_generation
@@ -129,9 +171,22 @@ class HelpTab(QWidget):
         if error is not None or not isinstance(payload, str):
             self.viewer.setPlainText(f"The FreqInOut guide could not be loaded: {error or 'invalid document'}")
             return
+        try:
+            # QTextBrowser.setHtml() accepts only the HTML string in PySide6.
+            # Set the document base URL separately so relative guide assets
+            # still resolve without aborting the completion callback.
+            document = self.viewer.document()
+            document.setBaseUrl(QUrl.fromLocalFile(str(self._doc_path)))
+            rendered_payload = self._resolve_local_image_urls(payload, self._doc_path)
+            self._register_local_image_resources(document, rendered_payload)
+            self.viewer.setHtml(rendered_payload)
+            self._build_toc(payload)
+        except Exception as exc:
+            self._document_html = ""
+            self.toc_list.clear()
+            self.viewer.setPlainText(f"The FreqInOut guide could not be displayed: {exc}")
+            return
         self._document_html = payload
-        self.viewer.setHtml(payload, QUrl.fromLocalFile(str(self._doc_path)))
-        self._build_toc(payload)
         self._update_responsive_layout()
         if self._pending_anchor:
             pending = self._pending_anchor

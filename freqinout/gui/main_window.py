@@ -630,7 +630,15 @@ class MainWindow(QMainWindow):
         self._nav_group_bodies: dict[str, QWidget] = {}
         self._nav_group_layouts: dict[str, QVBoxLayout] = {}
         self._nav_group_sections: dict[str, QWidget] = {}
-        self._nav_group_order: list[str] = ["Messages", "NCS", "Operators", "Resources", "Plan Builder", "Station", "Settings"]
+        self._nav_group_order: list[str] = [
+            "Messages",
+            "NCS",
+            "Operators",
+            "Resources",
+            "Plan Builder",
+            "Station",
+            "Configuration",
+        ]
         self._nav_group_states: dict[str, bool] = self._load_nav_group_states()
         self._suppress_initial_nav_group_auto_expand = True
 
@@ -1985,7 +1993,7 @@ class MainWindow(QMainWindow):
                 self.logs_active_btn.setVisible(True)
                 self.logs_active_btn.setText(f"Logs: {level}")
                 self.logs_active_btn.setToolTip(
-                    "Logging is active. Disable in Settings unless you are troubleshooting."
+                    "Logging is active. Disable in Configuration unless you are troubleshooting."
                 )
                 try:
                     theme = resolve_theme(self.settings)
@@ -3981,7 +3989,7 @@ class MainWindow(QMainWindow):
             ("Resources", "Tools and Resources", "Resources", "resources.svg"),
             ("Plans", "Plans", "Plan Builder", "plans.svg"),
             ("Station", "Station", "Station", "station.svg"),
-            ("Settings", "Settings", "Settings", "settings.svg"),
+            ("Config", "Configuration", "Configuration", "settings.svg"),
             ("Help", "Help", "Help", "help.svg"),
         )
 
@@ -10693,7 +10701,7 @@ class MainWindow(QMainWindow):
             )
         )
         if selected is None:
-            empty = QLabel("No configured radios · add a radio in Settings", parent)
+            empty = QLabel("No configured radios · add a radio in Configuration", parent)
             empty.setObjectName("stationCommandRadioSummaryEmpty")
             layout.addWidget(empty)
             parent.setMinimumWidth(0)
@@ -12669,7 +12677,7 @@ class MainWindow(QMainWindow):
             "Resources": False,
             "Plan Builder": False,
             "Station": False,
-            "Settings": False,
+            "Configuration": False,
         }
         try:
             raw = self.settings.get("main_nav_group_states", {}) or {}
@@ -12683,6 +12691,8 @@ class MainWindow(QMainWindow):
                 raw["FreqPlanner"] = raw.get("Schedule")
             if "Plan Builder" not in raw and "FreqPlanner" in raw:
                 raw["Plan Builder"] = raw.get("FreqPlanner")
+            if "Configuration" not in raw and "Settings" in raw:
+                raw["Configuration"] = raw.get("Settings")
             for key in defaults:
                 if key in raw:
                     defaults[key] = bool(raw.get(key))
@@ -12710,7 +12720,7 @@ class MainWindow(QMainWindow):
         if screen in {"Resources", "Shortwave"}:
             return "Resources"
         if screen == "Settings":
-            return "Settings"
+            return "Configuration"
         txt = str(button_label or "").strip()
         if txt.startswith("NCS -"):
             return "NCS"

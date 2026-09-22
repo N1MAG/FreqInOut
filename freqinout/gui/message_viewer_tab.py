@@ -22331,7 +22331,7 @@ class MessageViewerTab(QWidget):
             QMessageBox.warning(
                 self,
                 "Archive BBS File",
-                "Set VarAC BBS Archive in Settings before archiving files.",
+                "Set VarAC BBS Archive in Configuration before archiving files.",
             )
             return
         archive_dir = Path(archive_dir_txt)
@@ -23312,7 +23312,7 @@ class MessageViewerTab(QWidget):
                 QMessageBox.warning(
                     self,
                     "Copy to FLAMP Relay",
-                    "Set a valid FLAMP Relay folder in Settings before using +Relay.",
+                    "Set a valid FLAMP Relay folder in Configuration before using +Relay.",
                 )
             else:
                 QMessageBox.warning(
@@ -24169,7 +24169,9 @@ class MessageViewerTab(QWidget):
         if reason == "path_missing":
             lines.append("Status: The configured folder does not exist or is not available.")
         elif reason == "not_configured":
-            lines.append("Status: Set VarAC Incoming Files in Settings so FIO knows where VarAC stores received files.")
+            lines.append(
+                "Status: Set VarAC Incoming Files in Configuration so FIO knows where VarAC stores received files."
+            )
         elif scan_requested:
             lines.append("Status: FIO is checking the configured message folders now. Refresh or select this row again after the scan completes.")
         else:

@@ -88,7 +88,7 @@ def source_connection_from_mesh_health(
         guidance = explicit_guidance or "Select Connect to retry this mesh source."
     elif _looks_like_config_error(last_error):
         state = SOURCE_CONNECTION_CONFIG_ERROR
-        guidance = "Open Settings > Local Mesh to fix the connection."
+        guidance = "Open Configuration > Main > Local Mesh to fix the connection."
     else:
         age = _age_seconds(updated_utc, now)
         if age is not None and age <= max(5, reconnecting_seconds):

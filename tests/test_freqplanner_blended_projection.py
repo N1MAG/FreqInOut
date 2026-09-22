@@ -354,7 +354,7 @@ def test_freqplanner_save_plan_persists_blended_projection(monkeypatch, tmp_path
     assert "not assigned to a radio yet" in tab.assign_plan_btn.toolTip()
 
     tab._on_assign_plan_clicked()
-    assert "Settings > Assign Schedule" in tab.frequency_plan_action_hint_label.text()
+    assert "Configuration > Radios > Schedule Assignment" in tab.frequency_plan_action_hint_label.text()
 
 
 def test_freqplanner_save_plan_requires_confirmation_when_rf_guard_preflight_skipped(monkeypatch, tmp_path) -> None:
@@ -1621,7 +1621,7 @@ def test_freqplanner_review_rf_guard_reports_blocked_issues(monkeypatch, tmp_pat
     assert "Resolution Checklist - Blocked:" in text
     assert "1. Issue: FIO-A and FIO-B would both be assigned on 40M." in text
     assert "Impact: Two transmit-capable radios may operate in the same protected band/window." in text
-    assert "Next: Open Settings > Radios and separate the assignments" in text
+    assert "Next: Open Configuration > Radios and separate the assignments" in text
     assert tab.resolve_rf_guard_btn.isEnabled()
     assert tab.resolve_rf_guard_btn.text() == "Resolve RF Guard"
     assert not tab.rf_guard_review_card.isHidden()
@@ -1741,7 +1741,7 @@ def test_freqplanner_review_rf_guard_reports_warning_resolution_checklist(monkey
     assert "Resolution Checklist - Warnings:" in text
     assert "1. Issue: FIO-A antenna support does not include 20M." in text
     assert "Impact: The selected radio may not be safe or useful on the planned band." in text
-    assert "Next: Open Settings > Radios and adjust the radio antenna bands" in text
+    assert "Next: Open Configuration > Radios and adjust the radio antenna bands" in text
     assert tab.resolve_rf_guard_btn.isEnabled()
     assert not tab.rf_guard_review_card.isHidden()
     assert tab.rf_guard_review_table.rowCount() == 1
@@ -1793,7 +1793,7 @@ def test_freqplanner_review_rf_guard_reports_assignment_checks_when_no_radio_con
     app.processEvents()
 
     text = tab.frequency_plan_action_hint_label.text()
-    assert "Assignment checks are still required in Settings" in text
+    assert "Assignment checks are still required in Configuration" in text
     assert "RF Guard preflight skipped because no radio context is selected." in text
     assert not tab.resolve_rf_guard_btn.isEnabled()
     assert tab.rf_guard_review_card.isHidden()
@@ -2018,7 +2018,7 @@ def test_freqplanner_selecting_assigned_plan_switches_command_radio(monkeypatch,
 
     assert window.activated == [int(radio["id"])]
     assert "command bar switched to that radio" in tab.frequency_plan_action_hint_label.text()
-    assert tab.assign_plan_btn.text() == "Assigned in Settings"
+    assert tab.assign_plan_btn.text() == "Assigned in Configuration"
     assert "assigned to FIO-B (HF)" in tab.assign_plan_btn.toolTip()
 
 

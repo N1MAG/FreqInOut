@@ -145,7 +145,7 @@ class StationOverviewTab(QWidget):
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
         self.control_center_empty_label = QLabel(
-            "No active station runtimes. Activate one or more device profiles in Settings to populate Station Control Center."
+            "No active station runtimes. Activate one or more device profiles in Configuration to populate Station Control Center."
         )
         self.control_center_empty_label.setObjectName("stationControlCenterEmptyState")
         self.control_center_empty_label.setWordWrap(True)
@@ -408,7 +408,9 @@ class StationOverviewTab(QWidget):
         self.alerts_label.setVisible(False)
         self.alerts_label.clear()
         if not snaps:
-            self.summary_label.setText("No active station runtimes. Activate one or more device profiles in Settings.")
+            self.summary_label.setText(
+                "No active station runtimes. Activate one or more device profiles in Configuration."
+            )
             self._last_render_signature = tuple()
             return
 

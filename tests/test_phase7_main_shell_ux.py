@@ -101,7 +101,7 @@ def test_phase7_navigation_groups_station_health_and_schedule_editors() -> None:
     assert '("Radios", "Settings")' in source
     assert '("Frequencies", "Resources")' in source
     assert '("Shortwave", "Shortwave")' in source
-    assert 'self._nav_group_order: list[str] = ["Messages", "NCS", "Operators", "Resources", "Plan Builder", "Station", "Settings"]' in source
+    assert '"Configuration",\n        ]' in source
     assert '"Messages": False' in source
     assert '"Station": False' in source
     assert '"Plan Builder": False' in source
@@ -114,7 +114,7 @@ def test_phase7_navigation_groups_station_health_and_schedule_editors() -> None:
     assert 'if screen == "Messages":' in source
     assert 'return "Messages"' in source
     assert 'if screen == "Settings":' in source
-    assert 'return "Settings"' in source
+    assert 'return "Configuration"' in source
     assert 'self._settings_nav_context = "main"' in source
     assert "self._settings_nav_button_indices: dict[str, int] = {}" in source
     assert "self._messages_nav_button_indices: dict[str, int] = {}" in source
@@ -201,6 +201,7 @@ def test_phase7_primary_nav_groups_start_collapsed() -> None:
                     "Station": False,
                     "FreqPlanner": False,
                     "Schedules": False,
+                    "Settings": True,
                     "NCS": True,
                     "Operators": True,
                 }
@@ -216,6 +217,8 @@ def test_phase7_primary_nav_groups_start_collapsed() -> None:
     assert states["Messages"] is False
     assert states["NCS"] is True
     assert states["Operators"] is True
+    assert states["Configuration"] is True
+    assert "Settings" not in states
 
 
 def test_main_messages_navigation_routes_to_requested_surface(monkeypatch) -> None:

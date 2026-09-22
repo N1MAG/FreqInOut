@@ -1330,7 +1330,9 @@ class _LegacySOPTab(QWidget):
         configured = self._configured_softwares()
         if not configured:
             self.add_row_btn.setEnabled(False)
-            self.hidden_rows_label.setText("No software configured in Settings. Configure JS8/VarAC/FLDigi first.")
+            self.hidden_rows_label.setText(
+                "No software configured in Configuration. Configure JS8/VarAC/FLDigi first."
+            )
             self._update_profile_action_styles()
             return
         self.add_row_btn.setEnabled(True)
@@ -6822,7 +6824,9 @@ class SOPTab(_LegacySOPTab):
             elif not self._hf_group_uses_condition_levels(group_name):
                 cond_widget.set_normalized_value("ALL", emit=False)
                 cond_widget.setEnabled(False)
-                cond_widget.setToolTip("Group must have 'Use Condition Levels' enabled in Settings for HF SOP actions.")
+                cond_widget.setToolTip(
+                    "Group must have 'Use Condition Levels' enabled in Configuration for HF SOP actions."
+                )
             else:
                 cond_widget.setEnabled(True)
                 cond_widget.setToolTip("Applies only when the group's current condition level matches this selection.")
@@ -6861,7 +6865,9 @@ class SOPTab(_LegacySOPTab):
             idx_all = cond_widget.findData("ALL")
             cond_widget.setCurrentIndex(idx_all if idx_all >= 0 else 0)
             cond_widget.setEnabled(False)
-            cond_widget.setToolTip("Group must have 'Use Condition Levels' enabled in Settings for HF SOP actions.")
+            cond_widget.setToolTip(
+                "Group must have 'Use Condition Levels' enabled in Configuration for HF SOP actions."
+            )
         else:
             cond_widget.setEnabled(True)
             cond_widget.setToolTip("Applies only when the group's current condition level matches this selection.")
@@ -8141,7 +8147,7 @@ class SOPTab(_LegacySOPTab):
                 raise ValueError(f"Row {r + 1}: Group is required for Local Comms SOP.")
             if category == self.CAT_HF and not self._hf_group_uses_condition_levels(group_name):
                 raise ValueError(
-                    f"Row {r + 1}: Group '{group_name}' must have Use Condition Levels enabled in Settings."
+                    f"Row {r + 1}: Group '{group_name}' must have Use Condition Levels enabled in Configuration."
                 )
             if not resource:
                 raise ValueError(f"Row {r + 1}: Resource is required.")
@@ -8244,7 +8250,9 @@ class SOPTab(_LegacySOPTab):
             if not group_name:
                 raise ValueError(f"Row {row + 1}: Group is required for this SOP.")
             if category == self.CAT_HF and not self._hf_group_uses_condition_levels(group_name):
-                raise ValueError(f"Row {row + 1}: Group '{group_name}' must have Use Condition Levels enabled in Settings.")
+                raise ValueError(
+                    f"Row {row + 1}: Group '{group_name}' must have Use Condition Levels enabled in Configuration."
+                )
             if not resource:
                 raise ValueError(f"Row {row + 1}: Resource is required.")
             if not action_key:

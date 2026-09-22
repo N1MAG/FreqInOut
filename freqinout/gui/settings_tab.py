@@ -19797,7 +19797,7 @@ class SettingsTab(QWidget):
                 elif observer_mode and key != "js8call":
                     chk.setToolTip("Unavailable for a receive-only SDR profile.")
                 elif js8_already_assigned:
-                    chk.setToolTip("Manage this receiver-owned JS8Call instance in Settings > Software.")
+                    chk.setToolTip("Manage this receiver-owned JS8Call instance in Configuration > Software.")
                 elif canonical_backed:
                     chk.setToolTip(
                         "This radio uses canonical software identities. Use Edit Apps to review and change the complete app setup."
@@ -22109,7 +22109,7 @@ class SettingsTab(QWidget):
         display_name_user_edited = False
         last_catalog_display_name = ""
 
-        role_group = QGroupBox("Software FIO found in Settings")
+        role_group = QGroupBox("Software FIO found in Configuration")
         role_layout = QVBoxLayout(role_group)
         role_layout.setSpacing(4)
         role_checks: Dict[str, QCheckBox] = {}
@@ -27165,7 +27165,7 @@ class SettingsTab(QWidget):
             observer_mode = str(device_class_combo.currentData() or "").strip().lower() == "observer"
             if selected is None:
                 operating_model_capabilities.setText(
-                    "Resolved behavior: unavailable. Restore or create a compatible behavior in Settings > Main."
+                    "Resolved behavior: unavailable. Restore or create a compatible behavior in Configuration > Main."
                 )
                 operating_model_why_label.setText(
                     "Why: FIO needs an explicit feature and safety boundary before this radio can be saved."
@@ -34786,7 +34786,7 @@ class SettingsTab(QWidget):
                     self,
                     "Receiver JS8Call Setup",
                     "The receiver and receive-only model were saved, but its distinct JS8Call instance was not added. "
-                    f"Review the endpoint and profile paths in Settings > Software, then retry. {exc}",
+                    f"Review the endpoint and profile paths in Configuration > Software, then retry. {exc}",
                 )
                 self._refresh_multi_radio_tables()
                 return False
@@ -34796,7 +34796,7 @@ class SettingsTab(QWidget):
                     self,
                     "Receiver JS8Call Setup",
                     "The receiver and receive-only model were saved, but its distinct JS8Call instance was not added. "
-                    "Open Settings > Software > JS8Call to retry; the primary JS8Call instance was not changed.",
+                    "Open Configuration > Software > JS8Call to retry; the primary JS8Call instance was not changed.",
                 )
                 self._refresh_multi_radio_tables()
                 return False
@@ -34810,7 +34810,7 @@ class SettingsTab(QWidget):
                 QMessageBox.warning(
                     self,
                     "Receiver Activation",
-                    "The receiver setup was saved safely, but FIO could not activate it. Use Radio Settings > Use Radio to retry.",
+                    "The receiver setup was saved safely, but FIO could not activate it. Use Configuration > Radios > Use Radio to retry.",
                 )
                 self._refresh_multi_radio_tables()
                 return False
@@ -35321,7 +35321,7 @@ class SettingsTab(QWidget):
             QMessageBox.warning(
                 self,
                 "Guided Add Radio",
-                "FIO could not open Guided Add Radio. Check the log for details, then try Settings > Radios again.",
+                "FIO could not open Guided Add Radio. Check the log for details, then try Configuration > Radios again.",
             )
             return
         if not created:
@@ -40268,7 +40268,7 @@ class SettingsTab(QWidget):
                 QMessageBox.warning(
                     self,
                     "GPG",
-                    f"{message}\n\nInstall GPG or set the executable path in Settings.",
+                    f"{message}\n\nInstall GPG or set the executable path in Configuration.",
                 )
             return
 

@@ -120,7 +120,7 @@ def test_compact_navigation_mirrors_master_groups_and_uses_owned_icons() -> None
         ("Resources", "Resources"),
         ("Plans", "Plan Builder"),
         ("Station", "Station"),
-        ("Settings", "Settings"),
+        ("Config", "Configuration"),
         ("Help", "Help"),
     ]
     icon_root = Path("assets/icons/navigation")
@@ -142,6 +142,9 @@ def test_compact_navigation_mirrors_master_groups_and_uses_owned_icons() -> None
         "JS8Call",
         "VHF/UHF",
     ]
+    assert MainWindow._nav_group_for_label("Main", "Settings") == "Configuration"
+    config_spec = next(spec for spec in specs if spec[2] == "Configuration")
+    assert config_spec[:3] == ("Config", "Configuration", "Configuration")
 
     source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
     assert "Qt.ToolButtonTextUnderIcon" in source

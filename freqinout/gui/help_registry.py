@@ -151,7 +151,7 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
     "tab.settings": HelpContext(
         key="tab.settings",
         anchor="settings",
-        title="Settings Help",
+        title="Configuration Help",
         summary="Station identity, software choices, paths, scheduler help, launch readiness, and troubleshooting.",
     ),
     "settings.operator": HelpContext(
@@ -194,13 +194,19 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         key="settings.hf-groups",
         anchor="settings-hf-groups-details",
         title="Operating Groups Help",
-        summary="Reusable group context for HF and Local Nets, expected HF behavior, and conflict-aware schedule inputs.",
+        summary="Required HF scheduling foundation: named groups, band/mode/frequency configurations, VFO, FLDigi expectations, auto-tune, condition levels, and known-group enablement.",
     ),
     "settings.local-comms": HelpContext(
         key="settings.local-comms",
         anchor="settings-local-comms-details",
         title="Local Comms Groups Help",
         summary="Local group profiles, resources, targets, and notes used for nearby communications planning.",
+    ),
+    "settings.local-mesh": HelpContext(
+        key="settings.local-mesh",
+        anchor="settings-local-mesh",
+        title="Local Mesh Help",
+        summary="Configure saved MeshCore or Meshtastic connections, supported transports, Inbox/Map ingest, and channel policy safely.",
     ),
     "settings.varac": HelpContext(
         key="settings.varac",
@@ -213,6 +219,12 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         anchor="settings-message-auth",
         title="Message Auth Help",
         summary="Plain-language signature and checksum verification, JS8 MsgAuth keys scoped by group/callsign, trusted hashes, GPG keys, and signing identity.",
+    ),
+    "settings.condition-alerts": HelpContext(
+        key="settings.condition-alerts",
+        anchor="settings-condition-alerts",
+        title="Condition Alerts Help",
+        summary="Configure trusted received-message rules that prompt or, when explicitly allowed, apply matching SOP condition layers.",
     ),
     "settings.launch-control": HelpContext(
         key="settings.launch-control",

@@ -80,7 +80,7 @@ def test_mesh_health_config_error_projects_actionable_lifecycle() -> None:
     )
 
     assert snapshot.lifecycle_state == SOURCE_CONNECTION_CONFIG_ERROR
-    assert "Settings > Local Mesh" in snapshot.guidance
+    assert "Configuration > Main > Local Mesh" in snapshot.guidance
 
 
 def test_mesh_health_disabled_projects_disabled_lifecycle() -> None:

@@ -1455,6 +1455,7 @@ class ControlFreqTab(QWidget):
         self.prop_summary_label.setStyleSheet("font-weight: 600;")
         prop_layout.addWidget(self.prop_summary_label)
         self.prop_band_ladder_container = QWidget()
+        self.prop_band_ladder_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self.prop_band_ladder_layout = QHBoxLayout(self.prop_band_ladder_container)
         self.prop_band_ladder_layout.setContentsMargins(0, 0, 0, 0)
         self.prop_band_ladder_layout.setSpacing(8)
@@ -9595,7 +9596,7 @@ class ControlFreqTab(QWidget):
             self._set_prop_window_headers()
             self._set_table_rows(self.prop_table, [])
             self.prop_hint.setText(
-                "Tip: Set Grid 6 in Settings to enable forecast."
+                "Tip: Set Grid 6 in Configuration to enable forecast."
             )
             self._set_prop_summary("RF Readiness: set operator grid to enable forecast.")
             self._render_prop_band_ladder((), target_label="", evidence_label="")
@@ -9802,6 +9803,7 @@ class ControlFreqTab(QWidget):
         if layout is None:
             return
         self._clear_widget_layout(layout)
+        self.prop_band_ladder_container.setMinimumHeight(0)
         if not scores:
             empty = QLabel("No current band recommendation")
             empty.setWordWrap(True)
@@ -9842,8 +9844,23 @@ class ControlFreqTab(QWidget):
             evidence.setStyleSheet(f"color: {theme.get('text_muted', '#5B6570')};")
             evidence.setWordWrap(True)
             card_layout.addWidget(evidence)
+            # The compact forecast used to let Qt compress these cards below
+            # their layout height when display or font scaling was increased.
+            # Preserve enough vertical room for the title, meter, and evidence.
+            card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+            card.setMinimumHeight(card_layout.sizeHint().height())
             layout.addWidget(card, 1)
         layout.addStretch(1)
+        layout.activate()
+        card_heights = [
+            card.layout().sizeHint().height()
+            for card in self.prop_band_ladder_container.findChildren(
+                QFrame, "controlfreqBandLadderCard", Qt.FindDirectChildrenOnly
+            )
+            if card.layout() is not None
+        ]
+        if card_heights:
+            self.prop_band_ladder_container.setMinimumHeight(max(card_heights))
 
     def _format_prop_readiness_summary(
         self,
@@ -10098,9 +10115,17 @@ class ControlFreqTab(QWidget):
             if details_visible and hasattr(self, "prop_table"):
                 self._fit_table_height_to_rows(self.prop_table, min_rows=0, max_rows=6, empty_rows=0)
             box.setMinimumHeight(0)
+            box.setMaximumHeight(16777215)
+            if box.layout() is not None:
+                box.layout().activate()
             height = max(96, int(box.sizeHint().height()) + 8)
-            box.setMaximumHeight(min(height, 460 if details_visible else 230))
+            box.setMinimumHeight(height)
+            box.updateGeometry()
+            bottom_row = getattr(self, "bottom_row", None)
+            if bottom_row is not None:
+                bottom_row.updateGeometry()
         except Exception:
+            box.setMinimumHeight(0)
             box.setMaximumHeight(16777215)
 
     def _append_section_row(self, text: str) -> None:

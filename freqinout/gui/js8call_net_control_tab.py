@@ -2026,7 +2026,7 @@ class JS8CallNetControlTab(QWidget):
             return
         mycall = self._my_callsign()
         if not mycall:
-            QMessageBox.warning(self, "Callsign", "Configure your callsign in Settings.")
+            QMessageBox.warning(self, "Callsign", "Configure your callsign in Configuration.")
             return
         text = f"{mycall}: {group} E? {self._spotter_form}"
         resp = QMessageBox.question(
@@ -2054,7 +2054,7 @@ class JS8CallNetControlTab(QWidget):
             return
         mycall = self._my_callsign()
         if not mycall:
-            QMessageBox.warning(self, "Callsign", "Configure your callsign in Settings.")
+            QMessageBox.warning(self, "Callsign", "Configure your callsign in Configuration.")
             return
         text = f"{mycall}: {cs} E? {self._spotter_form}"
         resp = QMessageBox.question(

@@ -1189,7 +1189,9 @@ class StationBbsTab(QWidget):
                 settings_nav_context="radios",
             )
             return
-        self.radio_service_status.setText("Open Settings → Radios to configure the selected radio's native VarAC paths.")
+        self.radio_service_status.setText(
+            "Open Configuration → Radios to configure the selected radio's native VarAC paths."
+        )
 
     def _set_location_editor_visible(self, visible: bool) -> None:
         if not visible:

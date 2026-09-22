@@ -2,6 +2,13 @@
 
 Use this checklist before pushing a release commit, tagging, or building installers.
 
+For the one-time promotion that makes multi-rig 2.0 the public base release,
+the binding publication, single-rig-upgrade, documentation/help, dependency,
+installer, runtime-only export, qualification, and rollback gates are in
+`docs/internal/public_2_0_runtime_release_plan.md`. Do not publish the private
+WIP history or begin that promotion until the maintainer explicitly declares
+the release candidate ready.
+
 ## 1) Versioning
 
 - Update `freqinout/version.py` (`__version__`).

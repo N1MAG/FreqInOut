@@ -1,5 +1,136 @@
 # UI Regression Work Log
 
+## 2026-09-22 — In-app help coverage and navigation alignment
+
+Observable acceptance route: open Help and use the table of contents to reach
+FIO Spotter, Station Control Center, Local Reports, Radios, Guided Add/Edit
+Radio, Local Mesh, and Condition Alerts. From Configuration, the Local Mesh and
+Condition Alerts Help actions must open their specific sections rather than the
+generic guide overview. The Main Menu reference must use the current left-rail
+labels, and every internal guide link must resolve to one unique anchor.
+
+The guide now documents the current grouped navigation, the seven-step atomic
+Add/Edit Radio workflow, radio versus software ownership, station-scoped FIO
+Spotter and BBS responsibilities, receive-only MeshCore/Meshtastic transport,
+multi-device Control Center state, local-report review, and the three Condition
+Alert action modes. Messages explains mesh Inbox/Map evidence, and the current
+top-level BBS service is distinguished from older Managed BBS Library wording.
+Local Mesh and Condition Alerts now have real registered contextual-help
+targets. Major sections that do not currently expose a local Help button remain
+available from the guide table of contents; no unrelated screen controls were
+added during this documentation slice.
+
+Production review then exposed a render-completion defect hidden by the earlier
+read-only snapshot assertion: `QTextBrowser.setHtml()` was called with an
+unsupported second base-URL argument. The worker successfully read the guide,
+then raised before rendering it or building the table of contents, leaving the
+initial `Loading the FreqInOut guide…` placeholder indefinitely. The completion
+handler now sets the document base URL separately, renders with the supported
+one-argument call, builds the table of contents, and replaces the placeholder
+with an actionable display error if rendering itself fails. The regression now
+requires rendered guide text, a populated table of contents, and the expected
+base URL—not merely a completed file read.
+
+The main navigation's station-setup group is now labeled
+`Configuration`, with `Config` used only on the narrow compact rail and
+`Configuration` retained as its accessible name. The internal `Settings`
+screen key, persisted data names, and component-specific settings terminology
+remain unchanged. Existing expanded/collapsed navigation preference is migrated
+from the former `Settings` group key. The guide, contextual-help title, Plan
+Builder assignment guidance, status prompts, and other operator-facing routes
+now consistently direct users to Configuration while preserving the real
+`Save Settings` control and application-specific settings names.
+
+Help PDF export now resolves each existing local guide image to an explicit
+absolute file URL before Qt builds the document. This removes the broken-image
+placeholder Qt previously printed for the FIO logo (and applies the same rule
+to other bundled guide images) while leaving remote and embedded image URLs
+unchanged. The on-screen guide and exported PDF now consume the same resolved
+document, preventing viewer/export asset drift.
+
+The guide's long-form reference sections now use stable reference labels in
+place of conversational prompts. The navigation overview is `Tabs Explained`
+with `Purpose`, `What's There`, and `Why It Matters`; the detailed index is
+`Sections and Sub-Tabs` with `Description`. Repeated labels such as `Why you
+use it`, `Explain this to me`, `Plain-language workflow`, and question-form
+behavior headings are now `Operational use`, `Overview`, `Typical workflow`,
+and named behavior or diagnostic references. Quick Start and live operating
+workflows remain procedural where ordered operator action is the subject.
+
+Operating Groups are now a distinct Quick Start prerequisite before HF Daily,
+HF Nets, and Plan Builder. The former Quick Start link targeted an ID on a
+table row, which Qt did not expose as a reliable scroll destination; it now
+targets the registered `settings-hf-groups-details` heading used by contextual
+Help. The reference section now covers scheduling dependency, the minimum
+useful configuration, multiple band/mode configurations, known-group preview
+and enablement, accepted frequency formats, VFO and FLDigi expectations,
+Auto-Tune on QSY, group-scoped condition levels and Fast Light naming, change
+impact, and the current control labels. A rendered-Help regression confirms the
+Operating Groups heading can be selected through its anchor.
+
+Work packages and exact model ownership:
+
+- `gpt-6-astra`, high reasoning: coverage matrix, implementation comparison,
+  guide/registry/test/spec integration, delegated-audit reconciliation, and
+  final acceptance.
+- `gpt-5.6-terra`, low reasoning: read-only initial coverage audit and
+  post-change operator-language/wiring audit. The primary accepted its stale
+  navigation, missing-section, BBS/Mesh, static fallback, Condition Alert
+  wording, and stale Map cross-link findings. It also removed unreachable
+  speculative context registrations instead of claiming UI wiring that was not
+  present.
+
+Acceptance evidence: help registry contains `39` contexts; the guide contains
+`107` unique anchors; all `29` literal contextual-help callers are registered;
+focused contextual-help tests `8 passed`; adjacent Help/shell/FIO Spotter tests
+`152 passed`; the combined Configuration-label, reference-language, and
+Help/PDF regression set reports `304 passed`; changed Python files compile;
+`git diff --check` passes.
+The 76-page PDF was rendered to PNG for visual review: the FIO logo is present
+on page 1 and the bundled support image is present on page 76. Existing
+operator edits to the DOCX guide and rendered upgrade output were not touched.
+
+## 2026-09-21 — Public 2.0 runtime-only promotion plan recorded
+
+The maintainer selected multi-rig 2.0 as the future public base application,
+with single-radio operation retained as a supported configuration. Public
+`N1MAG/FreqInOut` remains a user runtime distribution: application source,
+runtime assets, user documentation, dependencies, installers, licenses, and
+release notes only. Tests, engineering tools, specifications, internal
+worklogs, diagnostic evidence, and the private WIP history remain private.
+
+`public_2_0_runtime_release_plan.md` now defines a private reconciliation plus
+allowlisted public export; current-single-rig backup/consent/idempotence/
+rollback acceptance; README and contextual-help completeness; runtime
+requirements parity; install/update/uninstall and packaging verification;
+2.0 metadata/provenance; clean-host qualification; and final public-tree audit.
+The plan is deliberately dormant until the maintainer explicitly declares the
+release candidate ready, so small private review patches may continue.
+
+Planning review found that all 37 registered contextual-help entries resolve to
+real guide anchors, while the Local Mesh and Condition Alerts Settings callers
+currently fall back to generic Help and must be completed before release. It
+also identified a blocking migration-consent contradiction between the Linux
+upgrade guide and installer finalization, plus private-WIP defaults throughout
+the current public-facing documentation. Those are now explicit release gates.
+
+Work packages and exact model ownership:
+
+- `gpt-6-astra`, high reasoning: publication architecture, runtime boundary,
+  upgrade/data-safety gates, help/dependency/installer/release checklist,
+  delegated-audit reconciliation, and final documentation integration.
+- `gpt-5.6-terra`, low reasoning: read-only release-readiness audit across
+  README/help, dependencies, installers, packaging, migration documentation,
+  existing tests, and remaining external qualification. The primary accepted
+  its migration-consent, artifact provenance, clean-host E2E, launcher
+  ownership, public-channel, and documentation-parity findings.
+
+Acceptance evidence: documentation-only change; help-registry audit reports
+`37` registered contexts, `100` guide anchors, and zero missing registered
+anchors; static caller audit reports the two release-gated generic fallbacks
+named above. No public branch, runtime code, installer behavior, production
+configuration/data, external application, tag, or release artifact changed.
+
 ## 2026-09-21 — Legacy VarAC argv and managed Wine-runtime recovery
 
 Observable acceptance route: restart FIO with an older saved FT-DX10/FT-710

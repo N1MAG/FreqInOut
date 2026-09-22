@@ -262,7 +262,7 @@ class FreqPlannerTab(QWidget):
         self.save_sop_plan_btn = QPushButton("Save SOP Plan")
         self.rename_plan_btn = QPushButton("Rename Plan")
         self.delete_plan_btn = QPushButton("Delete Plan")
-        self.assign_plan_btn = QPushButton("Assign in Settings")
+        self.assign_plan_btn = QPushButton("Assign in Configuration")
         self.new_plan_btn.clicked.connect(self._on_new_plan_clicked)
         self.new_plan_btn.setToolTip("Start a new Frequency Plan from the selected Daily, Net, and SOP layers.")
         plan_select_row.addWidget(self.new_plan_btn, 0, 3)
@@ -281,7 +281,7 @@ class FreqPlannerTab(QWidget):
         self.assign_plan_btn.clicked.connect(self._on_assign_plan_clicked)
         self.assign_plan_btn.setEnabled(False)
         self.assign_plan_btn.setToolTip(
-            "Select or save a Frequency Plan, then use Settings > Schedule Assignment to assign it with RF Guard."
+            "Select or save a Frequency Plan, then use Configuration > Radios > Schedule Assignment to assign it with RF Guard."
         )
         plan_select_row.addWidget(self.assign_plan_btn, 0, 7)
         self.plan_select_controls = [
@@ -983,28 +983,30 @@ class FreqPlannerTab(QWidget):
         if plan is None:
             plan = self._selected_frequency_plan_row()
         if not isinstance(plan, Mapping):
-            self.assign_plan_btn.setText("Assign in Settings")
+            self.assign_plan_btn.setText("Assign in Configuration")
             self.assign_plan_btn.setEnabled(False)
             self.assign_plan_btn.setStyleSheet(button_style("muted", theme))
             self.assign_plan_btn.setToolTip(
-                "Select or save a Frequency Plan, then use Settings > Schedule Assignment to assign it with RF Guard."
+                "Select or save a Frequency Plan, then use Configuration > Radios > Schedule Assignment to assign it with RF Guard."
             )
             return
         assigned_ids = self._assigned_radio_ids_for_plan(plan)
         plan_name = str(plan.get("name") or "Frequency Plan").strip()
         self.assign_plan_btn.setEnabled(True)
         if assigned_ids:
-            self.assign_plan_btn.setText("Assigned in Settings")
+            self.assign_plan_btn.setText("Assigned in Configuration")
             self.assign_plan_btn.setStyleSheet(button_style("muted", theme))
             labels = ", ".join(self._radio_label_for_id(radio_id) for radio_id in assigned_ids[:3])
             if len(assigned_ids) > 3:
                 labels += f", +{len(assigned_ids) - 3}"
-            self.assign_plan_btn.setToolTip(f"'{plan_name}' is assigned to {labels}. Open Settings to review or change assignment.")
+            self.assign_plan_btn.setToolTip(
+                f"'{plan_name}' is assigned to {labels}. Open Configuration to review or change assignment."
+            )
         else:
             self.assign_plan_btn.setText("Assign with RF Guard")
             self.assign_plan_btn.setStyleSheet(button_style("eligible_warning", theme))
             self.assign_plan_btn.setToolTip(
-                f"'{plan_name}' is not assigned to a radio yet. Open Settings > Schedule Assignment to assign it with RF Guard."
+                f"'{plan_name}' is not assigned to a radio yet. Open Configuration > Radios > Schedule Assignment to assign it with RF Guard."
             )
 
     def _on_source_set_selected(self, *_args: Any) -> None:
@@ -1290,7 +1292,7 @@ class FreqPlannerTab(QWidget):
     def _configured_group_help_text(self) -> str:
         groups = sorted(self._configured_operating_group_names())
         if not groups:
-            return "No Operating Groups are configured in Settings."
+            return "No Operating Groups are configured in Configuration."
         return "Configured Operating Groups: " + ", ".join(groups)
 
     @staticmethod
@@ -1708,7 +1710,7 @@ class FreqPlannerTab(QWidget):
         assigned_ids = self._assigned_radio_ids_for_plan(plan)
         if not assigned_ids:
             self._update_assign_plan_action_state(plan=plan)
-            return f"'{plan_name}' is not assigned to a radio yet. Use Assign in Settings before relying on this plan operationally."
+            return f"'{plan_name}' is not assigned to a radio yet. Use Assign in Configuration before relying on this plan operationally."
         self._update_assign_plan_action_state(plan=plan)
         if len(assigned_ids) > 1:
             labels = ", ".join(self._radio_label_for_id(radio_id) for radio_id in assigned_ids[:3])
@@ -1732,7 +1734,9 @@ class FreqPlannerTab(QWidget):
     def _on_assign_plan_clicked(self) -> None:
         plan = self._selected_frequency_plan_row()
         if not plan:
-            self.frequency_plan_action_hint_label.setText("Select or save a Frequency Plan before assigning it in Settings.")
+            self.frequency_plan_action_hint_label.setText(
+                "Select or save a Frequency Plan before assigning it in Configuration."
+            )
             return
         try:
             plan_id = int(plan.get("id") or 0)
@@ -1746,7 +1750,7 @@ class FreqPlannerTab(QWidget):
         ):
             return
         self.frequency_plan_action_hint_label.setText(
-            f"Assign '{str(plan.get('name') or 'Frequency Plan')}' from Settings > Assign Schedule. "
+            f"Assign '{str(plan.get('name') or 'Frequency Plan')}' from Configuration > Radios > Schedule Assignment. "
             "Choose the radio and save with RF Guard before the schedule changes."
         )
 
@@ -2161,7 +2165,9 @@ class FreqPlannerTab(QWidget):
         elif state == "warning":
             lines.append(f"RF Guard found warning(s) for this {plan_kind}. Review the checklist before assignment or save.")
         elif state in {"off", "not_enforced"} or rf_state == "not_enforced":
-            lines.append("RF Guard could not run against a selected radio here. Assignment checks are still required in Settings.")
+            lines.append(
+                "RF Guard could not run against a selected radio here. Assignment checks are still required in Configuration."
+            )
         else:
             lines.append(f"RF Guard passed for {schedule_count} effective window(s).")
         lane_summary = self._radio_lane_summary_for_payload(plan_payload or {})
@@ -2211,13 +2217,13 @@ class FreqPlannerTab(QWidget):
         text = str(message or "")
         lower = text.lower()
         if "antenna support does not include" in lower:
-            return "Open Settings > Radios and adjust the radio antenna bands or choose a plan layer on a supported band."
+            return "Open Configuration > Radios and adjust the radio antenna bands or choose a plan layer on a supported band."
         if "prevent band overlap" in lower or "would both be assigned on" in lower:
-            return "Open Settings > Radios and separate the assignments, change one plan window, or adjust the RF Guard group/mode."
+            return "Open Configuration > Radios and separate the assignments, change one plan window, or adjust the RF Guard group/mode."
         if "advanced guard" in lower or ("within" in lower and "hz" in lower):
-            return "Open Settings > Radios and review the Advanced RF Guard spacing or move one schedule window/frequency."
+            return "Open Configuration > Radios and review the Advanced RF Guard spacing or move one schedule window/frequency."
         if "observer" in lower or "receive-only" in lower:
-            return "Open Settings > Radios and assign a receive-only plan or change the radio role."
+            return "Open Configuration > Radios and assign a receive-only plan or change the radio role."
         return "Review the affected plan window and radio assignment before saving."
 
     def _set_rf_guard_resolution_available(self, enabled: bool) -> None:
@@ -2225,7 +2231,7 @@ class FreqPlannerTab(QWidget):
             return
         self.resolve_rf_guard_btn.setEnabled(bool(enabled))
         self.resolve_rf_guard_btn.setToolTip(
-            "Open Settings > Assign Schedule to resolve the RF Guard issue(s)."
+            "Open Configuration > Radios > Schedule Assignment to resolve the RF Guard issue(s)."
             if enabled
             else "Review RF Guard issues first, then open the radio assignment area to resolve them."
         )
@@ -2372,11 +2378,11 @@ class FreqPlannerTab(QWidget):
                     )
                 if str(purpose or "").strip().lower() == "assign":
                     self.frequency_plan_action_hint_label.setText(
-                        f"Opened Settings > Assign Schedule for '{label}'. Choose the radio and save with RF Guard."
+                        f"Opened Configuration > Radios > Schedule Assignment for '{label}'. Choose the radio and save with RF Guard."
                     )
                 else:
                     self.frequency_plan_action_hint_label.setText(
-                        f"Opened Settings > Assign Schedule to resolve RF Guard issues for {label}."
+                        f"Opened Configuration > Radios > Schedule Assignment to resolve RF Guard issues for {label}."
                     )
                 return True
             except Exception as exc:
@@ -2393,7 +2399,7 @@ class FreqPlannerTab(QWidget):
         if self._open_schedule_assignment_settings(plan_name=plan_name, plan_id=plan_id):
             return
         self.frequency_plan_action_hint_label.setText(
-            "Open Settings > Radios > Schedule Assignment to resolve the RF Guard issue(s)."
+            "Open Configuration > Radios > Schedule Assignment to resolve the RF Guard issue(s)."
         )
 
     def _on_review_rf_guard_clicked(self) -> None:
@@ -6003,7 +6009,7 @@ class FreqPlannerTab(QWidget):
                 plan_payload=selected_plan,
             )
             self.frequency_plan_action_hint_label.setText(
-                "Radio Windows shows assigned plan windows by radio. Assign this plan in Settings to review cross-radio windows here."
+                "Radio Windows shows assigned plan windows by radio. Assign this plan in Configuration to review cross-radio windows here."
             )
             return
 
