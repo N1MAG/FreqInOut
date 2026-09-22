@@ -1100,6 +1100,14 @@ selected-radio start, row `Start`, and manual launch:
 - process-only applications are matched by the canonical executable plus the
   radio-owned launch arguments/profile selector, so another radio's process is
   neither credited nor duplicated;
+- presentation-only `-title` values never participate in process identity;
+  FLMsg retains its radio-owned native root and FLAmp retains its config root,
+  ARQ endpoint, and XML-RPC endpoint as the required duplicate-prevention
+  selectors even when an older launcher split the title into multiple argv
+  values;
+- Linux process inventory inspects exact and delimiter-qualified native names
+  such as `flamp-2.2.14`, then requires the saved executable argv and the same
+  radio-owned selectors before crediting that process;
 - FLRig, FLDigi, and JS8Call additionally receive a fresh configured-host/port
   probe for that exact radio endpoint before a spawn is authorized;
 - a reachable configured endpoint is `already running` even when the process

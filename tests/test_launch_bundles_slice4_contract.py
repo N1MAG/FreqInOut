@@ -18,6 +18,7 @@ from freqinout.core.config_backup import ConfigBackupItem, ConfigBackupResult
 from freqinout.core.launch_bundle_store import LaunchBundleStore, normalize_launch_items
 from freqinout.core.station_launch_planner import LaunchPlan, PlannedInstance, StationLaunchPlanner
 from freqinout.core.launch_orchestrator import LaunchOrchestrator
+from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core import launch_orchestrator as launch_module
 from freqinout.core import js8_storage as js8_storage_module
 
@@ -1427,6 +1428,133 @@ def test_radio_scoped_flamp_without_exact_native_identity_fails_closed() -> None
     assert "radio-scoped launch identity is incomplete" in reason
     assert "--config-dir" in reason
     assert "--arq-server-port" in reason
+
+
+@pytest.mark.parametrize(
+    ("radio_name", "arq_port", "xmlrpc_port", "observed_title"),
+    [
+        ("FTDX-10", "7322", "7362", ("FLAmp", "—", "FTDX-10")),
+        ("FT-710", "7323", "7363", ("FLAmp — FT-710",)),
+    ],
+)
+def test_existing_flamp_process_is_not_duplicated_when_title_tokenization_differs(
+    monkeypatch,
+    tmp_path: Path,
+    radio_name: str,
+    arq_port: str,
+    xmlrpc_port: str,
+    observed_title: tuple[str, ...],
+) -> None:
+    root = f"/home/bill/.nbems/instances/{radio_name}"
+    identity_arguments = (
+        "--config-dir", root,
+        "--arq-server-address", "127.0.0.1",
+        "--arq-server-port", arq_port,
+        "--xmlrpc-server-address", "127.0.0.1",
+        "--xmlrpc-server-port", xmlrpc_port,
+    )
+    record = {
+        "name": "flamp",
+        "exe": "flamp",
+        "exe_path": "/usr/local/bin/flamp",
+        "cmd_tokens": ("flamp",),
+        "cmd_paths": ("/usr/local/bin/flamp", root),
+        "cmdline": (
+            "/usr/local/bin/flamp",
+            *identity_arguments,
+            "-title",
+            *observed_title,
+        ),
+    }
+    monkeypatch.setattr(SoftwareStatusService, "_shared_proc_records", [record])
+    service = SoftwareStatusService(
+        SimpleNamespace(get=lambda _key, default=None: default)
+    )
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / radio_name))
+    from freqinout.core.settings_manager import SettingsManager
+
+    orchestrator = LaunchOrchestrator(SettingsManager())
+    orchestrator.status = service
+    item = {
+        "name": "FLAmp",
+        "instance_identity": f"fast-light:{radio_name.casefold()}:flamp",
+        "launch_path_override": "/usr/local/bin/flamp",
+        "launch_arguments": [
+            *identity_arguments,
+            "-title",
+            f"FLAmp — {radio_name}",
+        ],
+    }
+
+    assert orchestrator._configured_instance_process_running(item) is True
+
+    monkeypatch.setattr(
+        launch_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail(
+            "an existing radio-owned FLAmp process must not be duplicated"
+        ),
+    )
+    orchestrator._active = True
+    orchestrator._process_preflight_pending = False
+    orchestrator._cancel_requested = False
+    orchestrator._queue = [item]
+    orchestrator._index = 0
+    orchestrator._results = []
+    orchestrator._blocked_dependency_for = lambda _item: None
+    orchestrator._schedule_advance_queue = lambda _delay=0: None
+
+    orchestrator._advance_queue()
+
+    assert orchestrator._results[0]["status"] == "already_running"
+
+    item["launch_arguments"] = [
+        *("7324" if value == arq_port else value for value in identity_arguments),
+        "-title",
+        f"FLAmp — {radio_name}",
+    ]
+    assert orchestrator._configured_instance_process_running(item) is False
+
+
+def test_existing_flmsg_process_identity_ignores_presentation_title(monkeypatch) -> None:
+    root = "/home/bill/.nbems/instances/FT-710"
+    record = {
+        "name": "flmsg",
+        "exe": "flmsg",
+        "exe_path": "/usr/local/bin/flmsg",
+        "cmd_tokens": ("flmsg",),
+        "cmd_paths": ("/usr/local/bin/flmsg", root),
+        "cmdline": (
+            "/usr/local/bin/flmsg",
+            "--flmsg-dir",
+            root,
+            "-title",
+            "FLMsg",
+            "—",
+            "FT-710",
+        ),
+    }
+    monkeypatch.setattr(SoftwareStatusService, "_shared_proc_records", [record])
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator.status = SoftwareStatusService(
+        SimpleNamespace(get=lambda _key, default=None: default)
+    )
+    item = {
+        "name": "FLMsg",
+        "instance_identity": "fast-light:ft-710:flmsg",
+        "launch_path_override": "/usr/local/bin/flmsg",
+        "launch_arguments": [
+            "--flmsg-dir",
+            root,
+            "-title",
+            "FLMsg — FT-710",
+        ],
+    }
+
+    assert orchestrator._configured_instance_process_running(item) is True
+
+    item["launch_arguments"][1] = "/home/bill/.nbems/instances/FTDX-10"
+    assert orchestrator._configured_instance_process_running(item) is False
 
 
 def test_canonical_lowercase_component_dependency_still_orders_launch_apps() -> None:

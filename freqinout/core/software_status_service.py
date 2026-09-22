@@ -228,6 +228,31 @@ class SoftwareStatusService:
         except Exception:
             return ""
 
+    @staticmethod
+    def _matches_target_process_name(name: str, targets: set[str]) -> bool:
+        """Recognize direct and version-qualified native process names.
+
+        Linux reports the executable's native name, which may differ from the
+        configured symlink used in argv (for example ``flamp-2.2.14`` launched
+        through ``/usr/local/bin/flamp``).  Inspect only an exact target or a
+        delimiter-qualified version/variant so unrelated processes still avoid
+        the comparatively expensive exe/cmdline reads.
+        """
+
+        normalized_name = str(name or "").strip().casefold()
+        if not normalized_name:
+            return False
+        name_stem = normalized_name[:-4] if normalized_name.endswith(".exe") else normalized_name
+        for raw_target in targets:
+            target = str(raw_target or "").strip().casefold()
+            target_stem = target[:-4] if target.endswith(".exe") else target
+            if name_stem == target_stem:
+                return True
+            if name_stem.startswith(target_stem) and len(name_stem) > len(target_stem):
+                if name_stem[len(target_stem)] in {"-", "_", "."}:
+                    return True
+        return False
+
     def _refresh_process_snapshot(self, *, force: bool = False) -> None:
         cls = type(self)
         with cls._shared_proc_lock:
@@ -256,7 +281,7 @@ class SoftwareStatusService:
                     exe_path = ""
                     exe = ""
                     cmdline: Sequence[object] = ()
-                    direct_match = name in target_tokens
+                    direct_match = self._matches_target_process_name(name, target_tokens)
                     # Multi-instance applications commonly share one binary
                     # and differ only by launch arguments (profile/config
                     # roots, rig name, or VarAC INI).  Inspect command lines

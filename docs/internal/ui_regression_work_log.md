@@ -10188,3 +10188,45 @@ unrelated Compose acceptance area and then exited with a native Qt segmentation
 fault while an existing JS8 reader thread was active, so that full-suite gate is
 not claimed. The focused implementation gate passes; Linux operator
 qualification remains open.
+
+## 2026-09-22 — FLAmp title-independent duplicate suppression follow-up
+
+Status: specified and surgically implemented; Linux operator qualification is
+open.
+
+The first launch-preflight correction still allowed two running FLAmp
+instances to be launched again. The operator's process evidence showed that
+both radio-owned processes already carried the correct config directory, ARQ
+endpoint, and FLDigi XML-RPC endpoint. Review found that exact process matching
+also included the presentation-only `-title` value. Older launch paths and
+desktop wrappers may expose that title as one argv value or several values, so
+a harmless title-tokenization difference made an existing process appear
+absent.
+
+The supplied `ps -ef` output exposes argv rather than Linux's native process
+name. A configured `/usr/local/bin/flamp` symlink can therefore run under a
+version-qualified name such as `flamp-2.2.14`, which the optimized inventory
+previously excluded before reading argv. Inventory now admits only exact or
+delimiter-qualified known application names for bounded argv inspection;
+unrelated processes still receive no executable or command-line read, and the
+full radio-specific argument match remains mandatory.
+
+FLMsg/FLAmp duplicate detection now excludes only the trailing title segment
+from process identity. It continues to require the executable and every
+qualified radio selector: `--flmsg-dir` for FLMsg, and `--config-dir` plus both
+FLAmp endpoint pairs for FLAmp. Regression coverage uses the operator's FTDX-10
+and FT-710 paths and ports, covers both single-value and split title argv, and
+confirms that changing the radio-owned ARQ port still rejects the match.
+
+Delegation evidence: the existing `gpt-5.6-luna` launch-safety reviewer was
+re-engaged for a bounded, read-only audit of the supplied Linux process lines.
+It independently identified title tokenization as the remaining false-negative
+boundary; the primary agent reviewed that finding, constrained the fix to
+presentation metadata, and retained every radio-owned native selector.
+
+Acceptance passes the complete launch-bundle and software-status suites with
+**69 passed, 2 platform skips**. The adjacent multi-rig, launch-identity,
+receiver, JS8, managed-directory, Fast Light repair, VarAC, refresh-coordination,
+and status suites pass **121 tests with 2 platform skips**. Changed-file
+compilation and `git diff --check` pass. Linux operator qualification remains
+open.

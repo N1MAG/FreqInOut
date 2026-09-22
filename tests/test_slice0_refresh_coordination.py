@@ -205,8 +205,16 @@ def test_process_inventory_avoids_expensive_details_for_unrelated_processes(monk
 
     unrelated = _Process("unrelated-daemon")
     direct = _Process("fldigi")
+    versioned = _Process(
+        "flamp-2.2.14",
+        [
+            "/usr/local/bin/flamp",
+            "--config-dir",
+            "/home/bill/.nbems/instances/FT-710",
+        ],
+    )
     wrapper = _Process("python3", ["python3", "/opt/tools/commstat.py"])
-    processes = [unrelated, direct, wrapper]
+    processes = [unrelated, direct, versioned, wrapper]
 
     monkeypatch.setattr(
         "freqinout.core.software_status_service.psutil.process_iter",
@@ -222,7 +230,10 @@ def test_process_inventory_avoids_expensive_details_for_unrelated_processes(monk
     # Known multi-instance applications need one bounded command-line read so
     # equal binaries can still be attributed to the correct radio profile.
     assert direct.cmdline_calls == 1
+    assert versioned.exe_calls == 1
+    assert versioned.cmdline_calls == 1
     assert wrapper.exe_calls == 0
     assert wrapper.cmdline_calls == 1
     assert service.program_is_running("FLDigi") is True
+    assert service.program_is_running("FLAmp") is True
     assert service.program_is_running("CommStat") is True

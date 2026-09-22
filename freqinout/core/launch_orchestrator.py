@@ -9,7 +9,7 @@ import sys
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
@@ -2034,6 +2034,7 @@ class LaunchOrchestrator(QObject):
                     arguments = item.get("launch_arguments", ())
                     if not isinstance(arguments, (list, tuple)):
                         arguments = ()
+                    arguments = self._process_identity_arguments(name, arguments)
                     if not arguments:
                         return bool(
                             self.status.cached_program_instance_running(name, target)
@@ -2048,6 +2049,29 @@ class LaunchOrchestrator(QObject):
                 except Exception:
                     return None
         return None
+
+    @staticmethod
+    def _process_identity_arguments(
+        name: str,
+        arguments: Sequence[object],
+    ) -> tuple[str, ...]:
+        """Return only arguments that identify one runnable app instance.
+
+        FLMsg and FLAmp accept ``-title`` as presentation metadata. Older
+        launch paths and desktop wrappers can preserve that title as one argv
+        value or split it into several values, so including it in an exact
+        process match can incorrectly authorize a duplicate. Their qualified
+        native selectors precede ``-title`` and remain mandatory; discard only
+        the trailing presentation segment when comparing process identity.
+        """
+
+        values = tuple(str(value or "").strip() for value in arguments)
+        if str(name or "").strip().casefold() not in {"flmsg", "flamp"}:
+            return values
+        for index, value in enumerate(values):
+            if value.casefold() in {"-title", "--title"}:
+                return values[:index]
+        return values
 
     def _program_running(self, item: Any) -> bool:
         exact = self._configured_instance_process_running(item)

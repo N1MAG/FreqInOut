@@ -442,14 +442,23 @@ identity is intentionally shared.
 Launch execution is conservative when runtime evidence is incomplete. Before
 automatic or manual launch may spawn any application, FIO must publish a fresh
 station-wide process inventory. Process-only applications are identified by
-their saved executable and radio-specific arguments. FLRig, FLDigi, and
-JS8Call also require a fresh probe of the selected instance's configured host
+their saved executable and radio-specific arguments. Presentation-only window
+titles are never part of process identity: FLMsg is matched by its native radio
+root, while FLAmp is matched by its config root plus ARQ and XML-RPC endpoint
+pair even when an older launcher tokenized `-title` differently. FLRig, FLDigi,
+and JS8Call also require a fresh probe of the selected instance's configured host
 and port. A reachable configured endpoint is treated as already active; an
 exact running process with an unreachable configured endpoint is a mismatch,
 not permission to launch another copy. Cold, pending, failed, or timed-out
 evidence fails closed and identifies duplicate prevention as the reason. These
 checks must run off the GUI thread and are identical for startup, selected-radio
 start, row Start, and manual launch.
+
+On Linux, native process discovery must recognize a delimiter-qualified
+version/variant name (for example `flamp-2.2.14`) when its argv executable is
+the saved command (for example `/usr/local/bin/flamp`). This allowance only
+authorizes reading and comparing that candidate's exact argv; it never replaces
+the required radio-specific selector match.
 
 Readiness states have precise meanings:
 
