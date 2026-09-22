@@ -1446,6 +1446,8 @@ class SettingsTab(QWidget):
         self._autofill_preserved_suggestions: Dict[str, List[Dict[str, str]]] = {}
         self._contextual_autofill_buttons: Dict[str, QPushButton] = {}
         self._contextual_autofill_rules: Dict[str, Dict[str, object]] = {}
+        self._contextual_autofill_refresh_deferred = False
+        self._varac_bbs_helper_refresh_deferred = False
         self._software_autofill_thread: QThread | None = None
         self._software_autofill_worker: _SoftwareAutofillWorker | None = None
         self._software_autofill_generation = 0
@@ -2649,6 +2651,9 @@ class SettingsTab(QWidget):
         self.varac_bbs_vault_source_hint_label.setToolTip(hint)
 
     def _autofill_varac_bbs_vault_location_defaults(self, *, force: bool = False) -> None:
+        if self._loading_settings and not force:
+            self._varac_bbs_helper_refresh_deferred = True
+            return
         if self._varac_bbs_vault_editor_loading:
             return
         current_name = (
@@ -2698,6 +2703,9 @@ class SettingsTab(QWidget):
         return ""
 
     def _maybe_autofill_varac_bbs_vault_flamp_relay_dir(self, *, force: bool = False) -> None:
+        if self._loading_settings and not force:
+            self._varac_bbs_helper_refresh_deferred = True
+            return
         if not hasattr(self, "varac_bbs_vault_flamp_relay_dir_edit"):
             return
         suggestion = self._suggest_varac_bbs_vault_flamp_relay_dir()
@@ -15482,8 +15490,12 @@ class SettingsTab(QWidget):
             self._start_software_autofill_request(pending)
 
     def _refresh_contextual_autofill_buttons(self) -> None:
+        if self._loading_settings:
+            self._contextual_autofill_refresh_deferred = True
+            return
         if not hasattr(self, "_contextual_autofill_buttons"):
             return
+        self._contextual_autofill_refresh_deferred = False
         theme = resolve_theme(self.settings)
         for rule_id, btn in self._contextual_autofill_buttons.items():
             rule = self._contextual_autofill_rules.get(rule_id, {})
@@ -16360,6 +16372,10 @@ class SettingsTab(QWidget):
         self._loading_settings = False
         self._settings_dirty = False
         self._set_save_button_state("success")
+        if self._varac_bbs_helper_refresh_deferred:
+            self._varac_bbs_helper_refresh_deferred = False
+            self._autofill_varac_bbs_vault_location_defaults()
+            self._maybe_autofill_varac_bbs_vault_flamp_relay_dir()
         self._refresh_radio_context_labels()
         self._refresh_section_titles()
         self._refresh_contextual_autofill_buttons()
@@ -37320,6 +37336,11 @@ class SettingsTab(QWidget):
     def _on_launch_table_item_changed(self, _item: QTableWidgetItem) -> None:
         if self._loading_settings or self._launch_table_loading:
             return
+        # Columns 0, 3, and 4 are presentation/status columns. In particular,
+        # painting a runtime status in column 4 must not be interpreted as an
+        # operator edit that dirties Settings and rebuilds section navigation.
+        if _item.column() not in {1, 2}:
+            return
         self._sync_launch_cache_from_table()
         if _item.column() == 1:
             row = _item.row()
@@ -37770,8 +37791,9 @@ class SettingsTab(QWidget):
                 status_key = self._launch_control_status_key(name)
                 status_text = self._launch_control_status_text(snapshot.get(status_key, {}))
                 status_item = self.launch_control_table.item(row, 4)
-                if status_item is not None:
-                    status_item.setText(status_text)
+                if status_item is not None and status_item.text() != status_text:
+                    with QSignalBlocker(self.launch_control_table):
+                        status_item.setText(status_text)
 
         # Keep VarAC path tooltip in sync with runtime status.
         if hasattr(self, "varac_path_edit"):

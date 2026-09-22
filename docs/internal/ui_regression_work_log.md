@@ -10090,3 +10090,44 @@ pre-existing unrelated failures: legacy JS8Spotter linked-row mirroring and a
 brittle Guided Add Radio source-string assertion. Those failures are recorded
 and were not waived as evidence for this slice. Changed-file compilation and
 `git diff --check` are required before handoff.
+
+## 2026-09-22 — two-radio UI event-loop contention correction
+
+Status: specified and surgically implemented; Linux operator retest remains
+open.
+
+The attached `freqinout (61).log` recorded 28 watchdog stalls after startup,
+and the five supplied thread captures measured stale UI heartbeats from 8.3 to
+81.1 seconds. This was a real event-loop starvation condition. Configuration
+load reached 54.3 seconds, running-status repaint reached 16.1 seconds, passive
+process inventories reached 5.0 seconds, schedule projections repeatedly
+reached 1–3.6 seconds, and a VarAC guard job exceeded 35 seconds.
+
+The captured main thread identified two direct UI feedback paths. Runtime
+status text written into Launch Control column 4 emitted `itemChanged`, entered
+the operator checkbox handler, dirtied Settings, and rebuilt section
+navigation. Bulk Settings population also emitted contextual Auto-Fill and
+VarAC helper work for each field. Both paths are now batch/signal safe: only
+columns 1 and 2 qualify as operator launch edits, status painting uses
+`QSignalBlocker` and skips unchanged text, and derived helper work runs once
+after `_loading_settings` clears.
+
+The captures also showed recurring ingest workers inside Settings schema and
+Launch Control migration code while the GUI waited in launch-bundle reads.
+`SettingsManager(runtime_worker=True)` now provides the same thread-owned
+cached `get`/`set` surface without repeating startup initialization. Background
+ingest exclusively requests that mode. Launch-bundle `get_bundle` and audit
+listing now use read-only SQLite connections after constructor-time schema
+initialization, so a command-bar or Configuration refresh cannot request a WAL
+journal lock. Passive process inventory TTL is 30 seconds station-wide;
+explicit post-launch/manual refresh still forces immediate discovery.
+
+Acceptance passes the Settings worker/thread-affinity, launch-bundle
+ownership/migration, background ingest, background refresh planner,
+selected-radio software status, endpoint status, and Settings UI source
+contracts: **272 passed, 5 skipped, 1 known deselected**. The deselected test is
+the previously recorded brittle Guided Add Radio source-string assertion and is
+unrelated to these paths. Changed Python compilation and `git diff --check`
+pass. An isolated real-Qt navigation/resize soak also passed with a 628 ms first
+usable shell, 11.6 ms maximum event-loop lag, and 12 ms shutdown. Linux
+production retest remains required before push.

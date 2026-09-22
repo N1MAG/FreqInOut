@@ -14,7 +14,7 @@ from freqinout.core.receiver_software_stack import (
     STANDARD_EXECUTION_SCOPE,
     execution_scope,
 )
-from freqinout.core.sqlite_utils import connect_sqlite
+from freqinout.core.sqlite_utils import connect_sqlite, connect_sqlite_readonly
 
 
 LAUNCH_BUNDLE_SCHEMA_VERSION = 1
@@ -141,6 +141,13 @@ class LaunchBundleStore:
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
+    def _connect_readonly(self) -> sqlite3.Connection:
+        """Open an initialized launch store without journal/schema writes."""
+
+        conn = connect_sqlite_readonly(self.db_path, timeout=0.25)
+        conn.row_factory = sqlite3.Row
+        return conn
+
     @staticmethod
     def _ensure_schema(conn: sqlite3.Connection) -> None:
         conn.executescript(
@@ -187,8 +194,7 @@ class LaunchBundleStore:
 
     def get_bundle(self, radio_profile_id: int, legacy_items: Any = None) -> Dict[str, Any]:
         radio_id = int(radio_profile_id)
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._connect_readonly() as conn:
             header = conn.execute(
                 "SELECT * FROM radio_launch_bundles WHERE radio_profile_id=?", (radio_id,)
             ).fetchone()
@@ -298,8 +304,7 @@ class LaunchBundleStore:
         return self.get_bundle(radio_id)
 
     def list_migration_audit(self) -> List[Dict[str, Any]]:
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._connect_readonly() as conn:
             return [dict(row) for row in conn.execute(
                 "SELECT * FROM launch_bundle_migration_audit ORDER BY occurred_utc ASC"
             ).fetchall()]

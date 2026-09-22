@@ -1144,6 +1144,57 @@ projection immediately; normal Settings Save persists it.
 - Two radios with a shared app launch it once; two distinct configured instances
   launch separately.
 
+### Runtime Configuration responsiveness contract
+
+Production evidence from `freqinout (61).log` and five UI-watchdog captures on
+2026-09-22 confirmed a two-radio event-loop regression. The watchdog recorded
+28 stalls after startup; the supplied captures ranged from 8 to 81 seconds.
+Configuration load reached 54.3 seconds, selected-radio running-status refresh
+reached 16.1 seconds, and passive Linux process inventory repeatedly took 1 to
+5 seconds. The captures showed three overlapping ownership violations rather
+than a paint-only problem:
+
+- a programmatic Launch Control status-cell update re-entered the same handler
+  reserved for operator checkbox edits, dirtied Settings, and rebuilt section
+  titles/navigation;
+- bulk Settings load emitted field-level contextual Auto-Fill and VarAC helper
+  recalculation for each populated field instead of publishing one settled
+  projection; and
+- recurring background-ingest jobs constructed full startup-owned
+  `SettingsManager` instances while UI launch-bundle reads repeated schema and
+  journal-mode initialization against the same database.
+
+The required contract is:
+
+1. Launch Control columns containing application identity, Start actions, or
+   runtime status are presentation-only. Programmatic status painting blocks
+   table signals and never invokes operator-edit persistence, dirty-state, or
+   navigation-health work. Only the Monitor Health and Launch at Startup
+   checkbox columns enter that edit path.
+2. A Settings load is a batch transaction at the presentation boundary.
+   Contextual Auto-Fill buttons and derived VarAC BBS helpers defer while the
+   load flag is active and each recomputes once after all saved values and radio
+   projections have settled.
+3. Application startup is the sole owner of schema creation, version migration,
+   legacy cleanup, and Launch Control adoption. Recurring ingest workers use a
+   thread-owned lightweight Settings view that retains normal `get`/`set`
+   behavior but opens an already initialized database without schema,
+   migration, timezone, or launch-bundle initialization.
+4. Launch-bundle reads are true read paths. Construction or an explicit write
+   ensures the schema; `get_bundle` and audit listing use a read-only SQLite
+   connection and never request `journal_mode`, schema, or foreign-key changes.
+5. Passive process health uses one station-wide cached inventory for at least
+   30 seconds. Endpoint reachability retains its independent shorter cache, and
+   explicit launch/manual refresh remains allowed to force immediate process
+   discovery.
+
+Acceptance requires thread-affinity and worker-write behavior to remain intact,
+launch bundle order/isolation and legacy-fallback semantics to remain intact,
+status painting to be signal-safe, field-load derivation to remain correct, and
+background refresh planning to remain cache-only on timer paths. No radio,
+schedule, software identity, message, or publication semantics may change as a
+side effect of this correction.
+
 Implementation result (2026-09-08): **automated Slice 4 exit gate passed**.
 Launch Control now persists an ordered, versioned bundle per radio in additive
 `radio_launch_bundles` and `radio_launch_bundle_items` tables. The startup-owned

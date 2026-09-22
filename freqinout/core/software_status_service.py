@@ -115,10 +115,12 @@ class SoftwareStatusService:
         self._proc_snapshot: List[str] = []
         self._proc_records: List[Dict[str, object]] = []
         self._proc_snapshot_ts: float = 0.0
-        # The shared coordinator refreshes every 10 seconds. Keep the process
-        # inventory fresh across that cadence so an incidental UI action never
-        # becomes the owner of another full process walk between ticks.
-        self._snapshot_ttl_sec: float = 15.0
+        # Process inventory is station-wide and comparatively expensive on
+        # some Linux /proc implementations. Endpoint reachability still has
+        # its own shorter cache, while launch/manual refreshes explicitly force
+        # a new inventory. A longer passive TTL prevents two-radio health
+        # projections from continuously walking the same process table.
+        self._snapshot_ttl_sec: float = 30.0
         self._js8_api_cache_key: tuple[str, int, bool] | None = None
         self._js8_api_cache_ok: bool = False
         self._js8_api_cache_ts: float = 0.0

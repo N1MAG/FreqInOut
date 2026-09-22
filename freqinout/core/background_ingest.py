@@ -370,7 +370,11 @@ class BackgroundIngestController(QObject):
             log.debug("BackgroundIngest: realtime executor shutdown failed: %s", e)
 
     def _new_worker_settings(self) -> SettingsManager:
-        return SettingsManager()
+        # The application startup owner has already created and migrated the
+        # settings database. Background jobs use a lightweight thread-owned
+        # view so recurring ingest cannot contend with the GUI by rerunning
+        # schema, migration, or launch-bundle adoption work.
+        return SettingsManager(runtime_worker=True)
 
     def _active_varac_vault_profiles(self) -> list[Dict[str, object]]:
         try:

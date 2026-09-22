@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 
 from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
-from freqinout.core.sqlite_utils import connect_sqlite
+from freqinout.core.sqlite_utils import connect_sqlite, connect_sqlite_runtime_write
 from freqinout.core.system_timezone import detect_system_timezone_name
 from freqinout.core.multi_radio_store import (
     CURRENT_MULTI_RIG_MIGRATION_VERSION,
@@ -39,7 +39,7 @@ class SettingsManager:
     Values are JSON-encoded to preserve existing data structures.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, runtime_worker: bool = False) -> None:
         # Prefer a user-writable config dir (works for both source and frozen builds)
         self.config_dir = get_config_dir() / "config"
         self.config_dir.mkdir(parents=True, exist_ok=True)
@@ -51,6 +51,16 @@ class SettingsManager:
         self._data: Dict[str, Any] = {}
         self._thread_id = threading.get_ident()
         self._last_timezone_sync_monotonic = 0.0
+        self._runtime_worker = bool(runtime_worker)
+
+        # Startup owns schema creation, migrations, legacy cleanup, and launch
+        # bundle adoption. Recurring ingest workers need the same get/set API,
+        # but must not repeat that initialization or request a WAL journal-mode
+        # lock while the UI is reading the database.
+        if self._runtime_worker:
+            self._conn = connect_sqlite_runtime_write(self.db_path, timeout=0.5)
+            self.reload()
+            return
 
         self._init_db()
         legacy_config_imported = self._maybe_migrate_from_json()
@@ -270,7 +280,7 @@ class SettingsManager:
 
     def get(self, key: str, default: Any = None) -> Any:
         self._assert_thread_affinity()
-        if key == "timezone":
+        if key == "timezone" and not self._runtime_worker:
             self._sync_system_timezone()
         return self._data.get(key, default)
 

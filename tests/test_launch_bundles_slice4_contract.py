@@ -141,6 +141,24 @@ def test_radio_bundle_roundtrip_preserves_order_and_isolation(tmp_path: Path) ->
     assert [row["name"] for row in _bundle_items(isolated_b)] == ["CommStat", "JS8Call"]
 
 
+def test_bundle_reads_do_not_repeat_schema_or_journal_initialization(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "settings.db"
+    _seed_radios(db_path)
+    store = LaunchBundleStore(db_path)
+    store.save_bundle(1, True, [_item("FLRig")])
+
+    monkeypatch.setattr(
+        store,
+        "_ensure_schema",
+        lambda _conn: (_ for _ in ()).throw(AssertionError("read repeated schema initialization")),
+    )
+
+    bundle = store.get_bundle(1)
+
+    assert _bundle_enabled(bundle) is True
+    assert [row["name"] for row in _bundle_items(bundle)] == ["FLRig"]
+
+
 @pytest.mark.parametrize(
     "catalog_action,custom_tools",
     [

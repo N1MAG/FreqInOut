@@ -4412,6 +4412,37 @@ def test_launch_table_startup_change_recomputes_startup_button_state() -> None:
     assert "self._update_launch_control_buttons()" in block
 
 
+def test_launch_status_paint_cannot_reenter_operator_edit_handler() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    handler = source[
+        source.index("def _on_launch_table_item_changed")
+        : source.index("def _on_launch_master_changed")
+    ]
+    painter = source[
+        source.index("def _paint_running_status_snapshot")
+        : source.index("def _int_override_from_text")
+    ]
+
+    assert "if _item.column() not in {1, 2}:" in handler
+    assert "with QSignalBlocker(self.launch_control_table):" in painter
+    assert "status_item.text() != status_text" in painter
+
+
+def test_settings_load_batches_contextual_autofill_and_varac_helpers() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    contextual = source[
+        source.index("def _refresh_contextual_autofill_buttons")
+        : source.index("def _attempt_fast_light_autofill")
+    ]
+    load = source[source.index("def _load_settings") : source.index("def _save_settings")]
+
+    assert "if self._loading_settings:" in contextual
+    assert "self._contextual_autofill_refresh_deferred = True" in contextual
+    assert "self._loading_settings = False" in load
+    assert load.index("self._loading_settings = False") < load.rindex("self._refresh_contextual_autofill_buttons()")
+    assert "if self._varac_bbs_helper_refresh_deferred:" in load
+
+
 def test_manual_launch_buttons_are_not_gated_by_unattended_start_policy() -> None:
     source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
     button_block = source[

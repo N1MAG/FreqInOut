@@ -22,6 +22,12 @@ class DummySettings:
         return self._values.get(key, default)
 
 
+def test_passive_process_inventory_cache_is_longer_than_endpoint_poll_cadence():
+    service = SoftwareStatusService(DummySettings())
+
+    assert service._snapshot_ttl_sec >= 30.0
+
+
 def test_flrig_api_reachable_uses_saved_port(monkeypatch):
     import freqinout.radio_interface.rigctl_client as rigctl_client
 
