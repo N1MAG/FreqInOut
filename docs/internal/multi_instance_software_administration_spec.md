@@ -482,6 +482,9 @@ radio-specific executable path. The same selector contract applies to native
 Windows command lines, Linux native/Wine command lines, and macOS native/Wine
 command lines. Exact match means `already running`; visible but ambiguous
 family evidence fails closed; only proven absence authorizes `Popen`.
+An exact match is terminal for that queue row. The presence of other configured
+radio identities in the same launch sequence must never reinterpret the match
+as authorization to start another copy of the already-running instance.
 
 Readiness states have precise meanings:
 

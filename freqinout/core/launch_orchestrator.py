@@ -1426,6 +1426,32 @@ class LaunchOrchestrator(QObject):
                 self.sequence_progress.emit(result)
                 self._schedule_advance_queue(0)
                 return
+        # An exact executable + radio-selector match is terminal evidence that
+        # this specific process-only instance is already running.  Do not let
+        # the later family-level multi-instance branch reinterpret that match
+        # as permission to start another copy merely because the queue also
+        # contains a second radio's FLAmp, FLMsg, VarAC, or VARA row.
+        if exact_process_running is True:
+            log.info(
+                "LaunchOrchestrator: skipped %s launch because its exact configured process is active",
+                name,
+            )
+            result = self._result_for(
+                queue_item,
+                status="already_running",
+                detail="exact configured process is already active",
+            )
+            self._results.append(result)
+            if sequence_identity:
+                self._sequence_claimed_identities = getattr(
+                    self,
+                    "_sequence_claimed_identities",
+                    set(),
+                )
+                self._sequence_claimed_identities.add(sequence_identity)
+            self.sequence_progress.emit(result)
+            self._schedule_advance_queue(0)
+            return
         unattributed_process = self._unattributed_process_blocker(
             queue_item,
             exact_process_running,

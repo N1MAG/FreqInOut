@@ -10360,3 +10360,19 @@ regression suite with **231 passed and 2 platform skips**, and the focused
 message-maintenance UI case. Changed-file compilation and `git diff --check`
 pass. Windows and macOS selector behavior is covered by platform-representative
 process records; native operator qualification remains a release check.
+
+### Follow-up: exact FLAmp match must terminate the row
+
+Production retesting exposed a downstream executor defect after the immutable
+inventory correction. FIO conclusively matched the running radio-specific
+FLAmp command, but the later family-level branch saw two configured FLAmp rows
+and treated “multiple distinct instances” as permission to launch. That branch
+was intended only to allow a proven-missing second radio instance; it also
+overrode a proven-present current instance.
+
+The executor now completes the current row as `already running` immediately
+after an exact executable-plus-selector match. No family readiness or
+multi-instance branch can subsequently reach `Popen` for that row. A focused
+two-radio FLAmp regression reproduces the former control flow and makes any
+spawn fail the test, while the existing missing-second-instance test confirms
+that a genuinely absent, fully attributed radio instance can still launch.

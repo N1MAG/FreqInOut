@@ -1119,6 +1119,9 @@ selected-radio start, row `Start`, and manual launch:
   plus ARQ/XML-RPC ports, VarAC selected INI, and VARA radio-specific executable.
   OS-specific path spelling, case rules, app bundles, or Wine wrappers do not
   weaken the exact instance check;
+- an exact executable-plus-selector match is a terminal `already running`
+  decision for that launch row. Family-level multi-instance planning cannot
+  override it merely because another radio has a same-application row;
 - if one or more family processes are visible but the launch-owned inventory
   cannot attribute all of them to configured identities, the requested row
   fails closed. This applies equally to native FLAmp/FLMsg processes and Wine

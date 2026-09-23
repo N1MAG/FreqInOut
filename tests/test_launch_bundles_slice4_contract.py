@@ -1753,6 +1753,75 @@ def test_launch_uses_accepted_preflight_records_after_shared_cache_changes(
     assert orchestrator._results[0]["status"] == "already_running"
 
 
+def test_exact_flamp_process_match_is_terminal_in_multi_radio_queue(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """A second configured radio must not override an exact running match."""
+
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "multi-flamp"))
+    monkeypatch.setattr(
+        launch_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail(
+            "an exact running FLAmp identity must never reach Popen"
+        ),
+    )
+    from freqinout.core.settings_manager import SettingsManager
+
+    running = {
+        "name": "FLAmp",
+        "instance_identity": "fast-light:ftdx-10:flamp",
+        "launch_path_override": "/usr/local/bin/flamp",
+        "launch_arguments": [
+            "--config-dir",
+            "/home/bill/.nbems/instances/FTDX-10",
+            "--arq-server-port",
+            "7322",
+            "--xmlrpc-server-port",
+            "7362",
+        ],
+        "readiness_policy": {},
+    }
+    other_radio = {
+        "name": "FLAmp",
+        "instance_identity": "fast-light:ft-710:flamp",
+        "launch_path_override": "/usr/local/bin/flamp",
+        "launch_arguments": [
+            "--config-dir",
+            "/home/bill/.nbems/instances/FT-710",
+            "--arq-server-port",
+            "7323",
+            "--xmlrpc-server-port",
+            "7363",
+        ],
+        "readiness_policy": {},
+    }
+    orchestrator = LaunchOrchestrator(SettingsManager())
+    orchestrator._active = True
+    orchestrator._process_preflight_pending = False
+    orchestrator._cancel_requested = False
+    orchestrator._queue = [running, other_radio]
+    orchestrator._index = 0
+    orchestrator._results = []
+    orchestrator._sequence_claimed_identities = set()
+    orchestrator._endpoint_preflight_verified = set()
+    orchestrator._blocked_dependency_for = lambda _item: None
+    orchestrator._instance_launch_identity_blocker = lambda _item: ""
+    orchestrator._configured_instance_process_running = (
+        lambda item: item is running
+    )
+    orchestrator._schedule_advance_queue = lambda _delay=0: None
+
+    orchestrator._advance_queue()
+
+    assert len(orchestrator._results) == 1
+    assert orchestrator._results[0]["status"] == "already_running"
+    assert orchestrator._results[0]["detail"] == (
+        "exact configured process is already active"
+    )
+
+
 @pytest.mark.parametrize(
     ("name", "arguments"),
     [
