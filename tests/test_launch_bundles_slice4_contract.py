@@ -896,11 +896,24 @@ def test_start_sequence_forces_and_waits_for_new_process_snapshot(
             sequence=6,
             scope="legacy_primary",
             reason="launch-preflight:startup",
+            process_records=(
+                {
+                    "name": "flamp",
+                    "cmdline": ("flamp", "--config-dir", "/profiles/alpha"),
+                },
+            ),
         )
     )
     orchestrator._on_launch_preflight_snapshot_changed(snapshots[-1])
 
     assert orchestrator._process_preflight_pending is False
+    assert orchestrator._sequence_process_records == (
+        {
+            "name": "flamp",
+            "cmdline": ("flamp", "--config-dir", "/profiles/alpha"),
+        },
+    )
+    assert orchestrator._sequence_process_records_ready is True
     assert scheduled == [0]
 
 
@@ -1571,6 +1584,173 @@ def test_existing_flmsg_process_identity_ignores_presentation_title(monkeypatch)
 
     item["launch_arguments"][1] = "/home/bill/.nbems/instances/FTDX-10"
     assert orchestrator._configured_instance_process_running(item) is False
+
+
+@pytest.mark.parametrize(
+    ("name", "target", "arguments", "record"),
+    [
+        (
+            "FLAmp",
+            "/usr/local/bin/flamp",
+            (
+                "--config-dir",
+                "/home/bill/.nbems/instances/FT-710",
+                "--arq-server-address",
+                "127.0.0.1",
+                "--arq-server-port",
+                "7323",
+                "--xmlrpc-server-address",
+                "127.0.0.1",
+                "--xmlrpc-server-port",
+                "7363",
+            ),
+            {
+                "name": "flamp-2.2.14",
+                "exe": "flamp-2.2.14",
+                "exe_path": "/usr/local/bin/flamp-2.2.14",
+                "cmd_tokens": ("flamp",),
+                "cmd_paths": (
+                    "/usr/local/bin/flamp",
+                    "/home/bill/.nbems/instances/FT-710",
+                ),
+                "cmdline": (
+                    "/usr/local/bin/flamp",
+                    "--config-dir",
+                    "/home/bill/.nbems/instances/FT-710",
+                    "--arq-server-address",
+                    "127.0.0.1",
+                    "--arq-server-port",
+                    "7323",
+                    "--xmlrpc-server-address",
+                    "127.0.0.1",
+                    "--xmlrpc-server-port",
+                    "7363",
+                    "-title",
+                    "FLAmp — FT-710",
+                ),
+            },
+        ),
+        (
+            "VarAC",
+            "wine",
+            (
+                "/home/bill/.wine/drive_c/VarAC/VarAC.exe",
+                "C:\\VarAC\\VarAC-ft-710.ini",
+            ),
+            {
+                "name": "wine64-preloader",
+                "exe": "",
+                "exe_path": "",
+                "cmd_tokens": ("wine64-preloader", "varac.exe", "varac-ft-710.ini"),
+                "cmd_paths": (
+                    "/usr/lib/wine/wine64-preloader",
+                    "/home/bill/.wine/drive_c/VarAC/VarAC.exe",
+                    "C:\\VarAC\\VarAC-ft-710.ini",
+                ),
+                "cmdline": (
+                    "/usr/lib/wine/wine64-preloader",
+                    "/home/bill/.wine/drive_c/VarAC/VarAC.exe",
+                    "C:\\VarAC\\VarAC-ft-710.ini",
+                ),
+            },
+        ),
+        (
+            "VarAC",
+            "wine",
+            (
+                "/home/bill/.wine/drive_c/VarAC/VarAC.exe",
+                "C:\\VarAC\\VarAC.ini",
+            ),
+            {
+                "name": "varac.exe",
+                "exe": "varac.exe",
+                "exe_path": "/home/bill/.wine/drive_c/VarAC/VarAC.exe",
+                "cmd_tokens": ("varac.exe", "varac.ini"),
+                "cmd_paths": (
+                    "/home/bill/.wine/drive_c/VarAC/VarAC.exe",
+                    "C:\\VarAC\\VarAC.ini",
+                ),
+                "cmdline": (
+                    "/home/bill/.wine/drive_c/VarAC/VarAC.exe",
+                    "C:\\VarAC\\VarAC.ini",
+                ),
+            },
+        ),
+        (
+            "VARA",
+            "wine",
+            ("/home/bill/.wine/drive_c/VARA-ft-710/VARA.exe",),
+            {
+                "name": "vara.exe",
+                "exe": "vara.exe",
+                "exe_path": "/home/bill/.wine/drive_c/VARA-ft-710/VARA.exe",
+                "cmd_tokens": ("vara.exe",),
+                "cmd_paths": (
+                    "/home/bill/.wine/drive_c/VARA-ft-710/VARA.exe",
+                ),
+                "cmdline": (
+                    "/home/bill/.wine/drive_c/VARA-ft-710/VARA.exe",
+                ),
+            },
+        ),
+    ],
+)
+def test_launch_uses_accepted_preflight_records_after_shared_cache_changes(
+    monkeypatch,
+    tmp_path: Path,
+    name: str,
+    target: str,
+    arguments: tuple[str, ...],
+    record: dict[str, object],
+) -> None:
+    """A timer inventory cannot replace launch authorization mid-sequence."""
+
+    monkeypatch.setattr(SoftwareStatusService, "_shared_proc_records", [])
+    monkeypatch.setenv(
+        "FREQINOUT_CONFIG_DIR",
+        str(tmp_path / name.casefold()),
+    )
+    from freqinout.core.settings_manager import SettingsManager
+
+    orchestrator = LaunchOrchestrator(SettingsManager())
+    orchestrator.status = SoftwareStatusService(
+        SimpleNamespace(get=lambda _key, default=None: default)
+    )
+    orchestrator._sequence_process_records = (record,)
+    orchestrator._sequence_process_records_ready = True
+    item = {
+        "name": name,
+        "instance_identity": f"radio-9:{name.casefold()}",
+        "launch_path_override": target,
+        "launch_arguments": list(arguments),
+    }
+
+    assert orchestrator._configured_instance_process_running(item) is True
+    assert orchestrator._unattributed_process_blocker(item, True) == ""
+
+    monkeypatch.setattr(
+        launch_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail(
+            f"the accepted {name} process line must prevent a duplicate spawn"
+        ),
+    )
+    orchestrator._active = True
+    orchestrator._process_preflight_pending = False
+    orchestrator._cancel_requested = False
+    orchestrator._queue = [item]
+    orchestrator._index = 0
+    orchestrator._results = []
+    orchestrator._sequence_claimed_identities = set()
+    orchestrator._endpoint_preflight_verified = set()
+    orchestrator._blocked_dependency_for = lambda _item: None
+    orchestrator._instance_launch_identity_blocker = lambda _item: ""
+    orchestrator._program_ready_for_sequence = lambda _item: True
+    orchestrator._schedule_advance_queue = lambda _delay=0: None
+
+    orchestrator._advance_queue()
+
+    assert orchestrator._results[0]["status"] == "already_running"
 
 
 @pytest.mark.parametrize(

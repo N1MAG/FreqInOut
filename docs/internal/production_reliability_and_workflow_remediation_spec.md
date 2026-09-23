@@ -1101,6 +1101,9 @@ selected-radio start, row `Start`, and manual launch:
 - the dedicated launch inventory runs off the GUI thread and performs a bounded
   full command-line attribution pass. Routine UI/timer inventories retain the
   low-cost direct-name/wrapper filter;
+- the exact process records published by that launch-owned inventory remain
+  bound to the complete launch sequence. A later timer, endpoint, health, or UI
+  refresh cannot replace launch authorization with a mutable shared cache;
 - process-only applications are matched by the canonical executable plus the
   radio-owned launch arguments/profile selector, so another radio's process is
   neither credited nor duplicated;
@@ -1112,6 +1115,10 @@ selected-radio start, row `Start`, and manual launch:
 - Linux process inventory inspects exact and delimiter-qualified native names
   such as `flamp-2.2.14`, then requires the saved executable argv and the same
   radio-owned selectors before crediting that process;
+- Windows, Linux, and macOS use the same durable selectors: FLAmp config root
+  plus ARQ/XML-RPC ports, VarAC selected INI, and VARA radio-specific executable.
+  OS-specific path spelling, case rules, app bundles, or Wine wrappers do not
+  weaken the exact instance check;
 - if one or more family processes are visible but the launch-owned inventory
   cannot attribute all of them to configured identities, the requested row
   fails closed. This applies equally to native FLAmp/FLMsg processes and Wine

@@ -425,19 +425,25 @@ class SoftwareStatusService:
             targets = {normalized, f"{normalized}.exe"}
         return any(token in targets for token in self._proc_snapshot)
 
-    def cached_program_process_count(self, program_name: str) -> int:
+    def cached_program_process_count(
+        self,
+        program_name: str,
+        process_records: Sequence[Mapping[str, object]] | None = None,
+    ) -> int:
         """Count cached process records carrying this program's family token."""
 
         cls = type(self)
-        self._proc_snapshot = cls._shared_proc_snapshot
-        self._proc_records = cls._shared_proc_records
-        self._proc_snapshot_ts = cls._shared_proc_snapshot_ts
+        records = cls._shared_proc_records if process_records is None else process_records
+        if process_records is None:
+            self._proc_snapshot = cls._shared_proc_snapshot
+            self._proc_records = cls._shared_proc_records
+            self._proc_snapshot_ts = cls._shared_proc_snapshot_ts
         targets = set(self._target_tokens(program_name))
         if not targets:
             normalized = str(program_name or "").strip().casefold()
             targets = {normalized, f"{normalized}.exe"}
         count = 0
-        for record in self._proc_records:
+        for record in records:
             record_tokens = {
                 str(record.get("name") or "").casefold(),
                 str(record.get("exe") or "").casefold(),
@@ -488,6 +494,7 @@ class SoftwareStatusService:
         program_name: str,
         configured_target: str,
         expected_arguments: Sequence[object] = (),
+        process_records: Sequence[Mapping[str, object]] | None = None,
     ) -> bool:
         """Match one configured process identity from shared cached records.
 
@@ -520,7 +527,8 @@ class SoftwareStatusService:
             normalized = program_name.strip().lower()
             targets = {normalized, f"{normalized}.exe"}
         cls = type(self)
-        for record in cls._shared_proc_records:
+        records = cls._shared_proc_records if process_records is None else process_records
+        for record in records:
             record_tokens = {
                 str(record.get("name") or ""),
                 str(record.get("exe") or ""),

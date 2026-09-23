@@ -172,6 +172,8 @@ class LaunchOrchestrator(QObject):
         self._endpoint_preflight_verified: set[str] = set()
         self._endpoint_preflight_requested: set[str] = set()
         self._sequence_claimed_identities: set[str] = set()
+        self._sequence_process_records: tuple[Mapping[str, object], ...] = ()
+        self._sequence_process_records_ready = False
         self._sequence_preflight_started_wall = 0.0
         self._process_preflight_pending = False
         self._process_preflight_baseline_sequence = 0
@@ -1110,6 +1112,8 @@ class LaunchOrchestrator(QObject):
         self._endpoint_preflight_verified = set()
         self._endpoint_preflight_requested = set()
         self._sequence_claimed_identities = set()
+        self._sequence_process_records = ()
+        self._sequence_process_records_ready = False
         self._sequence_preflight_started_wall = time.time()
         self._process_preflight_pending = True
         self._process_preflight_generation += 1
@@ -1181,6 +1185,12 @@ class LaunchOrchestrator(QObject):
             return False
         if sequence <= int(self._process_preflight_baseline_sequence or 0):
             return False
+        self._sequence_process_records = tuple(
+            dict(record)
+            for record in (getattr(snapshot, "process_records", ()) or ())
+            if isinstance(record, Mapping)
+        )
+        self._sequence_process_records_ready = True
         self._process_preflight_pending = False
         log.info(
             "LaunchOrchestrator: process preflight complete for %s launch (sequence=%s)",
@@ -2070,20 +2080,40 @@ class LaunchOrchestrator(QObject):
                     if not isinstance(arguments, (list, tuple)):
                         arguments = ()
                     arguments = self._process_identity_arguments(name, arguments)
+                    process_records = self._launch_process_records()
+                    inventory = (
+                        {}
+                        if process_records is None
+                        else {"process_records": process_records}
+                    )
                     if not arguments:
                         return bool(
-                            self.status.cached_program_instance_running(name, target)
+                            self.status.cached_program_instance_running(
+                                name,
+                                target,
+                                **inventory,
+                            )
                         )
                     return bool(
                         self.status.cached_program_instance_running(
                             name,
                             target,
                             arguments,
+                            **inventory,
                         )
                     )
                 except Exception:
                     return None
         return None
+
+    def _launch_process_records(
+        self,
+    ) -> tuple[Mapping[str, object], ...] | None:
+        """Return the one immutable inventory accepted for this sequence."""
+
+        if not bool(getattr(self, "_sequence_process_records_ready", False)):
+            return None
+        return tuple(getattr(self, "_sequence_process_records", ()) or ())
 
     def _unattributed_process_blocker(
         self,
@@ -2107,7 +2137,12 @@ class LaunchOrchestrator(QObject):
         if not callable(counter):
             return ""
         try:
-            process_count = int(counter(name))
+            process_records = self._launch_process_records()
+            process_count = int(
+                counter(name)
+                if process_records is None
+                else counter(name, process_records=process_records)
+            )
         except Exception:
             return (
                 "process attribution is unavailable after launch preflight; "

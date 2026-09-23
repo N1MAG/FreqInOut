@@ -97,6 +97,12 @@ class DependencySnapshot:
     station_id: Optional[str] = None
     radio_id: Optional[str] = None
     process: Mapping[str, DependencyStatus] = field(default_factory=dict)
+    # Launch-owned snapshots retain the exact immutable process records that
+    # produced their family status.  Launch authorization must not consult the
+    # mutable station-wide cache later because an unrelated timer refresh can
+    # replace that cache while a multi-application startup sequence is still
+    # running.
+    process_records: tuple[Mapping[str, object], ...] = ()
     reason: str = ""
     sequence: int = 0
 
@@ -484,6 +490,7 @@ class DependencyStatusService(QObject):
             force=True,
             inspect_all=str(reason or "").startswith("launch-preflight:"),
         )
+        process_records = tuple(dict(record) for record in probe._proc_records)
         statuses: Dict[str, DependencyStatus] = {}
         for status_key in STATUS_KEYS:
             self._cancel_token.checkpoint()
@@ -547,6 +554,7 @@ class DependencyStatusService(QObject):
             station_id=None,
             radio_id=None,
             process=statuses,
+            process_records=process_records,
             reason=reason,
             sequence=sequence,
         )

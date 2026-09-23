@@ -70,6 +70,33 @@ def test_projected_receipt_lines_keep_api_and_directed_sources_distinct() -> Non
     assert "/radio-a/DIRECTED.TXT" in lines[1]
 
 
+def test_message_maintenance_service_resolves_through_nested_parent_chain() -> None:
+    service = object()
+
+    class _Node:
+        def __init__(self, parent=None):
+            self._parent = parent
+
+        def parent(self):
+            return self._parent
+
+        def window(self):
+            current = self
+            while current.parent() is not None:
+                current = current.parent()
+            return current
+
+    host = _Node()
+    host.message_projection_maintenance = service
+    container = _Node(host)
+    messages = _Node(container)
+
+    assert (
+        MessageViewerTab._message_projection_maintenance_service(messages)
+        is service
+    )
+
+
 def _app() -> QApplication:
     return QApplication.instance() or QApplication([])
 

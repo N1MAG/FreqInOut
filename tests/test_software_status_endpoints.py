@@ -113,6 +113,141 @@ def test_flamp_process_identity_requires_the_selected_radio_root_and_ports(monke
     )
 
 
+@pytest.mark.parametrize(
+    ("program", "target", "arguments", "record"),
+    [
+        (
+            "FLAmp",
+            r"C:\Program Files\W1HKJ\flamp.exe",
+            (
+                "--config-dir",
+                r"C:\Users\Bill\NBEMS.files\instances\FT-710",
+                "--arq-server-port",
+                "7323",
+                "--xmlrpc-server-port",
+                "7363",
+            ),
+            {
+                "name": "flamp.exe",
+                "exe": "flamp.exe",
+                "exe_path": r"C:\Program Files\W1HKJ\flamp.exe",
+                "cmd_tokens": ("flamp.exe",),
+                "cmd_paths": (r"C:\Program Files\W1HKJ\flamp.exe",),
+                "cmdline": (
+                    r"C:\Program Files\W1HKJ\flamp.exe",
+                    "--config-dir",
+                    r"C:\Users\Bill\NBEMS.files\instances\FT-710",
+                    "--arq-server-port",
+                    "7323",
+                    "--xmlrpc-server-port",
+                    "7363",
+                ),
+            },
+        ),
+        (
+            "VarAC",
+            r"C:\VarAC\VarAC.exe",
+            (r"C:\VarAC\VarAC-ft-710.ini",),
+            {
+                "name": "varac.exe",
+                "exe": "varac.exe",
+                "exe_path": r"C:\VarAC\VarAC.exe",
+                "cmd_tokens": ("varac.exe", "varac-ft-710.ini"),
+                "cmd_paths": (
+                    r"C:\VarAC\VarAC.exe",
+                    r"C:\VarAC\VarAC-ft-710.ini",
+                ),
+                "cmdline": (
+                    r"C:\VarAC\VarAC.exe",
+                    r"C:\VarAC\VarAC-ft-710.ini",
+                ),
+            },
+        ),
+        (
+            "FLAmp",
+            "/Applications/FLAmp.app/Contents/MacOS/flamp",
+            (
+                "--config-dir",
+                "/Users/bill/Library/Application Support/NBEMS/instances/FT-710",
+                "--arq-server-port",
+                "7323",
+                "--xmlrpc-server-port",
+                "7363",
+            ),
+            {
+                "name": "flamp",
+                "exe": "flamp",
+                "exe_path": "/Applications/FLAmp.app/Contents/MacOS/flamp",
+                "cmd_tokens": ("flamp",),
+                "cmd_paths": (
+                    "/Applications/FLAmp.app/Contents/MacOS/flamp",
+                    "/Users/bill/Library/Application Support/NBEMS/instances/FT-710",
+                ),
+                "cmdline": (
+                    "/Applications/FLAmp.app/Contents/MacOS/flamp",
+                    "--config-dir",
+                    "/Users/bill/Library/Application Support/NBEMS/instances/FT-710",
+                    "--arq-server-port",
+                    "7323",
+                    "--xmlrpc-server-port",
+                    "7363",
+                ),
+            },
+        ),
+        (
+            "VarAC",
+            "/opt/homebrew/bin/wine64",
+            (
+                "/Users/bill/.wine/drive_c/VarAC/VarAC.exe",
+                r"C:\VarAC\VarAC-ft-710.ini",
+            ),
+            {
+                "name": "wine64-preloader",
+                "exe": "",
+                "exe_path": "",
+                "cmd_tokens": ("wine64-preloader", "varac.exe", "varac-ft-710.ini"),
+                "cmd_paths": (
+                    "/opt/homebrew/bin/wine64",
+                    "/Users/bill/.wine/drive_c/VarAC/VarAC.exe",
+                    r"C:\VarAC\VarAC-ft-710.ini",
+                ),
+                "cmdline": (
+                    "/opt/homebrew/bin/wine64",
+                    "/Users/bill/.wine/drive_c/VarAC/VarAC.exe",
+                    r"C:\VarAC\VarAC-ft-710.ini",
+                ),
+            },
+        ),
+    ],
+)
+def test_cross_platform_process_identity_uses_native_instance_selectors(
+    program: str,
+    target: str,
+    arguments: tuple[str, ...],
+    record: dict[str, object],
+) -> None:
+    service = SoftwareStatusService(DummySettings())
+
+    assert service.cached_program_instance_running(
+        program,
+        target,
+        arguments,
+        process_records=(record,),
+    )
+    changed = tuple(
+        "9999"
+        if value in {"7323", "7363"}
+        else value.replace("710", "999")
+        for value in arguments
+    )
+    assert not service.cached_program_instance_running(
+        program,
+        target,
+        changed,
+        process_records=(record,),
+    )
+
+
 def test_status_snapshot_does_not_credit_other_radio_family_process(monkeypatch):
     service = SoftwareStatusService(DummySettings())
     monkeypatch.setattr(service, "program_is_running", lambda _name: True)

@@ -473,6 +473,16 @@ the saved command (for example `/usr/local/bin/flamp`). This allowance only
 authorizes reading and comparing that candidate's exact argv; it never replaces
 the required radio-specific selector match.
 
+The accepted launch-preflight inventory is immutable for the complete launch
+sequence. A timer, health, endpoint, or UI refresh may publish newer station
+status, but it cannot replace the process records used to authorize that
+sequence. FLAmp identity is the executable plus config root and ARQ/XML-RPC
+ports; VarAC identity is its executable plus selected INI; VARA identity is its
+radio-specific executable path. The same selector contract applies to native
+Windows command lines, Linux native/Wine command lines, and macOS native/Wine
+command lines. Exact match means `already running`; visible but ambiguous
+family evidence fails closed; only proven absence authorizes `Popen`.
+
 Readiness states have precise meanings:
 
 - `Configured`: durable settings exist.

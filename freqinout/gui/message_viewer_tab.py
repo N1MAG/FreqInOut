@@ -12524,8 +12524,21 @@ class MessageViewerTab(QWidget):
         tabs.setTabText(1, f"Hidden CommStat ({len(hidden_rows)})")
 
     def _message_projection_maintenance_service(self):
-        host = self.parent()
-        return getattr(host, "message_projection_maintenance", None)
+        # Messages is nested below the MainWindow in the production tab stack.
+        # Its immediate Qt parent is therefore normally a container widget, not
+        # the application host that owns the maintenance service.  Walk the
+        # ownership chain so the same lookup works in the full shell, embedded
+        # windows, and focused widget tests.
+        current = self
+        visited: set[int] = set()
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            service = getattr(current, "message_projection_maintenance", None)
+            if service is not None:
+                return service
+            current = current.parent()
+        window = self.window()
+        return getattr(window, "message_projection_maintenance", None)
 
     def _start_message_projection_deep_rebuild(self) -> None:
         service = self._message_projection_maintenance_service()

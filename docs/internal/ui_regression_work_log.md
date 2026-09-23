@@ -10323,3 +10323,40 @@ case also passes independently. Changed-file compilation and `git diff
 native paint-event segmentation fault when run as one process after nine
 passing cases; there was no Python assertion failure before that host-native
 crash.
+
+## 2026-09-22 — immutable launch evidence and maintenance action availability
+
+Status: specified and surgically implemented; production startup qualification
+is open.
+
+The production process examples confirmed that FLAmp, VarAC, and VARA expose
+enough durable identity to make startup idempotent without relying on a window
+title: FLAmp supplies its config root and ARQ/XML-RPC ports, VarAC supplies its
+selected INI, and VARA supplies its radio-specific executable. The remaining
+duplicate-launch defect was a lifecycle race. Launch preflight correctly found
+processes, but the orchestrator later queried the mutable station-wide process
+cache. A timer, health, endpoint, or UI refresh could replace that cache before
+the row reached its final launch gate, incorrectly turning an exact match into
+absence and permitting `Popen`.
+
+Each launch sequence now freezes the exact process records from its accepted
+launch-owned preflight and uses only those records for both exact instance
+matching and ambiguous-family fail-close checks. Linux native and Wine process
+forms are covered directly from the supplied process examples. Equivalent
+Windows native and macOS native/Wine forms use the same selectors, including
+case/path normalization and application-bundle paths. An exact selector match
+returns `already running`; visible ambiguous family evidence remains blocked;
+only proven absence permits launch.
+
+The disabled Preview Message Index Rebuild action had an independent UI
+ownership defect. The Messages widget searched only its immediate container
+parent, while the maintenance service belongs to the application host. Service
+resolution now walks the Qt ownership chain, so the preview action is available
+in the production nested tab layout as well as focused windows.
+
+Acceptance passes the complete launch/status/refresh focused suite with **88
+passed and 2 platform skips**, the broader multi-rig and application launch
+regression suite with **231 passed and 2 platform skips**, and the focused
+message-maintenance UI case. Changed-file compilation and `git diff --check`
+pass. Windows and macOS selector behavior is covered by platform-representative
+process records; native operator qualification remains a release check.
