@@ -33,6 +33,7 @@ from freqinout.core.message_projection_writer import (
     ProjectionBundle,
     ProjectionDeleteRequest,
     ProjectionWriteResult,
+    ProjectionRepairResult,
     get_projection_writer,
 )
 from freqinout.core.perf_metrics import emit_span
@@ -555,6 +556,13 @@ class MessageProjectionCoordinator:
             max_transaction_ms=max_transaction_ms,
             state=state,
         )
+
+    def repair_legacy_duplicates(
+        self, *, cancel_event: threading.Event | None = None
+    ) -> ProjectionRepairResult:
+        """Run explicit derived-index convergence on the serialized lane."""
+
+        return self._writer.repair_legacy_duplicates(cancel_event=cancel_event)
 
     @staticmethod
     def _obsolete_source_identity(item: DirtyProjectionItem) -> bool:

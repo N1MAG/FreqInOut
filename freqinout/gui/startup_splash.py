@@ -12,8 +12,14 @@ from freqinout.gui.theme import active_app_theme
 class StartupSplash:
     """Small, early startup status surface for slow first-window builds."""
 
-    DEDICATION = "Dedicated to my Dad, now SK, who learned digital HF TriMode at age 86."
-    SUPPORT_MESSAGE = "If FIO serves your station, please consider supporting its continued development."
+    DEDICATION = (
+        "Dedicated to my Dad (SK), a U.S. Navy Radioman who learned "
+        "HF Digital Tri-Mode at age 86."
+    )
+    SUPPORT_MESSAGE = (
+        "If FIO benefits your station, please consider supporting its continued "
+        "development. There's more to come."
+    )
     SUPPORT_URL = "buymeacoffee.com/n1mag"
 
     def __init__(self, app: QApplication, *, version: str = "") -> None:
@@ -23,7 +29,7 @@ class StartupSplash:
         self._splash.setWindowFlag(Qt.FramelessWindowHint, True)
         self._splash.setAccessibleName("Starting FIO")
         self._splash.setAccessibleDescription(
-            f"{self.DEDICATION} {self.SUPPORT_MESSAGE} Buy Me a Coffee: {self.SUPPORT_URL}"
+            f"{self.DEDICATION} {self.SUPPORT_MESSAGE} {self.SUPPORT_URL}"
         )
         self._theme = active_app_theme()
         self._last_message = ""
@@ -95,7 +101,7 @@ class StartupSplash:
             support_font.setBold(True)
             painter.setFont(support_font)
             painter.setPen(QColor(theme["info"]))
-            painter.drawText(32, 218, f"Buy Me a Coffee  ·  {StartupSplash.SUPPORT_URL}")
+            painter.drawText(32, 218, StartupSplash.SUPPORT_URL)
 
             painter.setPen(QColor(theme["border"]))
             painter.drawLine(32, 232, 508, 232)

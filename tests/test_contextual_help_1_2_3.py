@@ -176,6 +176,41 @@ def test_quick_start_operating_groups_link_targets_the_registered_help_section()
         assert f"<code>{control}</code>" in html
 
 
+def test_guide_places_dedication_support_and_tri_mode_reference_near_the_top() -> None:
+    guide_path = Path(__file__).resolve().parents[1] / "docs" / "guide.html"
+    html = guide_path.read_text(encoding="utf-8", errors="ignore")
+
+    dedication = (
+        "Dedicated to my Dad (SK), a U.S. Navy Radioman who learned "
+        "HF Digital Tri-Mode at age 86."
+    )
+    support_url = "https://buymeacoffee.com/n1mag"
+    tri_mode_start = html.index('<h2 id="hf-digital-tri-mode">')
+    quick_start = html.index('<h2 id="quick-start">')
+    footer_support = html.index('<h2 id="support">')
+
+    assert html.count(dedication) == 1
+    assert html.count(support_url) == 1
+    assert html.index(support_url) < tri_mode_start < quick_start < footer_support
+    assert "SK means Silent Key" in html
+    assert "HF Digital Tri-Mode combines three complementary families" in html
+    for label in ("Fast Light:", "JS8Call:", "VarAC and VARA:"):
+        assert f"<strong>{label}</strong>" in html
+    assert "independently useful applications" in html
+    assert "common station message library" in html
+    assert "FIO Spotter, FLAmp Q, CommStat, and the FIO BBS" in html
+
+
+def test_message_maintenance_help_explains_safe_legacy_duplicate_repair() -> None:
+    html = (Path(__file__).resolve().parents[1] / "docs" / "guide.html").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    section = html.split('<h3 id="messages-maintenance">', 1)[1].split("<h3", 1)[0]
+    assert "Legacy duplicate repair" in section
+    assert "Separate JS8, VarAC, FLMsg, FLAmp, and BBS receipts remain attached" in section
+    assert "different content hashes stay separate" in section
+
+
 def test_sop_builder_context_help_is_registered_and_wired() -> None:
     context = get_help_context("tab.sop-builder")
     source = Path("freqinout/gui/sop_tab.py").read_text(encoding="utf-8")

@@ -10407,3 +10407,76 @@ while projection continues. The focused maintenance suite passes **14 tests**;
 the broader MIP-2/MIP-4/MIP-5 coordinator, writer, queue, store, telemetry, and
 UI integration suite passes **117 tests**. Changed-file compilation and `git
 diff --check` pass.
+
+## 2026-09-22 — startup dedication and Tri-Mode guide introduction
+
+Status: implemented and verified.
+
+The launch splash now carries the approved dedication to the author's Dad, a
+U.S. Navy Radioman and Silent Key who learned HF Digital Tri-Mode at age 86.
+The support message now uses the station-benefit wording, includes “There's
+more to come,” and presents `buymeacoffee.com/n1mag` without extra label text.
+Its accessible description contains the complete dedication, support message,
+and URL.
+
+The guide moves the Buy Me a Coffee reference from its footer to an opening
+dedication/support callout, expands SK once as Silent Key, and retains the
+footer for support contact information. A new top-level **What Is HF Digital
+Tri-Mode?** reference describes Fast Light, JS8Call, and VarAC/VARA as
+independently useful software families, then explains FIO's coordinating role
+without claiming that Tri-Mode is FIO-specific. It also distinguishes
+radio-owned profiles and endpoints from station services including FIO
+Spotter, FLAmp Q, CommStat, and the FIO BBS.
+
+Focused splash, guide-anchor/content, Help rendering, image resolution, and
+responsive-layout acceptance passes **23 tests**. The updated startup pixmap
+was rendered offscreen and visually inspected with all approved text visible.
+Changed-file compilation and `git diff --check` pass.
+
+## 2026-09-22 — Message Index legacy-reference convergence
+
+Status: specified and surgically implemented; production operator qualification
+is open.
+
+The post-rebuild production database proved that source replay had completed at
+projector version 4 and had correctly merged the reported KR1FLE Spotter pair,
+but legacy JS8 and file projection references were still attached to older
+presentation rows. Those rows were not orphans, so the intentional orphan-only
+cleanup left thousands of duplicate Inbox/All presentations visible. JS8 also
+changed both its source-id classification and, for migrated rows, its external
+key from the native row id to the durable source id.
+
+Deep rebuild completion now includes a derived-index-only convergence pass on
+the serialized projection writer. It recognizes proven JS8 and VarAC identity
+migrations from authoritative native rows and identical file receipts by
+family, filename, and SHA-256 digest. It moves references, artifacts,
+operator-owned lifecycle state, active delete work, Spotter watches, and compact
+Ops index state before removing a superseded presentation. Native rows and
+files are never modified, and same-looking files with different hashes remain
+separate.
+
+Focused repair and maintenance acceptance passes **17 tests**. Qualification on
+a disposable copy of the supplied 465 MB production message database planned
+and repaired **10,084** legacy presentations in bounded transactions, retained
+all **37,448** external receipt records, left zero unreferenced projections,
+returned `PRAGMA quick_check=ok`, eliminated all exact JS8 presentation
+duplicates, kept the longest repair transaction below **27 ms**, and planned
+zero work on an immediate second run. Remaining
+same-looking BBS, FLAmp, and VarAC file rows had different content hashes and
+were correctly retained. The supplied production databases were inspected
+read-only and were not modified.
+
+The focused repair, maintenance, writer, coordinator, integration,
+responsiveness, and Help-guide commands pass **71 tests**; the broader non-UI
+source-projector, store, MIP-2, and MIP-5 group passes **49 tests**. The existing Qt inbox-reader
+suite passed its first 11 cases and then reproducibly terminated in PySide's
+native paint path (`_settle_reader_paint`) rather than producing a Python test
+failure; no reader-paint code changed in this slice. Changed-file compilation
+and `git diff --check` pass.
+
+Model ownership: `gpt-6-astra` (current reasoning effort) owned database safety,
+architecture, implementation, integration, and qualification. `gpt-5.6-luna`
+with low reasoning performed the independent read-only duplicate-pattern and
+test-boundary audit; the primary reviewed its findings and retained persistent,
+transactional canonical repair rather than UI-only hiding because the governing
+projection specification requires one station message with preserved receipts.

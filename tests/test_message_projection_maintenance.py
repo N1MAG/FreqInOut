@@ -6,6 +6,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -85,6 +86,22 @@ class _BusyOnceCoordinator:
         return ProjectionCycleResult()
 
 
+class _RepairCoordinator(_BatchCoordinator):
+    def __init__(self) -> None:
+        super().__init__(0)
+        self.repair_calls = 0
+
+    def repair_legacy_duplicates(self, *, cancel_event=None):
+        self.repair_calls += 1
+        return SimpleNamespace(
+            state="committed",
+            planned=3,
+            repaired=3,
+            transactions=1,
+            max_transaction_ms=4.0,
+        )
+
+
 def _empty_db(tmp_path: Path, name: str = "maintenance.sqlite") -> Path:
     path = tmp_path / name
     conn = sqlite3.connect(path)
@@ -94,6 +111,25 @@ def _empty_db(tmp_path: Path, name: str = "maintenance.sqlite") -> Path:
     finally:
         conn.close()
     return path
+
+
+def test_explicit_deep_rebuild_converges_legacy_presentations_before_complete(
+    tmp_path,
+) -> None:
+    coordinator = _RepairCoordinator()
+    service = MessageProjectionMaintenanceService(
+        _empty_db(tmp_path), coordinator=coordinator, yield_seconds=0
+    )
+    try:
+        result = service.run_post_shell_catchup(
+            rebuild_id="repair-rebuild", source_rows_estimate=10
+        )
+        assert result.state == "complete"
+        assert result.repaired == 3
+        assert result.processed == 3
+        assert coordinator.repair_calls == 1
+    finally:
+        service.close(wait=True)
 
 
 def _native_db(tmp_path: Path) -> Path:
@@ -421,6 +457,7 @@ def test_maintenance_diagnostics_are_in_memory_and_bounded(tmp_path) -> None:
             "claimed": 100,
             "committed": 100,
             "deleted": 0,
+            "repaired": 0,
             "processed": 100,
             "deferred": 0,
             "max_transaction_ms": 0.0,

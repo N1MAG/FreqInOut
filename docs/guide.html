@@ -32,6 +32,28 @@
 
   <h1 id="guide-home">FreqInOut User Guide</h1>
   <p><strong>Current version</strong>: 2.0.0</p>
+  <div class="callout">
+    <p><strong>Dedication</strong></p>
+    <p>Dedicated to my Dad (SK), a U.S. Navy Radioman who learned HF Digital Tri-Mode at age 86.</p>
+    <p><em>SK means Silent Key, an amateur-radio term honoring an operator who has passed away.</em></p>
+    <p>If FIO benefits your station, please consider supporting its continued development. There's more to come.</p>
+    <p>
+      <a href="https://buymeacoffee.com/n1mag" target="_blank" rel="noopener">
+        <img src="../assets/bmc-button.png" alt="Support FreqInOut at Buy Me a Coffee" style="max-width: 180px; height: auto;">
+      </a>
+    </p>
+  </div>
+
+  <h2 id="hf-digital-tri-mode">What Is HF Digital Tri-Mode?</h2>
+  <p>HF Digital Tri-Mode combines three complementary families of amateur-radio software:</p>
+  <ul class="section-list">
+    <li><strong>Fast Light:</strong> FLRig provides radio control, FLDigi supports digital-mode operation, and FLMsg and FLAmp support structured messages and file transfer.</li>
+    <li><strong>JS8Call:</strong> provides weak-signal keyboard messaging, store-and-forward capabilities, and relay communication using JS8.</li>
+    <li><strong>VarAC and VARA:</strong> provide chat, messaging, file transfer, BBS, and related services.</li>
+  </ul>
+  <p>FIO helps bring these independently useful applications together as a coordinated station. It can discover and configure application instances, maintain separate identities for multiple radios, manage paths and endpoints, monitor readiness, control application launching, associate schedules with radios, and collect supported traffic into a common station message library.</p>
+  <p>For multi-radio stations, FIO keeps each radio's application profiles, ports, message locations, and launch identities distinct. Station-level services such as FIO Spotter, FLAmp Q, CommStat, and the FIO BBS can then work with received traffic according to the operator's configured access and publication policies.</p>
+
   <p>This guide is a complete reference for the current FreqInOut interface. It documents each main-menu area, tab, button, table, and nested action so both new and advanced operators can move quickly and confidently.</p>
   <p><strong>Time model</strong>: schedule and SOP data are stored in UTC. Local/UTC toggles change display only.</p>
   <p><strong>Guide structure</strong>: new operators can read the sections in operational order, beginning with <a href="#settings">Configuration</a>, followed by the schedule tabs and live operating tabs such as <a href="#controlfreq">Ops Center</a>, <a href="#messages">Inbox</a>, and <a href="#map">Map</a>. During operation, the guide also serves as a workflow map: related tabs and configuration sections identify the source of shared behavior.</p>
@@ -475,6 +497,7 @@
     <li><strong>Message Index</strong>: choose <code>More... &gt; Message Maintenance...</code>, then open this tab only when troubleshooting a stale or missing indexed view.</li>
     <li><strong>Preview Message Index Rebuild</strong>: counts the available source evidence and shows an estimate before anything changes. Preview is read-only.</li>
     <li><strong>Rebuild safety</strong>: confirmation resets only derived indexing watermarks. It does not delete or rewrite native messages, received files, operator read state, BBS mappings, or source evidence.</li>
+    <li><strong>Legacy duplicate repair</strong>: after replaying current sources, the rebuild also combines proven duplicate presentation rows left by older index versions. Separate JS8, VarAC, FLMsg, FLAmp, and BBS receipts remain attached to the surviving station message. Files that merely look alike but have different content hashes stay separate.</li>
     <li><strong>Progress and restart</strong>: the rebuild runs in bounded background batches and can be cancelled. Its durable remaining work may resume during normal background catch-up or after restart. You may keep using FIO while it runs.</li>
   </ul>
 
@@ -1886,10 +1909,5 @@
   <h2 id="support">Support</h2>
   <p>Questions, bug reports, and enhancement ideas are welcome.</p>
   <p>Contact: <a href="mailto:bill@n1mag.com">bill@n1mag.com</a></p>
-  <p>
-    <a href="https://buymeacoffee.com/n1mag" target="_blank" rel="noopener">
-      <img src="../assets/bmc-button.png" alt="Buy me a coffee" style="max-width: 180px; height: auto;">
-    </a>
-  </p>
 </body>
 </html>

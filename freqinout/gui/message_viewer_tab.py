@@ -12754,11 +12754,12 @@ class MessageViewerTab(QWidget):
         snapshot = service.diagnostic_snapshot() if hasattr(service, "diagnostic_snapshot") else {}
         processed = int(snapshot.get("processed", 0) or 0) if isinstance(snapshot, Mapping) else 0
         estimate = int(snapshot.get("source_rows_estimate", 0) or 0) if isinstance(snapshot, Mapping) else 0
-        if estimate > progress.maximum():
-            progress.setMaximum(estimate)
+        display_total = max(estimate, processed, progress.maximum())
+        if display_total > progress.maximum():
+            progress.setMaximum(display_total)
         progress.setValue(min(progress.maximum(), processed))
         progress.setLabelText(
-            f"Rebuilding the derived Message Index… {processed:,} of approximately {max(estimate, progress.maximum()):,} records"
+            f"Rebuilding the derived Message Index… {processed:,} of approximately {display_total:,} records"
         )
         if not hasattr(future, "done") or not future.done():
             return
@@ -12768,6 +12769,7 @@ class MessageViewerTab(QWidget):
             result = future.result()
             state = str(getattr(result, "state", "complete") or "complete")
             processed = int(getattr(result, "processed", processed) or processed)
+            repaired = int(getattr(result, "repaired", 0) or 0)
         except Exception as exc:
             state = "failed"
             failure = type(exc).__name__
@@ -12776,7 +12778,14 @@ class MessageViewerTab(QWidget):
         if status_label is not None:
             try:
                 if state == "complete":
-                    status_label.setText(f"Message Index rebuild complete: {processed:,} records considered.")
+                    repair_text = (
+                        f"; {repaired:,} legacy duplicate presentations repaired"
+                        if repaired
+                        else ""
+                    )
+                    status_label.setText(
+                        f"Message Index rebuild complete: {processed:,} records considered{repair_text}."
+                    )
                 elif state == "cancelled":
                     status_label.setText(
                         "Message Index rebuild paused. Normal background catch-up may resume the remaining work safely."
@@ -12791,10 +12800,15 @@ class MessageViewerTab(QWidget):
                 pass
         if state == "complete":
             self._request_projected_message_query(force=True, delay_ms=0)
+            repair_text = (
+                f"; {repaired:,} legacy duplicate presentations repaired"
+                if repaired
+                else ""
+            )
             QMessageBox.information(
                 self,
                 "Message Index Rebuild",
-                f"The derived Message Index rebuild completed ({processed:,} records considered).",
+                f"The derived Message Index rebuild completed ({processed:,} records considered{repair_text}).",
             )
         elif state == "cancelled":
             QMessageBox.information(

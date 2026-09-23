@@ -66,6 +66,7 @@ class ProjectionCatchupProgress:
     prepared: int = 0
     committed: int = 0
     deleted: int = 0
+    repaired: int = 0
     deferred: int = 0
     max_transaction_ms: float = 0.0
     queue_depth: int = 0
@@ -75,11 +76,22 @@ class ProjectionCatchupProgress:
 
     @property
     def processed(self) -> int:
-        return self.committed + self.deleted
+        return self.committed + self.deleted + self.repaired
 
     @property
     def resumable(self) -> bool:
         return self.state in {"cancelled", "deferred", "failed", "running"}
+
+
+@dataclass(frozen=True)
+class _NoProjectionRepair:
+    """Compatibility result for narrow coordinator test doubles."""
+
+    state: str = "committed"
+    planned: int = 0
+    repaired: int = 0
+    transactions: int = 0
+    max_transaction_ms: float = 0.0
 
 
 class MessageProjectionMaintenanceService:
@@ -312,6 +324,31 @@ class MessageProjectionMaintenanceService:
                     progress = _with_state(progress, "deferred")
                     break
                 if _cycle_is_idle(result):
+                    if progress.rebuild_id:
+                        repair_method = getattr(
+                            self._coordinator, "repair_legacy_duplicates", None
+                        )
+                        repair = (
+                            repair_method(cancel_event=event)
+                            if callable(repair_method)
+                            else _NoProjectionRepair()
+                        )
+                        progress = _with_repair(
+                            progress,
+                            repaired=int(repair.repaired or 0),
+                            max_transaction_ms=float(repair.max_transaction_ms or 0.0),
+                        )
+                        self._record_progress(progress)
+                        log.info(
+                            "MESSAGE_INDEX_REBUILD|canonical_repair|state=%s|planned=%s|repaired=%s|transactions=%s",
+                            repair.state,
+                            repair.planned,
+                            repair.repaired,
+                            repair.transactions,
+                        )
+                        if repair.state != "committed":
+                            progress = _with_state(progress, repair.state)
+                            break
                     progress = _with_state(progress, "complete")
                     break
                 # Let Qt/the interpreter and unrelated service workers run.
@@ -432,6 +469,7 @@ class MessageProjectionMaintenanceService:
             "claimed": int(progress.claimed),
             "committed": int(progress.committed),
             "deleted": int(progress.deleted),
+            "repaired": int(progress.repaired),
             "processed": int(progress.processed),
             "deferred": int(progress.deferred),
             "max_transaction_ms": round(float(progress.max_transaction_ms), 3),
@@ -632,6 +670,7 @@ def _accumulate(
         prepared=progress.prepared + int(result.prepared or 0),
         committed=progress.committed + int(result.committed or 0),
         deleted=progress.deleted + int(result.deleted or 0),
+        repaired=progress.repaired,
         deferred=progress.deferred + int(result.deferred or 0),
         max_transaction_ms=max(
             float(progress.max_transaction_ms or 0.0),
@@ -653,6 +692,7 @@ def _with_state(progress: ProjectionCatchupProgress, state: str) -> ProjectionCa
         prepared=progress.prepared,
         committed=progress.committed,
         deleted=progress.deleted,
+        repaired=progress.repaired,
         deferred=progress.deferred,
         max_transaction_ms=progress.max_transaction_ms,
         queue_depth=progress.queue_depth,
@@ -673,10 +713,38 @@ def _with_queue_state(
         prepared=progress.prepared,
         committed=progress.committed,
         deleted=progress.deleted,
+        repaired=progress.repaired,
         deferred=progress.deferred,
         max_transaction_ms=progress.max_transaction_ms,
         queue_depth=max(0, int(depth or 0)),
         oldest_dirty_utc=str(oldest_utc or ""),
+        rebuild_id=progress.rebuild_id,
+        source_rows_estimate=progress.source_rows_estimate,
+    )
+
+
+def _with_repair(
+    progress: ProjectionCatchupProgress,
+    *,
+    repaired: int,
+    max_transaction_ms: float,
+) -> ProjectionCatchupProgress:
+    return ProjectionCatchupProgress(
+        state=progress.state,
+        cycles=progress.cycles,
+        discovered=progress.discovered,
+        claimed=progress.claimed,
+        prepared=progress.prepared,
+        committed=progress.committed,
+        deleted=progress.deleted,
+        repaired=progress.repaired + max(0, int(repaired or 0)),
+        deferred=progress.deferred,
+        max_transaction_ms=max(
+            float(progress.max_transaction_ms or 0.0),
+            float(max_transaction_ms or 0.0),
+        ),
+        queue_depth=progress.queue_depth,
+        oldest_dirty_utc=progress.oldest_dirty_utc,
         rebuild_id=progress.rebuild_id,
         source_rows_estimate=progress.source_rows_estimate,
     )

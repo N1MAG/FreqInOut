@@ -138,6 +138,29 @@ Projector identity-version changes replay in bounded background batches. They
 must not scan sources on the GUI thread or make Messages first paint wait for
 historical repair.
 
+An operator-requested deep Message Index rebuild is not complete merely because
+all current source rows were replayed. Before reporting completion it must also
+converge legacy derived presentations whose receipt identities changed across
+projector versions. The repair is derived-index-only and transactional:
+
+- known JS8 and VarAC source/key migrations may converge only when the current
+  native receipt proves the old and new identities refer to the same row;
+- file-backed FLMsg, FLAmp, VarAC, and BBS presentations may converge only
+  within one family when protocol filename and SHA-256 content digest match;
+- every external reference, artifact, operator read/pin/archive/delete state,
+  active delete request, watch match, and compact Ops index entry follows the
+  surviving presentation;
+- source rows and source files are never modified, and completed audit history
+  remains immutable;
+- same-looking files with different content hashes, changed file versions,
+  different families, or ambiguous legacy receipts remain distinct; and
+- the repair runs through the serialized projection writer in bounded
+  transactions, is cancellable/resumable, and is idempotent.
+
+The rebuild UI must refresh from the repaired projection before announcing
+completion. Repair counts are part of rebuild progress so an operator can
+distinguish source replay from legacy presentation convergence.
+
 Message detail must list every retained receipt using its human source label,
 radio and application instance when known, external kind/key, and native path
 or endpoint. A single canonical row must therefore never make API versus file,

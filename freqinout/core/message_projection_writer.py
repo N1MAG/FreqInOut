@@ -28,11 +28,13 @@ from freqinout.core.message_projection_store import (
     MessageProjectionRecord,
     MessageSourceRecord,
     PROJECTION_SCHEMA_VERSION,
+    merge_message_projections,
     upsert_external_ref,
     upsert_message_artifact,
     upsert_message_projection,
     upsert_message_source,
 )
+from freqinout.core.message_projection_repair import plan_legacy_projection_merges
 from freqinout.core.scheduler_serial_executor import DaemonSerialExecutor
 from freqinout.core.sqlite_utils import connect_sqlite_runtime_write
 from freqinout.core.perf_metrics import emit_span
@@ -43,6 +45,7 @@ from freqinout.core.perf_metrics import emit_span
 # CPU-bound unit small as well as the transaction itself; the coordinator owns
 # the larger 100-identity catch-up budget.
 MAX_BUNDLES_PER_TRANSACTION = 25
+MAX_REPAIRS_PER_TRANSACTION = 10
 MAX_TRANSACTION_SECONDS = 0.050
 INITIAL_BUSY_RETRY_SECONDS = 0.050
 MAX_BUSY_RETRY_SECONDS = 2.0
@@ -417,6 +420,19 @@ class ProjectionWriteResult:
     @property
     def completed(self) -> bool:
         return self.state == "committed" and not self.deferred_bundles
+
+
+@dataclass(frozen=True)
+class ProjectionRepairResult:
+    """Outcome of one explicit derived-index convergence pass."""
+
+    state: str
+    planned: int = 0
+    repaired: int = 0
+    transactions: int = 0
+    busy_retries: int = 0
+    max_transaction_ms: float = 0.0
+    error: str = ""
 
 
 @dataclass(frozen=True)
@@ -818,6 +834,143 @@ class ProjectionBundleWriter:
                 level="warning" if result.max_transaction_ms > 100.0 else "debug",
             )
             return result
+
+    def repair_legacy_duplicates(
+        self,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> ProjectionRepairResult:
+        """Converge proven legacy presentations through the serialized writer.
+
+        Planning is read-only and runs off the UI thread.  Native source rows
+        and files are never changed.  Each short transaction moves receipts,
+        artifacts, and operator-owned state before removing only the
+        superseded derived presentation.
+        """
+
+        with self._serial_lock:
+            conn, retries, error = self._open_with_busy_retry(cancel_event)
+            if conn is None:
+                return ProjectionRepairResult(
+                    state="cancelled" if self._cancelled(cancel_event) else "deferred",
+                    busy_retries=retries,
+                    error=_clean_text(error),
+                )
+            try:
+                planned = plan_legacy_projection_merges(conn)
+            except Exception as exc:
+                return ProjectionRepairResult(state="failed", error=_clean_text(exc))
+            repaired = transactions = 0
+            max_transaction_ms = 0.0
+            for start in range(0, len(planned), MAX_REPAIRS_PER_TRANSACTION):
+                if self._cancelled(cancel_event):
+                    return ProjectionRepairResult(
+                        state="cancelled",
+                        planned=len(planned),
+                        repaired=repaired,
+                        transactions=transactions,
+                        busy_retries=retries,
+                        max_transaction_ms=max_transaction_ms,
+                    )
+                chunk = planned[start : start + MAX_REPAIRS_PER_TRANSACTION]
+                retry_started = time.monotonic()
+                delay = INITIAL_BUSY_RETRY_SECONDS
+                while True:
+                    try:
+                        conn.execute("BEGIN IMMEDIATE")
+                        transaction_started = time.monotonic()
+                        changed = 0
+                        for merge in chunk:
+                            if self._cancelled(cancel_event):
+                                raise InterruptedError("projection repair cancelled")
+                            if merge_message_projections(
+                                conn,
+                                target_message_id=merge.target_message_id,
+                                duplicate_message_id=merge.duplicate_message_id,
+                            ):
+                                changed += 1
+                        if changed:
+                            conn.execute(
+                                """
+                                UPDATE message_projection_generation
+                                   SET generation=generation+1, updated_utc=?
+                                 WHERE singleton=1
+                                """,
+                                (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),),
+                            )
+                        conn.commit()
+                        transaction_ms = (time.monotonic() - transaction_started) * 1000.0
+                        max_transaction_ms = max(max_transaction_ms, transaction_ms)
+                        repaired += changed
+                        transactions += 1
+                        break
+                    except InterruptedError:
+                        conn.rollback()
+                        return ProjectionRepairResult(
+                            state="cancelled",
+                            planned=len(planned),
+                            repaired=repaired,
+                            transactions=transactions,
+                            busy_retries=retries,
+                            max_transaction_ms=max_transaction_ms,
+                        )
+                    except sqlite3.OperationalError as exc:
+                        conn.rollback()
+                        if not self._is_busy_error(exc):
+                            return ProjectionRepairResult(
+                                state="failed",
+                                planned=len(planned),
+                                repaired=repaired,
+                                transactions=transactions,
+                                busy_retries=retries,
+                                max_transaction_ms=max_transaction_ms,
+                                error=_clean_text(exc),
+                            )
+                        retries += 1
+                        elapsed = time.monotonic() - retry_started
+                        if elapsed >= self._busy_retry_seconds:
+                            return ProjectionRepairResult(
+                                state="deferred",
+                                planned=len(planned),
+                                repaired=repaired,
+                                transactions=transactions,
+                                busy_retries=retries,
+                                max_transaction_ms=max_transaction_ms,
+                                error=_clean_text(exc),
+                            )
+                        if not self._sleep_until_retry(
+                            min(delay, self._busy_retry_seconds - elapsed), cancel_event
+                        ):
+                            return ProjectionRepairResult(
+                                state="cancelled",
+                                planned=len(planned),
+                                repaired=repaired,
+                                transactions=transactions,
+                                busy_retries=retries,
+                                max_transaction_ms=max_transaction_ms,
+                            )
+                        delay = min(self._busy_retry_seconds, delay * 2.0)
+                    except Exception as exc:
+                        conn.rollback()
+                        return ProjectionRepairResult(
+                            state="failed",
+                            planned=len(planned),
+                            repaired=repaired,
+                            transactions=transactions,
+                            busy_retries=retries,
+                            max_transaction_ms=max_transaction_ms,
+                            error=_clean_text(exc),
+                        )
+                if start + MAX_REPAIRS_PER_TRANSACTION < len(planned):
+                    time.sleep(0)
+            return ProjectionRepairResult(
+                state="committed",
+                planned=len(planned),
+                repaired=repaired,
+                transactions=transactions,
+                busy_retries=retries,
+                max_transaction_ms=max_transaction_ms,
+            )
 
     def close(self, *, wait: bool = True, cancel_pending: bool = False) -> None:
         """Stop accepting work and release the writer connection on its owner thread."""

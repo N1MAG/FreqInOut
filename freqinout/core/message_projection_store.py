@@ -1093,6 +1093,56 @@ def _merge_relinked_projection(
         index_message_for_ops_focus(conn, refreshed)
 
 
+def merge_message_projections(
+    conn: sqlite3.Connection,
+    *,
+    target_message_id: str,
+    duplicate_message_id: str,
+) -> bool:
+    """Converge one proven duplicate presentation without losing receipts.
+
+    This is a derived-index repair seam.  Native rows and files remain
+    untouched; every external reference and artifact is rehomed to the chosen
+    canonical presentation before the superseded row is removed.  The shared
+    relink helper preserves operator state, active delete work, Spotter watch
+    state, and compact Ops indexes.
+    """
+
+    target = _sanitize_sql_text(target_message_id)
+    duplicate = _sanitize_sql_text(duplicate_message_id)
+    if not target or not duplicate or target == duplicate:
+        return False
+    target_exists = conn.execute(
+        "SELECT 1 FROM message_projection WHERE message_id=?", (target,)
+    ).fetchone()
+    duplicate_exists = conn.execute(
+        "SELECT 1 FROM message_projection WHERE message_id=?", (duplicate,)
+    ).fetchone()
+    if target_exists is None or duplicate_exists is None:
+        return False
+    conn.execute(
+        "UPDATE message_external_refs SET message_id=? WHERE message_id=?",
+        (target, duplicate),
+    )
+    conn.execute(
+        "UPDATE message_artifacts SET message_id=? WHERE message_id=?",
+        (target, duplicate),
+    )
+    _merge_relinked_projection(
+        conn,
+        previous_message_id=duplicate,
+        message_id=target,
+        source_id="",
+        external_key="",
+    )
+    return (
+        conn.execute(
+            "SELECT 1 FROM message_projection WHERE message_id=?", (duplicate,)
+        ).fetchone()
+        is None
+    )
+
+
 def upsert_message_artifact(conn: sqlite3.Connection, artifact: MessageArtifactRecord, *, updated_utc: str | None = None) -> str:
     stamp = updated_utc or utc_now_iso()
     conn.execute(
