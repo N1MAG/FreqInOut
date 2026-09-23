@@ -114,6 +114,33 @@ def test_flamp_process_identity_requires_the_selected_radio_root_and_ports(monke
 
 
 @pytest.mark.parametrize(
+    ("program", "process_name"),
+    [
+        ("FLMsg", "flmsg-4.0.24"),
+        ("FLAmp", "flamp-2.2.14"),
+    ],
+)
+def test_process_count_recognizes_version_qualified_fast_light_names(
+    program: str,
+    process_name: str,
+) -> None:
+    service = SoftwareStatusService(DummySettings())
+    record = {
+        "name": process_name,
+        "exe": process_name,
+        "exe_path": "",
+        "cmd_tokens": (),
+        "cmd_paths": (),
+        "cmdline": (),
+    }
+
+    assert service.cached_program_process_count(
+        program,
+        process_records=(record,),
+    ) == 1
+
+
+@pytest.mark.parametrize(
     ("program", "target", "arguments", "record"),
     [
         (
@@ -145,6 +172,26 @@ def test_flamp_process_identity_requires_the_selected_radio_root_and_ports(monke
             },
         ),
         (
+            "FLMsg",
+            r"C:\Program Files\W1HKJ\flmsg.exe",
+            (
+                "--flmsg-dir",
+                r"C:\Users\Bill\NBEMS.files\instances\FT-710",
+            ),
+            {
+                "name": "flmsg.exe",
+                "exe": "flmsg.exe",
+                "exe_path": r"C:\Program Files\W1HKJ\flmsg.exe",
+                "cmd_tokens": ("flmsg.exe",),
+                "cmd_paths": (r"C:\Program Files\W1HKJ\flmsg.exe",),
+                "cmdline": (
+                    r"C:\Program Files\W1HKJ\flmsg.exe",
+                    "--flmsg-dir",
+                    r"C:\Users\Bill\NBEMS.files\instances\FT-710",
+                ),
+            },
+        ),
+        (
             "VarAC",
             r"C:\VarAC\VarAC.exe",
             (r"C:\VarAC\VarAC-ft-710.ini",),
@@ -165,7 +212,7 @@ def test_flamp_process_identity_requires_the_selected_radio_root_and_ports(monke
         ),
         (
             "FLAmp",
-            "/Applications/FLAmp.app/Contents/MacOS/flamp",
+            "/Applications/FLAmp.app",
             (
                 "--config-dir",
                 "/Users/bill/Library/Application Support/NBEMS/instances/FT-710",
@@ -191,6 +238,29 @@ def test_flamp_process_identity_requires_the_selected_radio_root_and_ports(monke
                     "7323",
                     "--xmlrpc-server-port",
                     "7363",
+                ),
+            },
+        ),
+        (
+            "FLMsg",
+            "/Applications/FLMsg.app",
+            (
+                "--flmsg-dir",
+                "/Users/bill/Library/Application Support/NBEMS/instances/FT-710",
+            ),
+            {
+                "name": "flmsg",
+                "exe": "flmsg",
+                "exe_path": "/Applications/FLMsg.app/Contents/MacOS/flmsg",
+                "cmd_tokens": ("flmsg",),
+                "cmd_paths": (
+                    "/Applications/FLMsg.app/Contents/MacOS/flmsg",
+                    "/Users/bill/Library/Application Support/NBEMS/instances/FT-710",
+                ),
+                "cmdline": (
+                    "/Applications/FLMsg.app/Contents/MacOS/flmsg",
+                    "--flmsg-dir",
+                    "/Users/bill/Library/Application Support/NBEMS/instances/FT-710",
                 ),
             },
         ),

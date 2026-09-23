@@ -171,6 +171,7 @@ class LaunchOrchestrator(QObject):
         self._current_phase = ""
         self._endpoint_preflight_verified: set[str] = set()
         self._endpoint_preflight_requested: set[str] = set()
+        self._endpoint_preflight_clear: set[str] = set()
         self._sequence_claimed_identities: set[str] = set()
         self._sequence_process_records: tuple[Mapping[str, object], ...] = ()
         self._sequence_process_records_ready = False
@@ -1111,6 +1112,7 @@ class LaunchOrchestrator(QObject):
         self._current_phase = ""
         self._endpoint_preflight_verified = set()
         self._endpoint_preflight_requested = set()
+        self._endpoint_preflight_clear = set()
         self._sequence_claimed_identities = set()
         self._sequence_process_records = ()
         self._sequence_process_records_ready = False
@@ -1401,6 +1403,12 @@ class LaunchOrchestrator(QObject):
                 self.sequence_progress.emit(result)
                 self._schedule_advance_queue(0)
                 return
+            self._endpoint_preflight_clear = getattr(
+                self,
+                "_endpoint_preflight_clear",
+                set(),
+            )
+            self._endpoint_preflight_clear.add(endpoint_key)
             if exact_process_running is True:
                 log.warning(
                     "LaunchOrchestrator: skipped duplicate %s launch; exact process is "
@@ -1455,6 +1463,11 @@ class LaunchOrchestrator(QObject):
         unattributed_process = self._unattributed_process_blocker(
             queue_item,
             exact_process_running,
+            endpoint_clear=(
+                bool(endpoint_key)
+                and endpoint_key
+                in getattr(self, "_endpoint_preflight_clear", set())
+            ),
         )
         if unattributed_process:
             log.warning(
@@ -1914,6 +1927,12 @@ class LaunchOrchestrator(QObject):
                         self._sequence_claimed_identities.add(sequence_identity)
                     self.sequence_progress.emit(result)
                 else:
+                    self._endpoint_preflight_clear = getattr(
+                        self,
+                        "_endpoint_preflight_clear",
+                        set(),
+                    )
+                    self._endpoint_preflight_clear.add(endpoint_key)
                     exact_process_running = self._configured_instance_process_running(item)
                     if exact_process_running is True:
                         log.warning(
@@ -2145,6 +2164,8 @@ class LaunchOrchestrator(QObject):
         self,
         item: Any,
         exact_process_running: Optional[bool],
+        *,
+        endpoint_clear: bool = False,
     ) -> str:
         """Fail closed when family processes cannot be fully attributed.
 
@@ -2156,6 +2177,17 @@ class LaunchOrchestrator(QObject):
         """
 
         if exact_process_running is True:
+            return ""
+        # FLRig, FLDigi, and JS8Call own persisted per-radio endpoints.  Once
+        # this launch sequence has freshly proved the requested endpoint clear,
+        # another same-family process belongs to a different endpoint and must
+        # not suppress the requested instance merely because a legacy/default
+        # process lacks radio-selecting argv.  The occupied-endpoint and exact
+        # configured-process checks run before this branch and remain terminal.
+        # Process-only applications (including FLMsg/FLAmp and Wine-hosted
+        # VarAC/VARA) deliberately retain the family-attribution fail-closed
+        # rule below.
+        if endpoint_clear and self._has_persisted_endpoint_identity(item):
             return ""
         name = self._queue_item_name(item)
         status = getattr(self, "status", None)
@@ -2577,6 +2609,7 @@ class LaunchOrchestrator(QObject):
         self._current_phase = ""
         self._endpoint_preflight_verified = set()
         self._endpoint_preflight_requested = set()
+        self._endpoint_preflight_clear = set()
         self._sequence_claimed_identities = set()
         self._sequence_preflight_started_wall = 0.0
         self._process_preflight_reason = ""

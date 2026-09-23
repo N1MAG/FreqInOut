@@ -452,7 +452,11 @@ class SoftwareStatusService:
                     for value in record.get("cmd_tokens", ())
                 ),
             }
-            if record_tokens.intersection(targets):
+            if any(
+                self._matches_target_process_name(token, targets)
+                for token in record_tokens
+                if token
+            ):
                 count += 1
         return count
 

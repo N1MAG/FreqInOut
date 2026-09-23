@@ -1050,6 +1050,87 @@ def test_exact_process_with_unready_port_is_not_duplicated_or_held(
     assert "duplicate launch skipped" in orchestrator._results[0]["detail"]
 
 
+@pytest.mark.parametrize(
+    ("name", "arguments", "port"),
+    [
+        ("FLRig", ["--config-dir", "/profiles/FT-710"], 12346),
+        (
+            "FLDigi",
+            [
+                "--config-dir", "/profiles/FT-710",
+                "--xmlrpc-server-address", "127.0.0.1",
+                "--xmlrpc-server-port", "7363",
+            ],
+            7363,
+        ),
+        ("JS8Call", ["--rig-name", "FT-710"], 2443),
+    ],
+)
+def test_fresh_clear_endpoint_does_not_treat_another_instance_as_duplicate(
+    monkeypatch,
+    name: str,
+    arguments: list[str],
+    port: int,
+) -> None:
+    """A legacy/default sibling process must not suppress a distinct endpoint."""
+
+    item = {
+        "name": name,
+        "instance_identity": f"radio-9:{name.casefold()}",
+        "launch_path_override": f"/usr/local/bin/{name.casefold()}",
+        "launch_arguments": arguments,
+        "readiness_policy": {"host": "127.0.0.1", "port": port},
+    }
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        launch_module.subprocess,
+        "Popen",
+        lambda command, **kwargs: captured.update(command=list(command), **kwargs)
+        or SimpleNamespace(),
+    )
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator._active = True
+    orchestrator._process_preflight_pending = False
+    orchestrator._cancel_requested = False
+    orchestrator._queue = [item]
+    orchestrator._index = 0
+    orchestrator._results = []
+    orchestrator._sequence_claimed_identities = set()
+    orchestrator._sequence_process_records_ready = False
+    orchestrator.status = SimpleNamespace(
+        cached_program_instance_running=lambda *_args, **_kwargs: False,
+        cached_program_process_count=lambda _name: 1,
+    )
+    endpoint_key = orchestrator._endpoint_preflight_key(item)
+    orchestrator._endpoint_preflight_verified = {endpoint_key}
+    orchestrator._endpoint_preflight_clear = {endpoint_key}
+    orchestrator._blocked_dependency_for = lambda _item: None
+    orchestrator._materialize_item_managed_directories = lambda _item: ()
+    orchestrator._is_self_launch_command = lambda _cmd: False
+    orchestrator._infer_launch_cwd = lambda *_args: None
+    orchestrator._schedule_advance_queue = lambda _delay=0: None
+    orchestrator.dependency_status = SimpleNamespace(refresh_now=lambda **_kwargs: None)
+    orchestrator._poll_timer = SimpleNamespace(
+        setInterval=lambda _value: None,
+        start=lambda: None,
+    )
+
+    assert "duplicate launch skipped" in orchestrator._unattributed_process_blocker(
+        item,
+        False,
+    )
+    assert orchestrator._unattributed_process_blocker(
+        item,
+        False,
+        endpoint_clear=True,
+    ) == ""
+
+    orchestrator._advance_queue()
+
+    assert captured["command"] == [item["launch_path_override"], *arguments]
+    assert orchestrator._current_item is item
+
+
 @pytest.mark.parametrize("name", ["FLMsg", "FLAmp"])
 def test_non_endpoint_fast_light_tools_do_not_use_endpoint_relaunch_recovery(name: str) -> None:
     assert not LaunchOrchestrator._has_persisted_endpoint_identity(
@@ -1059,6 +1140,49 @@ def test_non_endpoint_fast_light_tools_do_not_use_endpoint_relaunch_recovery(nam
             "readiness_policy": {"host": "127.0.0.1", "port": 7000},
         }
     )
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments", "windows_target", "mac_target"),
+    [
+        (
+            "FLMsg",
+            ["--flmsg-dir", "INSTANCE_ROOT"],
+            r"C:\Program Files\W1HKJ\flmsg.exe",
+            "/Applications/FLMsg.app",
+        ),
+        (
+            "FLAmp",
+            [
+                "--config-dir", "INSTANCE_ROOT",
+                "--arq-server-address", "127.0.0.1",
+                "--arq-server-port", "7323",
+                "--xmlrpc-server-address", "127.0.0.1",
+                "--xmlrpc-server-port", "7363",
+            ],
+            r"C:\Program Files\W1HKJ\flamp.exe",
+            "/Applications/FLAmp.app",
+        ),
+    ],
+)
+def test_fast_light_message_selectors_are_forwarded_on_windows_and_macos(
+    name: str,
+    arguments: list[str],
+    windows_target: str,
+    mac_target: str,
+) -> None:
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+
+    assert orchestrator._finalize_launch_command(
+        name,
+        [windows_target],
+        arguments,
+    ) == [windows_target, *arguments]
+    assert orchestrator._finalize_launch_command(
+        name,
+        ["open", "-a", mac_target],
+        arguments,
+    ) == ["open", "-a", mac_target, "--args", *arguments]
 
 
 def test_executor_requires_dependency_success_for_every_shared_radio() -> None:
@@ -1590,6 +1714,31 @@ def test_existing_flmsg_process_identity_ignores_presentation_title(monkeypatch)
     ("name", "target", "arguments", "record"),
     [
         (
+            "FLMsg",
+            "/usr/local/bin/flmsg",
+            (
+                "--flmsg-dir",
+                "/home/bill/.nbems/instances/FT-710",
+            ),
+            {
+                "name": "flmsg-4.0.24",
+                "exe": "flmsg-4.0.24",
+                "exe_path": "/usr/local/bin/flmsg-4.0.24",
+                "cmd_tokens": ("flmsg",),
+                "cmd_paths": (
+                    "/usr/local/bin/flmsg",
+                    "/home/bill/.nbems/instances/FT-710",
+                ),
+                "cmdline": (
+                    "/usr/local/bin/flmsg",
+                    "--flmsg-dir",
+                    "/home/bill/.nbems/instances/FT-710",
+                    "-title",
+                    "FLMsg — FT-710",
+                ),
+            },
+        ),
+        (
             "FLAmp",
             "/usr/local/bin/flamp",
             (
@@ -1826,6 +1975,12 @@ def test_exact_flamp_process_match_is_terminal_in_multi_radio_queue(
     ("name", "arguments"),
     [
         (
+            "FLMsg",
+            [
+                "--flmsg-dir", "/home/bill/.nbems/instances/FT-710",
+            ],
+        ),
+        (
             "FLAmp",
             [
                 "--config-dir", "/home/bill/.nbems/instances/FT-710",
@@ -1889,18 +2044,95 @@ def test_unattributed_process_family_fails_closed_before_spawn(
     assert "duplicate launch skipped" in orchestrator._results[0]["detail"]
 
 
-def test_missing_distinct_flamp_instance_launches_when_running_family_is_attributed() -> None:
+@pytest.mark.parametrize(
+    ("name", "process_name", "launch_path", "arguments"),
+    [
+        (
+            "FLMsg",
+            "flmsg-4.0.24",
+            "/usr/local/bin/flmsg",
+            ["--flmsg-dir", "/home/bill/.nbems/instances/FT-710"],
+        ),
+        (
+            "FLAmp",
+            "flamp-2.2.14",
+            "/usr/local/bin/flamp",
+            [
+                "--config-dir", "/home/bill/.nbems/instances/FT-710",
+                "--arq-server-address", "127.0.0.1",
+                "--arq-server-port", "7323",
+                "--xmlrpc-server-address", "127.0.0.1",
+                "--xmlrpc-server-port", "7363",
+            ],
+        ),
+    ],
+)
+def test_unreadable_version_qualified_fast_light_process_fails_closed(
+    name: str,
+    process_name: str,
+    launch_path: str,
+    arguments: list[str],
+) -> None:
+    item = {
+        "name": name,
+        "instance_identity": f"fast-light:ft-710:{name.casefold()}",
+        "launch_path_override": launch_path,
+        "launch_arguments": arguments,
+        "execution_scope": "radio_scoped",
+    }
+    record = {
+        "name": process_name,
+        "exe": process_name,
+        "exe_path": "",
+        "cmd_tokens": (),
+        "cmd_paths": (),
+        "cmdline": (),
+    }
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator._queue = [item]
+    orchestrator._sequence_process_records = (record,)
+    orchestrator._sequence_process_records_ready = True
+    orchestrator.status = SoftwareStatusService(
+        SimpleNamespace(get=lambda _key, default=None: default)
+    )
+
+    assert "duplicate launch skipped" in orchestrator._unattributed_process_blocker(
+        item,
+        False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "running_arguments", "missing_arguments"),
+    [
+        (
+            "FLMsg",
+            ["--flmsg-dir", "/profiles/FTDX-10"],
+            ["--flmsg-dir", "/profiles/FT-710"],
+        ),
+        (
+            "FLAmp",
+            ["--config-dir", "/profiles/FTDX-10"],
+            ["--config-dir", "/profiles/FT-710"],
+        ),
+    ],
+)
+def test_missing_distinct_fast_light_message_instance_launches_when_running_family_is_attributed(
+    name: str,
+    running_arguments: list[str],
+    missing_arguments: list[str],
+) -> None:
     running = {
-        "name": "FLAmp",
-        "instance_identity": "fast-light:ftdx-10:flamp",
-        "launch_path_override": "/usr/local/bin/flamp",
-        "launch_arguments": ["--config-dir", "/profiles/FTDX-10"],
+        "name": name,
+        "instance_identity": f"fast-light:ftdx-10:{name.casefold()}",
+        "launch_path_override": f"/usr/local/bin/{name.casefold()}",
+        "launch_arguments": running_arguments,
     }
     missing = {
-        "name": "FLAmp",
-        "instance_identity": "fast-light:ft-710:flamp",
-        "launch_path_override": "/usr/local/bin/flamp",
-        "launch_arguments": ["--config-dir", "/profiles/FT-710"],
+        "name": name,
+        "instance_identity": f"fast-light:ft-710:{name.casefold()}",
+        "launch_path_override": f"/usr/local/bin/{name.casefold()}",
+        "launch_arguments": missing_arguments,
     }
     orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
     orchestrator._queue = [running, missing]
