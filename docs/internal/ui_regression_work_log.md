@@ -10542,3 +10542,80 @@ two existing Qt signal-disconnect warnings but no failures. A single very large
 mixed Qt run terminated in the host PySide native `NetScheduleTab` path without
 a Python assertion; the same affected suites pass in the isolated partitions
 above. Changed-file compilation and `git diff --check` pass before handoff.
+
+## 2026-09-23 — Deferred Message Relay Queue and JS8/Mesh bridge authority
+
+Status: specification complete; explicitly deferred until after FIO 2.0.
+
+A read-only review of SuperSpotter 3.0.7 separated two useful concepts that had
+previously appeared only as future-direction paragraphs: a custom JS8 held
+message/pickup service and a bidirectional MeshCore-channel/JS8-group bridge.
+The review also identified behaviors FIO must not copy, including optimistic
+delivery state before send success, unused expiry, ambiguous list-number and
+bare-ACK semantics, missing sender attribution, unguarded third-party storage,
+raw JS8 socket transmission, direction-overloaded relay rows, body/time-only
+dedupe, and remote `!` text acting too much like authorization.
+
+`message_relay_queue_and_cross_transport_bridge_spec.md` is now the detailed
+post-2.0 authority. It distinguishes JS8Call native `MSG`, FIO-held relay
+traffic, MeshCore device `MESSAGES_WAITING`, and BBS/FLAmp publication; keeps
+the canonical station message library authoritative; defines stable relay,
+route, attempt, audit, lifecycle/evidence, access, expiry, retry, concurrency,
+loop-prevention, UI, migration, and acceptance contracts; and makes operating
+groups metadata/access-policy subjects rather than message silos. Initial JS8
+scope is operator-created callsign-only held traffic. Automatic waiting notices,
+remote third-party storage, group mailboxes, Mesh outbound, and cross-transport
+automation remain separately gated.
+
+The production-remediation, FIO Spotter, SuperSpotter integration,
+protocol-neutral communications, and Local Mesh specifications now point to
+that one authority. The current Mesh UI remains truthfully receive-only and no
+schema, command parser, timer, endpoint, UI, transmission, migration, or
+production data changed. Documentation links and `git diff --check` pass; no
+runtime test was required for this specification-only package.
+
+## 2026-09-23 — endpoint-scoped launch attribution and Fast Light duplicate guard
+
+Status: specified and surgically implemented; Linux production launch
+qualification remains open.
+
+Observable reproduction: on the FT-710 Launch Control page, row **Start** for
+JS8 Subspace and FLRig reached the launch orchestrator, their configured target
+endpoints were not active, and both were rejected as duplicate risks because a
+legacy/default same-family process for the other radio lacked FIO-attributable
+selector argv. Startup showed the same JS8 suppression. This contradicted the
+persisted endpoint ownership rule for FLRig, FLDigi, and JS8Call.
+
+The launcher now records only fresh per-sequence `clear` endpoint evidence. For
+FLRig, FLDigi, and JS8Call, a clear requested endpoint plus absence of the exact
+configured process permits the distinct radio instance to launch. An occupied
+requested endpoint and an exact process/endpoint mismatch remain terminal, and
+pending, failed, stale, or timed-out endpoint evidence still fails closed. The
+same path is used by startup, selected-radio start, row Start, and manual launch.
+
+FLMsg and FLAmp remain process-only and deliberately do not receive this
+endpoint exception. Exact duplicate prevention uses FLMsg's `--flmsg-dir` and
+FLAmp's config root plus ARQ/XML-RPC address/port arguments; presentation titles
+are excluded. Direct Windows executables and macOS app forwarding retain those
+selectors. Linux family counting now also recognizes version-qualified native
+names such as `flmsg-4.0.24` and `flamp-2.2.14` when argv cannot be read, so the
+row fails closed rather than authorizing an unverified second process.
+
+Primary `gpt-6-astra` (current session reasoning effort) owned the safety design,
+implementation, specification reconciliation, diff review, and integration
+tests. `gpt-5.6-terra` at medium reasoning performed the independent FLMsg/FLAmp
+cross-platform identity audit; its version-qualified process-count finding was
+incorporated. `gpt-5.6-luna` at medium reasoning reviewed the endpoint-attribution
+boundary and focused test matrix; the primary retained its narrow fresh-clear
+authorization and kept process-only families fail-closed.
+
+Acceptance covers clear, occupied, pending, and exact-process endpoint states;
+unattributed and version-qualified FLMsg/FLAmp processes; distinct attributed
+radio instances; presentation-title normalization; Windows paths; macOS app
+bundles and `open --args`; immutable launch-owned process inventories; and the
+broader launch, software-status, guided-recipe, JS8, VarAC, and radio-bundle
+families. The automated commands pass **222 tests** with **4 environment/platform
+skips**. Changed-file compilation and `git diff --check` pass. External
+qualification must confirm FT-710 FLRig and JS8 Subspace start through both
+startup and row Start on the Linux station and that repeated FLMsg/FLAmp starts
+do not create a second process for the same radio.

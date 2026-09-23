@@ -777,6 +777,11 @@ selected-target, RF Guard, PTT/busy, hold, and schedule protections. Automatic
 `message waiting` notification defaults off. Remote third-party storage and
 group delivery remain out of the first package.
 
+The post-2.0 implementation authority is
+`message_relay_queue_and_cross_transport_bridge_spec.md`. This paragraph is a
+directional release note only and does not authorize Relay Queue work inside
+the FIO 2.0 remediation slices.
+
 #### FIO Spotter workflow correction exit gate
 
 - A locally received JS8 CommStat report appears in Activity as `CommStat` with
@@ -1114,7 +1119,9 @@ selected-radio start, row `Start`, and manual launch:
   values;
 - Linux process inventory inspects exact and delimiter-qualified native names
   such as `flamp-2.2.14`, then requires the saved executable argv and the same
-  radio-owned selectors before crediting that process;
+  radio-owned selectors before crediting that process. Family counts retain the
+  qualified-name evidence when argv cannot be read, so an unverified FLMsg or
+  FLAmp process fails closed rather than authorizing another copy;
 - Windows, Linux, and macOS use the same durable selectors: FLAmp config root
   plus ARQ/XML-RPC ports, VarAC selected INI, and VARA radio-specific executable.
   OS-specific path spelling, case rules, app bundles, or Wine wrappers do not
@@ -1124,14 +1131,19 @@ selected-radio start, row `Start`, and manual launch:
   override it merely because another radio has a same-application row;
 - if one or more family processes are visible but the launch-owned inventory
   cannot attribute all of them to configured identities, the requested row
-  fails closed. This applies equally to native FLAmp/FLMsg processes and Wine
-  VarAC/VARA children; another instance is launchable only after all existing
-  family processes are attributed to other persisted rows;
+  fails closed. This governs process-only applications and applies equally to
+  native FLAmp/FLMsg processes and Wine VarAC/VARA children; another instance
+  is launchable only after all existing family processes are attributed to
+  other persisted rows;
 - FLRig, FLDigi, and JS8Call additionally receive a fresh configured-host/port
   probe for that exact radio endpoint before a spawn is authorized;
 - a reachable configured endpoint is `already running` even when the process
   command line cannot be attributed safely; FIO must not launch a second
   process onto an occupied endpoint;
+- when that requested endpoint is freshly proven clear and the exact configured
+  executable-plus-selector process is absent, the endpoint-scoped instance may
+  launch even if a legacy/default same-family process on another endpoint lacks
+  FIO's selector argv. Family name alone must not suppress the distinct radio;
 - when the exact configured process is present but its configured endpoint is
   not ready, FIO reports the process/port mismatch and skips launch. It must not
   start a duplicate or consume the normal 90-second post-spawn readiness wait;

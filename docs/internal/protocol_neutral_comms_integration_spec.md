@@ -779,6 +779,11 @@ Store-and-forward remains a future protocol-neutral capability. It should not be
 implemented opportunistically as part of map pins, mesh message viewing, or
 Spotter compatibility.
 
+The detailed deferred authority is
+`message_relay_queue_and_cross_transport_bridge_spec.md`. It explicitly keeps
+this work outside the FIO 2.0 gate and separates JS8 native `MSG`, station-held
+relay traffic, MeshCore device `MESSAGES_WAITING`, and BBS/FLAmp publication.
+
 When revisited, it should be modeled as a `Message Relay Queue` with source
 adapter states for held, offered, requested, sent, acknowledged, expired, and
 failed traffic. JS8Call query-message behavior is sufficient for the current
@@ -1319,6 +1324,9 @@ Implementation status:
 
 ### Phase 5: MQTT And Store-And-Forward Routing
 
+- Complete the non-Internet Message Relay Queue and typed outbound evidence
+  gates in `message_relay_queue_and_cross_transport_bridge_spec.md` before
+  expanding routes to MQTT or Reticulum.
 - Add explicitly configured MQTT/Reticulum routing previews.
 - Keep internet-enabled flows opt-in and visibly labeled.
 - Connect BBS/relay suggestions to operator permissions.

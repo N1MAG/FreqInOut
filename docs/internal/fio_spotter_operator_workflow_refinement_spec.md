@@ -829,8 +829,9 @@ This package closes the remaining compatibility gaps in the FIO-supported
 SuperSpotter surface. It covers the configured MCForms catalog, Compose,
 Expect round trips, received native-JS8 stored messages, and shared Message
 Intelligence. It does not add the legacy application's email/HTTP/APRS
-gateways. Protocol-neutral Store & Forward remains the separately gated
-Message Relay Queue described in `superspotter_offline_integration_spec.md`.
+gateways. Protocol-neutral Store & Forward remains the separately gated,
+post-2.0 Message Relay Queue specified in
+`message_relay_queue_and_cross_transport_bridge_spec.md`.
 
 | SuperSpotter behavior | FIO disposition |
 |---|---|
@@ -838,7 +839,7 @@ Message Relay Queue described in `superspotter_offline_integration_spec.md`.
 | Create/view/edit/send saved E? responses | Supported through Compose + Expect |
 | Ordinary directed and native JS8 stored-message delivery | Supported; `Send as MSG` is explicit and off by default |
 | Receive, decode, summarize, map, and deduplicate MCForms | Supported through shared Message Intelligence |
-| SuperSpotter proprietary Store & Forward commands | Not copied; protocol-neutral Message Relay Queue remains separately gated |
+| SuperSpotter proprietary Store & Forward commands | Not copied; the post-2.0 protocol-neutral Message Relay Queue remains separately gated by `message_relay_queue_and_cross_transport_bridge_spec.md` |
 | Email, APRS-email, HTTP gateways, online propagation/tile services | Intentionally excluded by the offline product contract |
 
 ### Canonical form grammar and persistence contract

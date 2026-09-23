@@ -135,6 +135,12 @@ Device channel create/update/remove is a separate, higher-risk capability and
 stays in the companion application until firmware-version qualification and
 secret handling are complete.
 
+The typed outbound contract is a prerequisite for, but not authorization to
+implement, MeshCore/Meshtastic-to-JS8 bridging. The deferred bridge, durable
+Message Relay Queue, bidirectional policy, provenance, loop prevention, and
+manual-review-first phases are governed by
+`message_relay_queue_and_cross_transport_bridge_spec.md`.
+
 ### Acceptance gates
 
 Automated release evidence must cover:
@@ -1022,6 +1028,8 @@ Not implemented yet:
   transports
 - protocol-neutral, completion-aware outbound send for Meshtastic or MeshCore;
   legacy `send_enabled` settings remain inert until that contract is delivered
+- Message Relay Queue and JS8/Mesh cross-transport bridging; both remain
+  deferred by `message_relay_queue_and_cross_transport_bridge_spec.md`
 - native channel write/remove support for MeshCore and Meshtastic adapters;
   their current capabilities intentionally direct device changes to the
   companion application

@@ -459,17 +459,29 @@ evidence fails closed and identifies duplicate prevention as the reason. These
 checks must run off the GUI thread and are identical for startup, selected-radio
 start, row Start, and manual launch.
 
+For those three endpoint-scoped applications, a fresh `clear` result for the
+requested persisted host/port plus absence of the exact configured
+executable-and-selector process authorizes that instance to launch. A legacy or
+default same-family process on another endpoint must not suppress the requested
+radio merely because its argv lacks FIO's radio selector. This is a narrow
+endpoint-owned rule: an occupied requested endpoint and an exact configured
+process remain terminal duplicate-prevention evidence.
+
 Observed family evidence that cannot be attributed to every configured
 instance is `unknown`, not `absent`. FIO fails that row closed with a
 duplicate-prevention result. A missing second instance may launch only when the
 fresh inventory attributes every already-running family process to another
 persisted instance and proves that the requested identity is absent. This rule
-also covers VarAC and VARA hosted by Wine, whose wrapper argv/process names may
-change after creation.
+governs process-only applications, including FLMsg and FLAmp, and also covers
+VarAC and VARA hosted by Wine, whose wrapper argv/process names may change after
+creation. It does not override the preceding fresh endpoint-owned rule.
 
 On Linux, native process discovery must recognize a delimiter-qualified
 version/variant name (for example `flamp-2.2.14`) when its argv executable is
-the saved command (for example `/usr/local/bin/flamp`). This allowance only
+the saved command (for example `/usr/local/bin/flamp`). Family process counts
+must recognize that qualified native name even when command-line inspection is
+unavailable, so FIO fails closed instead of starting an unverified second
+FLMsg/FLAmp process. This allowance only
 authorizes reading and comparing that candidate's exact argv; it never replaces
 the required radio-specific selector match.
 
