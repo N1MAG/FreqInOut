@@ -12781,6 +12781,10 @@ class MessageViewerTab(QWidget):
                     status_label.setText(
                         "Message Index rebuild paused. Normal background catch-up may resume the remaining work safely."
                     )
+                elif state == "deferred":
+                    status_label.setText(
+                        "Message Index rebuild paused for active database work. Its checkpoint remains safe; retry when activity settles."
+                    )
                 else:
                     status_label.setText(f"Message Index rebuild stopped: {state}.")
             except RuntimeError:
@@ -12798,6 +12802,13 @@ class MessageViewerTab(QWidget):
                 "Message Index Rebuild Paused",
                 "The rebuild was paused. Its durable work remains safe and may resume during normal "
                 "background catch-up or after FIO restarts.",
+            )
+        elif state == "deferred":
+            QMessageBox.information(
+                self,
+                "Message Index Rebuild Paused",
+                "Active message database work remained busy, so the rebuild paused safely. "
+                "Its checkpoint and queued work were retained; retry after current message activity settles.",
             )
         else:
             QMessageBox.warning(

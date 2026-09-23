@@ -10376,3 +10376,34 @@ multi-instance branch can subsequently reach `Popen` for that row. A focused
 two-radio FLAmp regression reproduces the former control flow and makes any
 spawn fail the test, while the existing missing-second-instance test confirms
 that a genuinely absent, fully attributed radio instance can still launch.
+
+## 2026-09-22 — Message Index rebuild database-contention recovery
+
+Status: specified and surgically implemented; Linux operator qualification is
+open.
+
+The supplied `freqinout (65).log` shows the requested rebuild actively
+processing 25-message bounded batches while normal source ingestion continued.
+The same database had repeated writer busy retries and earlier `database is
+locked` events. No corrupt source row or projection exception was recorded.
+The maintenance coordinator and compact progress-checkpoint paths used 250 ms
+write windows and allowed an escaping SQLite `OperationalError` to terminate
+the future; its UI then displayed only the exception class, leaving no SQL
+context in the log. The exact escaping statement cannot be recovered from this
+log, so both bounded-cycle and checkpoint contention paths are corrected.
+
+Transient SQLite busy/locked results are now explicit scheduling conditions.
+The rebuild retries a contended coordinator cycle with bounded backoff,
+checkpoint-only contention defers that metadata write without stopping source
+projection, and sustained contention returns a safe resumable `deferred` state
+instead of a terminal exception. The initial reset transaction reports `busy`
+without partial mutation. Unexpected failures now write a contextual traceback
+to the application log, while the UI explains a deferred rebuild as safely
+paused with its checkpoint and queued work retained.
+
+Acceptance covers an actual held SQLite writer lock during the rebuild request,
+a transient lock escaping a coordinator cycle, and checkpoint-only contention
+while projection continues. The focused maintenance suite passes **14 tests**;
+the broader MIP-2/MIP-4/MIP-5 coordinator, writer, queue, store, telemetry, and
+UI integration suite passes **117 tests**. Changed-file compilation and `git
+diff --check` pass.

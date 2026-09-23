@@ -298,6 +298,14 @@ An explicit deep rebuild is a maintenance action with preview, estimated row
 count, progress, cancellation, and a resumable checkpoint. It cannot begin
 implicitly when the operator opens Messages or FIO Spotter.
 
+Normal ingest remains live during an explicit rebuild. Transient SQLite
+`busy`/`locked` results from that concurrent activity are retryable scheduling
+conditions, not rebuild corruption: bounded coordinator retries continue the
+rebuild, checkpoint-only contention defers the compact metadata write, and
+prolonged contention pauses with durable source watermarks and queue work
+intact. A database lock alone must never surface as a terminal
+`OperationalError` or discard rebuild progress.
+
 ## File Discovery And Artifact Handling
 
 File discovery separates directory detection from parsing and projection.

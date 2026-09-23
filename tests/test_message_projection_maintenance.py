@@ -9,9 +9,11 @@ from pathlib import Path
 
 import pytest
 
+import freqinout.core.message_projection_maintenance as maintenance_module
 from freqinout.core.message_projection_coordinator import ProjectionCycleResult
 from freqinout.core.message_projection_maintenance import (
     DEEP_REBUILD_CHECKPOINT_SOURCE,
+    DeepRebuildPreview,
     MessageProjectionMaintenanceService,
 )
 from freqinout.core.message_projection_queue import (
@@ -61,6 +63,26 @@ class _BlockedCoordinator:
         self.started.set()
         assert self.release.wait(2.0)
         return ProjectionCycleResult(discovered=1, state="committed")
+
+
+class _BusyOnceCoordinator:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def run_once(self, *, reconcile: bool = True, cancel_event=None) -> ProjectionCycleResult:
+        assert reconcile is True
+        self.calls += 1
+        if self.calls == 1:
+            raise sqlite3.OperationalError("database is locked")
+        if self.calls == 2:
+            return ProjectionCycleResult(
+                discovered=1,
+                claimed=1,
+                prepared=1,
+                committed=1,
+                state="committed",
+            )
+        return ProjectionCycleResult()
 
 
 def _empty_db(tmp_path: Path, name: str = "maintenance.sqlite") -> Path:
@@ -159,6 +181,76 @@ def test_catchup_publishes_progress_after_each_bounded_cycle(tmp_path) -> None:
         assert 200 in committed
         assert 300 in committed
     finally:
+        service.close()
+
+
+def test_deep_rebuild_retries_transient_coordinator_database_lock(tmp_path) -> None:
+    db_path = _empty_db(tmp_path)
+    coordinator = _BusyOnceCoordinator()
+    service = MessageProjectionMaintenanceService(
+        db_path, coordinator=coordinator, yield_seconds=0
+    )
+    try:
+        result = service.run_post_shell_catchup(
+            rebuild_id="busy-once",
+            source_rows_estimate=1,
+        )
+        assert result.state == "complete"
+        assert result.committed == 1
+        assert coordinator.calls == 3
+    finally:
+        service.close()
+
+
+def test_checkpoint_lock_does_not_abort_active_deep_rebuild(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = _empty_db(tmp_path)
+    coordinator = _BatchCoordinator(1)
+    service = MessageProjectionMaintenanceService(
+        db_path, coordinator=coordinator, yield_seconds=0
+    )
+    original_connect = maintenance_module.connect_sqlite_runtime_write
+    calls = 0
+
+    def busy_first_checkpoint(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "freqinout.core.message_projection_maintenance.connect_sqlite_runtime_write",
+        busy_first_checkpoint,
+    )
+    try:
+        result = service.run_post_shell_catchup(
+            rebuild_id="checkpoint-busy",
+            source_rows_estimate=1,
+        )
+        assert result.state == "complete"
+        assert result.committed == 100
+    finally:
+        service.close()
+
+
+def test_rebuild_request_reports_busy_instead_of_operational_error(tmp_path) -> None:
+    db_path = _empty_db(tmp_path)
+    service = MessageProjectionMaintenanceService(
+        db_path, coordinator=_BatchCoordinator(0), yield_seconds=0
+    )
+    writer = sqlite3.connect(db_path, timeout=0.1)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        result = service.request_deep_rebuild(
+            preview=DeepRebuildPreview(source_rows=1, available_sources=1)
+        )
+        assert result.state == "busy"
+        assert result.rebuild_id == ""
+    finally:
+        writer.rollback()
+        writer.close()
         service.close()
 
 

@@ -34,6 +34,7 @@ from freqinout.core.message_projection_store import (
     get_message_projection_checkpoint,
     set_message_projection_checkpoint,
 )
+from freqinout.core.logger import log
 from freqinout.core.perf_metrics import emit_span
 from freqinout.core.scheduler_serial_executor import DaemonSerialExecutor
 from freqinout.core.sqlite_utils import connect_sqlite_readonly, connect_sqlite_runtime_write
@@ -41,6 +42,8 @@ from freqinout.core.sqlite_utils import connect_sqlite_readonly, connect_sqlite_
 
 DEEP_REBUILD_CHECKPOINT_SOURCE = "maintenance:message-projection:deep-rebuild"
 DEFAULT_CATCHUP_YIELD_SECONDS = 0.01
+MAX_CONSECUTIVE_BUSY_RETRIES = 8
+BUSY_RETRY_DELAY_SECONDS = 0.1
 
 
 @dataclass(frozen=True)
@@ -156,10 +159,14 @@ class MessageProjectionMaintenanceService:
                 return ProjectionCatchupProgress(state="busy")
         preview = preview or self.preview_deep_rebuild()
         rebuild_id = uuid.uuid4().hex
-        conn = connect_sqlite_runtime_write(
-            self.db_path, timeout=0.25, row_factory=sqlite3.Row, busy_timeout_ms=250
-        )
+        conn: sqlite3.Connection | None = None
         try:
+            conn = connect_sqlite_runtime_write(
+                self.db_path,
+                timeout=0.5,
+                row_factory=sqlite3.Row,
+                busy_timeout_ms=500,
+            )
             with conn:
                 for _adapter, family, source_id in native_projection_source_state_specs():
                     prior = get_source_state_conn(conn, source_id)
@@ -191,8 +198,16 @@ class MessageProjectionMaintenanceService:
                     processed=0,
                     source_rows_estimate=preview.source_rows,
                 )
+        except sqlite3.OperationalError as exc:
+            if not _is_sqlite_busy(exc):
+                raise
+            log.info(
+                "MESSAGE_INDEX_REBUILD|request_deferred|reason=database_busy"
+            )
+            return ProjectionCatchupProgress(state="busy")
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
         return ProjectionCatchupProgress(
             state="requested",
             rebuild_id=rebuild_id,
@@ -264,12 +279,31 @@ class MessageProjectionMaintenanceService:
             source_rows_estimate=max(0, int(source_rows_estimate or 0)),
         )
         self._record_progress(progress)
+        consecutive_busy = 0
         try:
             while not event.is_set() and (limit is None or progress.cycles < limit):
-                result = self._coordinator.run_once(
-                    reconcile=True,
-                    cancel_event=event,
-                )
+                try:
+                    result = self._coordinator.run_once(
+                        reconcile=True,
+                        cancel_event=event,
+                    )
+                except sqlite3.OperationalError as exc:
+                    if not _is_sqlite_busy(exc):
+                        raise
+                    consecutive_busy += 1
+                    log.warning(
+                        "MESSAGE_INDEX_REBUILD|database_busy|cycle=%s|retry=%s|limit=%s",
+                        progress.cycles,
+                        consecutive_busy,
+                        MAX_CONSECUTIVE_BUSY_RETRIES,
+                    )
+                    if consecutive_busy >= MAX_CONSECUTIVE_BUSY_RETRIES:
+                        progress = _with_state(progress, "deferred")
+                        break
+                    if event.wait(BUSY_RETRY_DELAY_SECONDS * consecutive_busy):
+                        break
+                    continue
+                consecutive_busy = 0
                 progress = _accumulate(progress, result)
                 self._record_progress(progress)
                 if progress.rebuild_id:
@@ -294,6 +328,11 @@ class MessageProjectionMaintenanceService:
             progress = _with_state(progress, "failed")
             if progress.rebuild_id:
                 self._persist_rebuild_progress(progress, state="failed")
+            log.exception(
+                "MESSAGE_INDEX_REBUILD|failed|rebuild_id=%s|cycle=%s",
+                progress.rebuild_id,
+                progress.cycles,
+            )
             raise
         finally:
             if progress.rebuild_id:
@@ -499,11 +538,21 @@ class MessageProjectionMaintenanceService:
 
     def _persist_rebuild_progress(
         self, progress: ProjectionCatchupProgress, *, state: str
-    ) -> None:
-        conn = connect_sqlite_runtime_write(
-            self.db_path, timeout=0.25, busy_timeout_ms=250
-        )
+    ) -> bool:
+        """Persist compact progress without letting lock contention stop work.
+
+        Source watermarks and queue rows are already durable.  This checkpoint
+        is resume/display metadata, so a transient writer lock must defer only
+        this metadata update; the next bounded cycle or final write retries it.
+        """
+
+        conn: sqlite3.Connection | None = None
         try:
+            conn = connect_sqlite_runtime_write(
+                self.db_path,
+                timeout=0.5,
+                busy_timeout_ms=500,
+            )
             with conn:
                 self._write_rebuild_checkpoint_conn(
                     conn,
@@ -513,8 +562,19 @@ class MessageProjectionMaintenanceService:
                     processed=progress.processed,
                     source_rows_estimate=progress.source_rows_estimate,
                 )
+            return True
+        except sqlite3.OperationalError as exc:
+            if not _is_sqlite_busy(exc):
+                raise
+            log.warning(
+                "MESSAGE_INDEX_REBUILD|checkpoint_deferred|state=%s|cycle=%s|reason=database_busy",
+                state,
+                progress.cycles,
+            )
+            return False
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
 
     @staticmethod
     def _write_rebuild_checkpoint_conn(
@@ -554,6 +614,11 @@ def _cycle_is_idle(result: ProjectionCycleResult) -> bool:
             result.deferred,
         )
     )
+
+
+def _is_sqlite_busy(exc: sqlite3.OperationalError) -> bool:
+    text = str(exc or "").strip().casefold()
+    return "locked" in text or "busy" in text
 
 
 def _accumulate(
