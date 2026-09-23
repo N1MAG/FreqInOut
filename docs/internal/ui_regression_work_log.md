@@ -10480,3 +10480,65 @@ with low reasoning performed the independent read-only duplicate-pattern and
 test-boundary audit; the primary reviewed its findings and retained persistent,
 transactional canonical repair rather than UI-only hiding because the governing
 projection specification requires one station message with preserved receipts.
+
+## 2026-09-23 — Message rebuild responsiveness and settled-idle CPU correction
+
+Status: specified and surgically implemented; Linux production idle-CPU and
+large-database operator qualification remain open.
+
+The supplied rebuild capture showed the explicit Message Index rebuild holding
+at 39 percent before the progress window disappeared and the host reported
+`Main.py` as unresponsive. The accompanying hotspot captures also showed one
+core remaining between approximately 85.8 and 96 percent while the station was
+otherwise settled. The fixes preserve the existing five-second scheduler
+cadence, message-source authority, serialized projection writer, radio-specific
+endpoint safety, and visible cancel/resume behavior.
+
+The explicit rebuild now coalesces worker progress notifications to at most
+four per second, always publishes a terminal update, avoids unchanged progress
+widget mutations, and keeps its modeless always-visible progress window. An
+intermediate batch no longer causes an Inbox count/page query; one bounded
+refresh runs after successful completion. Durable checkpoints occur every ten
+bounded cycles and at the exact terminal state, while cancellation and
+contention remain resumable.
+
+The six hotspot corrections are implemented as one bounded concurrency slice:
+
+1. The scheduler status worker owns one reusable lightweight
+   `SettingsManager`, reloads it for saved configuration, and closes it on the
+   same serial worker during shutdown instead of reconstructing settings and
+   schema state every five seconds.
+2. The five-second cadence and single-flight status-worker boundary are
+   unchanged.
+3. Local and shared PTT evidence publication is edge-triggered by the complete
+   evidence signature; a changed group, owner, or reason republishes, while an
+   unchanged active or clear state writes only once.
+4. JS8Call, FLAmp, and VarAC background-ingest eligibility share one immutable
+   linked-profile snapshot per committed settings generation. A settings save
+   invalidates it immediately, and a transient read failure remains retryable
+   rather than becoming a cached empty station.
+5. Each dynamic FLAmp ingest job owns one worker settings view rather than one
+   per radio.
+6. Station command-bar radio, launch-monitor, Mesh configuration, and Mesh
+   health rendering is cache-only. Lifecycle and health callbacks publish the
+   immutable snapshots, Mesh freshness is evaluated per adapter, and periodic
+   paint paths perform no database, schema-assurance, launch-bundle, or Mesh
+   settings reads. Mesh health reads themselves are read-only and no longer run
+   schema DDL.
+
+The optimized delegation split independent bounded packages across three
+`gpt-5.6-terra` agents: message rebuild, Station/Mesh presentation, and
+scheduler/background-ingest. The primary `gpt-6-astra` integration review
+corrected per-adapter Mesh freshness, removed the remaining launch-bundle read
+from command-bar rendering, preserved changed PTT evidence, retained runtime
+settings reload semantics, and added the transient profile-read retry guard.
+
+Acceptance passes the complete scheduler family with **233 passed and 1
+platform skip**, the broader background-ingest/runtime/hotspot group with **80 passed
+and 1 platform skip**, Message Index responsiveness, maintenance, and MIP-5 integration with
+**37 passed**, Phase 7 shell plus Mesh reconnect with **143 passed**, and the
+scheduler/UI responsiveness group with **27 passed**. The scheduler run reports
+two existing Qt signal-disconnect warnings but no failures. A single very large
+mixed Qt run terminated in the host PySide native `NetScheduleTab` path without
+a Python assertion; the same affected suites pass in the isolated partitions
+above. Changed-file compilation and `git diff --check` pass before handoff.

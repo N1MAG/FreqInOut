@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime as dt
 import sqlite3
 import threading
+import time
 import uuid
 from concurrent.futures import Future
 from dataclasses import dataclass
@@ -44,6 +45,12 @@ DEEP_REBUILD_CHECKPOINT_SOURCE = "maintenance:message-projection:deep-rebuild"
 DEFAULT_CATCHUP_YIELD_SECONDS = 0.01
 MAX_CONSECUTIVE_BUSY_RETRIES = 8
 BUSY_RETRY_DELAY_SECONDS = 0.1
+# Rebuild cycles are deliberately small so cancellation has a short worst-case
+# latency.  Publishing every small cycle to Qt, however, can queue thousands of
+# cross-thread UI events during a large historical rebuild.  The dialog polls
+# the in-memory snapshot directly, so callbacks are only a visible-view hint.
+PROGRESS_CALLBACK_MIN_INTERVAL_SECONDS = 0.25
+REBUILD_CHECKPOINT_CYCLE_INTERVAL = 10
 
 
 @dataclass(frozen=True)
@@ -125,6 +132,7 @@ class MessageProjectionMaintenanceService:
         self._closed = False
         self._last_progress = ProjectionCatchupProgress()
         self._progress_callback: Callable[[ProjectionCatchupProgress], None] | None = None
+        self._last_progress_callback_monotonic = 0.0
 
     def set_progress_callback(
         self, callback: Callable[[ProjectionCatchupProgress], None] | None
@@ -318,7 +326,7 @@ class MessageProjectionMaintenanceService:
                 consecutive_busy = 0
                 progress = _accumulate(progress, result)
                 self._record_progress(progress)
-                if progress.rebuild_id:
+                if progress.rebuild_id and _should_checkpoint_rebuild(progress):
                     self._persist_rebuild_progress(progress, state="running")
                 if result.deferred:
                     progress = _with_state(progress, "deferred")
@@ -394,7 +402,9 @@ class MessageProjectionMaintenanceService:
                 )
             except Exception:
                 pass
-            self._record_progress(progress)
+            # A terminal state must always be published even if a large rebuild
+            # finished within the normal callback coalescing interval.
+            self._record_progress(progress, force_callback=True)
         return progress
 
     def preview_deep_rebuild(self) -> DeepRebuildPreview:
@@ -564,11 +574,24 @@ class MessageProjectionMaintenanceService:
         future.add_done_callback(_finished)
         return future
 
-    def _record_progress(self, progress: ProjectionCatchupProgress) -> None:
+    def _record_progress(
+        self,
+        progress: ProjectionCatchupProgress,
+        *,
+        force_callback: bool = False,
+    ) -> None:
         with self._lock:
             self._last_progress = progress
             callback = self._progress_callback
-        if callback is not None:
+            now = time.monotonic()
+            publish = bool(
+                force_callback
+                or now - self._last_progress_callback_monotonic
+                >= PROGRESS_CALLBACK_MIN_INTERVAL_SECONDS
+            )
+            if publish:
+                self._last_progress_callback_monotonic = now
+        if callback is not None and publish:
             try:
                 callback(progress)
             except Exception:
@@ -652,6 +675,19 @@ def _cycle_is_idle(result: ProjectionCycleResult) -> bool:
             result.deferred,
         )
     )
+
+
+def _should_checkpoint_rebuild(progress: ProjectionCatchupProgress) -> bool:
+    """Persist resumability metadata periodically, with terminal state flushed.
+
+    Native source watermarks and dirty queue rows are committed by each bounded
+    coordinator cycle.  The maintenance checkpoint is operator-facing resume
+    metadata, so writing it for every 25-row cycle only adds SQLite contention
+    without improving recovery precision.  ``finally`` always flushes the
+    exact terminal state.
+    """
+
+    return int(progress.cycles or 0) % REBUILD_CHECKPOINT_CYCLE_INTERVAL == 0
 
 
 def _is_sqlite_busy(exc: sqlite3.OperationalError) -> bool:

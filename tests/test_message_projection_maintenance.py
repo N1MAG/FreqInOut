@@ -202,10 +202,10 @@ def test_post_shell_catchup_drains_twelve_thousand_rows_in_100_item_cycles(tmp_p
         service.close()
 
 
-def test_catchup_publishes_progress_after_each_bounded_cycle(tmp_path) -> None:
+def test_catchup_coalesces_ui_progress_but_always_publishes_terminal_state(tmp_path) -> None:
     db_path = _empty_db(tmp_path)
     service = MessageProjectionMaintenanceService(
-        db_path, coordinator=_BatchCoordinator(3), yield_seconds=0
+        db_path, coordinator=_BatchCoordinator(30), yield_seconds=0
     )
     published = []
     service.set_progress_callback(published.append)
@@ -213,9 +213,34 @@ def test_catchup_publishes_progress_after_each_bounded_cycle(tmp_path) -> None:
         result = service.run_post_shell_catchup()
         committed = [item.committed for item in published if item.committed]
         assert result.state == "complete"
-        assert 100 in committed
-        assert 200 in committed
-        assert 300 in committed
+        # The dialog polls the bounded in-memory snapshot.  Cross-thread UI
+        # notifications are intentionally coalesced rather than queued for
+        # every 25/100-row cycle of a large historical rebuild.
+        assert committed[-1] == 3_000
+        assert len(committed) < 30
+    finally:
+        service.close()
+
+
+def test_rebuild_checkpoint_is_periodic_and_terminal_state_is_exact(tmp_path) -> None:
+    db_path = _empty_db(tmp_path)
+    service = MessageProjectionMaintenanceService(
+        db_path, coordinator=_BatchCoordinator(23), yield_seconds=0
+    )
+    persisted: list[tuple[int, str]] = []
+    original = service._persist_rebuild_progress
+
+    def record(progress, *, state: str):
+        persisted.append((progress.cycles, state))
+        return original(progress, state=state)
+
+    service._persist_rebuild_progress = record  # type: ignore[method-assign]
+    try:
+        result = service.run_post_shell_catchup(
+            rebuild_id="periodic-checkpoint", source_rows_estimate=2300
+        )
+        assert result.state == "complete"
+        assert persisted == [(10, "running"), (20, "running"), (24, "complete")]
     finally:
         service.close()
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sqlite3
 import types
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -11,6 +12,7 @@ from PySide6.QtWidgets import QApplication
 from freqinout.core.mesh import MeshConnectionConfig, MeshConnectionType, MeshCoreBleAdvertisement, MeshHealthSnapshot, MeshMessage
 from freqinout.core.mesh.meshcore_adapter import MeshCoreBleAdapter, MeshCoreBleCompanionClient
 from freqinout.core.mesh.meshcore_codec import MESHCORE_PUSH_MSG_WAITING, MESHCORE_RESP_NO_MORE_MESSAGES
+from freqinout.core.mesh import store as mesh_store
 from freqinout.gui import main_window as main_window_module
 from freqinout.gui.main_window import MainWindow
 from freqinout.gui.settings_tab import SettingsTab
@@ -460,7 +462,7 @@ def test_meshcore_scan_results_make_select_device_available_after_failed_connect
         app.processEvents()
 
 
-def test_station_command_mesh_source_chips_drop_stale_error_once_connected(monkeypatch) -> None:
+def test_station_command_mesh_source_chips_drop_stale_error_once_connected() -> None:
     saved_config = MeshConnectionConfig(
         adapter_id="meshcore-mobl1",
         protocol="meshcore",
@@ -486,11 +488,10 @@ def test_station_command_mesh_source_chips_drop_stale_error_once_connected(monke
         "updated_utc": "2026-09-06T10:00:00Z",
     }
 
-    monkeypatch.setattr(main_window_module, "load_saved_mesh_connection_configs", lambda _settings: (saved_config,))
-    monkeypatch.setattr(main_window_module, "list_mesh_health", lambda _db_path: [stale_row, healthy_row])
-
     class DummyWindow:
-        settings = {}
+        _station_command_mesh_configs = (saved_config,)
+        _station_command_mesh_health_rows = (stale_row, healthy_row)
+        _station_command_cached_mesh_health_rows = MainWindow._station_command_cached_mesh_health_rows
         _station_command_mesh_config_chip_label = staticmethod(MainWindow._station_command_mesh_config_chip_label)
         _station_command_best_mesh_health_for_config = staticmethod(MainWindow._station_command_best_mesh_health_for_config)
 
@@ -505,7 +506,7 @@ def test_station_command_mesh_source_chips_drop_stale_error_once_connected(monke
     ]
 
 
-def test_station_command_mesh_source_chip_does_not_keep_stale_success_green(monkeypatch) -> None:
+def test_station_command_mesh_source_chip_does_not_keep_stale_success_green() -> None:
     saved_config = MeshConnectionConfig(
         adapter_id="meshcore-mobl1",
         protocol="meshcore",
@@ -531,11 +532,10 @@ def test_station_command_mesh_source_chip_does_not_keep_stale_success_green(monk
         "updated_utc": "2026-09-06T10:05:00Z",
     }
 
-    monkeypatch.setattr(main_window_module, "load_saved_mesh_connection_configs", lambda _settings: (saved_config,))
-    monkeypatch.setattr(main_window_module, "list_mesh_health", lambda _db_path: [old_success, current_failure])
-
     class DummyWindow:
-        settings = {}
+        _station_command_mesh_configs = (saved_config,)
+        _station_command_mesh_health_rows = (old_success, current_failure)
+        _station_command_cached_mesh_health_rows = MainWindow._station_command_cached_mesh_health_rows
         _station_command_mesh_config_chip_label = staticmethod(MainWindow._station_command_mesh_config_chip_label)
         _station_command_best_mesh_health_for_config = staticmethod(MainWindow._station_command_best_mesh_health_for_config)
 
@@ -543,6 +543,89 @@ def test_station_command_mesh_source_chip_does_not_keep_stale_success_green(monk
 
     assert chips[0]["role"] == "warning"
     assert "encryption timed out" in chips[0]["tooltip"]
+
+
+def test_station_command_mesh_reads_only_published_snapshot(monkeypatch) -> None:
+    """A periodic shell render must not reload settings or health storage."""
+    config = MeshConnectionConfig(
+        adapter_id="meshcore-field",
+        protocol="meshcore",
+        enabled=True,
+        connection_type=MeshConnectionType.BLE,
+        ble_device_name="MeshCore Field",
+    )
+
+    class DummyWindow:
+        _station_command_mesh_configs = (config,)
+        _station_command_mesh_health_rows = ()
+        _station_command_cached_mesh_health_rows = MainWindow._station_command_cached_mesh_health_rows
+        _station_command_mesh_config_chip_label = staticmethod(MainWindow._station_command_mesh_config_chip_label)
+        _station_command_best_mesh_health_for_config = staticmethod(MainWindow._station_command_best_mesh_health_for_config)
+
+    monkeypatch.setattr(
+        main_window_module,
+        "load_mesh_connection_configs",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("periodic render reloaded settings")),
+    )
+    chips = MainWindow._station_command_mesh_source_chips(DummyWindow())
+    assert chips[0]["name"] == "MeshCore Field"
+
+
+def test_station_command_mesh_health_cache_expires_stale_success(monkeypatch) -> None:
+    config = MeshConnectionConfig(
+        adapter_id="meshcore-field",
+        protocol="meshcore",
+        enabled=True,
+        connection_type=MeshConnectionType.BLE,
+        ble_device_name="MeshCore Field",
+    )
+
+    class DummyWindow:
+        _station_command_mesh_configs = (config,)
+        _station_command_mesh_health_rows = ({"adapter_id": "meshcore-field", "connected": True},)
+        _station_command_mesh_health_published_monotonic_by_adapter = {"meshcore-field": 100.0}
+        _station_command_cached_mesh_health_rows = MainWindow._station_command_cached_mesh_health_rows
+        _station_command_mesh_config_chip_label = staticmethod(MainWindow._station_command_mesh_config_chip_label)
+        _station_command_best_mesh_health_for_config = staticmethod(MainWindow._station_command_best_mesh_health_for_config)
+
+    monkeypatch.setattr(main_window_module.time, "monotonic", lambda: 121.0)
+    assert MainWindow._station_command_cached_mesh_health_rows(DummyWindow()) == ()
+    chips = MainWindow._station_command_mesh_source_chips(DummyWindow())
+    assert chips[0]["role"] == "muted"
+    assert "not connected" in chips[0]["tooltip"]
+
+
+def test_station_command_mesh_health_ttl_is_per_adapter(monkeypatch) -> None:
+    class DummyWindow:
+        _station_command_mesh_health_rows = (
+            {"adapter_id": "meshcore-stale", "connected": True},
+            {"adapter_id": "meshtastic-fresh", "connected": True},
+        )
+        _station_command_mesh_health_published_monotonic_by_adapter = {
+            "meshcore-stale": 100.0,
+            "meshtastic-fresh": 120.0,
+        }
+
+    monkeypatch.setattr(main_window_module.time, "monotonic", lambda: 121.0)
+    rows = MainWindow._station_command_cached_mesh_health_rows(DummyWindow())
+    assert [row["adapter_id"] for row in rows] == ["meshtastic-fresh"]
+
+
+def test_list_mesh_health_does_not_run_schema_ddl_on_read(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "mesh.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        mesh_store.ensure_mesh_schema(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        mesh_store,
+        "ensure_mesh_schema",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("ordinary health read ran schema DDL")),
+    )
+    assert mesh_store.list_mesh_health(db_path) == []
 
 
 def test_meshcore_idle_receive_events_stays_silent_until_waiting_frame_arrives() -> None:

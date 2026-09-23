@@ -107,6 +107,17 @@ state and uses concise, target-scoped language such as `On schedule · verified`
 `Receiver unavailable`, or `Control stalled · other radios unaffected`.
 Unknown or stale evidence must not be presented as success.
 
+The same cache-only rule applies to configuration and health presentation. The
+shell consumes lifecycle-published radio profiles, per-radio launch-monitor
+choices, saved Mesh configurations, and per-adapter Mesh health snapshots. A
+periodic render cannot reopen the settings database, reconstruct a launch
+bundle, read the Mesh health table, or run schema assurance. Configuration-save,
+runtime-start/restart, and worker-health boundaries publish replacements.
+Per-adapter Mesh health expires independently; an update from one transport
+cannot keep another transport's stale connected state green. Until a fresh
+snapshot is available, the shell presents unknown/not connected rather than
+performing synchronous fallback work.
+
 The UI hang watchdog may include the scheduler's bounded cache-only diagnostic
 snapshot. That snapshot may identify a safe endpoint label/hash, generation,
 failure/circuit state, queue/in-flight state, staleness, and lifecycle event, but

@@ -722,6 +722,12 @@ def upsert_mesh_health(db_path: str | Path, snapshot: MeshHealthSnapshot, *, upd
 
 
 def list_mesh_health(db_path: str | Path, *, transport: str = "") -> list[dict[str, Any]]:
+    """Return retained health rows without mutating the database.
+
+    Schema ownership belongs to startup/migration and mesh-ingest writers.  This
+    function is also used by presentation code, where an ordinary read must
+    never run DDL or inspect table columns.
+    """
     clauses: list[str] = []
     params: list[Any] = []
     if transport:
@@ -731,7 +737,6 @@ def list_mesh_health(db_path: str | Path, *, transport: str = "") -> list[dict[s
 
     conn = connect_sqlite(db_path, row_factory=sqlite3.Row)
     try:
-        ensure_mesh_schema(conn)
         rows = conn.execute(
             f"""
             SELECT

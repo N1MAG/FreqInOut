@@ -7,6 +7,7 @@ import sqlite3
 import sys
 import time
 import uuid
+from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 
 from PySide6.QtWidgets import (
@@ -87,9 +88,7 @@ from freqinout.core.mesh import (
     MeshConnectionWorker,
     activate_mesh_connection_config,
     default_mesh_db_path,
-    list_mesh_health,
     load_mesh_connection_configs,
-    load_saved_mesh_connection_configs,
     mesh_connection_config_key,
     mesh_health_matches_config,
 )
@@ -231,6 +230,10 @@ class MainWindow(QMainWindow):
       - Operator History
       - Help
     """
+
+    # Health is worker-published at a bounded cadence.  A stale cached success
+    # must never remain green merely because the worker stopped publishing.
+    _STATION_COMMAND_MESH_HEALTH_TTL_SECONDS = 20.0
 
     _message_projection_cycle_finished = Signal(object)
     _message_projection_progressed = Signal(object)
@@ -377,6 +380,11 @@ class MainWindow(QMainWindow):
             include_varac_sync_status=False,
         )
         self.launch_orchestrator = self.settings_tab.launch_orchestrator
+        # Launch bundles are database-backed.  Publish the small monitor
+        # selection projection once at this lifecycle boundary so station-bar
+        # health repaint never reconstructs a bundle.
+        self._station_command_launch_monitor_cache: dict[int, tuple[tuple[str, bool], ...]] = {}
+        self._refresh_station_command_launch_monitor_cache()
         self._launch_progress_dialog: QProgressDialog | None = None
         self._launch_progress_total = 0
         self._launch_progress_done = 0
@@ -1021,6 +1029,12 @@ class MainWindow(QMainWindow):
         self.station_command_radio_next_btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         self._station_command_radio_page = 0
         self._station_command_radio_summary_signature: tuple[object, ...] | None = None
+        # The station shell is a presentation surface.  Mesh worker callbacks
+        # publish these immutable snapshots; periodic rendering must not reopen
+        # a database, run schema checks, or query a transport.
+        self._station_command_mesh_configs: tuple[MeshConnectionConfig, ...] = ()
+        self._station_command_mesh_health_rows: tuple[Mapping[str, object], ...] = ()
+        self._station_command_mesh_health_published_monotonic_by_adapter: dict[str, float] = {}
         self._mesh_health_command_refresh_timer = QTimer(self)
         self._mesh_health_command_refresh_timer.setSingleShot(True)
         self._mesh_health_command_refresh_timer.setInterval(350)
@@ -3248,6 +3262,9 @@ class MainWindow(QMainWindow):
 
     def _start_mesh_runtime_if_enabled(self) -> None:
         configs = tuple(self._mesh_runtime_configs())
+        publish_snapshot = getattr(self, "_publish_station_command_mesh_snapshot", None)
+        if callable(publish_snapshot):
+            publish_snapshot(configs=configs)
         signature = self._mesh_runtime_signature_from_configs(configs)
         self._mesh_runtime_signature = signature
         if not configs:
@@ -3307,6 +3324,9 @@ class MainWindow(QMainWindow):
 
     def _restart_mesh_runtime_if_needed(self) -> None:
         configs = tuple(self._mesh_runtime_configs())
+        publish_snapshot = getattr(self, "_publish_station_command_mesh_snapshot", None)
+        if callable(publish_snapshot):
+            publish_snapshot(configs=configs)
         signature = self._mesh_runtime_signature_from_configs(configs)
         if signature == getattr(self, "_mesh_runtime_signature", tuple()):
             return
@@ -3331,6 +3351,9 @@ class MainWindow(QMainWindow):
 
     def _restart_mesh_runtime_now(self) -> None:
         configs = tuple(self._mesh_runtime_configs())
+        publish_snapshot = getattr(self, "_publish_station_command_mesh_snapshot", None)
+        if callable(publish_snapshot):
+            publish_snapshot(configs=configs)
         self._mesh_runtime_signature = self._mesh_runtime_signature_from_configs(configs)
         thread = getattr(self, "_mesh_worker_thread", None)
         if thread is not None and thread.isRunning():
@@ -3442,6 +3465,7 @@ class MainWindow(QMainWindow):
             log.warning("Local Mesh runtime: %s", text)
 
     def _on_mesh_runtime_health(self, health) -> None:
+        self._publish_station_command_mesh_snapshot(health=health)
         try:
             if hasattr(self, "station_health_tab") and hasattr(self.station_health_tab, "refresh"):
                 self.station_health_tab.refresh()
@@ -6894,6 +6918,12 @@ class MainWindow(QMainWindow):
 
         if self._shutting_down:
             return
+        # An explicit Message Index rebuild has its own progress dialog and
+        # requests exactly one indexed Inbox refresh on terminal completion.
+        # Refreshing the full visible Inbox after every tiny rebuild cycle can
+        # keep the UI busy for the duration of a large historical replay.
+        if str(getattr(progress, "rebuild_id", "") or ""):
+            return
         changed = int(getattr(progress, "committed", 0) or 0) + int(
             getattr(progress, "deleted", 0) or 0
         )
@@ -8680,39 +8710,85 @@ class MainWindow(QMainWindow):
         *,
         radio_profile_id: int = 0,
     ) -> list[tuple[str, str]]:
-        raw_items = []
-        radio_bundle_loaded = False
+        monitored_by_key: dict[str, bool] = {}
         if radio_profile_id > 0:
-            try:
-                bundle = self.launch_orchestrator.get_radio_launch_bundle(radio_profile_id)
-                raw_items = bundle.get("items", []) if isinstance(bundle, Mapping) else []
-                radio_bundle_loaded = isinstance(bundle, Mapping)
-            except Exception:
-                raw_items = []
-        # An empty saved radio bundle is authoritative.  Falling back to the
-        # old station-global list here can make one radio's health choices
-        # leak into another radio's header.
-        if not radio_bundle_loaded:
+            # Production command-bar rendering consumes only the lifecycle
+            # published radio projection.  In particular, it must not call
+            # get_radio_launch_bundle(), which opens the settings database.
+            cache = getattr(self, "_station_command_launch_monitor_cache", {})
+            if isinstance(cache, Mapping):
+                for key, monitor in tuple(cache.get(int(radio_profile_id), ()) or ()):
+                    monitored_by_key[str(key)] = bool(monitor)
+        else:
+            # Compatibility fallback is station-scoped and is intentionally
+            # unavailable to radio-scoped command-bar rendering.  It supports
+            # legacy/small isolated callers that have no radio identity.
             try:
                 raw_items = self.settings.get("launch_control_items", [])
             except Exception:
                 raw_items = []
-        if not isinstance(raw_items, list):
-            return items
-        monitored_by_key: dict[str, bool] = {}
-        builtin_names = set(LAUNCH_APP_ORDER)
-        for item in raw_items:
-            if not isinstance(item, Mapping):
-                continue
-            name = str(item.get("name", "") or "").strip()
-            if name not in builtin_names:
-                continue
-            monitored_by_key[self._station_command_launch_health_key(name)] = bool(
-                item.get("monitor_health", item.get("enabled", True))
-            )
+            if isinstance(raw_items, list):
+                builtin_names = set(LAUNCH_APP_ORDER)
+                for item in raw_items:
+                    if not isinstance(item, Mapping):
+                        continue
+                    name = str(item.get("name", "") or "").strip()
+                    if name not in builtin_names:
+                        continue
+                    monitored_by_key[self._station_command_launch_health_key(name)] = bool(
+                        item.get("monitor_health", item.get("enabled", True))
+                    )
         if not monitored_by_key:
             return items
         return [(key, label) for key, label in items if monitored_by_key.get(key, True)]
+
+    def _refresh_station_command_launch_monitor_cache(
+        self,
+        profiles: Sequence[Mapping[str, object]] | None = None,
+    ) -> None:
+        """Publish each radio's health-monitor choice outside the paint path."""
+        if profiles is None:
+            profiles = tuple(getattr(self, "_station_command_profile_cache", ()) or ())
+        orchestrator = getattr(self, "launch_orchestrator", None)
+        getter = getattr(orchestrator, "get_radio_launch_bundle", None)
+        if not callable(getter):
+            return
+        cache: dict[int, tuple[tuple[str, bool], ...]] = {}
+        for profile in profiles:
+            if not isinstance(profile, Mapping):
+                continue
+            try:
+                radio_profile_id = int(profile.get("id", 0) or 0)
+            except Exception:
+                radio_profile_id = 0
+            if radio_profile_id <= 0:
+                continue
+            try:
+                bundle = getter(radio_profile_id)
+            except Exception:
+                # Retain a prior published projection rather than making a
+                # transient settings read failure look like configuration loss.
+                prior = getattr(self, "_station_command_launch_monitor_cache", {})
+                if isinstance(prior, Mapping) and radio_profile_id in prior:
+                    cache[radio_profile_id] = tuple(prior[radio_profile_id])
+                continue
+            raw_items = bundle.get("items", []) if isinstance(bundle, Mapping) else []
+            monitored: list[tuple[str, bool]] = []
+            if isinstance(raw_items, list):
+                for item in raw_items:
+                    if not isinstance(item, Mapping):
+                        continue
+                    name = str(item.get("name", "") or "").strip()
+                    if name not in LAUNCH_APP_ORDER:
+                        continue
+                    monitored.append(
+                        (
+                            self._station_command_launch_health_key(name),
+                            bool(item.get("monitor_health", item.get("enabled", True))),
+                        )
+                    )
+            cache[radio_profile_id] = tuple(monitored)
+        self._station_command_launch_monitor_cache = cache
 
     def _station_command_health_status_snapshot(self, profile: object | None) -> Mapping[str, object]:
         service_states = self._station_command_value(profile, "service_states", {}) if profile is not None else {}
@@ -9555,14 +9631,8 @@ class MainWindow(QMainWindow):
         return f"{name}: {label}\nNow: {now or '--'}\nNext: {next_text or '--'}\nPlan: {plan_text or '--'}"
 
     def _station_command_mesh_source_chips(self) -> list[dict[str, str]]:
-        try:
-            configs = load_saved_mesh_connection_configs(self.settings)
-        except Exception:
-            configs = ()
-        try:
-            rows = list_mesh_health(default_mesh_db_path())
-        except Exception:
-            rows = []
+        configs = tuple(getattr(self, "_station_command_mesh_configs", ()) or ())
+        rows = self._station_command_cached_mesh_health_rows()
         out: list[dict[str, str]] = []
         saved = list(configs)
         for config in sorted(saved, key=lambda item: (str(item.protocol or ""), self._station_command_mesh_config_chip_label(item).lower())):
@@ -9758,15 +9828,80 @@ class MainWindow(QMainWindow):
         return items[0] if items else None
 
     def _station_command_saved_mesh_control_items(self) -> tuple[SourceControlItem, ...]:
-        try:
-            configs = load_saved_mesh_connection_configs(self.settings)
-        except Exception:
-            configs = ()
-        try:
-            rows = list_mesh_health(default_mesh_db_path())
-        except Exception:
-            rows = []
+        configs = tuple(getattr(self, "_station_command_mesh_configs", ()) or ())
+        rows = self._station_command_cached_mesh_health_rows()
         return source_control_mesh_items_from_configs(configs, rows)
+
+    def _station_command_cached_mesh_health_rows(self) -> tuple[Mapping[str, object], ...]:
+        """Return health only while the worker-published cache is fresh.
+
+        This inexpensive monotonic check is safe in periodic rendering and
+        prevents an old connected snapshot from being presented as current
+        after a worker or transport failure.
+        """
+        rows = tuple(getattr(self, "_station_command_mesh_health_rows", ()) or ())
+        published_by_adapter = dict(
+            getattr(self, "_station_command_mesh_health_published_monotonic_by_adapter", {}) or {}
+        )
+        if not published_by_adapter:
+            # Compatibility with small view-model tests and pre-publisher
+            # windows: caller-provided rows carry no live-worker timestamp.
+            return rows
+        now = time.monotonic()
+        return tuple(
+            row
+            for row in rows
+            if not (published := float(published_by_adapter.get(str(row.get("adapter_id") or ""), 0.0) or 0.0))
+            or now - published <= MainWindow._STATION_COMMAND_MESH_HEALTH_TTL_SECONDS
+        )
+
+    def _publish_station_command_mesh_snapshot(
+        self,
+        *,
+        configs: Sequence[MeshConnectionConfig] | None = None,
+        health: object | None = None,
+    ) -> None:
+        """Publish a UI-only Mesh snapshot from a lifecycle boundary.
+
+        The Mesh worker owns connection polling and persistence.  The command
+        bar only consumes this immutable projection.  Configurations are
+        refreshed when runtime settings are loaded or saved; health replaces
+        the row for one adapter when the worker publishes an update.
+        """
+        if configs is not None:
+            self._station_command_mesh_configs = tuple(configs)
+        if health is None:
+            return
+        adapter_id = str(getattr(health, "adapter_id", "") or "").strip()
+        if not adapter_id:
+            return
+        row = MappingProxyType(
+            {
+                "adapter_id": adapter_id,
+                "transport": str(getattr(health, "transport", "") or ""),
+                "enabled": bool(getattr(health, "enabled", False)),
+                "connected": bool(getattr(health, "connected", False)),
+                "connection_type": str(getattr(health, "connection_type", "") or ""),
+                "device_name": str(getattr(health, "device_name", "") or ""),
+                "firmware_version": str(getattr(health, "firmware_version", "") or ""),
+                "battery_percent": getattr(health, "battery_percent", None),
+                "battery_voltage": getattr(health, "battery_voltage", None),
+                "last_error": str(getattr(health, "last_error", "") or ""),
+                "lifecycle_state": str(getattr(health, "lifecycle_state", "") or ""),
+                "required": bool(getattr(health, "required", False)),
+                "guidance": str(getattr(health, "guidance", "") or ""),
+                "updated_utc": str(getattr(health, "updated_utc", "") or ""),
+            }
+        )
+        prior = tuple(getattr(self, "_station_command_mesh_health_rows", ()) or ())
+        rows = [item for item in prior if str(item.get("adapter_id") or "") != adapter_id]
+        rows.append(row)
+        self._station_command_mesh_health_rows = tuple(rows)
+        published_by_adapter = dict(
+            getattr(self, "_station_command_mesh_health_published_monotonic_by_adapter", {}) or {}
+        )
+        published_by_adapter[adapter_id] = time.monotonic()
+        self._station_command_mesh_health_published_monotonic_by_adapter = published_by_adapter
 
     def _open_mesh_settings_from_station_command(self) -> None:
         try:
@@ -9797,10 +9932,7 @@ class MainWindow(QMainWindow):
         title.setTextFormat(Qt.RichText)
         layout.addWidget(title)
 
-        try:
-            rows = list_mesh_health(default_mesh_db_path())
-        except Exception:
-            rows = []
+        rows = self._station_command_cached_mesh_health_rows()
         chips = self._station_command_mesh_source_chips()
         if chips:
             for chip in chips:
@@ -9900,6 +10032,9 @@ class MainWindow(QMainWindow):
         # adapter's bounded retry series when the live worker still owns the
         # same configuration; otherwise replace the runtime normally.
         configs = tuple(self._mesh_runtime_configs())
+        publish_snapshot = getattr(self, "_publish_station_command_mesh_snapshot", None)
+        if callable(publish_snapshot):
+            publish_snapshot(configs=configs)
         new_signature = self._mesh_runtime_signature_from_configs(configs)
         selected_config = next(
             (
@@ -12463,6 +12598,7 @@ class MainWindow(QMainWindow):
             )
         except Exception:
             pass
+        self._refresh_station_command_launch_monitor_cache()
         self._apply_runtime_profile_state()
         self._refresh_plan_context_labels("runtime_settings_saved")
         try:
@@ -12485,6 +12621,7 @@ class MainWindow(QMainWindow):
             )
         except Exception:
             pass
+        self._refresh_station_command_launch_monitor_cache()
         self._apply_runtime_profile_state()
         self._refresh_plan_context_labels("runtime_device_profiles_changed")
         self._on_settings_saved_for_lazy_tabs()

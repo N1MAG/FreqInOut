@@ -159,6 +159,14 @@ class BackgroundIngestController(QObject):
         self._runtime_inventory_cache: Optional[IngestSourceInventory] = None
         self._runtime_inventory_cache_ts: float = 0.0
         self._runtime_inventory_cache_ttl_sec: float = 5.0
+        # Linked device/profile resolution is comparatively expensive and is
+        # shared by the JS8, FLAMP, and VarAC background jobs.  The cache is
+        # fenced by an explicit configuration generation, incremented by the
+        # Settings-saved path, rather than relying on an unbounded TTL.
+        self._runtime_profile_cache_lock = threading.RLock()
+        self._runtime_profile_generation: int = 0
+        self._runtime_profile_cache_generation: int = -1
+        self._runtime_profile_cache: tuple[Dict[str, object], ...] = ()
         self._job_watchdog_timer: Optional[QTimer] = None
         self._health = get_dependency_health_registry()
         self._running = False
@@ -376,15 +384,45 @@ class BackgroundIngestController(QObject):
         # schema, migration, or launch-bundle adoption work.
         return SettingsManager(runtime_worker=True)
 
-    def _active_varac_vault_profiles(self) -> list[Dict[str, object]]:
+    def _runtime_active_profiles(self) -> list[Dict[str, object]]:
+        """Return one configuration-generation-fenced linked-profile snapshot.
+
+        This helper is called only by background workers.  It keeps recurring
+        JS8/FLAMP/VarAC eligibility checks from independently resolving the
+        same active radios and linked application profiles.  ``refresh_runtime_settings``
+        invalidates it immediately after a committed settings change.
+        """
+
+        with self._runtime_profile_cache_lock:
+            generation = self._runtime_profile_generation
+            if self._runtime_profile_cache_generation == generation:
+                return [dict(profile) for profile in self._runtime_profile_cache]
         try:
             store = MultiRadioStore()
             runtime_status = build_multi_rig_runtime_status(store)
             if runtime_status.background_ingest_scope != SCOPE_ALL_ACTIVE_RUNTIME:
-                return []
-            profiles = [dict(row) for row in store.list_runtime_active_device_profiles()]
+                profiles: tuple[Dict[str, object], ...] = ()
+            else:
+                profiles = tuple(
+                    dict(row) for row in store.list_runtime_active_device_profiles()
+                )
         except Exception:
+            # A transient database/read failure is not evidence that the
+            # station has no active radios.  Leave this generation uncached
+            # so the next ingest pass retries instead of suppressing all
+            # profile-scoped ingestion until another settings save.
             return []
+        with self._runtime_profile_cache_lock:
+            # A settings-save can race the read.  Do not publish an older
+            # snapshot into the newer generation; its caller can safely use
+            # the result once, and the next request will reload.
+            if generation == self._runtime_profile_generation:
+                self._runtime_profile_cache = profiles
+                self._runtime_profile_cache_generation = generation
+        return [dict(profile) for profile in profiles]
+
+    def _active_varac_vault_profiles(self) -> list[Dict[str, object]]:
+        profiles = self._runtime_active_profiles()
         return [
             profile
             for profile in profiles
@@ -483,6 +521,10 @@ class BackgroundIngestController(QObject):
     def refresh_runtime_settings(self) -> None:
         self._runtime_inventory_cache = None
         self._runtime_inventory_cache_ts = 0.0
+        with self._runtime_profile_cache_lock:
+            self._runtime_profile_generation += 1
+            self._runtime_profile_cache_generation = -1
+            self._runtime_profile_cache = ()
         self.request_varac_vault_refresh("settings_saved")
 
     def is_running(self) -> bool:
@@ -1001,6 +1043,7 @@ class BackgroundIngestController(QObject):
     ) -> None:
         selected_profiles = list(profiles) if profiles is not None else self._active_js8_spotter_profiles()
         store = MultiRadioStore()
+        profile_fallback = self._new_worker_settings()
         try:
             for profile_row in selected_profiles:
                 self._cancel_checkpoint()
@@ -1008,7 +1051,6 @@ class BackgroundIngestController(QObject):
                 radio_id = int(profile.get("id", 0) or 0)
                 if radio_id <= 0:
                     continue
-                profile_fallback = self._new_worker_settings()
                 profile_settings = _DeviceProfileVaultSettings(profile, profile_fallback, store)
                 try:
                     if not self._truthy(
@@ -1030,9 +1072,8 @@ class BackgroundIngestController(QObject):
                         str(profile.get("name", "") or radio_id),
                         exc,
                     )
-                finally:
-                    profile_fallback.close()
         finally:
+            profile_fallback.close()
             self._dynamic_flamp_projection_ready.set()
 
     def _ensure_initial_dynamic_flamp_projection(
@@ -1490,14 +1531,7 @@ class BackgroundIngestController(QObject):
         return tuple(deduped[:6] or ["RF Guard reported a condition-alert SOP conflict."])
 
     def _active_js8_spotter_profiles(self) -> list[Dict[str, object]]:
-        try:
-            store = MultiRadioStore()
-            runtime_status = build_multi_rig_runtime_status(store)
-            if runtime_status.background_ingest_scope != SCOPE_ALL_ACTIVE_RUNTIME:
-                return []
-            profiles = [dict(row) for row in store.list_runtime_active_device_profiles()]
-        except Exception:
-            return []
+        profiles = self._runtime_active_profiles()
         out: list[Dict[str, object]] = []
         for profile in profiles:
             if not self._truthy(profile.get("use_js8call", False), False) and not self._truthy(profile.get("use_js8spotter", False), False):
@@ -1871,14 +1905,7 @@ class BackgroundIngestController(QObject):
             worker_settings.close()
 
     def _active_varac_profiles(self) -> list[Dict[str, object]]:
-        try:
-            store = MultiRadioStore()
-            runtime_status = build_multi_rig_runtime_status(store)
-            if runtime_status.background_ingest_scope != SCOPE_ALL_ACTIVE_RUNTIME:
-                return []
-            profiles = [dict(row) for row in store.list_runtime_active_device_profiles()]
-        except Exception:
-            return []
+        profiles = self._runtime_active_profiles()
         return [
             profile
             for profile in profiles

@@ -12718,7 +12718,13 @@ class MessageViewerTab(QWidget):
             self,
         )
         progress.setWindowTitle("Message Index Rebuild")
-        progress.setWindowModality(Qt.WindowModal)
+        # QProgressDialog processes nested Qt events from setValue() while it
+        # is modal.  A large rebuild updates often enough that those nested
+        # events can make the dialog appear to hang or disappear behind other
+        # work.  The rebuild is already protected by the service busy flag;
+        # keep this as a modeless, always-on-top status window instead.
+        progress.setWindowModality(Qt.NonModal)
+        progress.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         progress.setAutoClose(False)
         progress.setAutoReset(False)
         progress.setMinimumDuration(0)
@@ -12755,12 +12761,26 @@ class MessageViewerTab(QWidget):
         processed = int(snapshot.get("processed", 0) or 0) if isinstance(snapshot, Mapping) else 0
         estimate = int(snapshot.get("source_rows_estimate", 0) or 0) if isinstance(snapshot, Mapping) else 0
         display_total = max(estimate, processed, progress.maximum())
-        if display_total > progress.maximum():
-            progress.setMaximum(display_total)
-        progress.setValue(min(progress.maximum(), processed))
-        progress.setLabelText(
-            f"Rebuilding the derived Message Index… {processed:,} of approximately {display_total:,} records"
+        display_value = min(display_total, processed)
+        display_text = (
+            "Rebuilding the derived Message Index… "
+            f"{processed:,} of approximately {display_total:,} records"
         )
+        # Avoid QProgressDialog.setValue() re-entering Qt for an unchanged
+        # worker snapshot.  The worker publishes cheap in-memory progress and
+        # the timer is only a UI observer, not a synchronization mechanism.
+        prior_total = int(getattr(progress, "_fio_rebuild_display_total", -1))
+        prior_value = int(getattr(progress, "_fio_rebuild_display_value", -1))
+        prior_text = str(getattr(progress, "_fio_rebuild_display_text", ""))
+        if display_total != prior_total:
+            progress.setMaximum(display_total)
+            progress._fio_rebuild_display_total = display_total
+        if display_value != prior_value:
+            progress.setValue(display_value)
+            progress._fio_rebuild_display_value = display_value
+        if display_text != prior_text:
+            progress.setLabelText(display_text)
+            progress._fio_rebuild_display_text = display_text
         if not hasattr(future, "done") or not future.done():
             return
         timer.stop()

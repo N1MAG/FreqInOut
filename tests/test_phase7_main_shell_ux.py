@@ -2025,7 +2025,6 @@ def test_phase7_station_command_bar_uses_planned_compact_layout(monkeypatch, tmp
 
 def test_phase7_station_command_mesh_source_chips_dedupe_connected_health(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
-    from freqinout.gui import main_window as main_window_module
     from freqinout.gui.main_window import MainWindow
 
     rows = [
@@ -2058,9 +2057,9 @@ def test_phase7_station_command_mesh_source_chips_dedupe_connected_health(monkey
             "updated_utc": "2026-08-31T22:00:00Z",
         },
     ]
-    monkeypatch.setattr(main_window_module, "list_mesh_health", lambda _path: rows)
-
     window = MainWindow.__new__(MainWindow)
+    window._station_command_mesh_configs = ()
+    window._station_command_mesh_health_rows = tuple(rows)
     chips = MainWindow._station_command_mesh_source_chips(window)
 
     assert len(chips) == 1
@@ -2220,8 +2219,11 @@ def test_phase7_empty_radio_health_bundle_does_not_fall_back_to_global_radio(mon
 
     window = MainWindow.__new__(MainWindow)
     window.launch_orchestrator = SimpleNamespace(
-        get_radio_launch_bundle=lambda _radio_id: {"launch_enabled": False, "items": []}
+        get_radio_launch_bundle=lambda _radio_id: (_ for _ in ()).throw(
+            AssertionError("command-bar render must not read a launch bundle")
+        )
     )
+    window._station_command_launch_monitor_cache = {22: ()}
     window.settings = SimpleNamespace(
         get=lambda key, default=None: [{"name": "FLRig", "monitor_health": False}]
         if key == "launch_control_items"
@@ -2235,6 +2237,32 @@ def test_phase7_empty_radio_health_bundle_does_not_fall_back_to_global_radio(mon
     )
 
     assert items == [("FLRig", "FLRig"), ("JS8Call_API", "JS8")]
+
+
+def test_phase7_radio_health_monitor_uses_published_launch_cache(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    QApplication.instance() or QApplication([])
+
+    from freqinout.gui.main_window import MainWindow
+
+    window = MainWindow.__new__(MainWindow)
+    window.launch_orchestrator = SimpleNamespace(
+        get_radio_launch_bundle=lambda _radio_id: (_ for _ in ()).throw(
+            AssertionError("periodic health rendering read the launch database")
+        )
+    )
+    window._station_command_launch_monitor_cache = {
+        22: (("FLRig", False), ("JS8Call_API", True)),
+    }
+
+    items = MainWindow._station_command_health_monitored_items(
+        window,
+        [("FLRig", "FLRig"), ("JS8Call_API", "JS8")],
+        radio_profile_id=22,
+    )
+
+    assert items == [("JS8Call_API", "JS8")]
 
 
 def test_phase7_station_command_health_shows_only_unhealthy_components(monkeypatch, tmp_path) -> None:

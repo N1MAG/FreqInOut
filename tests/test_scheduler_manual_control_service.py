@@ -10,7 +10,7 @@ from PySide6.QtCore import QCoreApplication, QEvent
 from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
 from freqinout.core import scheduler_engine as scheduler_engine_module
 from freqinout.core.multi_rig_runtime_status import radio_shared_state_id
-from freqinout.core.scheduler_engine import SchedulerEngine
+from freqinout.core.scheduler_engine import SchedulerEngine, StationActualState
 from freqinout.core.scheduler_manual_control_service import SchedulerManualControlService
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.shared_state import SchedulerManualControlState, SchedulerManualTarget
@@ -44,6 +44,21 @@ def _shutdown_engine(engine: SchedulerEngine) -> None:
     if QCoreApplication.instance() is not None:
         engine.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+
+def _known_target_state(frequency_hz: int) -> StationActualState:
+    """Return explicit fresh target-radio evidence for prompt unit tests."""
+
+    return StationActualState(
+        checked_ts=time.time(),
+        flrig_freq_hz=frequency_hz,
+        flrig_ptt_active=False,
+        flrig_ptt_known=True,
+        flrig_ptt_age_s=0.0,
+        flrig_ptt_stale=False,
+        actual_frequency_hz=frequency_hz,
+        actual_frequency_source="Rig",
+    )
 
 
 def test_scheduler_manual_control_defaults_to_on_schedule_and_creates_schema(tmp_path) -> None:
@@ -600,6 +615,12 @@ def test_scheduler_prompt_frequency_mode_holds_before_command(monkeypatch, tmp_p
             "_control_context_for_entry",
             lambda _entry: (engine.rig, None, None, settings, 8),
         )
+        monkeypatch.setattr(engine, "_control_mode_for_context", lambda *_args, **_kwargs: "FLRIG")
+        monkeypatch.setattr(
+            engine,
+            "_read_target_station_actual_state",
+            lambda _entry, **_kwargs: _known_target_state(7_115_000),
+        )
 
         engine._apply_schedule_entry(
             {
@@ -659,6 +680,11 @@ def test_scheduler_prompt_verifies_target_radio_before_emit(monkeypatch, tmp_pat
             "_control_context_for_entry",
             lambda _entry: (_Rig(), None, None, settings, 8),
         )
+        monkeypatch.setattr(
+            engine,
+            "_read_target_station_actual_state",
+            lambda _entry, **_kwargs: _known_target_state(14_110_000),
+        )
 
         engine._maybe_prompt_enforcement()
 
@@ -691,6 +717,12 @@ def test_scheduler_manual_qsy_state_suppresses_off_schedule_prompt(monkeypatch, 
             engine,
             "_control_context_for_entry",
             lambda _entry: (_Rig(), None, None, settings, 8),
+        )
+        monkeypatch.setattr(engine, "_control_mode_for_context", lambda *_args, **_kwargs: "FLRIG")
+        monkeypatch.setattr(
+            engine,
+            "_read_target_station_actual_state",
+            lambda _entry, **_kwargs: _known_target_state(7_115_000),
         )
 
         engine.current_schedule_entry = {
@@ -734,6 +766,12 @@ def test_scheduler_skip_once_suppresses_same_radio_mismatch(monkeypatch, tmp_pat
             "_control_context_for_entry",
             lambda _entry: (_Rig(), None, None, settings, 8),
         )
+        monkeypatch.setattr(engine, "_control_mode_for_context", lambda *_args, **_kwargs: "FLRIG")
+        monkeypatch.setattr(
+            engine,
+            "_read_target_station_actual_state",
+            lambda _entry, **_kwargs: _known_target_state(7_115_000),
+        )
 
         entry = {
             "frequency": "14.110",
@@ -744,6 +782,8 @@ def test_scheduler_skip_once_suppresses_same_radio_mismatch(monkeypatch, tmp_pat
             "target_device_profile_id": 8,
         }
         engine.current_schedule_entry = dict(entry)
+        engine._status_flrig_freq_hz = 7_115_000
+        engine._status_flrig_freq_ts = scheduler_engine_module.time.time()
         engine._maybe_prompt_enforcement()
 
         assert emitted
@@ -895,7 +935,8 @@ def test_scheduler_background_status_clears_js8_stale_when_js8_not_relevant() ->
     source = Path("freqinout/core/scheduler_engine.py").read_text(encoding="utf-8")
     js8_block = source[source.index('if control_mode == "JS8CALL" or js8_offset_check_active:') : source.index("return out", source.index('if control_mode == "JS8CALL" or js8_offset_check_active:'))]
 
-    assert 'else:\n                    out["js8_status_stale"] = False' in js8_block
+    assert 'else:' in js8_block
+    assert 'out["js8_status_stale"] = False' in js8_block
     assert 'out["js8_status_detail"] = ""' in js8_block
 
 

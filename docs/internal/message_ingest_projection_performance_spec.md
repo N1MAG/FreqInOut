@@ -709,3 +709,37 @@ request-coalescing, duplicate-storage, shutdown, and existing message projection
 tests to pass. The final gate still requires a Linux production launch showing
 no sustained projection/ingest overlap, a falling dirty queue, responsive tab
 navigation, and settled CPU appropriate to enabled endpoint services.
+
+## September 23 Explicit Rebuild Responsiveness Correction
+
+Production evidence from an approximately 24,119-record operator-requested
+Message Index rebuild showed the progress window remaining at 39%, a native
+`Main.py not responding` warning, and the progress window later disappearing.
+The worker remained active in the captured stacks; the failure was excessive UI
+and database amplification around otherwise bounded rebuild cycles, not proof of
+source-data corruption.
+
+The following rules are binding for an explicit deep rebuild:
+
+- progress state is an immutable in-memory snapshot that the UI may poll; worker
+  callbacks are hints and are published no more than four times per second;
+- a terminal `complete`, `cancelled`, `deferred`, or `failed` state is always
+  published regardless of callback coalescing;
+- the progress window remains independently visible and must not use modal
+  `QProgressDialog.setValue()` event pumping as a synchronization mechanism;
+- unchanged progress values and labels produce no Qt mutation;
+- intermediate rebuild commits never request an Inbox page/count query; one
+  forced bounded query occurs after successful terminal completion;
+- native source watermarks and durable dirty rows continue to commit with each
+  bounded coordinator unit, while compact operator-facing rebuild checkpoint
+  metadata is written every ten cycles and at the exact terminal state; and
+- cancellation remains bounded by the existing coordinator unit and preserves
+  all committed watermarks, dirty work, native rows, files, external receipts,
+  and operator lifecycle state.
+
+Automated acceptance must prove callback coalescing, forced terminal
+publication, periodic plus terminal checkpoint persistence, unchanged-progress
+Qt suppression, one completion refresh, cancellation, contention recovery, and
+the existing 12,000-row restart/idempotence contracts. Linux production
+qualification remains open until a production-sized rebuild completes with a
+responsive shell, visible terminal state, and no watchdog stall.

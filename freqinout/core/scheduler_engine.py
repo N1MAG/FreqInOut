@@ -476,6 +476,10 @@ class SchedulerEngine(QObject):
         self._status_snapshot_started_at: Optional[float] = None
         self._status_snapshot_timeout_s: float = 15.0
         self._status_snapshot_timeout_reported: bool = False
+        # Owned exclusively by the serial status worker.  It is created
+        # lazily there with runtime_worker=True so recurring polls cannot
+        # repeat migration/schema work or borrow Qt-thread state.
+        self._status_worker_settings: Optional[SettingsManager] = None
         self._last_js8_shadow_comparison: Dict[str, object] = {}
         self._last_varac_status: Dict[str, object] = {"busy": False, "waiting_for_frequency": False, "reason": None}
         self._last_varac_status_stale: bool = False
@@ -531,6 +535,8 @@ class SchedulerEngine(QObject):
         self._schedule_projection_future = None
         self._schedule_projection_requested_at: float = 0.0
         self._schedule_projection_started_at: Optional[float] = None
+        # Projection requests remain on the five-second scheduler cadence, but
+        # are strictly single-flight and execute outside the Qt thread.
         self._schedule_projection_refresh_interval_s: float = max(5.0, poll_interval_ms / 1000.0)
         self._schedule_projection_generation: int = 0
         self._schedule_projection_request_count: int = 0
@@ -538,9 +544,13 @@ class SchedulerEngine(QObject):
         self._schedule_projection_completed_count: int = 0
         self._manual_states_by_radio: Dict[int, SchedulerManualControlState] = {}
         self._published_busy_evidence_ids: Set[str] = set()
+        self._busy_evidence_signatures: Dict[str, tuple[object, ...]] = {}
         # Clear a possibly stale row from a previous process once, then keep
         # the scheduler's idle path free of database writes.
         self._busy_evidence_clear_checked_ids: Set[str] = set()
+        self._published_ptt_conflict_ids: Set[str] = set()
+        self._ptt_conflict_signatures: Dict[str, tuple[object, ...]] = {}
+        self._ptt_conflict_clear_checked_ids: Set[str] = set()
         self._busy_evidence_published_ts: Dict[str, float] = {}
         self._last_busy_skip_log_signature: str = ""
         self._last_busy_skip_log_ts: float = 0.0
@@ -1194,6 +1204,7 @@ class SchedulerEngine(QObject):
                 max_workers=1,
                 thread_name_prefix="freqinout-status",
             )
+            self._status_worker_settings = None
             self._schedule_projection_executor = DaemonSerialExecutor(
                 max_workers=1,
                 thread_name_prefix="freqinout-schedule-projection",
@@ -2341,8 +2352,31 @@ class SchedulerEngine(QObject):
                 future.cancel()
             except Exception as e:
                 log.debug("SchedulerEngine: status future cancel failed during %s: %s", reason, e)
+        worker_settings = getattr(self, "_status_worker_settings", None)
+        if worker_settings is not None:
+            # Schedule cleanup behind a running status call.  The manager is
+            # thread-affine, so the Qt thread never closes its SQLite
+            # connection.  A permanently hung status operation is already a
+            # bounded daemon-worker failure path; this queued cleanup runs if
+            # and when that worker can drain.
+            def _close_worker_settings(settings=worker_settings) -> None:
+                try:
+                    settings.close()
+                except Exception as exc:
+                    log.debug("SchedulerEngine: status worker settings close failed during %s: %s", reason, exc)
+                finally:
+                    if getattr(self, "_status_worker_settings", None) is settings:
+                        self._status_worker_settings = None
+
+            try:
+                self._status_executor.submit(_close_worker_settings)
+            except RuntimeError:
+                pass
         try:
-            self._status_executor.shutdown(wait=False, cancel_futures=True)
+            self._status_executor.shutdown(
+                wait=False,
+                cancel_futures=worker_settings is None,
+            )
         except TypeError:
             try:
                 self._status_executor.shutdown(wait=False)
@@ -2844,122 +2878,133 @@ class SchedulerEngine(QObject):
         js8_offset_check_active = self._js8_offset_authority_active(current_entry, self._cached_control_mode())
 
         def _task() -> Dict[str, object]:
-            settings = SettingsManager()
-            try:
-                control_mode = (settings.get("control_via", "FLRig") or "FLRig").upper()
-                out: Dict[str, object] = {
-                    "varac_status": {"busy": False, "waiting_for_frequency": False, "reason": None},
-                    "rig_ptt": False,
-                    "rig_ptt_known": False,
-                    "rig_freq_hz": None,
-                    "rig_vfo": None,
-                    "js8_freq_hz": None,
-                    "js8_offset_hz": None,
-                    "js8_busy": self._last_js8_busy,
-                    "checked_ts": time.time(),
-                }
+            settings = getattr(self, "_status_worker_settings", None)
+            if settings is None:
+                # The serial executor owns this SettingsManager for its whole
+                # lifetime.  ``runtime_worker`` deliberately skips startup
+                # migrations and schema/adoption work on routine five-second
+                # status polling.
                 try:
-                    def _poll_varac_status() -> Dict[str, object]:
-                        # Reuse the worker-owned SettingsManager. Constructing
-                        # another one here repeats schema/usage discovery on
-                        # every background status refresh.
-                        varac = VarACStatusClient(settings=settings)
-                        return {
-                            "varac_status": varac.get_status(include_db_transfer=True),
-                            "source": "scheduler_background_varac",
-                        }
+                    settings = SettingsManager(runtime_worker=True)
+                except TypeError:  # focused test doubles from older suites
+                    settings = SettingsManager()
+                self._status_worker_settings = settings
+            # SettingsManager.runtime_worker owns one lightweight connection.
+            # Reload its key/value snapshot on the worker before every status
+            # pass so a just-saved control mode or VarAC path takes effect on
+            # the next five-second snapshot without rerunning any migration.
+            reload_settings = getattr(settings, "reload", None)
+            if callable(reload_settings):
+                try:
+                    reload_settings()
+                except Exception as exc:
+                    log.debug("SchedulerEngine: status worker settings reload failed: %s", exc)
+            control_mode = (settings.get("control_via", "FLRig") or "FLRig").upper()
+            out: Dict[str, object] = {
+                "varac_status": {"busy": False, "waiting_for_frequency": False, "reason": None},
+                "rig_ptt": False,
+                "rig_ptt_known": False,
+                "rig_freq_hz": None,
+                "rig_vfo": None,
+                "js8_freq_hz": None,
+                "js8_offset_hz": None,
+                "js8_busy": self._last_js8_busy,
+                "checked_ts": time.time(),
+            }
+            try:
+                def _poll_varac_status() -> Dict[str, object]:
+                    varac = VarACStatusClient(settings=settings)
+                    return {
+                        "varac_status": varac.get_status(include_db_transfer=True),
+                        "source": "scheduler_background_varac",
+                    }
 
-                    varac_snapshot = status_poll_coordinator.get_snapshot(
-                        "scheduler:primary:background_varac",
-                        _poll_varac_status,
+                varac_snapshot = status_poll_coordinator.get_snapshot(
+                    "scheduler:primary:background_varac",
+                    _poll_varac_status,
+                    force=force,
+                )
+                if not varac_snapshot.errors:
+                    out["varac_status"] = dict(varac_snapshot.varac_status or {})
+                out["varac_status_stale"] = bool(varac_snapshot.stale)
+                out["varac_status_detail"] = "; ".join(
+                    str(value) for value in (varac_snapshot.errors or {}).values() if str(value or "").strip()
+                )
+            except Exception as e:
+                log.debug("SchedulerEngine: background VarAC status failed: %s", e)
+            if rig is not None:
+                try:
+                    def _poll_rig_status() -> Dict[str, object]:
+                        reading: Dict[str, object] = {}
+                        if hasattr(rig, "get_ptt"):
+                            ptt_reader = getattr(rig, "get_ptt_checked", None)
+                            if not callable(ptt_reader):
+                                ptt_reader = rig.get_ptt
+                            reading["ptt_active"] = bool(ptt_reader())
+                            reading["ptt_known"] = True
+                        if hasattr(rig, "get_vfo_frequency"):
+                            reading["frequency_hz"] = rig.get_vfo_frequency()
+                        if hasattr(rig, "get_active_vfo"):
+                            reading["vfo"] = rig.get_active_vfo()
+                        reading["source"] = "scheduler_background_rig"
+                        return reading
+
+                    rig_snapshot = status_poll_coordinator.get_snapshot(
+                        "scheduler:primary:background_rig",
+                        _poll_rig_status,
                         force=force,
                     )
-                    if not varac_snapshot.errors:
-                        out["varac_status"] = dict(varac_snapshot.varac_status or {})
-                    out["varac_status_stale"] = bool(varac_snapshot.stale)
-                    out["varac_status_detail"] = "; ".join(
-                        str(value) for value in (varac_snapshot.errors or {}).values() if str(value or "").strip()
+                    out["rig_ptt"] = bool(rig_snapshot.ptt_active)
+                    out["rig_ptt_known"] = bool(rig_snapshot.ptt_known and not rig_snapshot.errors)
+                    out["rig_freq_hz"] = rig_snapshot.frequency_hz
+                    out["rig_vfo"] = rig_snapshot.vfo
+                except Exception as e:
+                    log.debug("SchedulerEngine: background rig status failed: %s", e)
+            if control_mode == "JS8CALL" or js8_offset_check_active:
+                try:
+                    def _poll_js8_status() -> Dict[str, object]:
+                        js8 = JS8ControlClient()
+                        reading: Dict[str, object] = {"source": "scheduler_background_js8"}
+                        if control_mode == "JS8CALL":
+                            reading["js8_busy"] = bool(js8.is_busy())
+                            reading["js8_frequency_hz"] = js8.get_frequency()
+                            reading["js8_offset_hz"] = js8.get_offset()
+                        elif js8_offset_check_active:
+                            reading["js8_offset_hz"] = js8.get_offset()
+                        return reading
+
+                    js8_snapshot = status_poll_coordinator.get_snapshot(
+                        "scheduler:primary:background_js8",
+                        _poll_js8_status,
+                        force=force,
+                    )
+                    legacy_readings: Dict[str, object] = {}
+                    if not js8_snapshot.errors:
+                        if control_mode == "JS8CALL":
+                            out["js8_busy"] = bool(js8_snapshot.js8_busy)
+                            out["js8_freq_hz"] = js8_snapshot.js8_frequency_hz
+                            out["js8_offset_hz"] = js8_snapshot.js8_offset_hz
+                            legacy_readings = {
+                                "busy": out.get("js8_busy"),
+                                "frequency_hz": out.get("js8_freq_hz"),
+                                "offset_hz": out.get("js8_offset_hz"),
+                            }
+                        elif js8_offset_check_active:
+                            out["js8_offset_hz"] = js8_snapshot.js8_offset_hz
+                            legacy_readings = {"offset_hz": out.get("js8_offset_hz")}
+                    if legacy_readings:
+                        shadow = self._software_status.js8_shadow_comparison_status(legacy_readings=legacy_readings)
+                        out["js8_shadow_comparison"] = dict(shadow)
+                    out["js8_status_stale"] = bool(js8_snapshot.stale)
+                    out["js8_status_detail"] = "; ".join(
+                        str(value) for value in (js8_snapshot.errors or {}).values() if str(value or "").strip()
                     )
                 except Exception as e:
-                    log.debug("SchedulerEngine: background VarAC status failed: %s", e)
-                if rig is not None:
-                    try:
-                        def _poll_rig_status() -> Dict[str, object]:
-                            reading: Dict[str, object] = {}
-                            if hasattr(rig, "get_ptt"):
-                                ptt_reader = getattr(rig, "get_ptt_checked", None)
-                                if not callable(ptt_reader):
-                                    ptt_reader = rig.get_ptt
-                                reading["ptt_active"] = bool(ptt_reader())
-                                reading["ptt_known"] = True
-                            if hasattr(rig, "get_vfo_frequency"):
-                                reading["frequency_hz"] = rig.get_vfo_frequency()
-                            if hasattr(rig, "get_active_vfo"):
-                                reading["vfo"] = rig.get_active_vfo()
-                            reading["source"] = "scheduler_background_rig"
-                            return reading
-
-                        rig_snapshot = status_poll_coordinator.get_snapshot(
-                            "scheduler:primary:background_rig",
-                            _poll_rig_status,
-                            force=force,
-                        )
-                        out["rig_ptt"] = bool(rig_snapshot.ptt_active)
-                        out["rig_ptt_known"] = bool(rig_snapshot.ptt_known and not rig_snapshot.errors)
-                        out["rig_freq_hz"] = rig_snapshot.frequency_hz
-                        out["rig_vfo"] = rig_snapshot.vfo
-                    except Exception as e:
-                        log.debug("SchedulerEngine: background rig status failed: %s", e)
-                if control_mode == "JS8CALL" or js8_offset_check_active:
-                    try:
-                        def _poll_js8_status() -> Dict[str, object]:
-                            js8 = JS8ControlClient()
-                            reading: Dict[str, object] = {"source": "scheduler_background_js8"}
-                            if control_mode == "JS8CALL":
-                                reading["js8_busy"] = bool(js8.is_busy())
-                                reading["js8_frequency_hz"] = js8.get_frequency()
-                                reading["js8_offset_hz"] = js8.get_offset()
-                            elif js8_offset_check_active:
-                                reading["js8_offset_hz"] = js8.get_offset()
-                            return reading
-
-                        js8_snapshot = status_poll_coordinator.get_snapshot(
-                            "scheduler:primary:background_js8",
-                            _poll_js8_status,
-                            force=force,
-                        )
-                        legacy_readings: Dict[str, object] = {}
-                        if not js8_snapshot.errors:
-                            if control_mode == "JS8CALL":
-                                out["js8_busy"] = bool(js8_snapshot.js8_busy)
-                                out["js8_freq_hz"] = js8_snapshot.js8_frequency_hz
-                                out["js8_offset_hz"] = js8_snapshot.js8_offset_hz
-                                legacy_readings = {
-                                    "busy": out.get("js8_busy"),
-                                    "frequency_hz": out.get("js8_freq_hz"),
-                                    "offset_hz": out.get("js8_offset_hz"),
-                                }
-                            elif js8_offset_check_active:
-                                out["js8_offset_hz"] = js8_snapshot.js8_offset_hz
-                                legacy_readings = {"offset_hz": out.get("js8_offset_hz")}
-                        if legacy_readings:
-                            shadow = self._software_status.js8_shadow_comparison_status(legacy_readings=legacy_readings)
-                            out["js8_shadow_comparison"] = dict(shadow)
-                        out["js8_status_stale"] = bool(js8_snapshot.stale)
-                        out["js8_status_detail"] = "; ".join(
-                            str(value) for value in (js8_snapshot.errors or {}).values() if str(value or "").strip()
-                        )
-                    except Exception as e:
-                        log.debug("SchedulerEngine: background JS8Call status failed: %s", e)
-                else:
-                    out["js8_status_stale"] = False
-                    out["js8_status_detail"] = ""
-                return out
-            finally:
-                try:
-                    settings.close()
-                except Exception:
-                    pass
+                    log.debug("SchedulerEngine: background JS8Call status failed: %s", e)
+            else:
+                out["js8_status_stale"] = False
+                out["js8_status_detail"] = ""
+            return out
 
         def _on_done(done) -> None:
             def _apply() -> None:
@@ -4860,11 +4905,26 @@ class SchedulerEngine(QObject):
         radio_id = radio_id if radio_id is not None else self._primary_manual_control_radio_id()
         if radio_id is None:
             return
+        evidence_id = self._local_ptt_busy_evidence_id(radio_id)
+        published = getattr(self, "_published_busy_evidence_ids", None)
+        if not isinstance(published, set):
+            published = set()
+            self._published_busy_evidence_ids = published
+        signatures = getattr(self, "_busy_evidence_signatures", None)
+        if not isinstance(signatures, dict):
+            signatures = {}
+            self._busy_evidence_signatures = signatures
+        signature = ("local_ptt", int(radio_id), str(source or "").strip().upper())
+        # PTT evidence has no expiration.  Once this scheduler owns a live
+        # row, a repeated five-second safety poll must not rewrite it until the
+        # state transitions clear and publish it again.
+        if evidence_id in published and signatures.get(evidence_id) == signature:
+            return
         now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         try:
             self._busy_evidence_service.publish(
                 BusyEvidence(
-                    id=self._local_ptt_busy_evidence_id(radio_id),
+                    id=evidence_id,
                     radio_profile_id=f"radio_{radio_id}",
                     source_family="ptt",
                     reason_code="ptt_active",
@@ -4873,6 +4933,11 @@ class SchedulerEngine(QObject):
                     description="Rig PTT is active.",
                 )
             )
+            published.add(evidence_id)
+            signatures[evidence_id] = signature
+            clear_checked = getattr(self, "_busy_evidence_clear_checked_ids", None)
+            if isinstance(clear_checked, set):
+                clear_checked.discard(evidence_id)
         except Exception as exc:
             log.debug("SchedulerEngine: failed to publish local PTT busy evidence: %s", exc)
 
@@ -4880,8 +4945,18 @@ class SchedulerEngine(QObject):
         radio_id = radio_id if radio_id is not None else self._primary_manual_control_radio_id()
         if radio_id is None:
             return
+        evidence_id = self._local_ptt_busy_evidence_id(radio_id)
+        published = getattr(self, "_published_busy_evidence_ids", set())
+        clear_checked = getattr(self, "_busy_evidence_clear_checked_ids", set())
+        if evidence_id not in published and evidence_id in clear_checked:
+            return
         try:
-            self._busy_evidence_service.clear(self._local_ptt_busy_evidence_id(radio_id))
+            self._busy_evidence_service.clear(evidence_id)
+            published.discard(evidence_id)
+            clear_checked.add(evidence_id)
+            signatures = getattr(self, "_busy_evidence_signatures", None)
+            if isinstance(signatures, dict):
+                signatures.pop(evidence_id, None)
         except Exception as exc:
             log.debug("SchedulerEngine: failed to clear local PTT busy evidence: %s", exc)
 
@@ -4905,32 +4980,79 @@ class SchedulerEngine(QObject):
             owner_device_id = None
         reason = str(shared_ptt.get("reason", "") or "").strip() or f"Shared PTT group {ptt_group} is active."
         now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        busy_evidence_id = self._shared_ptt_busy_evidence_id(radio_id)
+        conflict_evidence_id = f"ptt_shared_{int(radio_id)}"
+        published_busy = getattr(self, "_published_busy_evidence_ids", None)
+        if not isinstance(published_busy, set):
+            published_busy = set()
+            self._published_busy_evidence_ids = published_busy
+        published_conflicts = getattr(self, "_published_ptt_conflict_ids", None)
+        if not isinstance(published_conflicts, set):
+            published_conflicts = set()
+            self._published_ptt_conflict_ids = published_conflicts
+        busy_signatures = getattr(self, "_busy_evidence_signatures", None)
+        if not isinstance(busy_signatures, dict):
+            busy_signatures = {}
+            self._busy_evidence_signatures = busy_signatures
+        conflict_signatures = getattr(self, "_ptt_conflict_signatures", None)
+        if not isinstance(conflict_signatures, dict):
+            conflict_signatures = {}
+            self._ptt_conflict_signatures = conflict_signatures
+        busy_signature = (
+            "shared_ptt",
+            str(ptt_group).strip().upper(),
+            owner_device_id,
+            reason,
+        )
+        conflict_signature = (
+            str(ptt_group).strip().upper(),
+            owner_device_id,
+            "scheduler_shared_ptt",
+        )
         try:
-            self._busy_evidence_service.publish(
-                BusyEvidence(
-                    id=self._shared_ptt_busy_evidence_id(radio_id),
-                    radio_profile_id=f"radio_{radio_id}",
-                    source_family="ptt",
-                    reason_code="shared_ptt_interlock",
-                    severity="hard",
-                    evidence_timestamp_utc=now,
-                    description=reason,
+            if (
+                busy_evidence_id not in published_busy
+                or busy_signatures.get(busy_evidence_id) != busy_signature
+            ):
+                self._busy_evidence_service.publish(
+                    BusyEvidence(
+                        id=busy_evidence_id,
+                        radio_profile_id=f"radio_{radio_id}",
+                        source_family="ptt",
+                        reason_code="shared_ptt_interlock",
+                        severity="hard",
+                        evidence_timestamp_utc=now,
+                        description=reason,
+                    )
                 )
-            )
+                published_busy.add(busy_evidence_id)
+                busy_signatures[busy_evidence_id] = busy_signature
+                clear_checked = getattr(self, "_busy_evidence_clear_checked_ids", None)
+                if isinstance(clear_checked, set):
+                    clear_checked.discard(busy_evidence_id)
         except Exception as exc:
             log.debug("SchedulerEngine: failed to publish shared PTT busy evidence: %s", exc)
         try:
-            self._ptt_conflict_service.publish(
-                PttConflictEvidence(
-                    id=f"ptt_shared_{int(radio_id)}",
-                    ptt_group=ptt_group,
-                    requested_radio_id=f"radio_{radio_id}",
-                    blocking_radio_id=f"radio_{owner_device_id}" if owner_device_id is not None else None,
-                    severity="hard",
-                    source="scheduler_shared_ptt",
-                    created_at_utc=now,
+            if (
+                conflict_evidence_id not in published_conflicts
+                or conflict_signatures.get(conflict_evidence_id) != conflict_signature
+            ):
+                self._ptt_conflict_service.publish(
+                    PttConflictEvidence(
+                        id=conflict_evidence_id,
+                        ptt_group=ptt_group,
+                        requested_radio_id=f"radio_{radio_id}",
+                        blocking_radio_id=f"radio_{owner_device_id}" if owner_device_id is not None else None,
+                        severity="hard",
+                        source="scheduler_shared_ptt",
+                        created_at_utc=now,
+                    )
                 )
-            )
+                published_conflicts.add(conflict_evidence_id)
+                conflict_signatures[conflict_evidence_id] = conflict_signature
+                clear_checked = getattr(self, "_ptt_conflict_clear_checked_ids", None)
+                if isinstance(clear_checked, set):
+                    clear_checked.discard(conflict_evidence_id)
         except Exception as exc:
             log.debug("SchedulerEngine: failed to publish shared PTT conflict evidence: %s", exc)
 
@@ -4938,12 +5060,34 @@ class SchedulerEngine(QObject):
         radio_id = radio_id if radio_id is not None else self._primary_manual_control_radio_id()
         if radio_id is None:
             return
+        busy_evidence_id = self._shared_ptt_busy_evidence_id(radio_id)
+        conflict_evidence_id = f"ptt_shared_{int(radio_id)}"
+        published_busy = getattr(self, "_published_busy_evidence_ids", set())
+        busy_clear_checked = getattr(self, "_busy_evidence_clear_checked_ids", set())
         try:
-            self._busy_evidence_service.clear(self._shared_ptt_busy_evidence_id(radio_id))
+            if busy_evidence_id not in published_busy and busy_evidence_id in busy_clear_checked:
+                pass
+            else:
+                self._busy_evidence_service.clear(busy_evidence_id)
+                published_busy.discard(busy_evidence_id)
+                busy_clear_checked.add(busy_evidence_id)
+                busy_signatures = getattr(self, "_busy_evidence_signatures", None)
+                if isinstance(busy_signatures, dict):
+                    busy_signatures.pop(busy_evidence_id, None)
         except Exception as exc:
             log.debug("SchedulerEngine: failed to clear shared PTT busy evidence: %s", exc)
+        published_conflicts = getattr(self, "_published_ptt_conflict_ids", set())
+        conflict_clear_checked = getattr(self, "_ptt_conflict_clear_checked_ids", set())
         try:
-            self._ptt_conflict_service.clear(f"ptt_shared_{int(radio_id)}")
+            if conflict_evidence_id not in published_conflicts and conflict_evidence_id in conflict_clear_checked:
+                pass
+            else:
+                self._ptt_conflict_service.clear(conflict_evidence_id)
+                published_conflicts.discard(conflict_evidence_id)
+                conflict_clear_checked.add(conflict_evidence_id)
+                conflict_signatures = getattr(self, "_ptt_conflict_signatures", None)
+                if isinstance(conflict_signatures, dict):
+                    conflict_signatures.pop(conflict_evidence_id, None)
         except Exception as exc:
             log.debug("SchedulerEngine: failed to clear shared PTT conflict evidence: %s", exc)
 

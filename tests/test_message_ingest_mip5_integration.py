@@ -71,6 +71,8 @@ def test_projection_batch_progress_coalesces_visible_inbox_queries() -> None:
     assert "_message_projection_progressed.connect" in constructor
     assert "_request_projected_message_query" in progress
     assert "delay_ms=1000" in progress
+    assert 'getattr(progress, "rebuild_id"' in progress
+    assert "return" in progress
 
 
 def test_projection_maintenance_is_paced_and_defers_while_message_ingest_runs() -> None:
@@ -120,6 +122,13 @@ def test_deep_rebuild_ui_states_scope_and_source_preservation() -> None:
     assert "native messages and received files remain untouched" in preview_poll
     assert "start_deep_rebuild" in request_poll
     assert "progress.canceled.connect(service.cancel)" in request_poll
+    deep_poll = _method_source(
+        ROOT / "freqinout" / "gui" / "message_viewer_tab.py",
+        "MessageViewerTab",
+        "_poll_message_projection_deep_rebuild",
+    )
+    assert "_fio_rebuild_display_value" in deep_poll
+    assert "setValue(display_value)" in deep_poll
     assert "background catch-up" in viewer
     assert "after restart" in viewer
 

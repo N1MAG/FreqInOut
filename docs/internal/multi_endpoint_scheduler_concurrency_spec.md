@@ -938,6 +938,54 @@ Thread-concurrency tests must use deterministic barriers/events rather than
 timing-only sleeps wherever possible. Hardware tests supplement; they do not
 replace fault-injection tests.
 
+## September 23 Settled-Idle CPU Requalification
+
+Three production hotspot captures taken before the Message Index rebuild showed
+FreqInOut consuming 85.8% to 96.0% of one logical CPU while ordinary message
+projection was already caught up. Endpoint status polling remained near its
+intended five-second cadence and schedule projection near seven seconds, but
+each cycle repeated configuration/schema construction, linked-profile reads,
+or unchanged evidence writes. Station Control Bar rendering also reconstructed
+radio launch bundles and queried Mesh health/schema state.
+
+The corrective contract is:
+
+1. The five-second endpoint status cadence is preserved. Its serialized worker
+   owns one lazily created `SettingsManager(runtime_worker=True)`, refreshes only
+   its key/value snapshot before a status pass, and closes that connection on
+   the same worker during shutdown. It never repeats startup migration, schema,
+   usage discovery, or launch-bundle adoption.
+2. Schedule projection remains single-flight and outside the Qt thread. This
+   remediation does not slow RF-safety or endpoint-liveness evidence to hide
+   CPU cost.
+3. Local and shared PTT busy/conflict evidence is edge-triggered. An identical
+   active signature writes once, a changed group/owner/reason republishes, and
+   an identical clear writes once. One initial clear may remove evidence left by
+   a previous process.
+4. Background JS8, dynamic FLAmp, and VarAC jobs share one immutable active
+   linked-profile snapshot per explicit settings generation. A committed
+   settings change invalidates the generation immediately; no timer-owned TTL
+   may keep changed radio/application scope indefinitely.
+5. One dynamic FLAmp job reuses one worker-owned lightweight settings context
+   across its radio profiles instead of creating a manager per radio. Source
+   reconciliation and freshness checks remain bounded and unchanged.
+6. Radio, launch-monitor, schedule, and Mesh information presented in the
+   Station Control Bar follows the cache-only publication boundary in
+   `multirig_product_ui_contract.md`. Read helpers do not perform schema DDL.
+
+Automated acceptance must prove worker ownership/reuse/reload/close, unchanged
+and changed PTT signatures, one linked-profile resolution per configuration
+generation, immediate invalidation after settings save, command-bar launch and
+Mesh cache-only rendering, per-adapter Mesh staleness, and absence of schema DDL
+from health reads. Existing endpoint-isolation, safety, restart, shutdown, and
+background-ingest suites must remain green.
+
+The implementation gate does not by itself close production qualification. A
+settled Linux run must show that normal idle CPU no longer produces sustained
+single-core hotspot reports, while endpoint polling, schedule transitions,
+shared-PTT protection, Mesh status, Expect handling, and multi-radio operation
+remain timely and accurate.
+
 ## Release Gate
 
 FIO may claim reliable automated multi-endpoint scheduling only when:
