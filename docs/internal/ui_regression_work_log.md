@@ -11033,3 +11033,49 @@ was used for this primary-owned release integration decision.
 
 Exit gate: proceed to the immutable private candidate and exact public source
 projection. Public push, merge, and `v2.0.0` tag remain outside this gate.
+
+## 2026-09-24 — Frozen private and public 2.0 source candidates
+
+Status: local candidate and projection gates pass; waiting for maintainer review
+before any remote action.
+
+The reviewed private source was frozen at
+`43b869f563333a89304f69634c5f9a4c4d4114b2`. From that exact commit, the
+fail-closed exporter produced 408 allowlisted files. Their durable inventory is
+`docs/internal/public_2_0_runtime_manifest.sha256`, whose SHA-256 is
+`c67241bd2c0367c8dfa869fd0f883221f29ba8f2d863b862d5b7833415ff1b19`.
+
+The projection was applied mechanically to a clean worktree based directly on
+public `main`/`v1.2.8` (`2c3ba1a`) and committed locally as
+`2f03e5f72c8d5dc27d0666b8444849d282079809` on
+`release/public-2.0-candidate`. Its Git tree is
+`dda03e10aa5d728a93ade49e91f6fecafabc4e7d`, and it exactly matches the
+allowlisted inventory fingerprint. No remote branch or `v2.0.0` tag exists.
+
+Public-boundary review confirms that no tests, tools, internal documents,
+packaging helpers, emulator/lab files, caches, private repository markers, or
+named maintainer paths entered the candidate. Relative to public 1.2.8, the only
+non-third-party deletions are contributor/developer material, generated
+installer documentation, the obsolete executable-installer definition, and the
+replaced single-rig launcher. The large remaining deletion set is the unused
+JS8Net auxiliary/example/image bundle; the runtime module and license remain.
+
+Acceptance:
+
+- exact 408-file source/inventory fingerprint: pass;
+- public worktree and private candidate worktree cleanliness: pass;
+- source-only manifest self-containment and zero broken local Markdown links:
+  pass;
+- forbidden path/marker and developer-surface scans: pass;
+- public branch shell syntax and `git diff --check`: pass;
+- projected-tree fresh-profile offscreen startup/shutdown: pass;
+- exact projected code plus private harness: 38 help, runtime-portability,
+  managed-BBS, and public-1.2.8 upgrade tests pass.
+
+Primary `gpt-6-astra` owned the release integration, candidate freeze, projection
+comparison, safety review, and acceptance. No reliable reasoning-effort label
+was exposed. No new delegation was used for this primary-owned release action.
+
+Exit gate: the local public candidate is ready for the maintainer's exact-diff
+and inventory approval. Pushing the branch, merging public `main`, and creating
+`v2.0.0` require the maintainer's next explicit authorization.

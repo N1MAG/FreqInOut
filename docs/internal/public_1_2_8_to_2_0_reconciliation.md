@@ -110,3 +110,12 @@ rehearsal and preserved public `v1.2.8` tag remain required safeguards.
 The remaining promotion work is therefore the immutable private candidate,
 exact allowlisted source projection, projected-tree smoke and private harness,
 and maintainer review of the final public diff and inventory.
+
+Those local artifacts were subsequently frozen as private candidate
+`43b869f563333a89304f69634c5f9a4c4d4114b2` and public candidate
+`2f03e5f72c8d5dc27d0666b8444849d282079809`, with public Git tree
+`dda03e10aa5d728a93ade49e91f6fecafabc4e7d`. The 408-file inventory manifest
+hash is `c67241bd2c0367c8dfa869fd0f883221f29ba8f2d863b862d5b7833415ff1b19`.
+The exact projected source passed clean startup/shutdown and 38 focused private
+harness tests. Final maintainer approval and all remote push/merge/tag actions
+remain outstanding.

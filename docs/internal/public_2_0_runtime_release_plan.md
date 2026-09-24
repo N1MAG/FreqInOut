@@ -400,6 +400,35 @@ These are explicit scope/risk decisions, not silently passed tests. They do not
 waive final source projection, smoke, privacy, inventory, version, or public-diff
 review.
 
+### Frozen local candidates (2026-09-24)
+
+- Immutable private source candidate:
+  `43b869f563333a89304f69634c5f9a4c4d4114b2`
+- Local public promotion candidate based directly on public `v1.2.8`/`main`:
+  `2f03e5f72c8d5dc27d0666b8444849d282079809`
+- Public candidate Git tree:
+  `dda03e10aa5d728a93ade49e91f6fecafabc4e7d`
+- Allowlisted runtime inventory: 408 files, recorded in
+  `docs/internal/public_2_0_runtime_manifest.sha256`
+- Inventory-manifest SHA-256:
+  `c67241bd2c0367c8dfa869fd0f883221f29ba8f2d863b862d5b7833415ff1b19`
+
+The local branch is `release/public-2.0-candidate` and is deliberately not
+pushed. Both candidate worktrees were clean after their commits. The projected
+tree contains no tests, engineering tools, internal documentation, packaging
+helpers, emulator/lab code, caches, or private repository markers. Its only
+non-third-party removals relative to public 1.2.8 are `CODE_OF_CONDUCT.md`,
+`CONTRIBUTING.md`, the propagation developer README, generated Linux installer
+HTML, the obsolete executable-installer definition, and `start-single-rig.sh`;
+the latter is replaced by the reviewed POSIX and Windows multi-rig launchers.
+
+The committed public candidate exactly matches the recorded inventory
+fingerprint. From that tree, shell syntax and diff hygiene pass, local Markdown
+links have zero missing targets, a fresh temporary profile starts and shuts
+down cleanly with `--smoke-test`, and 38 private help/runtime/upgrade tests pass
+against a qualification copy containing the exact projected application code.
+No `v2.0.0` tag, remote promotion branch, merge, or public push exists yet.
+
 ## Promotion And Rollback
 
 After every gate closes, push the curated runtime branch to the public
