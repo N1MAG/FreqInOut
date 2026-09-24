@@ -11144,3 +11144,12 @@ Automated exit gate: 197 focused VarAC writer/preparation/transaction,
 Launch Control, identity, and launch-planner tests passed. No schema or runtime
 data was changed, and nothing was pushed. Remaining exit gate: operator verify
 the FT-710 manual start on Linux/Wine opens its distinct VarAC and VARA pair.
+
+Production testing then exposed one remaining attribution-only regression. The
+complete-station review fed two legitimate cluster members through the generic
+independent-VarAC validator, which rejected their intentionally shared database
+before either identity could be credited. Both launch preflight and automatic
+launch-policy repair now project each radio independently and combine the
+result only as a read-only process-attribution catalog. Normal station launch
+planning retains its existing cross-radio collision checks. A shared-cluster-DB
+fixture covers both paths; the focused gate is now 201 passing tests.

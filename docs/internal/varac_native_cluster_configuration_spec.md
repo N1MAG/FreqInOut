@@ -821,6 +821,11 @@ preflight constructs one immutable attribution catalog from every persisted,
 configured VarAC and VARA identity before evaluating the selected target. Each
 observed process is matched against the exact executable, VarAC INI argument,
 Wine prefix/working directory where applicable, or distinct VARA runtime path.
+Catalog entries are projected one radio at a time and then combined for
+attribution only. This prevents the generic independent-instance validator
+from rejecting the cluster's intentionally shared VarAC database. Normal
+multi-radio launch planning still runs its station-wide collision validation;
+the attribution path does not weaken or bypass launch authorization.
 
 An existing FTDX-10 process that matches the FTDX-10 identity is therefore
 attributed and does not block an absent FT-710 identity. The requested FT-710
@@ -865,6 +870,9 @@ action. Unsupported or ambiguous layouts remain read-only.
    `Start Startup Apps`, and row `Start` without broadening their launch scope.
 3. An exact already-running FT-710 VarAC process is credited and never
    duplicated; an unknown VarAC or VARA family process still fails closed.
+   Two verified cluster members may share the cluster database without making
+   the attribution catalog incomplete; their INIs, mailboxes, launch arguments,
+   and VARA runtimes remain distinct.
 4. Managed create-cluster and join-cluster fixtures write
    `VarahfLaunchOnModemConnect=ON`, read it back, and retain distinct runtime
    paths and ports on Linux/Wine and native Windows.
@@ -891,4 +899,4 @@ complete saved station catalog; and automatic recovery performs a one-key
 backup/stage/semantic-readback repair only for an idle, exact managed member.
 Unknown family process evidence remains fail-closed. The focused VarAC,
 launch-planner, identity, transaction, and Launch Control gate completed with
-197 passing tests on 2026-09-24.
+201 passing tests on 2026-09-24.

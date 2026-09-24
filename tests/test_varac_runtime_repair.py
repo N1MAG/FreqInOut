@@ -192,6 +192,98 @@ def test_exact_running_node_detection_does_not_defer_idle_cluster_sibling(tmp_pa
     assert running_managed_varac_node_ids(store, _Status()) == (node["id"],)
 
 
+def test_cluster_shared_database_does_not_abort_process_attribution(tmp_path) -> None:
+    store, first_node, first_profile, _ini, _legacy_vara = _clustered_managed_state(
+        tmp_path
+    )
+    second_root = tmp_path / "prefix" / "drive_c" / "VarAC-FT710"
+    second_root.mkdir(parents=True)
+    second_node = store.save_varac_node(
+        {
+            "system_key": "varac-radio-b",
+            "name": "Radio B VarAC",
+            "install_path": str(second_root),
+            "ini_path": str(second_root / "VarAC-ft-710.ini"),
+            # Cluster members intentionally share this database.
+            "db_path": first_node["db_path"],
+            "incoming_path": str(tmp_path / "mail" / "radio-b-in"),
+            "outbox_path": str(tmp_path / "mail" / "radio-b-out"),
+            "vara_runtime_path": str(tmp_path / "prefix" / "drive_c" / "VARA-radio-b"),
+            "vara_ini_path": str(
+                tmp_path / "prefix" / "drive_c" / "VARA-radio-b" / "VARA.ini"
+            ),
+            "native_management_state": "managed",
+            "native_writer_key": "varac:13.2.7:linux-wine:create-member",
+        }
+    )
+    second_profile = store.save_device_profile(
+        {
+            "system_key": "radio-b",
+            "name": "Radio B",
+            "varac_node_id": second_node["id"],
+            "varac_outbox_dir": str(tmp_path / "mail" / "radio-b-out"),
+        }
+    )
+    membership = store.list_varac_cluster_members(
+        device_profile_id=first_profile["id"]
+    )[0]
+    store.set_varac_cluster_member(
+        membership["cluster_id"],
+        second_profile["id"],
+        instance_number=2,
+        enabled=True,
+    )
+
+    first_arguments = [
+        str(Path(first_node["install_path"]) / "VarAC.exe"),
+        r"C:\VarAC\VarAC.ini",
+    ]
+    second_arguments = [
+        str(Path(second_node["install_path"]) / "VarAC.exe"),
+        r"C:\VarAC-FT710\VarAC-ft-710.ini",
+    ]
+    for profile, key, arguments in (
+        (first_profile, "radio-a", first_arguments),
+        (second_profile, "radio-b", second_arguments),
+    ):
+        store.save_radio_launch_bundle(
+            profile["id"],
+            launch_enabled=True,
+            items=(
+                {
+                    "name": "VarAC",
+                    "instance_key": f"varac:{key}:varac",
+                    "enabled": True,
+                    "startup": True,
+                    "monitor_health": True,
+                    "launch_path_override": "wine",
+                    "dependencies": (),
+                    "readiness_policy": {
+                        "structured_launch": True,
+                        "executable": "wine",
+                        "launch_arguments": arguments,
+                    },
+                },
+            ),
+        )
+
+    class _Status:
+        def program_instance_running(self, name, target, arguments):
+            assert name == "VarAC"
+            assert target == "wine"
+            return list(arguments) == first_arguments
+
+        def cached_program_process_count(self, name):
+            return 1 if name == "VarAC" else 0
+
+    attribution = managed_varac_process_attribution(store, _Status())
+
+    assert attribution["catalog_complete"] is True
+    assert attribution["complete"] is True
+    assert attribution["running_node_ids"] == (first_node["id"],)
+    assert attribution["attributed_process_count"] == 1
+
+
 def test_unknown_varac_process_keeps_automatic_policy_repair_fail_closed(tmp_path) -> None:
     store, _node, profile, _ini, _legacy_vara = _clustered_managed_state(tmp_path)
     store.save_radio_launch_bundle(

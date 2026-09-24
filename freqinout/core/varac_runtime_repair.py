@@ -292,21 +292,33 @@ def managed_varac_process_attribution(
             "running_node_ids": (),
             "observed_process_count": 0,
             "attributed_process_count": 0,
+            "catalog_complete": True,
             "complete": True,
         }
     bundle_store = LaunchBundleStore(store.db_path)
-    bundles = {
-        profile_id: bundle_store.get_bundle(profile_id)
-        for profile_id in profile_node_ids
-    }
-    review = StationLaunchPlanner().plan_review(
-        profiles,
-        bundles,
-        trigger="varac-launch-policy-repair",
-    )
+    planner = StationLaunchPlanner()
+    catalog: list[Mapping[str, Any]] = []
+    catalog_complete = True
+    for profile in profiles:
+        profile_id = int(profile.get("id") or 0)
+        if profile_id not in profile_node_ids:
+            continue
+        try:
+            # This is an attribution inventory, not authorization to launch
+            # multiple radios.  Planning one identity at a time preserves the
+            # normal station-wide collision guard while allowing members of a
+            # verified VarAC cluster to share their database by design.
+            review = planner.plan_review(
+                (profile,),
+                {profile_id: bundle_store.get_bundle(profile_id)},
+                trigger="varac-launch-policy-repair",
+            )
+            catalog.extend(review.queue())
+        except Exception:
+            catalog_complete = False
     running: set[int] = set()
     attributed: set[str] = set()
-    for item in review.queue():
+    for item in catalog:
         name = str(item.get("name") or "").strip()
         if name.casefold() not in {"varac", "vara"}:
             continue
@@ -346,7 +358,7 @@ def managed_varac_process_attribution(
             int(status.cached_program_process_count(name))
             for name in ("VarAC", "VARA")
         )
-        complete = observed <= len(attributed)
+        complete = catalog_complete and observed <= len(attributed)
     except Exception:
         observed = -1
         complete = False
@@ -354,6 +366,7 @@ def managed_varac_process_attribution(
         "running_node_ids": tuple(sorted(running)),
         "observed_process_count": observed,
         "attributed_process_count": len(attributed),
+        "catalog_complete": catalog_complete,
         "complete": complete,
     }
 

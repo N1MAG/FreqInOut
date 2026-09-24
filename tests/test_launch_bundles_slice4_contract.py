@@ -2198,9 +2198,20 @@ def test_selected_radio_varac_launch_credits_running_sibling_from_station_catalo
 
 
 def test_selected_radio_preflight_catalog_contains_both_saved_varac_nodes() -> None:
+    shared_db = "/varac/shared/VarAC.db"
     profiles = [
-        {"id": 1, "name": "FTDX-10", "runtime_active": 1},
-        {"id": 2, "name": "FT-710", "runtime_active": 1},
+        {
+            "id": 1,
+            "name": "FTDX-10",
+            "runtime_active": 1,
+            "varac_db_path": shared_db,
+        },
+        {
+            "id": 2,
+            "name": "FT-710",
+            "runtime_active": 1,
+            "varac_db_path": shared_db,
+        },
     ]
     bundles = {
         1: {

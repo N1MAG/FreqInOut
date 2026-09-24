@@ -924,18 +924,30 @@ class LaunchOrchestrator(QObject):
 
         candidates: List[Mapping[str, Any]] = []
         try:
-            profiles = self.multi_radio_store.list_device_profiles()
-            bundles = {
-                int(profile["id"]): self.get_radio_launch_bundle(int(profile["id"]))
-                for profile in profiles
-                if int(profile.get("id", 0) or 0) > 0
-            }
-            review = self.planner.plan_review(
-                profiles,
-                bundles,
-                trigger="process-attribution",
-            )
-            candidates.extend(review.queue())
+            profiles = tuple(self.multi_radio_store.list_device_profiles())
+            for profile in profiles:
+                radio_id = int(profile.get("id", 0) or 0)
+                if radio_id <= 0:
+                    continue
+                try:
+                    # Attribution inventories identities; it does not approve
+                    # a multi-radio launch. Plan each radio independently so a
+                    # legitimate VarAC cluster-shared database does not invoke
+                    # the independent-instance collision gate. Normal startup
+                    # planning retains that station-wide validation.
+                    review = self.planner.plan_review(
+                        (profile,),
+                        {radio_id: self.get_radio_launch_bundle(radio_id)},
+                        trigger="process-attribution",
+                    )
+                    candidates.extend(review.queue())
+                except Exception as exc:
+                    log.warning(
+                        "LaunchOrchestrator: process attribution identity is incomplete "
+                        "for radio %s: %s",
+                        radio_id,
+                        exc,
+                    )
         except Exception as exc:
             # The requested queue remains usable, but any process that cannot
             # be attributed through it will retain the existing fail-closed
