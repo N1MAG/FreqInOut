@@ -33,7 +33,8 @@ source .venv/bin/activate
 - `release_builder.py`: release preflight + optional EXE build helper.
 - `install_FreqInOut_linux.sh`: Linux installer (guided, repair, dry-run, update flows).
 - `uninstall_FreqInOut_linux.sh`: Linux uninstaller.
-- `start-multi-rig.sh`: local multi-rig launcher that uses the configured multi-rig runtime profile.
+- `start-multi-rig.sh`: Linux/macOS source launcher for the standard FIO profile.
+- `start-multi-rig.cmd`: Windows source launcher for the standard FIO profile.
 
 Safe starter commands (run the Windows-only build command only on Windows):
 
@@ -45,12 +46,23 @@ bash uninstall_FreqInOut_linux.sh --help
 ./start-multi-rig.sh
 ```
 
+Windows source launch:
+
+```bat
+.\start-multi-rig.cmd
+```
+
 Notes:
 
 - `view_logs.py` prints the entire log; use only when you intentionally want full output.
 - `install_freqinout.py` does not have `-h`; running it executes installation immediately.
 - `install_freqinout.py` creates `.venv`; the Linux guided installer creates `venv`. `start-multi-rig.sh` accepts either layout.
-- `start-multi-rig.sh` accepts `FREQINOUT_INSTALL_DIR` and `FREQINOUT_RUNTIME_ROOT`, so community testers do not need to edit the script or use maintainer-local paths.
+- Both launchers accept `FREQINOUT_INSTALL_DIR` and use `.venv` or `venv`.
+  They leave the profile location to FIO, so an upgrade opens the existing
+  standard profile (`~/.freqinout` on Linux/macOS and the FreqInOut folder
+  below `LOCALAPPDATA`/`APPDATA` on Windows). Set `FREQINOUT_CONFIG_DIR` only
+  when an intentionally isolated profile is required. The older
+  `FREQINOUT_RUNTIME_ROOT` name remains a deprecated compatibility alias.
 
 ### DB wrappers (recommended for beginners)
 
@@ -209,7 +221,9 @@ Notes:
 
 - `tools/multirig_test_lab.py`: prepares repeatable multi-rig runtime profiles, upgrade checks, and fixture-driven lab runs.
 - `tools/multirig_upgrade_lab.sh`: small shell wrapper for common upgrade-lab commands.
-- `tools/start_multirig_gui_lab.sh`: starts/stops/checks the local three-profile GUI lab for FLRig, FLDigi, JS8Call, and companion app testing.
+- `tools/start_multirig_gui_lab.sh`: starts/stops/checks the local three-profile GUI lab for FLRig, FLDigi, JS8Call, and companion app testing. The lab intentionally uses JS8 TCP ports `2242`–`2244`; each FLRig profile is backed by a distinct pseudo-serial Kenwood TS-2000 CAT emulator.
+- `tools/ts2000_cat_emulator.py`: focused local-lab CAT emulator used by the GUI launcher so FLRig can retain and report the `TS-2000` radio identity while testing without physical radios.
+- `tools/create_readme_demo_profile.py`: privately creates a callsign-masked release-media profile from a matched database pair. `--gui-lab-root` binds its radios in display order to the GUI lab's `fio-a`, `fio-b`, and subsequent suites; it fails closed when an existing output appears to be open.
 - `tools/multirig_capture_test_session.py`: creates a portable evidence bundle from a multi-rig field-test session.
 
 Safe starter commands:

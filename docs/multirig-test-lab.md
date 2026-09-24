@@ -141,7 +141,17 @@ The GUI launcher starts:
 | `FIO-B` | `12346` | `7363` | `2243` | `fio-b` | `3.0.3` |
 | `FIO-C` | `12347` | `7364` | `2244` | `fio-c` | `3.0.3` |
 
-It also starts the rigctld CAT emulators on `4532`, `4533`, and `4534`.
+It also starts the rigctld endpoint emulators on `4532`, `4533`, and `4534`.
+Each FLRig profile receives its own pseudo-serial CAT emulator and remains
+configured as the radio model `TS-2000`; FLRig is never changed to the `NONE`
+model merely to make the lab start. The launcher waits for each FLRig XML-RPC
+server to report `TS-2000` and a valid frequency before starting that suite's
+FLDigi and JS8Call applications. This keeps startup ordering deterministic and
+allows the real applications and FIO to show an actual connected radio model.
+The `2242` series in this table is an intentional TCP API override for this
+GUI lab, not JS8Call's usual `2442` TCP default. A FIO profile connected to the
+GUI lab must use the table's ports and the matching `fio-a`/`fio-b`/`fio-c`
+save directories.
 
 Start the full three-radio GUI lab:
 
@@ -183,6 +193,37 @@ Run only a subset:
 ```bash
 tools/start_multirig_gui_lab.sh start --profiles a,b
 ```
+
+For the two-radio README/demo profile, `a,b` is the matching selection. Verify
+the live CAT identity without changing the UI:
+
+```bash
+python3 - <<'PY'
+from xmlrpc.client import ServerProxy
+for port in (12345, 12346):
+    rig = ServerProxy(f"http://127.0.0.1:{port}")
+    print(port, rig.rig.get_xcvr(), rig.rig.get_vfo(), rig.rig.get_mode())
+PY
+```
+
+Both rows should report `TS-2000`, a nonzero frequency, and `USB`.
+
+Create a callsign-masked release-media profile bound to suites A and B:
+
+```bash
+.venv/bin/python tools/create_readme_demo_profile.py \
+  --settings-db /path/to/matched/freqinout.db \
+  --nets-db /path/to/matched/freqinout_nets.db \
+  --output-root /Users/Shared/FreqInOut-README-Demo-GUI-Lab \
+  --radio-tools /Users/Shared/RadioTools-Demo \
+  --gui-lab-root /Users/bill/RadioCode/WORK/MultiRig/TestLab
+```
+
+The configured radios are assigned by display order: the first radio uses
+`fio-a`, the second uses `fio-b`, and so on. Close any FIO process using the
+output profile before rebuilding it with `--replace-output`; the tool uses
+process open-file evidence and refuses to rotate a profile whose databases are
+still owned by a running process.
 
 Override app locations:
 

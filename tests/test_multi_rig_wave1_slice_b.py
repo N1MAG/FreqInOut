@@ -74,6 +74,18 @@ def test_settings_tab_add_device_profile_persists(monkeypatch, tmp_path):
                 "launch_path": "C:/Apps/JS8Call/JS8Call.exe",
                 "notes": "Field kit",
                 "guided_operating_profile_id": operating_profile_id,
+                "guided_software_instance_drafts": {
+                    "js8call": {
+                        "instance_name": "Remote JS8",
+                        "application_system_key": "remote_js8",
+                        "application_path": "C:/Apps/JS8Call/JS8Call.exe",
+                        "configuration_path": "C:/Users/operator/AppData/Local/JS8Call - Remote JS8.ini",
+                        "storage_path": "C:/Users/operator/AppData/Local/JS8Call - Remote JS8",
+                        "host": "10.0.0.10",
+                        "port": 2542,
+                        "mode": "manual",
+                    }
+                },
             },
         )
         tab._add_device_profile()
@@ -82,6 +94,8 @@ def test_settings_tab_add_device_profile_persists(monkeypatch, tmp_path):
         devices = store.list_device_profiles()
         assert len(devices) == 1
         assert any(str(row.get("name", "")) == "Remote JS8" for row in devices)
+        identities = store.list_radio_software_identity_records(int(devices[0]["id"]))
+        assert [record.family_key for record in identities] == ["js8call"]
         assert tab.device_profiles_table.rowCount() == 1
     finally:
         tab.deleteLater()

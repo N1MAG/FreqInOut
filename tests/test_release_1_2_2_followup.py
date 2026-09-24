@@ -329,17 +329,12 @@ def test_linux_installer_running_detector_is_scoped_and_diagnostic():
     assert "uninstall_freqinout_linux.sh" in detector
 
 
-def test_linux_installer_finalizes_multi_rig_migration_after_upgrade():
+def test_linux_installer_defers_multi_rig_migration_to_in_app_review():
     source = Path("install_FreqInOut_linux.sh").read_text(encoding="utf-8")
-    finalizer = source[source.index("finalize_multi_rig_config_migration()") : source.index("print_finish_message()")]
-    finalizer_step = 'run_step "Finalize multi-rig configuration migration" finalize_multi_rig_config_migration'
 
-    assert "ensure_multi_rig_migration(" in finalizer
-    assert "get_multi_rig_migration_version(conn)" in finalizer
-    assert "get_multi_rig_migration_deferred(conn)" in finalizer
-    assert "Multi-rig migration finalized:" in finalizer
-    assert "CURRENT_MULTI_RIG_MIGRATION_VERSION" in finalizer
-    assert source.count(finalizer_step) >= 2
+    assert "finalize_multi_rig_config_migration" not in source
+    assert "ensure_multi_rig_migration(" not in source
+    assert source.count("Configuration migration will be reviewed in FIO on first launch.") >= 2
 
 
 def test_inactive_scheduler_busy_health_rows_are_ok_not_alerts():

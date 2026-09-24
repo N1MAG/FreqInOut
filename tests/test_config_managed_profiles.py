@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from freqinout.core.config_autodiscovery import build_lab_radio_proposals
+from freqinout.core.config_autodiscovery import build_radio_instance_proposals
 from freqinout.core.config_managed_profiles import (
     build_flrig_fldigi_managed_profile_plans,
     create_managed_profile_directories,
@@ -10,7 +10,7 @@ from freqinout.core.config_managed_profiles import (
 
 
 def test_managed_flrig_fldigi_profile_plans_use_fio_owned_dirs_and_ports(tmp_path) -> None:
-    proposal = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)[0]
+    proposal = build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False)[0]
 
     plans = build_flrig_fldigi_managed_profile_plans(
         proposal,
@@ -48,7 +48,7 @@ def test_managed_flrig_fldigi_profile_plans_use_fio_owned_dirs_and_ports(tmp_pat
 
 
 def test_managed_profile_directories_are_created_idempotently(tmp_path) -> None:
-    proposal = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)[0]
+    proposal = build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False)[0]
     plans = build_flrig_fldigi_managed_profile_plans(proposal, config_root=tmp_path / "fio-config")
 
     first = create_managed_profile_directories(plans)
@@ -63,7 +63,7 @@ def test_managed_profile_directories_are_created_idempotently(tmp_path) -> None:
 
 def test_managed_profile_plans_honor_alternate_busy_port_assignments(tmp_path) -> None:
     busy_ports = {12345, 12355, 7362}
-    proposal = build_lab_radio_proposals(
+    proposal = build_radio_instance_proposals(
         radio_count=1,
         busy_checker=lambda _host, port: port in busy_ports,
     )[0]
@@ -79,7 +79,7 @@ def test_managed_profile_plans_honor_alternate_busy_port_assignments(tmp_path) -
 
 
 def test_fast_light_materializes_only_canonical_fio_dirs_and_preserves_existing_contents(tmp_path) -> None:
-    proposal = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)[0]
+    proposal = build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False)[0]
     config_root = tmp_path / "fio-config"
     plans = build_flrig_fldigi_managed_profile_plans(proposal, config_root=config_root)
     fldigi_logs = next(plan for plan in plans if plan.app_id == "fldigi").config_dir / "logs"
@@ -100,7 +100,7 @@ def test_fast_light_materializes_only_canonical_fio_dirs_and_preserves_existing_
 
 
 def test_fast_light_never_converts_a_file_target_into_a_directory(tmp_path) -> None:
-    proposal = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)[0]
+    proposal = build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False)[0]
     plans = build_flrig_fldigi_managed_profile_plans(proposal, config_root=tmp_path / "fio-config")
     file_target = next(plan for plan in plans if plan.app_id == "flrig").config_dir
     file_target.parent.mkdir(parents=True)

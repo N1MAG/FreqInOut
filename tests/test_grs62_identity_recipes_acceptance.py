@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from freqinout.core.config_autodiscovery import build_lab_radio_proposals
+from freqinout.core.config_autodiscovery import build_radio_instance_proposals
 from freqinout.core.config_js8_managed import build_js8call_managed_profile_plans
 from freqinout.core.config_managed_profiles import build_flrig_fldigi_managed_profile_plans
 from freqinout.core.guided_radio_software_model import (
@@ -41,7 +41,7 @@ from freqinout.core.station_launch_planner import StationLaunchPlanner
 def test_js8_variants_have_platform_managed_roots_and_dual_protocol_identity(
     tmp_path: Path, variant: str, platform: str
 ) -> None:
-    radios = build_lab_radio_proposals(radio_count=2, enabled_apps=("js8call",), busy_checker=lambda *_: False)
+    radios = build_radio_instance_proposals(radio_count=2, enabled_apps=("js8call",), busy_checker=lambda *_: False)
     plans = build_js8call_managed_profile_plans(
         radios,
         config_root=tmp_path / variant,
@@ -66,14 +66,14 @@ def test_js8_variants_have_platform_managed_roots_and_dual_protocol_identity(
 
 
 def test_fast_light_transceiver_is_fldigi_after_flrig_and_observer_is_fldigi_only(tmp_path: Path) -> None:
-    tx = build_lab_radio_proposals(radio_count=1, enabled_apps=("flrig", "fldigi"), busy_checker=lambda *_: False)[0]
+    tx = build_radio_instance_proposals(radio_count=1, enabled_apps=("flrig", "fldigi"), busy_checker=lambda *_: False)[0]
     tx_plans = build_flrig_fldigi_managed_profile_plans(tx, config_root=tmp_path / "tx")
     assert [p.app_id for p in tx_plans] == ["flrig", "fldigi"]
     assert tx_plans[0].config_dir != tx_plans[1].config_dir
     assert tx_plans[1].settings["flrig_port"] == str(tx_plans[0].expected_port)
     assert "--config-dir" in tx_plans[1].launch_args
 
-    observer = build_lab_radio_proposals(radio_count=1, enabled_apps=("fldigi",), busy_checker=lambda *_: False)[0]
+    observer = build_radio_instance_proposals(radio_count=1, enabled_apps=("fldigi",), busy_checker=lambda *_: False)[0]
     observer_plans = build_flrig_fldigi_managed_profile_plans(observer, config_root=tmp_path / "observer")
     assert [p.app_id for p in observer_plans] == ["fldigi"]
     assert observer_plans[0].config_dir != tx_plans[1].config_dir

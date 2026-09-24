@@ -488,7 +488,7 @@ def assign_default_ports(
     return tuple(assignments)
 
 
-def build_lab_radio_proposals(
+def build_radio_instance_proposals(
     *,
     radio_count: int = 3,
     enabled_apps: Sequence[str] = ("flrig", "fldigi", "js8call"),
@@ -509,7 +509,7 @@ def build_lab_radio_proposals(
                 enabled_apps=clean_enabled_apps,
                 ports=ports,
                 varac_enabled=include_varac,
-                notes=(f"Lab-safe managed instance {instance_name}.",),
+                notes=(f"FIO-managed instance {instance_name}.",),
             )
         )
     return tuple(radios)
@@ -1167,7 +1167,7 @@ def build_autoconfig_proposal(
     if not include_varac:
         warnings.append("VarAC is optional and remains disabled unless the operator enables it.")
 
-    radios = build_lab_radio_proposals(
+    radios = build_radio_instance_proposals(
         radio_count=radio_count,
         include_varac=include_varac,
         busy_checker=busy_checker,

@@ -54,7 +54,7 @@ from freqinout.core.guided_setup import (
     start_guided_setup_session,
     GuidedSetupFieldVisibilityInput,
 )
-from freqinout.core.config_autodiscovery import build_lab_radio_proposals
+from freqinout.core.config_autodiscovery import build_radio_instance_proposals
 from freqinout.core.guided_app_config_plan import build_guided_external_app_config_plan
 
 
@@ -258,7 +258,7 @@ def test_read_only_blueprint_blocks_external_app_config_plan_writes(tmp_path) ->
         setup_mode=SETUP_MODE_READ_ONLY,
         control_route=CONTROL_JS8CALL,
     )
-    base_proposal = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)[0]
+    base_proposal = build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False)[0]
     proposal = radio_proposal_for_blueprint(blueprint, base_proposal)
 
     plan = build_guided_external_app_config_plan(
@@ -283,7 +283,7 @@ def test_js8call_only_blueprint_scopes_autofill_and_planner_apps() -> None:
         include_commstat=True,
     )
     selected = selected_app_map_for_blueprint(blueprint)
-    base_proposal = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)[0]
+    base_proposal = build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False)[0]
     proposal = radio_proposal_for_blueprint(blueprint, base_proposal)
 
     assert selected["js8call"] is True
@@ -421,7 +421,7 @@ def test_blueprint_bridge_keeps_read_only_plan_from_writing_external_configs(tmp
         setup_mode=SETUP_MODE_READ_ONLY,
         control_route=CONTROL_JS8CALL,
     )
-    base_proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
+    base_proposals = build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
 
     plan = build_app_config_plan_for_blueprint(
         blueprint,
@@ -442,7 +442,7 @@ def test_blueprint_bridge_scopes_managed_js8_only_plan_to_js8call(tmp_path) -> N
         setup_mode=SETUP_MODE_MANAGED,
         control_route=CONTROL_JS8CALL,
     )
-    base_proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
+    base_proposals = build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
 
     plan = build_app_config_plan_for_blueprint(
         blueprint,
@@ -473,7 +473,7 @@ def test_blueprint_bridge_js8_only_flrig_route_does_not_enable_fast_light(tmp_pa
         control_route=CONTROL_JS8CALL,
         js8call_uses_flrig=True,
     )
-    base_proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
+    base_proposals = build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
 
     plan = build_app_config_plan_for_blueprint(
         blueprint,
@@ -501,7 +501,7 @@ def test_blueprint_bridge_keeps_varac_only_plan_read_import_only(tmp_path) -> No
         setup_mode=SETUP_MODE_MANAGED,
         control_route=CONTROL_FLRIG,
     )
-    base_proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
+    base_proposals = build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
 
     plan = build_app_config_plan_for_blueprint(
         blueprint,
@@ -529,7 +529,7 @@ def test_blueprint_bridge_keeps_varac_read_import_action_in_trimode_managed_plan
         setup_mode=SETUP_MODE_MANAGED,
         control_route=CONTROL_FLRIG,
     )
-    base_proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
+    base_proposals = build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
 
     plan = build_app_config_plan_for_blueprint(
         blueprint,
@@ -565,7 +565,7 @@ def test_guided_setup_preview_keeps_ui_summary_in_core_for_js8(tmp_path) -> None
     )
     plan = build_app_config_plan_for_blueprint(
         blueprint,
-        build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
+        build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
         config_root=tmp_path / "fio-config",
         app_paths={"js8call": "/apps/js8call"},
     )
@@ -595,7 +595,7 @@ def test_guided_setup_preview_blocks_varac_scheduler_controls(tmp_path) -> None:
     )
     plan = build_app_config_plan_for_blueprint(
         blueprint,
-        build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
+        build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
         config_root=tmp_path / "fio-config",
         app_paths={
             "varac": "/apps/VarAC",
@@ -719,7 +719,7 @@ def test_guided_setup_preview_describes_rigctld_control_route(tmp_path) -> None:
     )
     plan = build_app_config_plan_for_blueprint(
         blueprint,
-        build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
+        build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
         config_root=tmp_path / "fio-config",
         app_paths={"js8call": "/apps/js8call"},
     )
@@ -737,7 +737,7 @@ def test_radio_proposals_for_blueprint_scopes_each_radio_independently() -> None
         hamlib_short_name="TS-2000",
         setup_mode=SETUP_MODE_MANAGED,
     )
-    base_proposals = build_lab_radio_proposals(radio_count=2, busy_checker=lambda _host, _port: False)
+    base_proposals = build_radio_instance_proposals(radio_count=2, busy_checker=lambda _host, _port: False)
 
     scoped = radio_proposals_for_blueprint(blueprint, base_proposals)
 
@@ -821,7 +821,7 @@ def test_guided_setup_flow_summary_is_human_readable_for_js8_only(tmp_path) -> N
     )
     plan = build_app_config_plan_for_blueprint(
         blueprint,
-        build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
+        build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
         config_root=tmp_path / "fio-config",
         app_paths={"js8call": "/apps/js8call"},
     )
@@ -852,7 +852,7 @@ def test_guided_setup_flow_does_not_show_ready_before_setup_type_selected(tmp_pa
     )
     plan = build_app_config_plan_for_blueprint(
         blueprint,
-        build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
+        build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
         config_root=tmp_path / "fio-config",
     )
 
@@ -875,7 +875,7 @@ def test_guided_app_config_review_summarizes_managed_external_writes(tmp_path) -
     )
     plan = build_app_config_plan_for_blueprint(
         blueprint,
-        build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
+        build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
         config_root=tmp_path / "fio-config",
         app_paths={"flrig": "/apps/flrig", "fldigi": "/apps/fldigi", "js8call": "/apps/js8call"},
     )
@@ -895,7 +895,7 @@ def test_guided_app_config_review_summarizes_read_only_references(tmp_path) -> N
     )
     plan = build_app_config_plan_for_blueprint(
         blueprint,
-        build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
+        build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
         config_root=tmp_path / "fio-config",
         app_paths={"varac": "/apps/VarAC"},
     )
@@ -933,7 +933,7 @@ def test_guided_setup_operator_guidance_is_clear_for_js8_only(tmp_path) -> None:
     )
     plan = build_app_config_plan_for_blueprint(
         blueprint,
-        build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
+        build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
         config_root=tmp_path / "fio-config",
         app_paths={"js8call": "/apps/js8call"},
     )
@@ -956,7 +956,7 @@ def test_guided_setup_flow_summary_keeps_varac_monitor_only(tmp_path) -> None:
     )
     plan = build_app_config_plan_for_blueprint(
         blueprint,
-        build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
+        build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
         config_root=tmp_path / "fio-config",
         app_paths={"varac": "/apps/VarAC"},
     )
@@ -978,7 +978,7 @@ def test_guided_setup_operator_guidance_keeps_varac_frequency_out_of_fio(tmp_pat
     )
     plan = build_app_config_plan_for_blueprint(
         blueprint,
-        build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
+        build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
         config_root=tmp_path / "fio-config",
         app_paths={"varac": "/apps/VarAC"},
     )
@@ -1320,7 +1320,7 @@ def test_guided_setup_next_action_comes_from_flow_status() -> None:
         setup_mode=SETUP_MODE_MANAGED,
     )
     plan = build_guided_external_app_config_plan(
-        build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
+        build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
         config_root=Path("/tmp/fio-test"),
         allow_external_writes=True,
     )
@@ -1339,7 +1339,7 @@ def test_guided_setup_next_action_uses_selected_schedule_decision() -> None:
         setup_mode=SETUP_MODE_MANAGED,
     )
     plan = build_guided_external_app_config_plan(
-        build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
+        build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
         config_root=Path("/tmp/fio-test"),
         allow_external_writes=True,
     )

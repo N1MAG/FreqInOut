@@ -1,189 +1,157 @@
-# FreqInOut 2.0 Testing Installation Guide
+# Installing and Updating FreqInOut 2.0
 
-This guide installs the multi-rig testing preview on Windows, macOS, or Linux without reusing normal production data. The preview will eventually merge into the public single-rig repository, but **all testing-community installs currently use only the private WIP repository and branch below**.
+FreqInOut 2.0 supports source installation on Windows 10/11, current macOS
+releases, and common Linux desktop distributions. Python 3.10 through 3.13 is
+accepted; Python 3.11 is the tested and recommended release interpreter.
+Companion radio applications are installed separately. No 2.0 executable or
+signed application bundle is currently published.
 
-## Required testing source
+## Before an upgrade
 
-| Item | Value |
-|---|---|
-| Repository | `https://github.com/N1MAG/FreqInOut-internal-testing.git` |
-| Branch | `wip/private-testing-multi-rig-1.2.3-not-ready` |
-| Python | 3.9–3.13; 3.11 recommended |
+An existing single-radio station can be upgraded in place. Before changing the
+application:
 
-Your GitHub account must have access to the private repository. GitHub may request browser sign-in, a credential-manager login, or an SSH key depending on your Git configuration.
+1. Close FreqInOut and the companion radio applications it manages.
+2. Back up the FIO profile and verify that the backup can be opened.
+3. Keep the existing application folder and profile until the upgraded station
+   has been reviewed.
+4. Use the same profile location during the update.
 
-## Before installing
+On first 2.0 launch, FIO presents the proposed conversion of the existing
+station to the default radio. Nothing is migrated until the operator confirms
+that review. Cancel or Defer leaves the legacy profile unchanged.
 
-- Close FreqInOut and companion radio applications before an update or migration test.
-- Use a new application folder and a dedicated test profile root.
-- Do not copy production databases into the test root for an ordinary fresh-install test.
-- Do not run the in-place upgrade guide unless the test coordinator specifically assigns that scenario.
+The conversion path has automated rehearsal coverage. A production-shaped
+operator migration was not a release prerequisite for 2.0, so the verified
+backup is mandatory and operators should be prepared to review or rebuild
+affected companion-application settings when an older station differs from the
+rehearsed profile.
 
-`FREQINOUT_CONFIG_DIR` identifies the profile root. FIO creates a `config` directory beneath it containing `freqinout.db` and, after operational use, `freqinout_nets.db`.
+The detailed cross-platform procedure is in the
+[FreqInOut 2.0 upgrade guide](FreqInOut%20Version%202%20Upgrade%20Guide%20for%20Current%20Single%20Radio%20Users.docx).
 
 ## Windows 10/11
 
-### Prerequisites
-
-- 64-bit Python 3.11 from python.org (enable the Python launcher during setup).
-- Git for Windows.
-- Optional companion applications such as FLRig, FLDigi, FLMsg, FLAmp, JS8Call, CommStat, and VarAC.
-
-### Install and run from PowerShell
+Install 64-bit Python 3.11 from Python.org and Git for Windows, then open
+PowerShell:
 
 ```powershell
-git clone --branch "wip/private-testing-multi-rig-1.2.3-not-ready" `
-  https://github.com/N1MAG/FreqInOut-internal-testing.git `
-  "$HOME\FreqInOut-multi-rig-test"
-Set-Location "$HOME\FreqInOut-multi-rig-test"
+git clone https://github.com/N1MAG/FreqInOut.git "$HOME\FreqInOut"
+Set-Location "$HOME\FreqInOut"
 py -3.11 install_freqinout.py
-$env:FREQINOUT_CONFIG_DIR = "$env:LOCALAPPDATA\FreqInOut-MultiRig-Test"
-.\.venv\Scripts\python.exe -m freqinout.main
+.\start-multi-rig.cmd
 ```
 
-If PowerShell blocks activation scripts, activation is not required: invoke `.venv\Scripts\python.exe` directly as shown. The profile override lasts for that PowerShell process. Use the same assignment before every test launch.
+The launcher accepts normal FIO command-line options. An explicit
+`FREQINOUT_CONFIG_DIR` is honored when a separate profile is intentionally
+required.
 
-Default production root (do not use for this fresh test): `%LOCALAPPDATA%\FreqInOut`, falling back to `%APPDATA%\FreqInOut`.
+To update a source checkout, close FIO and its companion applications, then:
 
-### Windows packaging note
+```powershell
+Set-Location "$HOME\FreqInOut"
+git pull --ff-only origin main
+py -3.11 install_freqinout.py
+```
 
-The repository includes PyInstaller/Inno Setup maintainer tooling. Testing-community installation currently uses the source workflow above; a public 2.0 Windows installer has not been published.
+The repository contains maintainer packaging support, but a signed Windows
+installer should only be treated as available when it is attached to an
+official FreqInOut release.
 
 ## macOS
 
-### Prerequisites
-
-- Git (installed by Xcode Command Line Tools or Homebrew).
-- Python 3.11 from python.org or Homebrew. Do not use an obsolete system Python.
-
-### Install and run from Terminal
+Install Git and Python 3.11 from Python.org or Homebrew. Do not use an obsolete
+system Python.
 
 ```bash
-git clone --branch "wip/private-testing-multi-rig-1.2.3-not-ready" \
-  https://github.com/N1MAG/FreqInOut-internal-testing.git \
-  "$HOME/FreqInOut-multi-rig-test"
-cd "$HOME/FreqInOut-multi-rig-test"
+git clone https://github.com/N1MAG/FreqInOut.git "$HOME/FreqInOut"
+cd "$HOME/FreqInOut"
 python3.11 install_freqinout.py
-FREQINOUT_CONFIG_DIR="$HOME/.freqinout-multi-rig-test" \
-  ./.venv/bin/python -m freqinout.main
+./start-multi-rig.sh
 ```
 
-The preview is not distributed as a signed/notarized macOS application. Launch it from Terminal. macOS may request file or automation permissions when configured companion applications are first accessed.
+For an update:
 
-Default production root (do not use for this fresh test): `~/.freqinout`.
+```bash
+cd "$HOME/FreqInOut"
+git pull --ff-only origin main
+python3.11 install_freqinout.py
+```
+
+FIO is currently supported as a source installation on macOS. A signed and
+notarized macOS application bundle is not currently published. macOS may ask
+for file or automation access when configured companion applications are first
+used; grant only the access needed by those configured paths.
 
 ## Linux
 
-### Side-by-side source install
-
-Use this path when a production FreqInOut launcher must remain unchanged:
-
-```bash
-git clone --branch "wip/private-testing-multi-rig-1.2.3-not-ready" \
-  https://github.com/N1MAG/FreqInOut-internal-testing.git \
-  "$HOME/FreqInOut-multi-rig-test"
-cd "$HOME/FreqInOut-multi-rig-test"
-python3.11 install_freqinout.py
-FREQINOUT_CONFIG_DIR="$HOME/.freqinout-multi-rig-test" \
-  ./.venv/bin/python -m freqinout.main
-```
-
-Install the Qt/PySide system libraries required by your distribution if they are not already present. On Debian/Ubuntu-family systems, `libxcb-cursor0` and `libxcb-xinerama0` are commonly required for the native Map window.
-
-### Guided isolated-profile install
-
-The installer recognizes `apt`, `dnf`, `yum`, `pacman`, and `zypper`, validates Python 3.9–3.13, creates a `venv`, installs Python dependencies, and creates a desktop/menu launcher.
-
-The profile data is isolated by `--config-root`, but the installer refreshes the account's standard `freqinout` launcher and menu entry. Use this path on a dedicated test account, or only when replacing that launcher target is acceptable. Use the source path above when production and testing must coexist under one account without changing the production launcher.
+The guided installer recognizes `apt`, `dnf`, `yum`, `pacman`, and `zypper`,
+installs supported system dependencies, creates a virtual environment, and
+prepares the launcher and desktop entry.
 
 ```bash
-git clone --branch "wip/private-testing-multi-rig-1.2.3-not-ready" \
-  https://github.com/N1MAG/FreqInOut-internal-testing.git \
-  "$HOME/FreqInOut-multi-rig-test"
-cd "$HOME/FreqInOut-multi-rig-test"
-bash install_FreqInOut_linux.sh \
-  --dir "$HOME/FreqInOut-multi-rig-test" \
-  --config-root "$HOME/.freqinout-multi-rig-test" \
-  --branch "wip/private-testing-multi-rig-1.2.3-not-ready"
+git clone https://github.com/N1MAG/FreqInOut.git "$HOME/FreqInOut"
+cd "$HOME/FreqInOut"
+bash install_FreqInOut_linux.sh
 ```
 
-The generated `freqinout` launcher exports the selected profile root. Installer output and failures are written to `~/freqinout-install.log`.
+Rerun the same installer to update. Preserve any explicit `--dir` and
+`--config-root` values used for the original installation. See the
+[Linux installer reference](FreqInOut-linux-installer.md) for repair, offline,
+unattended, rollback, and uninstall options.
 
-Preview without changes:
+The native Map may require `libxcb-cursor0` and `libxcb-xinerama0` on
+Debian/Ubuntu-family desktops. The guided installer offers applicable platform
+packages when they are missing.
 
-```bash
-bash install_FreqInOut_linux.sh \
-  --dry-run \
-  --dir "$HOME/FreqInOut-multi-rig-test" \
-  --config-root "$HOME/.freqinout-multi-rig-test" \
-  --branch "wip/private-testing-multi-rig-1.2.3-not-ready"
-```
+## First launch
 
-The Map's native Qt window may require `libxcb-cursor0` and `libxcb-xinerama0` on Debian/Ubuntu-family desktops. The installer offers the appropriate platform packages when they are missing.
+1. Enter the station callsign, location, and time preferences under
+   **Configuration**.
+2. Define the operating groups used by schedules, filtering, access policies,
+   and publication rules.
+3. Add or review the first radio and select only the software it uses.
+4. Review Software Administration and Launch Control for that radio.
+5. Assign a plan and schedule, then verify Ops Center and Station Health.
+6. Restart FIO and confirm that the selected profile and radio settings persist.
 
-See [FreqInOut Linux Installer Guide](FreqInOut-linux-installer.md) for repair, rollback, offline, and policy options.
+FIO vendors its supported JS8 networking integration. Do not install
+`pyjs8call` as a replacement for that integration.
 
-## First launch and configuration
+## Profile and log locations
 
-1. Verify the test profile contains `config/freqinout.db` only after the test launch.
-2. Open **Settings** and create/review the first radio profile.
-3. Set the Station Default radio intentionally.
-4. Configure executable, host/port, and data-file paths per radio. A configured JS8Call instance needs its matching API endpoint and data paths.
-5. Configure the FIO Spotter forms folder for built-in Spotter compose/decode. The external JS8Spotter executable is optional.
-6. Open Station Health and resolve only actionable configuration warnings.
-7. Restart and confirm profile settings persist in the isolated root.
+Unless `FREQINOUT_CONFIG_DIR` selects another profile, the normal roots are:
 
-FIO vendors its supported JS8 networking integration in the repository; do **not** install `pyjs8call` separately.
-
-## Updating
-
-Close FIO and companion applications first. From the test checkout:
-
-```bash
-git pull --ff-only origin wip/private-testing-multi-rig-1.2.3-not-ready
-```
-
-Then run `py -3.11 install_freqinout.py` on Windows or `python3.11 install_freqinout.py` on macOS. Linux guided-installer users should rerun the same installer command, preserving both `--dir` and `--config-root`.
-
-## Logs and support evidence
-
-| OS | Test profile root example |
+| OS | Default profile root |
 |---|---|
-| Windows | `%LOCALAPPDATA%\FreqInOut-MultiRig-Test` |
-| macOS | `~/.freqinout-multi-rig-test` |
-| Linux | `~/.freqinout-multi-rig-test` |
+| Windows | `%LOCALAPPDATA%\FreqInOut` (or `%APPDATA%\FreqInOut`) |
+| macOS | `~/.freqinout` |
+| Linux | `~/.freqinout` |
 
-Look in the profile root for:
+The settings and operational databases are under the profile's `config`
+folder. Support evidence in the profile root includes:
 
-- `freqinout.log` — application log;
+- `freqinout.log` — primary application log;
 - `perf_metrics.log` — bounded performance observations;
 - `fio_cpu_hotspot_*.txt` — CPU hotspot evidence when generated;
-- UI hang-dump files when generated by the watchdog.
+- UI hang evidence generated by the watchdog, when present.
 
-Create a support-session folder from the checkout:
-
-```bash
-python tools/multirig_capture_test_session.py --session-label "short-issue-name"
-```
-
-Add relevant files to the generated `logs` and `screenshots` folders and complete `operator_notes.md`. Do not include databases or use `--config-dir` unless support specifically requests a configuration copy. Review all evidence for callsigns, message content, access codes, paths, and secrets before sharing.
+Review attachments for callsigns, message content, access codes, local paths,
+and other private information. Database files are not normally needed unless
+support specifically requests them.
 
 ## Troubleshooting
 
-- **Python rejected:** use Python 3.9 through 3.13; Python 3.14 is not yet supported.
-- **Private repository clone fails:** confirm the GitHub account has testing-repository access and authenticate with Git Credential Manager or a configured SSH key.
-- **Module/import error:** rerun `install_freqinout.py` (Windows/macOS) or the Linux installer with `--repair` and the original paths.
-- **Wrong settings appear:** stop immediately and confirm `FREQINOUT_CONFIG_DIR` points at the dedicated test root before relaunching.
-- **Companion app unavailable:** verify that the selected radio profile has the correct executable, host, port, profile, and data-file paths for that instance.
-- **Linux launcher is missing:** rerun the installer with the same `--dir`, `--config-root`, and branch values.
-- **Map is blank:** do not add a tile-server API key. Capture logs; the map is designed to use bundled geography and remain functional offline.
+- **Python rejected:** use Python 3.10 through 3.13. Python 3.14 is not yet
+  supported.
+- **Module or import error:** rerun `install_freqinout.py`, or use the Linux
+  installer's `--repair` option with the original paths.
+- **Wrong configuration appears:** close FIO and check
+  `FREQINOUT_CONFIG_DIR` before changing any settings.
+- **A companion app is unavailable:** verify that the selected radio owns the
+  correct executable, endpoint, profile, and data paths.
+- **Map is blank:** capture the logs; the Map is designed to use bundled
+  geography and does not require an online tile API key.
 
-## Removing the test install
-
-Deleting a checkout or profile is destructive. Confirm the exact test-only paths before removal. The Linux uninstaller can remove the application folder and shared launcher but intentionally leaves profile data in place:
-
-```bash
-bash uninstall_FreqInOut_linux.sh --dir "$HOME/FreqInOut-multi-rig-test"
-```
-
-Archive or remove the dedicated profile root separately only after its test evidence is no longer needed.
+The in-app FreqInOut Guide contains configuration, recovery, and feature-level
+reference material.

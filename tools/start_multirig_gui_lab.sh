@@ -17,9 +17,13 @@
 #   tools/start_multirig_gui_lab.sh stop
 #
 # Default lab mapping:
-#   fio-a: FLRig 12345, FLDigi 7362, JS8Call 2242, JS8Call 2.5.2
-#   fio-b: FLRig 12346, FLDigi 7363, JS8Call 2243, JS8Call 3.0.3
-#   fio-c: FLRig 12347, FLDigi 7364, JS8Call 2244, JS8Call 3.0.3
+#   fio-a: TS-2000 CAT, FLRig 12345, FLDigi 7362, JS8Call TCP API 2242
+#   fio-b: TS-2000 CAT, FLRig 12346, FLDigi 7363, JS8Call TCP API 2243
+#   fio-c: TS-2000 CAT, FLRig 12347, FLDigi 7364, JS8Call TCP API 2244
+#
+# The 2242 series is an intentional GUI-lab override for the JS8 TCP API. It is
+# not JS8Call's ordinary 2442 TCP default. A FIO profile using this lab must be
+# configured to the 2242 series and the matching fio-a/fio-b/fio-c save roots.
 #
 # JS8Call app overrides:
 #   tools/start_multirig_gui_lab.sh start \
@@ -75,9 +79,11 @@ Usage:
 
 Starts the three-radio GUI lab:
   - rigctld radio emulators: A/B/C on 4532/4533/4534
+  - TS-2000 CAT emulators: one pseudo-serial device per FLRig profile
   - real FLRig apps: A/B/C on XML-RPC 12345/12346/12347
   - real FLDigi apps: A/B/C on XML-RPC 7362/7363/7364
-  - real JS8Call instances: fio-a on 2.5.2, fio-b/fio-c on 3.0.3
+  - real JS8Call instances: fio-a on 2.5.2, fio-b/fio-c on 3.0.3;
+    their TCP APIs are intentionally reassigned to 2242/2243/2244
 
 Options:
   --profiles a,b,c       Comma-separated profile list. Default: a,b,c
@@ -334,20 +340,33 @@ set_xml_value() {
 
 prepare_flrig_profile() {
   local profile="$1"
-  local label port config_dir prefs rig_prefs
+  local label port config_dir prefs rig_prefs prior_prefs cat_device
   label="$(label_for_profile "$profile")"
   port="$(flrig_port_for_profile "$profile")"
   config_dir="${TOOL_PROFILES}/flrig/${label}"
   prefs="${config_dir}/flrig.prefs"
-  rig_prefs="${config_dir}/NONE.prefs"
+  rig_prefs="${config_dir}/TS-2000.prefs"
+  prior_prefs="${config_dir}/NONE.prefs"
+  cat_device="${RUN_DIR}/ts2000-${label}.tty"
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "DRY RUN: ensure FLRig profile ${label} config ${config_dir} XML-RPC ${port}"
+    echo "DRY RUN: ensure FLRig profile ${label} uses TS-2000 CAT ${cat_device}, XML-RPC ${port}"
     return 0
   fi
   mkdir -p "$config_dir"
-  [[ -f "$prefs" ]] || printf '; FLTK preferences file format 1.0\n; vendor: w1hkj.com\n; application: flrig\n\n[.]\n\nxcvr_name:NONE\n' >"$prefs"
-  [[ -f "$rig_prefs" ]] || touch "$rig_prefs"
-  set_kv_file_value "$prefs" "xcvr_name" "NONE"
+  [[ -f "$prefs" ]] || printf '; FLTK preferences file format 1.0\n; vendor: w1hkj.com\n; application: flrig\n\n[.]\n\nxcvr_name:TS-2000\n' >"$prefs"
+  if [[ ! -f "$rig_prefs" ]]; then
+    if [[ -f "$prior_prefs" ]]; then
+      cp "$prior_prefs" "$rig_prefs"
+    else
+      printf '; FLTK preferences file format 1.0\n; vendor: w1hkj.com\n; application: TS-2000\n\n[.]\n' >"$rig_prefs"
+    fi
+  fi
+  set_kv_file_value "$prefs" "xcvr_name" "TS-2000"
+  set_kv_file_value "$rig_prefs" "xcvr_serial_port" "$cat_device"
+  set_kv_file_value "$rig_prefs" "serial_baudrate" "4"
+  set_kv_file_value "$rig_prefs" "serial_stopbits" "2"
+  set_kv_file_value "$rig_prefs" "rts_cts_flow" "0"
+  set_kv_file_value "$rig_prefs" "ptt_via_cat" "1"
   set_kv_file_value "$rig_prefs" "xmlport" "$port"
   set_kv_file_value "$rig_prefs" "xmlrig_port" "$port"
 }
@@ -507,18 +526,78 @@ start_rigctld() {
   echo "radio emulator $(label_for_profile "$profile"): rigctld 127.0.0.1:${port}"
 }
 
+start_ts2000_cat() {
+  local profile="$1"
+  local label device frequency
+  label="$(label_for_profile "$profile")"
+  device="${RUN_DIR}/ts2000-${label}.tty"
+  case "$profile" in
+    a) frequency="14115000" ;;
+    b) frequency="14074000" ;;
+    c) frequency="7078000" ;;
+    d) frequency="7102000" ;;
+    *) frequency="14074000" ;;
+  esac
+  start_bg "ts2000-${label}" 3 "ts2000_cat_emulator.py" "--device-link" "$device" -- \
+    "$PYTHON_BIN" "${REPO_ROOT}/tools/ts2000_cat_emulator.py" \
+    --device-link "$device" \
+    --frequency "$frequency"
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    local attempt
+    for attempt in {1..50}; do
+      [[ -e "$device" ]] && break
+      sleep 0.1
+    done
+    if [[ ! -e "$device" ]]; then
+      echo "TS-2000 CAT emulator did not publish ${device}" >&2
+      return 1
+    fi
+  fi
+  echo "CAT emulator ${label}: TS-2000 at ${device}"
+}
+
+wait_for_flrig_ready() {
+  local port="$1"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "DRY RUN: wait for FLRig TS-2000 XML-RPC on 127.0.0.1:${port}"
+    return 0
+  fi
+  "$PYTHON_BIN" - "$port" <<'PY'
+import sys
+import time
+from xmlrpc.client import ServerProxy
+
+port = int(sys.argv[1])
+deadline = time.monotonic() + 12.0
+last_error = "not listening"
+while time.monotonic() < deadline:
+    try:
+        radio = ServerProxy(f"http://127.0.0.1:{port}", allow_none=True)
+        model = radio.rig.get_xcvr()
+        frequency = radio.rig.get_vfo()
+        if model == "TS-2000" and int(frequency) > 0:
+            raise SystemExit(0)
+        last_error = f"model={model!r}, frequency={frequency!r}"
+    except Exception as exc:  # The server is expected to refuse early probes.
+        last_error = str(exc)
+    time.sleep(0.2)
+raise SystemExit(f"FLRig 127.0.0.1:{port} did not become ready: {last_error}")
+PY
+}
+
 start_profile_apps() {
   local profile="$1"
-  local label flrig_port fldigi_port js8_port js8_bin
+  local label flrig_port fldigi_port js8_port js8_bin js8_data_root
   label="$(label_for_profile "$profile")"
   flrig_port="$(flrig_port_for_profile "$profile")"
   fldigi_port="$(fldigi_port_for_profile "$profile")"
   js8_port="$(js8_port_for_profile "$profile")"
   js8_bin="$(js8call_bin_for_profile "$profile")"
+  js8_data_root="${HOME}/Library/Application Support/JS8Call - ${label}"
 
   start_bg "flrig-${label}" 2 "$FLRIG_BIN" "--config-dir ${TOOL_PROFILES}/flrig/${label}" -- \
     "$FLRIG_BIN" --config-dir "${TOOL_PROFILES}/flrig/${label}"
-  sleep 0.5
+  wait_for_flrig_ready "$flrig_port"
   start_bg "fldigi-${label}" 2 "$FLDIGI_BIN" "--config-dir ${TOOL_PROFILES}/fldigi/${label}" -- \
     "$FLDIGI_BIN" \
     --config-dir "${TOOL_PROFILES}/fldigi/${label}" \
@@ -528,13 +607,14 @@ start_profile_apps() {
   sleep 0.5
   start_bg "js8call-${label}" 2 "$js8_bin" "-r ${label}" -- "$js8_bin" -r "$label"
 
-  echo "${label}: FLRig ${flrig_port}, FLDigi ${fldigi_port}, JS8Call ${js8_port}, JS8 app ${js8_bin}, DIRECTED.TXT ${JS8_HOME_ROOT}/${label}/save/DIRECTED.TXT"
+  echo "${label}: FLRig ${flrig_port}, FLDigi ${fldigi_port}, JS8Call TCP ${js8_port}, JS8 app ${js8_bin}, SaveDir ${JS8_HOME_ROOT}/${label}/save, message root ${js8_data_root}"
 }
 
 start_all() {
   prepare_profiles
   for profile in "${PROFILES[@]}"; do
     start_rigctld "$profile"
+    start_ts2000_cat "$profile"
   done
   for profile in "${PROFILES[@]}"; do
     start_profile_apps "$profile"
@@ -583,6 +663,7 @@ stop_all() {
   done
   if [[ "$FORCE" -eq 1 && "$DRY_RUN" -eq 0 ]]; then
     pkill -f "${RADIO_TOOLS}/bin/run-rigctld.sh" 2>/dev/null || true
+    pkill -f "${REPO_ROOT}/tools/ts2000_cat_emulator.py.*${RUN_DIR}/ts2000-fio-" 2>/dev/null || true
     pkill -f "$FLRIG_BIN.*${TOOL_PROFILES}/flrig/fio-" 2>/dev/null || true
     pkill -f "$FLDIGI_BIN.*${TOOL_PROFILES}/fldigi/fio-" 2>/dev/null || true
     pkill -f "JS8Call.*-r fio-" 2>/dev/null || true

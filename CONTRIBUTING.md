@@ -4,7 +4,7 @@ Thanks for your interest in contributing. During 2.0 testing, changes target the
 
 ## Quick Start
 
-- Python 3.9 through 3.13 is supported (3.11 recommended; 3.14 is not yet supported).
+- Python 3.10 through 3.13 is supported (3.11 recommended; 3.14 is not yet supported).
 - Clone the repo and set up a virtual environment:
 
 ```bash

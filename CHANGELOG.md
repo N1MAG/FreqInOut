@@ -1,7 +1,9 @@
 # Changelog
 
 ## [2.0.0]
-- Added: Multi-rig testing release with profile-scoped radio runtime configuration, launch control, health monitoring, and JS8/Fast Light path handling.
+- Added: Multi-radio operation with profile-scoped radio runtime configuration, launch control, health monitoring, and JS8/Fast Light path handling. One-radio stations remain fully supported.
+- Changed: FreqInOut 2.0 is distributed as a source installation for Windows, macOS, and Linux. No 2.0 executable or signed application bundle is currently published.
+- Changed: Existing 1.2.8 single-radio profiles are offered an explicit, backup-first conversion into the 2.0 default-radio model. Operators should retain the verified backup and expect to review or rebuild affected companion-application settings if their station differs from the rehearsed upgrade path.
 - Added: Map intelligence now includes Regional Intel heat-map behavior, focused path rendering, station/report action panels, CommStat reported-for/reported-by handling, and map-to-Messages handoff.
 - Changed: Map now opens in one reusable nonmodal window so operators can keep it visible while working elsewhere in FIO; its validated normal placement and maximized state persist without changing the main window, and closing Map hides it for fast reuse.
 - Added: Map now provides a persistent `Show FIO` action, and station-detail Inbox/Compose actions bring the existing main window forward after navigation without closing, moving, or resizing Map.

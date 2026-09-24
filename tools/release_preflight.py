@@ -20,7 +20,6 @@ REQUIREMENTS_FILE = ROOT / "requirements.txt"
 REQUIREMENTS_ONLY_ALLOWED = {
     "pyside6-addons",
     "pyside6-essentials",
-    "pyyaml",  # internal tooling only
 }
 
 

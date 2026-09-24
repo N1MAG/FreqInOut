@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from freqinout.core.config_autodiscovery import build_lab_radio_proposals
+from freqinout.core.config_autodiscovery import build_radio_instance_proposals
 from freqinout.core.config_js8_managed import (
     build_js8call_managed_profile_plans,
     create_js8call_managed_directories,
@@ -11,7 +11,7 @@ from freqinout.core.config_js8_managed import (
 
 
 def test_js8call_managed_profile_plans_map_each_radio_to_flrig_and_api_ports(tmp_path) -> None:
-    proposals = build_lab_radio_proposals(radio_count=3, busy_checker=lambda _host, _port: False)
+    proposals = build_radio_instance_proposals(radio_count=3, busy_checker=lambda _host, _port: False)
 
     plans = build_js8call_managed_profile_plans(
         proposals,
@@ -49,7 +49,7 @@ def test_js8call_managed_profile_plans_map_each_radio_to_flrig_and_api_ports(tmp
 
 def test_js8call_managed_profiles_honor_busy_port_assignments(tmp_path) -> None:
     busy_ports = {12345, 12355, 2442, 2452}
-    proposals = build_lab_radio_proposals(
+    proposals = build_radio_instance_proposals(
         radio_count=1,
         busy_checker=lambda _host, port: port in busy_ports,
     )
@@ -68,7 +68,7 @@ def test_js8call_managed_profiles_honor_busy_port_assignments(tmp_path) -> None:
 
 
 def test_js8call_managed_profile_can_leave_radio_control_to_js8call(tmp_path) -> None:
-    proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
+    proposals = build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
 
     plan = build_js8call_managed_profile_plans(
         proposals,
@@ -88,7 +88,7 @@ def test_js8call_managed_profile_can_leave_radio_control_to_js8call(tmp_path) ->
 
 
 def test_windows_js8call_managed_profile_uses_application_specific_qt_config_location(tmp_path) -> None:
-    proposal = build_lab_radio_proposals(
+    proposal = build_radio_instance_proposals(
         radio_count=1,
         busy_checker=lambda _host, _port: False,
     )
@@ -105,7 +105,7 @@ def test_windows_js8call_managed_profile_uses_application_specific_qt_config_loc
 
 
 def test_render_js8call_native_settings_preserves_unrelated_sections_and_updates_active_configuration(tmp_path) -> None:
-    proposals = build_lab_radio_proposals(radio_count=2, busy_checker=lambda _host, _port: False)
+    proposals = build_radio_instance_proposals(radio_count=2, busy_checker=lambda _host, _port: False)
     plans = build_js8call_managed_profile_plans(
         proposals,
         config_root=tmp_path / "fio-config",
@@ -145,7 +145,7 @@ def test_render_js8call_native_settings_preserves_unrelated_sections_and_updates
 
 
 def test_js8call_managed_directories_are_created_idempotently(tmp_path) -> None:
-    proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
+    proposals = build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
     plans = build_js8call_managed_profile_plans(
         proposals,
         config_root=tmp_path / "fio-config",
@@ -164,7 +164,7 @@ def test_js8call_managed_directories_are_created_idempotently(tmp_path) -> None:
 
 
 def test_js8call_materializes_canonical_qt_and_data_dirs_without_touching_operator_config_root(tmp_path) -> None:
-    proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
+    proposals = build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
     operator_root = tmp_path / "operator-owned-config-root"
     plan = build_js8call_managed_profile_plans(
         proposals,
@@ -187,7 +187,7 @@ def test_js8call_materializes_canonical_qt_and_data_dirs_without_touching_operat
 
 
 def test_js8call_never_converts_settings_file_or_managed_directory_file_target(tmp_path) -> None:
-    proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
+    proposals = build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
     plan = build_js8call_managed_profile_plans(
         proposals,
         config_root=tmp_path / "fio-config",

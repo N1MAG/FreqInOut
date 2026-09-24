@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from freqinout.core.config_autodiscovery import build_lab_radio_proposals
+from freqinout.core.config_autodiscovery import build_radio_instance_proposals
 from freqinout.core.guided_app_config_plan import (
     apply_guided_external_app_config_plan,
     build_guided_external_app_config_plan,
@@ -21,7 +21,7 @@ from freqinout.core.station_launch_planner import StationLaunchPlanner
 
 
 def _proposals(count=1):
-    return build_lab_radio_proposals(radio_count=count, busy_checker=lambda _host, _port: False)
+    return build_radio_instance_proposals(radio_count=count, busy_checker=lambda _host, _port: False)
 
 
 def _qualified_js8_paths(ini: Path) -> dict[str, str]:

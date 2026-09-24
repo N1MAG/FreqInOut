@@ -11444,8 +11444,81 @@ This keeps protocol-specific stability and safety intact while supporting the
 local -> county -> state -> regional -> national flow for groups whose members
 have different communication capabilities.
 
+## Addendum: Public 2.0 Source Launcher And Installer Contract (2026-09-23)
+
+FreqInOut 2.0 source launches must preserve the operator's established profile.
+The Linux/macOS `start-multi-rig.sh` and Windows `start-multi-rig.cmd` launchers
+therefore use FIO's platform default profile unless the operator explicitly
+sets `FREQINOUT_CONFIG_DIR`. They must never infer or create a sibling
+`runtime/multi-rig` profile. `FREQINOUT_INSTALL_DIR` may select the source tree,
+and both `.venv` and `venv` virtual-environment layouts are supported. The
+legacy `FREQINOUT_RUNTIME_ROOT` variable is accepted only as a deprecated,
+explicit compatibility alias when `FREQINOUT_CONFIG_DIR` is absent.
+
+The Linux installer defaults to the anonymous public HTTPS repository
+`https://github.com/N1MAG/FreqInOut.git` and stable `main` branch. Private
+preview testing must select its private repository and branch explicitly. An
+explicit repository, branch, config root, or install root remains authoritative
+across install, update, and repair. Runtime sparse checkout includes only
+application/runtime assets, public metadata, documentation, and operator-facing
+launch/install files.
+When `--repo` is supplied for an existing checkout, the installer must update
+`origin` before fetching and restore the prior URL on installer failure. A
+target branch that is not yet local is created from the fetched remote-tracking
+branch; an existing local target branch is reused and fast-forwarded only.
+
+Installers may back up data, install dependencies, create launchers, and run a
+self-test against a disposable profile. They must not finalize the
+single-rig-to-multi-rig migration. The application owns the informed migration
+review and confirmation after backup review; Cancel or Defer produces no
+production-profile migration writes. Uninstall removes every launcher, desktop
+entry, and icon installed by the paired installer while retaining operator
+profile data unless a separate, explicit data-removal action is requested.
+
+Acceptance:
+
+- POSIX and Windows source launchers select `.venv` before `venv`, forward all
+  arguments, and leave the default profile environment unset.
+- An explicit `FREQINOUT_CONFIG_DIR` reaches the application unchanged.
+- The Linux installer contains no automatic migration finalizer and reports
+  that migration review occurs on first launch.
+- Public runtime requirements match project runtime dependencies and exclude
+  internal tooling dependencies.
+- Shell syntax, Python compilation, installer contract tests, and whitespace
+  checks pass before promotion; Windows packaging still requires a native
+  Windows build/install/uninstall smoke test.
+
 Implementation must not create a second map or parallel message/activity store
 for mesh or Reticulum. The existing FIO map becomes a communications
 intelligence surface with geographic and topology/path modes. Offline operation
 remains mandatory; optional online/cached tiles must never become a dependency
 for core workflows.
+
+## Addendum: Public 1.2.8 Reconciliation And Packaged Runtime (2026-09-23)
+
+Public FIO 2.0 supports Python 3.10 through 3.13. Project metadata, lock data,
+runtime requirements, installers, launch documentation, and protocol client
+specifications must agree on that range and reject unsupported interpreters
+before changing an operator installation. The earlier Python 3.9 compatibility
+and `urllib3<2` workaround are superseded intentionally, not silently omitted.
+
+The public 1.2.8-to-2.0 review is semantic. A public fix is accepted only when
+its operator-visible behavior is patch-equivalent, directly retained, or
+demonstrably superseded by the radio-scoped architecture and focused tests.
+The private reconciliation record must identify both immutable baselines,
+commit dispositions, commands, results, and remaining external gates.
+
+Frozen builds must not inherit another Python or Qt runtime by default. The
+PyInstaller hook removes host `PYTHONHOME`, `PYTHONPATH`, Qt plugin/QML paths,
+and Qt WebEngine process overrides before adding bundled QML and plugin roots.
+An explicit `FREQINOUT_ALLOW_EXTERNAL_RUNTIME_ENV=1` is the only supported
+opt-out. Windows packaged builds disable UPX and default Qt Quick, OpenGL, and
+Chromium to software rendering. Windowed startup must tolerate missing standard
+output, offer a bounded hidden smoke-test launch, and retain a fatal traceback
+in `startup-error.log` when normal logging or the GUI cannot explain startup.
+
+Acceptance requires focused hook/logger/smoke tests, an isolated
+public-1.2.8-shaped preview/backup/migration/idempotency/rollback rehearsal,
+and the current BBS/VarAC/FLAMP parity suite. Native Windows executable and
+installer build/smoke/install/uninstall remains a separate mandatory release
+gate; passing source tests on another OS never closes it.

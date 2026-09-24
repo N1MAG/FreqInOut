@@ -577,11 +577,55 @@ VARAC_BBS_SAFE_SUFFIXES = (
     ".asc",
     ".gpg",
 )
-DEFAULT_WATCH_DIRS = [
-    {"path": r"C:\VarAC", "origin": "varac"},
-    {"path": r"C:\Users\HP\NBEMS.files\ICS\messages", "origin": "flmsg"},
-    {"path": r"C:\Users\HP\NBEMS.files\FLAMP", "origin": "flamp"},
-]
+def _operator_nbems_roots(
+    *,
+    home: Path | None = None,
+    system: str | None = None,
+) -> tuple[Path, ...]:
+    """Return current-operator NBEMS roots without naming another account."""
+
+    operator_home = Path(home) if home is not None else Path.home()
+    platform_name = str(system or platform.system()).strip().lower()
+    if platform_name == "windows":
+        candidates = [
+            operator_home / "NBEMS.files",
+            operator_home / "Documents" / "NBEMS.files",
+            operator_home / ".nbems",
+        ]
+    elif platform_name == "darwin":
+        candidates = [
+            operator_home / ".nbems",
+            operator_home / "NBEMS.files",
+            operator_home / "Library" / "Application Support" / "NBEMS.files",
+        ]
+    else:
+        candidates = [operator_home / ".nbems", operator_home / "NBEMS.files"]
+    seen: set[str] = set()
+    roots: list[Path] = []
+    for candidate in candidates:
+        key = os.path.normcase(os.path.normpath(str(candidate)))
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(candidate)
+    return tuple(roots)
+
+
+def _default_message_watch_dirs(
+    *,
+    home: Path | None = None,
+    system: str | None = None,
+) -> List[Dict[str, str]]:
+    """Discover only existing message folders owned by the current operator."""
+
+    watch_dirs: List[Dict[str, str]] = []
+    for root in _operator_nbems_roots(home=home, system=system):
+        for relative, origin in ((Path("ICS/messages"), "flmsg"), (Path("FLAMP"), "flamp")):
+            candidate = root / relative
+            if candidate.is_dir():
+                watch_dirs.append({"path": str(candidate), "origin": origin})
+    return watch_dirs
+
 
 SCAN_CHOICES = [1, 15, 30, 60]  # minutes
 JS8_POLL_SECONDS = 90  # 90 seconds
@@ -3724,7 +3768,7 @@ class MessageViewerTab(QWidget):
             if p:
                 self.watch_dirs.append({"path": p, "origin": origin})
         if not self.watch_dirs and not self._multi_radio_message_path_entries():
-            self.watch_dirs = DEFAULT_WATCH_DIRS
+            self.watch_dirs = _default_message_watch_dirs()
         fldigi_log_path = (self.settings.get("fldigi_log_path", "") or "").strip()
         if fldigi_log_path:
             images_dir = Path(fldigi_log_path) / "images"
@@ -8298,13 +8342,18 @@ class MessageViewerTab(QWidget):
 
     def _compose_commstat_brevity_catalog_dirs(self) -> List[Path]:
         paths: List[Path] = []
-        for raw in (
+        configured = (
             self.settings.get("commstat_path", ""),
             self.settings.get("commstat_app_path", ""),
             self.settings.get("commstat_config_path", ""),
-            "/Users/bill/RadioTools/Programs/commstat-4.7",
-            "/Users/bill/RadioTools/Programs/CommStat",
-        ):
+        )
+        base_raw = str(self.settings.get("radio_apps_base_folder", "") or "").strip()
+        base_roots = [Path(base_raw).expanduser()] if base_raw else []
+        base_roots.append(Path.home() / "RadioTools" / "Programs")
+        candidates: List[str | Path] = list(configured)
+        for root in base_roots:
+            candidates.extend((root / "commstat-4.7", root / "CommStat"))
+        for raw in candidates:
             text = str(raw or "").strip()
             if not text:
                 continue
@@ -21940,10 +21989,12 @@ class MessageViewerTab(QWidget):
                     if cand.exists():
                         log.debug("MessageViewer: using custom forms path %s", cand)
                         return cand
-        fallback = Path(r"C:\Users\billd\NBEMS.files\CUSTOM")
-        if fallback.exists():
-            log.debug("MessageViewer: using custom forms fallback %s", fallback)
-        return fallback if fallback.exists() else None
+        for root in _operator_nbems_roots():
+            fallback = root / "CUSTOM"
+            if fallback.is_dir():
+                log.debug("MessageViewer: using current-operator custom forms path %s", fallback)
+                return fallback
+        return None
 
     def _resolve_custom_form_template_path(self, form_name: str) -> Optional[Path]:
         safe_name = Path(str(form_name or "").strip()).name

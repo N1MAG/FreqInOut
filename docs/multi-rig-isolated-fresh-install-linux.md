@@ -26,7 +26,10 @@ bash install_FreqInOut_linux.sh \
   --branch "wip/private-testing-multi-rig-1.2.3-not-ready"
 ```
 
-`--config-root` is part of the safety contract: it applies to installer migration work and is written into the generated `freqinout` launcher. Keep this argument unchanged for every update or repair.
+`--config-root` is part of the safety contract: it is written into the generated
+`freqinout` launcher and used by FIO at first launch. The installer itself does
+not finalize configuration migration. Keep this argument unchanged for every
+update or repair.
 
 ## Launch and verify isolation
 
@@ -55,7 +58,7 @@ The repository helper can also launch a source install and accepts both location
 
 ```bash
 FREQINOUT_INSTALL_DIR="$HOME/FreqInOut-multi-rig-test" \
-FREQINOUT_RUNTIME_ROOT="$HOME/.freqinout-multi-rig-test" \
+FREQINOUT_CONFIG_DIR="$HOME/.freqinout-multi-rig-test" \
   "$HOME/FreqInOut-multi-rig-test/start-multi-rig.sh"
 ```
 

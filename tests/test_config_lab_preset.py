@@ -7,12 +7,13 @@ from freqinout.core.config_lab_preset import (
     apply_lab_radio_preset_to_store,
     build_lab_radio_profile_values,
 )
-from freqinout.core.config_autodiscovery import build_lab_radio_proposals
+from freqinout.core.config_autodiscovery import build_radio_instance_proposals
+from freqinout.core.config_js8_managed import build_js8call_managed_profile_plans
 from freqinout.core.multi_radio_store import MultiRadioStore
 
 
 def test_lab_profile_values_are_varac_off_and_ported_from_proposal(tmp_path) -> None:
-    proposal = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)[0]
+    proposal = build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False)[0]
 
     values = build_lab_radio_profile_values(
         proposal,
@@ -45,7 +46,13 @@ def test_lab_profile_values_are_varac_off_and_ported_from_proposal(tmp_path) -> 
     assert values["js8_install_path"] == "/Applications/JS8Call.app"
     assert values["js8_instance_id"] == 8
     assert values["fast_light_config_id"] == 9
-    assert "managed-instances/fio-a/js8call/DIRECTED.TXT" in values["js8_directed_path"]
+    js8_plan = build_js8call_managed_profile_plans(
+        (proposal,),
+        config_root=tmp_path / "fio-config",
+        js8call_path="/Applications/JS8Call.app",
+    )[0]
+    assert values["js8_directed_path"] == str(js8_plan.directed_path)
+    assert values["js8_forms_path"] == str(js8_plan.forms_dir)
 
 
 def test_apply_lab_radio_preset_creates_three_idempotent_runtime_radios(tmp_path) -> None:
@@ -74,6 +81,7 @@ def test_apply_lab_radio_preset_creates_three_idempotent_runtime_radios(tmp_path
     radios = store.list_device_profiles()
     by_key = {str(row["system_key"]): row for row in radios}
     js8_instances = store.list_js8_instances()
+    js8_by_key = {str(row["system_key"]): row for row in js8_instances}
     fast_light_configs = store.list_fast_light_configs()
     assignments = store.list_effective_assignments()
     plans_by_id = {int(row["id"]): row for row in store.list_operating_profiles()}
@@ -84,7 +92,14 @@ def test_apply_lab_radio_preset_creates_three_idempotent_runtime_radios(tmp_path
     assert all(path.is_dir() for path in first.managed_paths)
     assert tmp_path / "fio-config" / "managed-instances" / "fio-a" / "flrig" in first.managed_paths
     assert tmp_path / "fio-config" / "managed-instances" / "fio-b" / "fldigi" / "logs" in first.managed_paths
-    assert tmp_path / "fio-config" / "managed-instances" / "fio-c" / "js8call" / "save" in first.managed_paths
+    js8_plans = build_js8call_managed_profile_plans(
+        build_radio_instance_proposals(radio_count=3, busy_checker=lambda _host, _port: False),
+        config_root=tmp_path / "fio-config",
+        js8call_path=app_paths["js8call"],
+    )
+    radio_c_js8 = js8_plans[2]
+    assert radio_c_js8.save_dir in first.managed_paths
+    assert radio_c_js8.forms_dir in first.managed_paths
     assert set(by_key) == {"lab_radio_a", "lab_radio_b", "lab_radio_c"}
     assert [by_key[key]["name"] for key in ("lab_radio_a", "lab_radio_b", "lab_radio_c")] == [
         "Radio A",
@@ -104,6 +119,18 @@ def test_apply_lab_radio_preset_creates_three_idempotent_runtime_radios(tmp_path
         "lab_js8_fio_b",
         "lab_js8_fio_c",
     }
+    assert js8_by_key["lab_js8_fio_c"]["profile_path"] == str(radio_c_js8.save_dir)
+    assert js8_by_key["lab_js8_fio_c"]["save_dir"] == str(radio_c_js8.save_dir)
+    assert js8_by_key["lab_js8_fio_c"]["directed_path"] == str(radio_c_js8.directed_path)
+    assert js8_by_key["lab_js8_fio_c"]["all_path"] == str(radio_c_js8.all_path)
+    assert js8_by_key["lab_js8_fio_c"]["inbox_path"] == str(radio_c_js8.inbox_path)
+    assert js8_by_key["lab_js8_fio_c"]["forms_path"] == str(radio_c_js8.forms_dir)
+    assert js8_by_key["lab_js8_fio_c"]["application_data_root"] == str(radio_c_js8.application_data_root)
+    assert js8_by_key["lab_js8_fio_c"]["rig_name"] == radio_c_js8.rig_name
+    assert js8_by_key["lab_js8_fio_c"]["storage_mode"] == "rig_scoped"
+    assert by_key["lab_radio_c"]["js8_profile_path"] == str(radio_c_js8.save_dir)
+    assert by_key["lab_radio_c"]["js8_directed_path"] == str(radio_c_js8.directed_path)
+    assert by_key["lab_radio_c"]["js8_forms_path"] == str(radio_c_js8.forms_dir)
     assert {row["system_key"] for row in fast_light_configs} == {
         "lab_fast_light_fio_a",
         "lab_fast_light_fio_b",

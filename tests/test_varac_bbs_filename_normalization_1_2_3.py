@@ -37,10 +37,21 @@ def _row(path: Path, *, msg_type: str = "FLAMP") -> SimpleNamespace:
 
 
 def _tab(bbs_dir: Path) -> SimpleNamespace:
+    db_path = bbs_dir.parent / "fixture-freqinout.db"
+    with connect_sqlite(db_path) as conn:
+        with conn:
+            ensure_bbs_library_schema(conn)
+            upsert_bbs_location(
+                conn,
+                location_id="fixture-live",
+                name="Fixture Live BBS",
+                source_dir=str(bbs_dir),
+            )
     tab = SimpleNamespace(
-        settings=_MemorySettings(bbs_dir),
+        settings=_MemorySettings(bbs_dir, db_path=db_path),
         _bbs_copied_session_keys=set(),
         _bbs_copy_target_session_id="",
+        _reader_bbs_known_counts={},
         _unfreeze_table=lambda: None,
         _populate_messages_table=lambda force=False: None,
     )
@@ -218,10 +229,7 @@ def test_projected_flmsg_file_is_eligible_for_bbs_publish(tmp_path: Path) -> Non
 
     assert tab._can_copy_row_to_varac_bbs(row) is True
     assert tab._varac_bbs_destination_for_row(row) == bbs_dir / "incoming.k2s"
-    assert mvt.MessageActionDelegate._supports_standard_management_actions(
-        row,
-        projected_file_row=True,
-    ) is True
+    assert MessageViewerTab._row_supports_managed_bbs_publication(tab, row) is True
 
 
 def test_managed_bbs_copy_target_uses_station_catalog_identity(tmp_path: Path) -> None:

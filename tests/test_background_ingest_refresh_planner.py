@@ -9,6 +9,7 @@ import freqinout.core.background_ingest as background_ingest
 from freqinout.core.background_ingest import BackgroundIngestController
 from freqinout.core.ingest_health import source_health_key
 from freqinout.core.ingest_source_model import IngestSourceDescriptor, IngestSourceInventory, build_ingest_source_inventory
+from freqinout.core.settings_manager import SettingsManager
 
 
 class _Settings:
@@ -391,6 +392,10 @@ def test_background_js8_links_manual_refresh_bypasses_unchanged_skip(tmp_path):
 
 
 def test_sitrep_commstat_source_ingest_skips_unchanged_sources_but_fusion_runs(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    worker_seed = SettingsManager()
+    worker_seed.close()
     controller = _PlannerOnlyController(IngestSourceInventory(ingest_sources=(_sqlite_source(tmp_path),)))
     calls = {"commstat": 0, "fusion": 0}
 

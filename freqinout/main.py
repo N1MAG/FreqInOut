@@ -2,7 +2,9 @@
 import sys
 import os
 import argparse
+import tempfile
 import time
+import traceback
 from pathlib import Path
 
 from PySide6.QtCore import QEventLoop, QLockFile, QTimer
@@ -19,6 +21,27 @@ from freqinout.gui.dialog_notifications import install_auto_closing_information_
 from freqinout.gui.startup_splash import StartupSplash
 from freqinout.gui.theme import apply_app_theme, resolve_theme, resolve_ui_text_scale
 from freqinout.version import __version__
+
+
+def _write_fatal_startup_log(exc: BaseException) -> Path:
+    """Persist fatal packaged-startup diagnostics even without a console."""
+
+    candidates: list[Path] = []
+    try:
+        candidates.append(get_config_dir())
+    except Exception:
+        pass
+    candidates.append(Path(tempfile.gettempdir()) / "FreqInOut")
+    detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    for base in candidates:
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            path = base / "startup-error.log"
+            path.write_text(detail, encoding="utf-8")
+            return path
+        except Exception:
+            continue
+    return Path("startup-error.log")
 
 
 def _set_windows_app_user_model_id() -> None:
@@ -99,6 +122,7 @@ def main():
     startup_started = time.perf_counter()
     parser = argparse.ArgumentParser(description="FreqInOut HF controller")
     parser.add_argument("--update", action="store_true", help="Check for and apply updates, then exit.")
+    parser.add_argument("--smoke-test", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     if args.update:
@@ -186,6 +210,9 @@ def main():
         if hasattr(win, "start_post_shell_services"):
             QTimer.singleShot(0, win.start_post_shell_services)
         log.info("FreqInOut started.")
+        if args.smoke_test:
+            log.info("FreqInOut packaged smoke test started.")
+            QTimer.singleShot(1000, app.quit)
     except Exception as e:
         log.exception("FreqInOut failed during startup: %s", e)
         if splash is not None:
@@ -223,4 +250,21 @@ def main():
     sys.exit(exit_code)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        try:
+            log.exception("Fatal startup error")
+        except Exception:
+            pass
+        path = _write_fatal_startup_log(exc)
+        try:
+            app = QApplication.instance() or QApplication(sys.argv)
+            QMessageBox.critical(
+                None,
+                "FreqInOut Startup Error",
+                f"FreqInOut could not start.\n\nDetails were written to:\n{path}",
+            )
+        except Exception:
+            pass
+        raise

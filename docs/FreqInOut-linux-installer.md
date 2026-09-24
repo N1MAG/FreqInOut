@@ -1,235 +1,170 @@
-# FreqInOut Linux Installer Guide
+# FreqInOut 2.0 Linux Installer Reference
 
-This guide is written for:
-- **new Linux users** who want a safe guided install, and
-- **advanced users** who want deterministic command-line control.
+`install_FreqInOut_linux.sh` provides guided and command-line installation,
+update, and repair for common Linux desktop distributions.
 
-The installer script is:
-- `install_FreqInOut_linux.sh`
-
----
-
-## 1) Testing-community fast path
-
-From a checked-out multi-rig WIP repo, open a terminal and run:
+## Normal installation
 
 ```bash
-bash install_FreqInOut_linux.sh \
-  --dir "$HOME/FreqInOut-multi-rig-test" \
-  --config-root "$HOME/.freqinout-multi-rig-test" \
-  --branch "wip/private-testing-multi-rig-1.2.3-not-ready"
+git clone https://github.com/N1MAG/FreqInOut.git "$HOME/FreqInOut"
+cd "$HOME/FreqInOut"
+bash install_FreqInOut_linux.sh
 ```
 
-If you still need the WIP repo locally:
+The installer:
+
+- validates Python 3.10 through 3.13;
+- recognizes `apt`, `dnf`, `yum`, `pacman`, and `zypper`;
+- installs applicable system dependencies when approved;
+- clones or updates the public FreqInOut repository;
+- creates or repairs the virtual environment;
+- installs the runtime requirements;
+- creates the launcher, desktop entry, and icons;
+- performs a post-install self-test; and
+- writes detailed output to `~/freqinout-install.log` by default.
+
+The installer prepares the application but does not silently finalize the
+single-radio-to-2.0 configuration migration. FIO owns the informed backup,
+review, and confirmation flow on first launch.
+
+## Common commands
+
+Install in the default location, `~/FreqInOut`:
 
 ```bash
-git clone --branch "wip/private-testing-multi-rig-1.2.3-not-ready" git@github.com:N1MAG/FreqInOut-internal-testing.git FreqInOut-multi-rig
-cd FreqInOut-multi-rig
-bash install_FreqInOut_linux.sh \
-  --dir "$HOME/FreqInOut-multi-rig-test" \
-  --config-root "$HOME/.freqinout-multi-rig-test" \
-  --branch "wip/private-testing-multi-rig-1.2.3-not-ready"
+bash install_FreqInOut_linux.sh
 ```
 
-When started with no arguments, the installer opens a guided prompt flow. In this WIP branch, the default repository is `git@github.com:N1MAG/FreqInOut-internal-testing.git` and the default branch is `wip/private-testing-multi-rig-1.2.3-not-ready`.
-
----
-
-## 2) What the installer does
-
-It automatically:
-- checks required tools and Python support
-- installs missing dependencies when possible
-- clones or updates FreqInOut from GitHub
-- creates/repairs a virtual environment and installs `requirements.txt`
-- optionally binds the generated launcher and migration work to a dedicated profile root
-- creates launcher + desktop entry/icon
-- runs a post-install self-test
-- writes detailed logs to `~/freqinout-install.log`
-- cleans up deprecated files from old versions during install/update/repair
-
-Default install location:
-- `~/FreqInOut`
-
-`requirements.txt` includes `keyring`, so the installer installs it during fresh installs, repairs, and updates. FIO uses `keyring` for secure GPG signing passphrase storage. Linux systems still need an OS credential backend such as Secret Service or KWallet; if no secure backend is available, FIO reports that passphrase storage is unavailable instead of storing plaintext.
-
----
-
-## 3) Guided prompts (what to expect)
-
-The installer may ask:
-- Is this an existing installation?
-- If yes: update app, desktop icon/launcher, or both?
-- For package installs: continue with elevated package manager commands?
-- For local git changes: stash/skip/fail behavior
-- For running app detection: close app, skip update, or fail
-
-If anything fails, recovery tips are printed and the log location is shown.
-
----
-
-## 4) Common commands
-
-Install to a custom folder:
+Install in another application folder:
 
 ```bash
 bash install_FreqInOut_linux.sh --dir "$HOME/Apps/FreqInOut"
 ```
 
-Or positional path:
+Bind the launcher to an intentionally separate profile:
 
 ```bash
-bash install_FreqInOut_linux.sh "$HOME/Apps/FreqInOut"
+bash install_FreqInOut_linux.sh \
+  --dir "$HOME/Apps/FreqInOut" \
+  --config-root "$HOME/.freqinout-field"
 ```
 
-Repair an existing install:
-
-```bash
-bash install_FreqInOut_linux.sh --repair --dir "$HOME/FreqInOut"
-```
-
-Preview actions without changes:
+Preview without changing the system:
 
 ```bash
 bash install_FreqInOut_linux.sh --dry-run
 ```
 
----
-
-## 5) Advanced options
-
-Use a specific repo:
-
-```bash
-bash install_FreqInOut_linux.sh --repo "git@github.com:N1MAG/FreqInOut-internal-testing.git"
-```
-
-Use a specific branch:
-
-```bash
-bash install_FreqInOut_linux.sh --branch "wip/private-testing-multi-rig-1.2.3-not-ready"
-```
-
-Bind the install, migration, and generated launcher to a dedicated test profile:
-
-```bash
-bash install_FreqInOut_linux.sh \
-  --dir "$HOME/FreqInOut-multi-rig-test" \
-  --config-root "$HOME/.freqinout-multi-rig-test" \
-  --branch "wip/private-testing-multi-rig-1.2.3-not-ready"
-```
-
-Install a private multi-rig WIP build for isolated testing:
-
-```bash
-bash install_FreqInOut_linux.sh \
-  --dir "$HOME/FreqInOut-multi-rig-test" \
-  --config-root "$HOME/.freqinout-multi-rig-test" \
-  --branch "wip/private-testing-multi-rig-1.2.3-not-ready"
-```
-
-Use a separate install directory for this WIP branch until upgrade testing is complete. The branch name is intentionally treated as an opaque test-channel name even when the app version advances to 2.0.0.
-
-Offline mode:
-
-```bash
-bash install_FreqInOut_linux.sh --offline
-```
-
-Set an explicit log file:
-
-```bash
-bash install_FreqInOut_linux.sh --log-file "$HOME/freqinout-install-custom.log"
-```
-
-Non-interactive policy-driven run:
-
-```bash
-bash install_FreqInOut_linux.sh --yes --on-dirty stash --on-running fail --on-non-git replace
-```
-
-Show help:
-
-```bash
-bash install_FreqInOut_linux.sh --help
-```
-
----
-
-## 6) Run and uninstall
-
-Run FreqInOut:
-- App menu: search **FreqInOut**
-- Terminal: `freqinout`
-
-When `--config-root` was supplied, the generated launcher exports that same
-profile root on every launch. Rerun updates and repairs with the same value.
-
-Uninstall:
-
-```bash
-bash uninstall_FreqInOut_linux.sh --dir "$HOME/FreqInOut"
-```
-
----
-
-## 7) Troubleshooting (quick)
-
-If desktop icon or launcher does not appear:
-- log out/in (or reboot)
-- rerun icon step via guided existing-install mode
-
-If install fails:
-- open `~/freqinout-install.log`
-- rerun repair:
+Repair the environment, launcher, and icons without recloning:
 
 ```bash
 bash install_FreqInOut_linux.sh --repair --dir "$HOME/FreqInOut"
 ```
 
-If internet checks fail:
-- use `--offline`
-- or configure proxy environment variables and retry
-
-### Safe recovery staging
-
-Installer backups and in-app migration backups are recovery points, not working directories. Keep the failed install and its logs until the recovered copy is verified. Before restoring anything, close FreqInOut and companion radio applications, copy the current config to a new holding folder, and inspect the archive or in-app `manifest.json`. Stage recovered files under a separate config root and launch with `FREQINOUT_CONFIG_DIR` pointed at that staging root for validation. Do not extract an archive or copy backup contents directly over the live `~/.freqinout` tree. The `--repair` mode repairs the application environment and launcher; it is not a request to overwrite production configuration.
-
-Preview an installer archive without changing the live install:
+Use local files without network checks or downloads:
 
 ```bash
-RECOVERY_ROOT="$HOME/freqinout-recovery-YYYYMMDD-HHMMSS"
-mkdir -p "$RECOVERY_ROOT"
-tar -tzf "$HOME/.local/state/freqinout/backups/freqinout-backup-YYYYMMDD-HHMMSS.tar.gz" \
-  > "$RECOVERY_ROOT/installer-archive-list.txt"
+bash install_FreqInOut_linux.sh --offline --dir "$HOME/FreqInOut"
 ```
 
-For an in-app backup, use the manifest's `backup_path` entries to select what to copy into the staging root; preserve the manifest and any missing-path entries for support. Keep the current tree, failed-state logs, staged recovery, and original backup until Settings, databases, schedules, and roster import results have been checked.
+## Update behavior
 
----
+Close FIO and companion radio applications before updating, then rerun the
+installer with the same `--dir` and `--config-root` values used originally.
+The public repository and `main` are the defaults.
 
-## 8) Safety and reliability features
+For unattended policy control:
 
-The installer includes:
-- single-instance lock (prevents concurrent runs)
-- running-app detection before in-place update
-- pre-update backup coverage for Linux single-rig and multi-rig config roots under `~/.freqinout`
-- dirty git worktree protection (prompt/policy)
-- non-git folder handling (replace/skip/fail)
-- rollback points for launcher/desktop/icon/venv on failure
-- desktop cache refresh attempts across multiple desktop environments
-- deprecated-file cleanup from prior releases
+```bash
+bash install_FreqInOut_linux.sh \
+  --yes \
+  --on-dirty fail \
+  --on-running fail \
+  --on-non-git fail
+```
 
----
+Available policies are:
 
-## 9) Suggested usage patterns
+- `--on-dirty prompt|stash|skip|fail`
+- `--on-running prompt|skip|fail`
+- `--on-non-git prompt|replace|skip|fail`
 
-For **new users**:
-- clone the private WIP branch and use the isolated `--dir` and `--config-root` command from section 1
-- follow guided prompts
-- do not reuse the normal production profile during general community testing
+An explicit repository or branch can be selected with `--repo` and `--branch`.
+Ordinary operators should retain the public defaults unless support supplies a
+specific recovery instruction.
 
-For **advanced users / automation**:
-- prefer explicit flags (`--dir`, `--repo`, `--branch`, `--yes`, policy flags)
-- use `--dry-run` before first unattended run
-- capture logs with `--log-file`
+## Profile ownership and backups
+
+Without `--config-root`, FIO uses its standard Linux profile under
+`~/.freqinout`. When `--config-root` is supplied, the generated launcher
+preserves that selection on later starts. Never change the profile root during
+an update merely to work around an error.
+
+The installer checks for a running FIO process, protects dirty Git worktrees,
+and creates rollback state before replacing managed launcher, environment, or
+icon files. Installer backups and FIO migration backups are recovery points,
+not working directories.
+
+Before restoring:
+
+1. close FIO and companion applications;
+2. retain the failed installation and logs;
+3. copy the current profile to a separate holding location;
+4. inspect the backup manifest or archive; and
+5. validate restored data under a separate `FREQINOUT_CONFIG_DIR` before
+   replacing a live profile.
+
+The `--repair` option repairs the application environment. It is not permission
+to overwrite production configuration.
+
+## Running FIO
+
+After installation:
+
+- use the desktop application menu and search for **FreqInOut**; or
+- run `freqinout` in a terminal.
+
+If a desktop entry or icon does not appear, log out and back in, then rerun the
+installer with the same paths if necessary.
+
+## Logs
+
+The installer log defaults to `~/freqinout-install.log`. Select another path
+with `--log-file`.
+
+Application logs are in the active FIO profile root:
+
+- `freqinout.log`
+- `perf_metrics.log`
+- generated `fio_cpu_hotspot_*.txt` files
+- generated UI-hang evidence, when present
+
+## Uninstall
+
+Preview uninstall actions:
+
+```bash
+bash uninstall_FreqInOut_linux.sh --dry-run --dir "$HOME/FreqInOut"
+```
+
+Run the uninstaller:
+
+```bash
+bash uninstall_FreqInOut_linux.sh --dir "$HOME/FreqInOut"
+```
+
+The uninstaller can remove the application folder, launcher, desktop entry,
+and installed icons. It intentionally leaves the operator profile and radio
+data in place. Archive or remove profile data separately only after confirming
+that it is no longer needed.
+
+## Troubleshooting
+
+- Use `--repair` after dependency or virtual-environment damage.
+- Use `--dry-run` before the first unattended or custom-path invocation.
+- Use `--offline` only when the required repository and dependencies are
+  already present locally.
+- If FIO is reported as running, close it rather than forcing an in-place
+  update.
+- On Debian/Ubuntu-family desktops, native Qt Map support may require
+  `libxcb-cursor0` and `libxcb-xinerama0`.

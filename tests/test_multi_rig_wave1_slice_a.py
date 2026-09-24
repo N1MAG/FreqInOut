@@ -1266,6 +1266,8 @@ def test_linked_records_project_and_mirror(monkeypatch, tmp_path):
         {
             "name": "Linked Field Device",
             "control_backend": "flrig",
+            "use_js8spotter": 1,
+            "use_commstat": 1,
             "js8_instance_id": int(js8["id"]),
             "fast_light_config_id": int(fast_light["id"]),
             "varac_node_id": int(varac["id"]),

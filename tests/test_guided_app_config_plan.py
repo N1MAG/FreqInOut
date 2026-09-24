@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from freqinout.core.config_autodiscovery import build_lab_radio_proposals
+from freqinout.core.config_autodiscovery import build_radio_instance_proposals
 from freqinout.core.guided_app_config_plan import (
     GuidedAppConfigAction,
     GuidedAppConfigPlan,
@@ -17,7 +17,7 @@ from freqinout.core.guided_launch_recipes import (
 
 
 def test_guided_external_app_config_plan_is_review_only_and_backup_gated(tmp_path) -> None:
-    proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
+    proposals = build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
 
     plan = build_guided_external_app_config_plan(
         proposals,
@@ -43,7 +43,7 @@ def test_guided_external_app_config_plan_is_review_only_and_backup_gated(tmp_pat
 
 
 def test_guided_external_app_config_apply_defaults_to_no_external_writes(tmp_path) -> None:
-    proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
+    proposals = build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
     js8_ini = tmp_path / "JS8Call.ini"
     js8_ini.write_text("[Configuration]\nMyCall=OLD\n", encoding="utf-8")
     plan = build_guided_external_app_config_plan(
@@ -97,7 +97,7 @@ def test_guided_directory_apply_rejects_existing_file_without_replacing_it(tmp_p
 
 
 def test_guided_external_app_config_apply_writes_js8_only_with_explicit_backup(tmp_path) -> None:
-    proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
+    proposals = build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
     js8_ini = tmp_path / "JS8Call.ini"
     js8_ini.write_text("[Configuration]\nMyCall=OLD\n", encoding="utf-8")
     plan = build_guided_external_app_config_plan(
@@ -137,7 +137,7 @@ def test_guided_external_app_config_apply_writes_js8_only_with_explicit_backup(t
 
 
 def test_guided_external_app_config_plan_describes_fast_light_instances(tmp_path) -> None:
-    proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
+    proposals = build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
 
     plan = build_guided_external_app_config_plan(
         proposals,
@@ -160,7 +160,7 @@ def test_guided_external_app_config_plan_describes_fast_light_instances(tmp_path
 
 
 def test_canonical_fast_light_recipe_replaces_legacy_dirs_and_materializes_all_selected_apps(tmp_path) -> None:
-    proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
+    proposals = build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
     base = build_guided_external_app_config_plan(
         proposals,
         config_root=tmp_path / "fio-config",
@@ -210,7 +210,7 @@ def test_canonical_fast_light_recipe_replaces_legacy_dirs_and_materializes_all_s
 
 
 def test_guided_external_app_config_plan_describes_js8_profile_and_ports(tmp_path) -> None:
-    proposals = build_lab_radio_proposals(radio_count=2, busy_checker=lambda _host, _port: False)
+    proposals = build_radio_instance_proposals(radio_count=2, busy_checker=lambda _host, _port: False)
 
     plan = build_guided_external_app_config_plan(
         proposals,
@@ -234,7 +234,7 @@ def test_guided_external_app_config_plan_describes_js8_profile_and_ports(tmp_pat
 
 
 def test_guided_external_app_config_plan_keeps_varac_cluster_manual(tmp_path) -> None:
-    proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
+    proposals = build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
 
     plan = build_guided_external_app_config_plan(
         proposals,
@@ -251,7 +251,7 @@ def test_guided_external_app_config_plan_keeps_varac_cluster_manual(tmp_path) ->
 
 
 def test_guided_external_app_config_plan_varac_remembers_integration_without_writes(tmp_path) -> None:
-    proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
+    proposals = build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
     varac_dir = tmp_path / "VarAC"
     bbs_dir = varac_dir / "BBS"
     bbs_archive_dir = bbs_dir / "Archive"

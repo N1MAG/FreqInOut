@@ -11,7 +11,7 @@ FreqInOut is a desktop operations console for amateur radio. It brings radio-pro
 | Repository | `https://github.com/N1MAG/FreqInOut-internal-testing.git` |
 | Branch | `wip/private-testing-multi-rig-1.2.3-not-ready` |
 | Application version | `2.0.0` |
-| Supported Python | 3.9–3.13 (3.11 recommended) |
+| Supported Python | 3.10–3.13 (3.11 recommended) |
 
 The WIP branch name is an opaque testing-channel name. It is intentionally unchanged while the application version advances. These temporary repository instructions will be switched to the public repository when the multi-rig work is approved for merge.
 

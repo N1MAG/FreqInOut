@@ -11,7 +11,7 @@ from freqinout.core.config_autodiscovery import (
     MAX_JS8CALL_SETTINGS_BYTES,
     app_search_paths_with_radio_apps_base,
     build_autoconfig_proposal,
-    build_lab_radio_proposals,
+    build_radio_instance_proposals,
     default_app_search_paths,
     default_js8call_ini_paths,
     discover_js8call_file_profiles,
@@ -377,7 +377,7 @@ def test_varac_local_asset_discovery_matches_available_production_fixture() -> N
 
 
 def test_lab_radio_proposal_assigns_expected_ports_and_leaves_varac_off() -> None:
-    proposals = build_lab_radio_proposals(radio_count=3, busy_checker=lambda _host, _port: False)
+    proposals = build_radio_instance_proposals(radio_count=3, busy_checker=lambda _host, _port: False)
 
     assert [proposal.instance_name for proposal in proposals] == ["fio-a", "fio-b", "fio-c"]
     assert proposals[0].varac_enabled is False
@@ -398,7 +398,7 @@ def test_lab_radio_proposal_assigns_expected_ports_and_leaves_varac_off() -> Non
 def test_port_proposal_uses_clear_alternate_when_preferred_port_is_busy() -> None:
     busy = {2442, 2452}
 
-    proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, port: port in busy)
+    proposals = build_radio_instance_proposals(radio_count=1, busy_checker=lambda _host, port: port in busy)
     js8_assignment = next(assignment for assignment in proposals[0].ports if assignment.service == "js8call")
 
     assert js8_assignment.preferred_port == 2442

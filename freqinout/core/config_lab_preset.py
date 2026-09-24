@@ -7,9 +7,10 @@ from typing import Any, Callable, Mapping, Optional, Sequence, Tuple
 from freqinout.core.config_autodiscovery import (
     LOCALHOST,
     RadioInstanceProposal,
-    build_lab_radio_proposals,
+    build_radio_instance_proposals,
 )
 from freqinout.core.config_js8_managed import (
+    JS8CallManagedProfilePlan,
     build_js8call_managed_profile_plans,
     create_js8call_managed_directories,
 )
@@ -45,6 +46,7 @@ def build_lab_radio_profile_values(
     *,
     app_paths: Mapping[str, str] | None = None,
     config_root: Path | None = None,
+    js8_plan: JS8CallManagedProfilePlan | None = None,
     existing_device_id: Optional[int] = None,
     js8_instance_id: Optional[int] = None,
     fast_light_config_id: Optional[int] = None,
@@ -52,6 +54,13 @@ def build_lab_radio_profile_values(
     paths = dict(app_paths or {})
     ports = _ports_by_service(proposal)
     instance_root = Path(config_root) / "managed-instances" / proposal.instance_name if config_root else None
+    if js8_plan is None and config_root is not None and "js8call" in proposal.enabled_apps:
+        matching_plans = build_js8call_managed_profile_plans(
+            (proposal,),
+            config_root=Path(config_root),
+            js8call_path=paths.get("js8call", ""),
+        )
+        js8_plan = matching_plans[0] if matching_plans else None
     display_order = (proposal.index + 1) * 10
     values: dict[str, Any] = {
         "system_key": f"lab_radio_{_radio_suffix(proposal.index)}",
@@ -97,8 +106,14 @@ def build_lab_radio_profile_values(
             {
                 "fldigi_log_path": str(instance_root / "fldigi" / "logs"),
                 "fldigi_checkin_dir": str(instance_root / "fldigi" / "checkins"),
-                "js8_directed_path": str(instance_root / "js8call" / "DIRECTED.TXT"),
-                "js8_forms_path": str(instance_root / "js8call" / "forms"),
+            }
+        )
+    if js8_plan is not None:
+        values.update(
+            {
+                "js8_profile_path": str(js8_plan.save_dir),
+                "js8_directed_path": str(js8_plan.directed_path),
+                "js8_forms_path": str(js8_plan.forms_dir),
             }
         )
     return values
@@ -112,7 +127,7 @@ def apply_lab_radio_preset_to_store(
     config_root: Path | None = None,
     busy_checker: Callable[[str, int], bool] | None = None,
 ) -> LabRadioApplyResult:
-    proposals = build_lab_radio_proposals(
+    proposals = build_radio_instance_proposals(
         radio_count=radio_count,
         enabled_apps=("flrig", "fldigi", "js8call"),
         include_varac=False,
@@ -121,10 +136,17 @@ def apply_lab_radio_preset_to_store(
     if not proposals:
         return LabRadioApplyResult(radio_profile_ids=(), radio_names=(), summary="No lab radios were requested.")
 
+    js8_plans = build_js8call_managed_profile_plans(
+        proposals,
+        config_root=Path(config_root),
+        js8call_path=(app_paths or {}).get("js8call", ""),
+    ) if config_root is not None else ()
+    js8_plans_by_instance = {plan.instance_name: plan for plan in js8_plans}
     managed_paths = _prepare_lab_managed_paths(
         proposals,
         config_root=config_root,
         app_paths=app_paths,
+        js8_plans=js8_plans,
     )
 
     with store.connect() as conn:
@@ -153,6 +175,7 @@ def apply_lab_radio_preset_to_store(
         existing_fast_light_id = _existing_id_by_system_key(store, "fast_light_configs", f"lab_fast_light_{instance_key}")
         if existing_fast_light_id is None and proposal.index == 0:
             existing_fast_light_id = _existing_id_by_system_key(store, "fast_light_configs", DEFAULT_FAST_LIGHT_SYSTEM_KEY)
+        js8_plan = js8_plans_by_instance.get(proposal.instance_name)
         js8 = store.save_js8_instance(
             {
                 "id": existing_js8_id,
@@ -160,11 +183,17 @@ def apply_lab_radio_preset_to_store(
                 "name": f"{proposal.name} JS8Call",
                 "host": LOCALHOST,
                 "port": ports.get("js8call", 2442),
-                "profile_path": _managed_path(config_root, proposal.instance_name, "js8call"),
-                "directed_path": _managed_path(config_root, proposal.instance_name, "js8call", "DIRECTED.TXT"),
-                "inbox_path": _managed_path(config_root, proposal.instance_name, "js8call", "inbox"),
-                "forms_path": _managed_path(config_root, proposal.instance_name, "js8call", "forms"),
+                "profile_path": str(js8_plan.save_dir) if js8_plan is not None else "",
+                "directed_path": str(js8_plan.directed_path) if js8_plan is not None else "",
+                "inbox_path": str(js8_plan.inbox_path) if js8_plan is not None else "",
+                "forms_path": str(js8_plan.forms_dir) if js8_plan is not None else "",
                 "install_path": (app_paths or {}).get("js8call", ""),
+                "rig_name": js8_plan.rig_name if js8_plan is not None else "",
+                "rig_name_source": "fio_managed" if js8_plan is not None else "",
+                "application_data_root": str(js8_plan.application_data_root) if js8_plan is not None else "",
+                "all_path": str(js8_plan.all_path) if js8_plan is not None else "",
+                "save_dir": str(js8_plan.save_dir) if js8_plan is not None else "",
+                "storage_mode": "rig_scoped" if js8_plan is not None else "unverified",
             }
         )
         fast_light = store.save_fast_light_config(
@@ -187,6 +216,7 @@ def apply_lab_radio_preset_to_store(
                 proposal,
                 app_paths=app_paths,
                 config_root=config_root,
+                js8_plan=js8_plan,
                 existing_device_id=existing_device_id,
                 js8_instance_id=int(js8["id"]),
                 fast_light_config_id=int(fast_light["id"]),
@@ -230,6 +260,7 @@ def _prepare_lab_managed_paths(
     *,
     config_root: Path | None,
     app_paths: Mapping[str, str] | None,
+    js8_plans: Sequence[JS8CallManagedProfilePlan] = (),
 ) -> Tuple[Path, ...]:
     if config_root is None:
         return ()
@@ -247,13 +278,12 @@ def _prepare_lab_managed_paths(
             if key not in seen:
                 seen.add(key)
                 prepared.append(path)
-    for path in create_js8call_managed_directories(
-        build_js8call_managed_profile_plans(
-            proposals,
-            config_root=config_root,
-            js8call_path=(app_paths or {}).get("js8call", ""),
-        )
-    ):
+    plans = tuple(js8_plans) or build_js8call_managed_profile_plans(
+        proposals,
+        config_root=config_root,
+        js8call_path=(app_paths or {}).get("js8call", ""),
+    )
+    for path in create_js8call_managed_directories(plans):
         key = str(path)
         if key not in seen:
             seen.add(key)

@@ -4,27 +4,21 @@ set -euo pipefail
 SCRIPT_WORKTREE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKTREE="${FREQINOUT_INSTALL_DIR:-$SCRIPT_WORKTREE}"
 if [[ -x "$WORKTREE/.venv/bin/python" ]]; then
-  VENV="$WORKTREE/.venv"
+  PYTHON="$WORKTREE/.venv/bin/python"
 elif [[ -x "$WORKTREE/venv/bin/python" ]]; then
-  VENV="$WORKTREE/venv"
+  PYTHON="$WORKTREE/venv/bin/python"
 else
   echo "Missing virtual environment at $WORKTREE/.venv or $WORKTREE/venv" >&2
   exit 1
 fi
-WORKTREE_PARENT="$(cd "$WORKTREE/.." && pwd)"
-LEGACY_RUNTIME_ROOT="$WORKTREE_PARENT/runtime/multi-rig"
-DEFAULT_RUNTIME_ROOT="$HOME/.freqinout/runtime/multi-rig"
-if [[ -n "${FREQINOUT_RUNTIME_ROOT:-}" ]]; then
-  RUNTIME_ROOT="$FREQINOUT_RUNTIME_ROOT"
-elif [[ -f "$LEGACY_RUNTIME_ROOT/config/freqinout.db" ]]; then
-  RUNTIME_ROOT="$LEGACY_RUNTIME_ROOT"
-else
-  RUNTIME_ROOT="$DEFAULT_RUNTIME_ROOT"
-fi
-CONFIG_ROOT="$RUNTIME_ROOT/config"
 
-mkdir -p "$RUNTIME_ROOT" "$CONFIG_ROOT"
-export FREQINOUT_CONFIG_DIR="$RUNTIME_ROOT"
+# FIO owns the platform-specific default profile location.  Do not silently
+# create a second multi-rig profile when an operator upgrades from single-rig.
+# FREQINOUT_CONFIG_DIR remains the supported way to select an isolated profile.
+if [[ -n "${FREQINOUT_RUNTIME_ROOT:-}" && -z "${FREQINOUT_CONFIG_DIR:-}" ]]; then
+  export FREQINOUT_CONFIG_DIR="$FREQINOUT_RUNTIME_ROOT"
+  echo "Warning: FREQINOUT_RUNTIME_ROOT is deprecated; use FREQINOUT_CONFIG_DIR." >&2
+fi
 
 cd "$WORKTREE"
-exec "$VENV/bin/python" -m freqinout.main "$@"
+exec "$PYTHON" -m freqinout.main "$@"

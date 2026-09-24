@@ -229,10 +229,15 @@ def test_add_radio_save_persists_selected_model_for_nonfirst_transceiver(monkeyp
 
     assigned: list[tuple[int, int, dict[str, object]]] = []
     persisted: list[dict[str, object]] = []
+    identity_records: list[object] = []
     tab = SettingsTab.__new__(SettingsTab)
+    tab._settings_dirty = False
+    tab._emit_device_profiles_changed = lambda: None
+    tab._set_save_button_state = lambda _role: None
     tab.multi_radio_store = SimpleNamespace(
         list_device_profiles=lambda: [{"id": 1, "name": "Primary"}],
         set_device_operating_profile=lambda radio_id, model_id, **kwargs: assigned.append((radio_id, model_id, kwargs)),
+        save_radio_software_identity_records=lambda _radio_id, records, **_kwargs: identity_records.extend(records) or tuple(records),
         guided_save_transaction=lambda: _CompleteTransaction(),
     )
     tab._open_device_profile_dialog = lambda existing=None, **_kwargs: {
@@ -256,6 +261,7 @@ def test_add_radio_save_persists_selected_model_for_nonfirst_transceiver(monkeyp
         "reason": "Operating Model selected during guided radio setup.",
         "created_by": "guided_radio_setup",
     })]
+    assert identity_records == []
 
 
 def test_first_transceiver_is_activated_only_after_selected_model_assignment() -> None:
@@ -264,6 +270,7 @@ def test_first_transceiver_is_activated_only_after_selected_model_assignment() -
     from freqinout.gui.settings_tab import SettingsTab
 
     events: list[tuple[str, int, int | None]] = []
+    identity_records: list[object] = []
     saved_radio = {
         "id": 1,
         "name": "First Rig",
@@ -281,10 +288,14 @@ def test_first_transceiver_is_activated_only_after_selected_model_assignment() -
         return {**saved_radio, "runtime_active": 1, "runtime_primary": 1}
 
     tab = SettingsTab.__new__(SettingsTab)
+    tab._settings_dirty = False
+    tab._emit_device_profiles_changed = lambda: None
+    tab._set_save_button_state = lambda _role: None
     tab.multi_radio_store = SimpleNamespace(
         list_device_profiles=lambda: [],
         set_device_operating_profile=assign,
         set_runtime_primary_device_profile=activate,
+        save_radio_software_identity_records=lambda _radio_id, records, **_kwargs: identity_records.extend(records) or tuple(records),
         guided_save_transaction=lambda: _CompleteTransaction(),
     )
     tab._open_device_profile_dialog = lambda existing=None, **_kwargs: {
@@ -306,6 +317,7 @@ def test_first_transceiver_is_activated_only_after_selected_model_assignment() -
     tab._add_device_profile()
 
     assert events == [("assign", 1, 42), ("activate", 1, None)]
+    assert identity_records == []
 
 
 def test_failed_new_observer_model_assignment_remains_inactive_and_nonprimary(monkeypatch) -> None:

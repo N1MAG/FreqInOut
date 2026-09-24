@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -31,7 +32,7 @@ def test_path_identity_is_reversible_and_printable_for_surrogate_paths() -> None
     assert "\\xff" in rendered
 
 
-def test_incremental_pipeline_projects_delta_then_avoids_all_unchanged_dml(tmp_path: Path) -> None:
+def test_incremental_pipeline_keeps_canonical_message_for_metadata_only_change(tmp_path: Path) -> None:
     db_path = tmp_path / "projection.sqlite"
     data_dir = tmp_path / "messages"
     data_dir.mkdir()
@@ -56,16 +57,58 @@ def test_incremental_pipeline_projects_delta_then_avoids_all_unchanged_dml(tmp_p
         change_delta = FileScanDelta.compare({"flamp": [first]}, {"flamp": [changed]})
         changed_result = pipeline.run({"flamp": [changed]}, {str(data_dir): 2.0}, "watch-a", change_delta)
         assert changed_result.projected == 1
-        assert changed_result.tombstoned == 1
+        assert changed_result.tombstoned == 0
     finally:
         close_projection_writers()
 
     conn = sqlite3.connect(db_path)
     try:
         rows = conn.execute("SELECT deleted, subject FROM message_projection ORDER BY event_ts").fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == 0
+        receipts = conn.execute(
+            "SELECT external_key, metadata_json FROM message_external_refs ORDER BY external_key"
+        ).fetchall()
+        assert len(receipts) == 2
+        receipt_presence = {row[0].rsplit(":", 2)[-2]: json.loads(row[1]).get("source_present", True) for row in receipts}
+        assert receipt_presence == {"10.000000": False, "11.000000": True}
+        assert conn.execute("SELECT COUNT(*) FROM message_file_scan_inventory").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_incremental_pipeline_tombstones_canonical_message_for_content_change(tmp_path: Path) -> None:
+    db_path = tmp_path / "projection.sqlite"
+    data_dir = tmp_path / "messages"
+    data_dir.mkdir()
+    path = data_dir / "Q123-04.k2s"
+    path.write_text("first", encoding="utf-8")
+    _schema(db_path)
+    first = _record(path, size=5, mtime=10.0)
+    pipeline = MessageFileProjectionPipeline(db_path)
+    try:
+        initial = FileScanDelta.compare({}, {"flamp": [first]})
+        assert pipeline.run({"flamp": [first]}, {str(data_dir): 1.0}, "watch-a", initial).projected == 1
+
+        path.write_text("second", encoding="utf-8")
+        changed = _record(path, size=6, mtime=11.0)
+        change_delta = FileScanDelta.compare({"flamp": [first]}, {"flamp": [changed]})
+        result = pipeline.run({"flamp": [changed]}, {str(data_dir): 2.0}, "watch-a", change_delta)
+        assert result.projected == 1
+        assert result.tombstoned == 1
+    finally:
+        close_projection_writers()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute("SELECT deleted FROM message_projection ORDER BY event_ts").fetchall()
         assert len(rows) == 2
         assert sorted(row[0] for row in rows) == [0, 1]
-        assert conn.execute("SELECT COUNT(*) FROM message_file_scan_inventory").fetchone()[0] == 1
+        receipts = conn.execute(
+            "SELECT metadata_json FROM message_external_refs ORDER BY external_key"
+        ).fetchall()
+        receipt_presence = {json.loads(row[0]).get("source_present", True) for row in receipts}
+        assert receipt_presence == {True, False}
     finally:
         conn.close()
 

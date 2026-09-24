@@ -9,7 +9,8 @@ DRY_RUN=0
 LAUNCHER_PATH="$HOME/.local/bin/freqinout"
 DESKTOP_FILE_NAME="freqinout.desktop"
 DESKTOP_ENTRY_PATH="$HOME/.local/share/applications/$DESKTOP_FILE_NAME"
-ICON_DEST="$HOME/.local/share/icons/hicolor/256x256/apps/freqinout.png"
+ICON_THEME_ROOT="$HOME/.local/share/icons/hicolor"
+PIXMAP_ICON="$HOME/.local/share/pixmaps/freqinout.png"
 
 usage() {
   cat <<'EOF'
@@ -111,7 +112,12 @@ remove_desktop_items() {
 
   [[ -f "$DESKTOP_ENTRY_PATH" ]] && run_cmd rm -f "$DESKTOP_ENTRY_PATH"
   [[ -f "$LAUNCHER_PATH" ]] && run_cmd rm -f "$LAUNCHER_PATH"
-  [[ -f "$ICON_DEST" ]] && run_cmd rm -f "$ICON_DEST"
+  local size
+  for size in 64 128 256 512 1024; do
+    local icon_path="$ICON_THEME_ROOT/${size}x${size}/apps/freqinout.png"
+    [[ -f "$icon_path" ]] && run_cmd rm -f "$icon_path"
+  done
+  [[ -f "$PIXMAP_ICON" ]] && run_cmd rm -f "$PIXMAP_ICON"
   [[ -f "$desktop_dir/$DESKTOP_FILE_NAME" ]] && run_cmd rm -f "$desktop_dir/$DESKTOP_FILE_NAME"
 
   if command_exists update-desktop-database; then
@@ -147,4 +153,3 @@ main() {
 }
 
 main "$@"
-

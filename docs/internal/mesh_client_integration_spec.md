@@ -61,12 +61,10 @@ must not imply that Connect can work. A saved formerly valid mode is never
 silently changed to another transport. Newly created connections may select only
 the supported modes in the matrix.
 
-FIO packages the official Meshtastic Python client for Python 3.9-3.14 and the
-official MeshCore Python client where its supported Python floor permits it.
-MeshCore 2.x requires Python 3.10 or newer; a Python 3.9 FIO build therefore
-keeps the qualified FIO BLE path, does not advertise MeshCore serial/TCP as
-available, and explains the interpreter requirement. Optional imports remain
-lazy so a missing or damaged hardware package cannot prevent FIO startup.
+FIO packages the official Meshtastic and MeshCore Python clients on every
+supported Python 3.10-3.13 runtime. Python 3.9 is not a supported FIO 2.0
+runtime. Optional imports remain lazy so a missing or damaged hardware package
+cannot prevent FIO startup.
 
 ### Discovery and configuration ownership
 

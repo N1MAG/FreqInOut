@@ -59,7 +59,8 @@ def _get_log_file():
     return os.path.join(_get_config_dir(), "freqinout.log")
 
 def _supports_color():
-    return sys.stdout.isatty()
+    stream = getattr(sys, "stdout", None)
+    return bool(stream is not None and hasattr(stream, "isatty") and stream.isatty())
 
 class ColorFormatter(logging.Formatter):
     COLORS = {
@@ -183,8 +184,9 @@ def setup_logger(name: str = "freqinout", log_to_console=True, log_level=logging
     logger.setLevel(log_level)
     logger.disabled = False
 
-    if log_to_console:
-        ch = logging.StreamHandler(sys.stdout)
+    console_stream = getattr(sys, "stdout", None)
+    if log_to_console and console_stream is not None:
+        ch = logging.StreamHandler(console_stream)
         ch.setLevel(log_level)
         ch.setFormatter(ColorFormatter("[%(levelname)s] %(message)s"))
         logger.addHandler(ch)

@@ -37,12 +37,20 @@ The final allowlist is reviewed before the first export. It normally includes:
 - Python/runtime dependency metadata;
 - user-facing install, update, uninstall, launcher, Windows packaging, and
   source-package metadata required to obtain or run FIO.
+- the root `start-multi-rig.sh` and `start-multi-rig.cmd` operator launchers.
+  Both use FIO's standard OS profile by default, preserve an explicit
+  `FREQINOUT_CONFIG_DIR`, and accept either the `.venv` source layout or the
+  Linux installer's `venv` layout without inventing a parallel multi-rig root.
 
 It excludes at minimum:
 
 - `tests/`, engineering `tools/`, `.github/` development workflows, `.windsurf/`,
   `AGENTS.md`, specifications, internal worklogs, and `docs/internal/`;
 - benchmark, audit, fixture-generation, and developer-only scripts;
+- all emulator, GUI-lab, demo-profile, capture, migration-rehearsal, and test
+  helpers, including `tools/start_multirig_gui_lab.sh`,
+  `tools/ts2000_cat_emulator.py`, `tools/create_readme_demo_profile.py`, and
+  the remaining engineering `tools/` tree;
 - operator databases, logs, screenshots, captures, rendered working files,
   machine-specific paths, credentials, or private repository instructions;
 - local caches, build trees, coverage data, virtual environments, and release
@@ -51,6 +59,17 @@ It excludes at minimum:
 Private verification must scan both the public candidate tree and its new
 public commits. An excluded file must never enter public Git history, even
 temporarily.
+
+The public export must also prove that no shipped runtime import, installer,
+launcher, help link, or README link depends on an excluded tool or developer
+file. If application operation requires such a file, the required runtime
+logic must first be moved into the reviewed runtime package rather than
+allowlisting an engineering directory wholesale.
+
+`docs/tools-and-scripts.md` currently catalogs private engineering utilities.
+It must either remain private or be replaced in the public export by a short
+operator-only appendix covering only the launch, install, update, uninstall,
+log, and supported repair commands that are actually shipped.
 
 ## Gate PR-1 — Reconcile The Product Baseline Privately
 
@@ -66,6 +85,16 @@ temporarily.
 - Record the candidate commit, public base commit, reconciliation decisions,
   acceptance results, remaining platform gates, and runtime export fingerprint.
 
+### Reconciliation evidence (2026-09-23)
+
+The semantic history audit is recorded in
+`docs/internal/public_1_2_8_to_2_0_reconciliation.md`. It compares public
+`2c3ba1a` with audited multi-rig `630c45b`, accounts for the 34 public-only
+range-diff commits, verifies the adapted managed-BBS behavior, and identifies
+Windows packaged-runtime hardening as the only code gap found. The gap is
+implemented privately; native Windows qualification and the final immutable
+candidate/export fingerprint remain open.
+
 ## Gate PR-2 — Smooth Single-Rig Upgrade
 
 Upgrading the current public single-rig release is a first-class release path,
@@ -78,11 +107,10 @@ not an exceptional test route.
 - Close FIO and affected companion applications before backup or migration.
 - Create and verify a complete, restorable pre-upgrade backup before changing
   the checkout, environment, database, profile, launcher, or desktop entry.
-- Resolve the current contract contradiction: the upgrade guide says migration
-  waits for informed operator confirmation, while the Linux installer currently
-  invokes multi-rig finalization. Public 2.0 must have one documented behavior.
-  The required default is explicit informed confirmation after backup review.
-  Cancel or Defer must cause zero production-profile migration writes.
+- The installer/migration contract is now resolved: installers prepare the
+  application and launcher but do not finalize multi-rig configuration.
+  Migration waits for explicit informed confirmation in FIO after backup
+  review. Cancel or Defer causes zero production-profile migration writes.
 - Preserve all existing operator data and application configuration. Convert
   the existing station into a clearly identified default radio and carry its
   software identity, schedule assignment, launch/monitor/startup choices, and
@@ -151,6 +179,67 @@ remain reachable from the guide table of contents; adding new UI buttons is a
 separate reviewed UI change rather than an implied part of documentation
 coverage.
 
+### Private release-media capture profile
+
+README screenshots and videos must be made from a disposable profile derived
+from a matched settings/operational database pair, never from the operator's
+live profile. The private `tools/create_readme_demo_profile.py` utility owns the
+repeatable preparation workflow and remains outside the public runtime export.
+
+- Source databases are opened read-only and copied through SQLite's backup API.
+- Recognized amateur-radio callsign bases are obfuscated by rotating ASCII
+  letters forward three positions and digits forward one position, with wrap;
+  digit-prefix international callsigns are supported, Maidenhead grids are
+  excluded, and portable/mobile suffixes are retained. `N1MAG` is intentionally
+  public and is preserved, including its suffix variants.
+- Personal names, grids, schedules, timestamps, and non-callsign message text
+  remain unchanged. This is presentation obfuscation, not irreversible
+  anonymization, and release captions must not claim otherwise.
+- A transform that would collide with a preserved callsign fails closed.
+  Database triggers are transactionally suspended and restored while the copied
+  rows are rewritten, preventing the masking operation from manufacturing
+  derived dirty-queue work.
+- Verification compares every source text cell with its expected transformed
+  copy before runtime overlays, then runs SQLite integrity checks on both copied
+  databases.
+- The capture profile disables launch-at-startup and unattended transmission,
+  clears saved Mesh connections and live ingest paths, and points radio
+  endpoints and companion launch paths at the selected RadioTools or GUI-lab
+  suites. GUI-lab radios map by display order to `fio-a`, `fio-b`, and later
+  suites, including the lab's intentional JS8 TCP `2242` series and save roots.
+- Rebuilding an existing destination requires `--replace-output`; the previous
+  profile is renamed to a timestamped sibling and retained. A failed rebuild
+  removes the incomplete result and restores the previous profile. Process
+  open-file inspection causes replacement to fail closed when a running process
+  owns either database, without mistaking closed residual WAL files for a live
+  FIO instance.
+
+The current private capture command is:
+
+```bash
+python tools/create_readme_demo_profile.py \
+  --settings-db /path/to/matched/freqinout.db \
+  --nets-db /path/to/matched/freqinout_nets.db \
+  --output-root /Users/Shared/FreqInOut-README-Demo-Current \
+  --radio-tools /Users/Shared/RadioTools-Demo \
+  --gui-lab-root /Users/bill/RadioCode/WORK/MultiRig/TestLab \
+  --replace-output
+```
+
+The first build omits `--replace-output`. Additional public callsigns may be
+retained with repeated `--preserve-callsign` arguments. Release review must
+still inspect every captured frame for private message content, names, paths,
+access codes, and secrets before publication.
+
+The maintainer supplied a separate production screenshot set for the public
+README on 2026-09-23. The reviewed frames cover Ops Center, two-radio profile
+readiness, per-radio Launch Control, Plan Builder, multi-transport Compose, and
+the offline operational map. The public asset copies use neutral stable names
+below `docs/images/readme-2.0/`. No non-public callsigns, local filesystem
+paths, access codes, or message bodies are visible; the public project identity
+`N1MAG` remains intentionally visible where present. Final release review must
+repeat that visual check against the exact exported image hashes.
+
 ## Gate PR-4 — Runtime Dependencies
 
 - Treat `pyproject.toml` runtime dependencies as the canonical dependency set.
@@ -167,11 +256,20 @@ coverage.
 - Record resolved dependency versions and licenses. Test the oldest and primary
   supported Python versions and reject unsupported Python before modifying an
   existing installation.
+- FIO 2.0 supports Python 3.10 through 3.13. Python 3.9 compatibility work from
+  the single-rig history is intentionally superseded, allowing the same
+  official MeshCore client on every supported interpreter.
 
 ## Gate PR-5 — Install, Update, Uninstall, And Packaging
 
 - Change every installer default and example from the private WIP repository
   and opaque WIP branch to the canonical public repository and release channel.
+- The Linux installer now names the canonical promotion target explicitly:
+  `https://github.com/N1MAG/FreqInOut.git` on `main`. Private-preview testing
+  must pass its private repository and branch explicitly.
+- The source launchers are now cross-platform (`.sh` and `.cmd`) and share the
+  same standard-profile/explicit-override contract. The Linux uninstaller
+  removes every icon size and pixmap installed by its paired installer.
 - Test anonymous public clone, first install, normal update, repair, dirty-tree
   handling, running-process refusal, offline behavior, interrupted update,
   rollback, and side-by-side ownership where supported.
@@ -186,6 +284,12 @@ coverage.
   assets, and required resource discovery.
 - Build and smoke the Windows executable/installer on Windows. Record signing
   status, SHA-256, build command, and install/uninstall behavior.
+- The private PyInstaller candidate must sanitize inherited Python/Qt runtime
+  paths, use bundled QML/plugins, disable UPX, default Windows Qt/Chromium to
+  software rendering, tolerate a windowed process without stdout, expose the
+  hidden bounded `--smoke-test`, and retain `startup-error.log` after fatal
+  startup failure. Focused cross-platform tests do not replace the native
+  Windows package gate.
 - State macOS source-install support and any unsigned/unnotarized limitation
   plainly; do not imply a published bundle where none exists.
 
@@ -223,6 +327,78 @@ coverage.
   publication boundary cannot conceal a missing runtime file.
 - Review the exact public diff and file inventory before pushing. Public `main`,
   the final tag, and release artifacts remain unchanged until this gate passes.
+
+### Private readiness evidence (2026-09-23)
+
+The private candidate now has a repeatable, fail-closed public projection tool:
+`tools/build_public_runtime_export.py`. It copies only individually allowlisted
+runtime files, substitutes the reviewed public 2.0 README draft, excludes the
+entire engineering tools/tests/internal-docs/lab surface, narrows bundled
+JS8Net content to its runtime module and license, and rejects private repository
+markers or named-user filesystem paths. The current projection contains **408
+files** and validates successfully. From that projected tree, a fresh temporary
+profile completed the packaged `--smoke-test` startup and clean shutdown on
+macOS.
+
+The release audit also closed the six stale private-test modules previously
+listed as blockers. The corrected modules pass **42 tests** together. An
+isolated sweep accounted for all **378 private test modules**: 374 module files
+pass, two are intentional skip-only modules, and two real-widget modules expose
+the documented PySide 6.8/macOS cross-test teardown fault. All **32 individual
+test nodes** in those two modules pass and exit normally in fresh processes,
+so no unsupported production lifecycle change was made.
+
+Focused final checks pass: release preflight; Linux installer, launcher, and
+uninstaller shell syntax; changed Python compilation; diff whitespace; and 55
+help, packaging, export, portability, and managed-BBS tests. The public
+installation documents now target `N1MAG/FreqInOut`, describe the explicit
+in-app upgrade/backup review, and contain no private-preview path. Runtime
+fallback discovery uses only the current operator's home and saved application
+roots; named local accounts are absent from the projected tree.
+
+Work-package ownership for this readiness slice:
+
+- Primary `gpt-6-astra` owned release architecture, persistence and portability
+  safety, integration, delegated-diff review, public projection validation, and
+  exit-gate decisions. The runtime did not expose a trustworthy reasoning-effort
+  label, so none is invented.
+- `release_projection_contract`: `gpt-5.6-luna`, low reasoning, bounded
+  projection-contract test review.
+- `release_stale_fixtures`: `gpt-5.6-terra`, medium reasoning, bounded stale
+  fixture review and correction.
+- `release_public_audit`: `gpt-5.6-luna`, medium reasoning, read-only public
+  runtime/documentation boundary audit.
+
+At the time of this evidence, the gate still included native packaging,
+clean-host interpreter, operator-upgrade, and soak qualifications. The
+maintainer's subsequent bounded risk decisions are recorded below. The exact
+immutable candidate, export fingerprint, and final public diff/inventory review
+remain mandatory. No public push, tag, or release is authorized by this evidence
+alone.
+
+### Maintainer-accepted release qualifications (2026-09-24)
+
+The maintainer accepted the following bounded residual risks so they do not
+block the source-only 2.0 promotion:
+
+- No Windows executable or signed application bundle will be published for this
+  release. Native executable/installer qualification is deferred until such an
+  artifact is actually offered.
+- Python 3.11 is the tested and recommended release interpreter. The declared
+  3.10 through 3.13 range remains accepted by metadata, but 3.10 clean-host
+  qualification is deferred and is not represented as completed evidence.
+- Stable local macOS operation is accepted as the maintainer's source-runtime
+  qualification; the macOS/PySide shared-process test-harness limitation remains
+  documented separately.
+- The production-shaped 1.2.8 operator migration rehearsal is waived as a
+  release prerequisite. Automated migration/backup/idempotency/rollback coverage
+  remains required, the `v1.2.8` tag remains recoverable, and public instructions
+  require a verified backup plus review or reconstruction of affected companion
+  settings when needed.
+
+These are explicit scope/risk decisions, not silently passed tests. They do not
+waive final source projection, smoke, privacy, inventory, version, or public-diff
+review.
 
 ## Promotion And Rollback
 

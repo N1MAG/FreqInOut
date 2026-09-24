@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtWidgets import QApplication
 
-from freqinout.core.config_autodiscovery import build_lab_radio_proposals
+from freqinout.core.config_autodiscovery import build_radio_instance_proposals
 from freqinout.core.config_js8_managed import build_js8call_managed_profile_plans
 from freqinout.core.guided_launch_recipes import (
     recipe_draft_updates,
@@ -78,7 +78,7 @@ def test_recipe_roots_align_with_platform_profile_builder_and_canonical_versions
         storage_home=tmp_path / "home",
     )
     assert resolution.qualified
-    proposal = build_lab_radio_proposals(radio_count=1, enabled_apps=("js8call",), busy_checker=lambda *_: False)[0]
+    proposal = build_radio_instance_proposals(radio_count=1, enabled_apps=("js8call",), busy_checker=lambda *_: False)[0]
     built = build_js8call_managed_profile_plans(
         (proposal.__class__(proposal.name, "stable-key", proposal.index, proposal.enabled_apps, proposal.ports),),
         config_root=tmp_path,

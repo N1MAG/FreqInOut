@@ -1868,7 +1868,13 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "selected_single = _select_single_detected_choice(js8_profile_choice_combo)" in dialog_block
     assert "_apply_js8_profile_choice()" in dialog_block
     assert "_update_port_prompt_visibility()" in dialog_block
-    assert "for widget in [flrig_port_edit, fldigi_port_edit, js8_port_edit, *port_prompt_fields.values()]:" in dialog_block
+    port_refresh_block = dialog_block[
+        dialog_block.index("for widget in [\n            flrig_port_edit,") :
+        dialog_block.index("notes_edit.textChanged.connect(_update_dialog_readiness)")
+    ]
+    assert "fldigi_arq_port_edit" in port_refresh_block
+    assert "*port_prompt_fields.values()" in port_refresh_block
+    assert "widget.textChanged.connect(lambda _text: _update_port_prompt_visibility())" in port_refresh_block
     assert "widget.textChanged.connect(lambda _text: _update_port_prompt_visibility())" in dialog_block
     assert "js8_port_edit.setText(port)" in dialog_block
     assert "js8_profile_edit.setText(profile_path)" in dialog_block

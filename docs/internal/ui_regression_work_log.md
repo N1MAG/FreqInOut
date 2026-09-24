@@ -10619,3 +10619,417 @@ skips**. Changed-file compilation and `git diff --check` pass. External
 qualification must confirm FT-710 FLRig and JS8 Subspace start through both
 startup and row Start on the Linux station and that repeated FLMsg/FLAmp starts
 do not create a second process for the same radio.
+
+## 2026-09-23 — Repeatable README/video callsign-masked demo profile
+
+Status: private preparation utility implemented and a current production-shaped
+capture profile generated; operator visual qualification remains open.
+
+The release-media workflow now uses
+`tools/create_readme_demo_profile.py` with an explicit matched settings and
+operational database pair. It copies sources read-only, shifts recognized
+callsign letters by three and digits by one with wrap, retains suffixes, and
+preserves the public `N1MAG` identity. Names such as Bill and Scott, grids,
+schedules, timestamps, and other message text are intentionally unchanged.
+The output is therefore obfuscated for presentation rather than claimed to be
+fully anonymized.
+
+The utility rejects collisions with preserved callsigns, transactionally
+suspends/restores copied-database triggers during transformation, performs an
+exact source-to-copy text-cell verification, and checks SQLite integrity. Its
+runtime overlay disables startup/transmit behavior, clears live ingest and
+saved Mesh connection paths, and assigns local RadioTools emulator endpoints.
+Safe refresh uses `--replace-output`, rotates the previous capture profile, and
+restores it if generation fails. The utility and its focused tests are private
+engineering assets excluded by the public runtime allowlist.
+
+Acceptance evidence:
+
+- `./.venv/bin/python -m pytest -q tests/test_create_readme_demo_profile.py`
+  passes 8 tests covering callsign rotation/wrap, digit-prefix international
+  callsigns, N1MAG and suffix preservation, unchanged names/grids/text, nested
+  JSON, preserved-identity collision
+  rejection, trigger suppression/restoration, exact copied content, and unique
+  callsign columns, plus safe existing-output rotation.
+- `python3 -m py_compile tools/create_readme_demo_profile.py` and
+  `git diff --check` pass.
+- The September 22 matched production copies generated
+  `/Users/Shared/FreqInOut-README-Demo-Current`: 3,356 callsign bases and
+  282,296 rows were transformed; both SQLite integrity checks returned `ok` and
+  the source-to-copy verification was exact.
+- The copied profile loads at migration version 3 with two active profiles,
+  zero launch-at-startup rows, an empty saved Mesh connection library, and
+  emulator endpoints on the expected FLRig, FLDigi, JS8, and rig-control ports.
+  All twelve endpoint probes succeeded while the three-radio emulator remained
+  running. A second end-to-end build with `--replace-output` also passed and
+  retained the prior capture profile at a timestamped sibling path.
+
+The primary root agent owned data-safety design, implementation, diff review,
+generation, and integration checks. Current runtime metadata did not expose an
+exact model identifier/reasoning-effort label, so none is invented here. No
+delegation was used for this bounded private-data preparation task. Exit gate:
+implementation and automated validation pass; the maintainer must inspect the
+running profile and captured frames before any media is published.
+
+## 2026-09-23 — Release-media profile bound to GUI radio suites
+
+Status: implemented, canonical profile refreshed, and live GUI-lab connection
+qualified.
+
+Review of `tools/start_multirig_gui_lab.sh` confirmed that its FLRig, FLDigi,
+and rigctld series are `12345`, `7362`, and `4532` plus the profile index. The
+GUI lab intentionally overrides JS8Call's TCP API to `2242`–`2244` and uses
+profile-specific save roots below `tool-homes/js8call/fio-a`, `fio-b`, and
+`fio-c`. Its operator SaveDir is distinct from the rig-named Qt application
+data root that owns `DIRECTED.TXT`, `ALL.TXT`, and `inbox.db3`. The launcher
+status text and lab documentation now distinguish both concepts and the lab's
+port contract from JS8Call's ordinary `2442` TCP default.
+
+`create_readme_demo_profile.py --gui-lab-root` now projects that exact contract
+into both each visible `device_profiles` row and its linked Fast Light and JS8
+identity. It also stores the real macOS FLRig, FLDigi, and per-version JS8Call
+executables and the GUI lab's log, NBEMS check-in, SaveDir, Qt data root,
+`DIRECTED.TXT`, inbox, forms, and `ALL.TXT` paths. Companion FLMsg, FLAmp,
+VarAC, JS8Spotter, and CommStat remain on the safe RadioTools stubs.
+Launch-at-startup and saved Mesh connections remain disabled.
+
+The tool inspects process open-file ownership before rotation and fails closed
+with a close-FIO instruction while allowing closed residual WAL files. The
+canonical profile was safely regenerated at
+`/Users/Shared/FreqInOut-README-Demo-Current` after its earlier FIO process had
+exited. FTDX-10 maps to suite A (`4532/12345/7362/2242`) and FT-710 maps to
+suite B (`4533/12346/7363/2243`). Both linked identities, distinct SaveDir/data
+roots, rig-scoped storage evidence, all paths, migration version 3, N1MAG/Bill
+preservation, zero startup rows, empty saved Mesh library, and both SQLite
+integrity checks passed. The previous canonical profile was retained as a
+timestamped sibling.
+
+The copied single-radio compatibility keys are now aligned with suite A as the
+primary runtime, including JS8 host, port, offset, SaveDir, DIRECTED.TXT, and
+forms. This prevents the shared compatibility client from also connecting to
+the production-default `2442` endpoint while per-radio suite B remains on
+`2243`. Focused regression coverage verifies that projection.
+
+Before live qualification, duplicate A/B Python mock FLRig/FLDigi listeners
+were stopped by exact validated command line so the real GUI applications own
+the test endpoints unambiguously. Rigctld, JS8Call, and the companion stubs
+were retained. Direct XML-RPC/API probes passed for both suites: FLRig A/B,
+FLDigi A/B, JS8Call A in compatible basic-API mode (2.5.2), and JS8Call B in
+full-API mode (3.0.3). FIO was then started with the canonical config directory;
+its live sockets show `12345`, `7362`, and `2242` for primary suite A plus
+`12346` monitoring for suite B, with no residual connection to `2442`. Suite B
+FLDigi and JS8 remain correctly saved and listening on `7363/2243` for use when
+that radio context is active.
+
+Acceptance: `bash -n tools/start_multirig_gui_lab.sh`, changed-file compilation,
+`git diff --check`, and 11 focused demo-profile tests pass. The primary root
+agent owned configuration safety, implementation, review, and validation; no
+delegation was used. Exit gate: the canonical profile is running against the
+GUI suites and is ready for maintainer visual/application qualification.
+
+## 2026-09-23 — GUI lab FLRig CAT identity and startup ordering
+
+Status: implemented and live-qualified against the callsign-masked README demo
+profile.
+
+The GUI launcher no longer prepares FLRig with the placeholder `NONE` model.
+Each selected suite now starts a distinct, stateful pseudo-serial Kenwood
+TS-2000 CAT emulator. Its FLRig profile is saved as `TS-2000`, points to a
+stable suite-specific device link, retains its existing XML-RPC allocation,
+and uses the TS-2000 serial defaults needed by FLRig. The launcher waits until
+FLRig reports the expected model and a valid VFO before starting FLDigi and
+JS8Call, avoiding the earlier race in which a dependent application could see
+an unready rig endpoint.
+
+Live A/B qualification used the canonical FIO profile at
+`/Users/Shared/FreqInOut-README-Demo-Current`. FLRig on `12345` and `12346`
+reports `TS-2000`, USB, and distinct valid frequencies. Both FLDigi instances
+are connected to their matching FLRig port; both JS8Call profiles are running
+on the intended `2242` and `2243` API ports; FIO remains connected to its
+active suite while the second suite remains available for radio-context use.
+No third suite was started because the current demo profile has two radios.
+
+Acceptance: direct CAT protocol smoke testing, `bash -n`, Python compilation,
+focused emulator tests, XML-RPC model/frequency/mode probes, process ownership,
+and socket attribution pass. The primary root agent owned the bounded lab
+implementation and validation; no delegation was used.
+
+## 2026-09-23 — Public 2.0 README screenshot set and narrative draft
+
+Status: screenshots staged and public README draft prepared for maintainer
+review; the current testing README remains unchanged.
+
+Six maintainer-supplied production screenshots were reviewed and copied under
+stable release names in `docs/images/readme-2.0/`: Ops Center, radio profiles,
+Launch Control, Plan Builder, Message Compose, and the operational map. The
+frames expose no non-public callsigns, message bodies, access codes, or local
+filesystem paths. The intentionally public `N1MAG` project identity remains in
+the small places where it appears.
+
+`docs/internal/README-public-2.0-draft.md` is a clean public landing-page draft
+whose paths are already written for eventual root `README.md` placement. It
+leads with the product outcome and Ops Center image, explains HF Digital
+Tri-Mode without claiming the concept as FIO-specific, presents multi-radio
+configuration, launch attribution, scheduling, messaging, offline mapping,
+platform support, fresh installation, single-radio upgrade expectations,
+privacy/logging, documentation, dedication, and development support. It does
+not include private repository, testing-branch, engineering-tool, or internal
+workflow instructions.
+
+Exit gate: maintainer wording and screenshot-order review remains required.
+The final README must not replace the testing README or enter the public export
+until the broader 2.0 promotion gates authorize it.
+
+## 2026-09-23 — Public 1.2.8 to multi-rig 2.0 semantic reconciliation
+
+Status: the five requested audit/remediation actions are complete at the source
+and focused-test level. The promotion gate remains open for native Windows,
+supported-platform qualification, and unrelated pre-existing private-suite
+failures.
+
+The immutable comparison used common ancestor `e91deaa`, public 1.2.8
+`2c3ba1a`, audited multi-rig head `630c45b`, and multi-rig alignment checkpoint
+`b8a71c6`. Public history has 98 commits after the ancestor versus 577 on the
+multi-rig side. `git cherry` identified 15 patch-equivalent commits;
+high-creation-factor `range-diff` paired 64 public commits and left 34 for
+explicit disposition. The private record
+`docs/internal/public_1_2_8_to_2_0_reconciliation.md` maps those fixes to the
+current architecture. No missing public runtime module was found.
+
+The managed-BBS/VarAC/FLAMP parity package mapped the adapted public behaviors
+to current station catalog, vault parser, helper filtering, signing, BLR/FLAMP
+state machine, and management tests. Its combined acceptance run passed 156
+tests with one expected skip and no failures.
+
+Source corrections made during reconciliation:
+
+- FIO 2.0 now consistently requires Python 3.10-3.13. Project metadata,
+  requirements, uv lock, install helpers, Linux installer, user install docs,
+  public README draft, and Mesh specification agree. The Python 3.9 and
+  `urllib3<2` compatibility work is explicitly superseded.
+- The existing PyInstaller runtime hook now removes inherited host Python/Qt
+  paths before prepending bundled QML/plugins. Windows defaults to software
+  Qt/Chromium rendering, UPX is disabled, windowed logging tolerates missing
+  stdout, `--smoke-test` exits after a bounded startup, and fatal startup
+  tracebacks are retained in `startup-error.log`.
+- A new public-1.2.8-shaped rehearsal test proves preview, retained backup,
+  explicit conversion, radio/app endpoint carry-forward, launch-off review,
+  idempotent rerun, and rollback to the pre-migration marker/state.
+- Legacy external JS8Spotter projection coverage was clarified to require the
+  matching software flag, and Guided Add Radio's current FLDigi ARQ port
+  refresh wiring replaced a stale single-line source assertion.
+
+Work-package ownership:
+
+- Architecture, Python/runtime contract, Windows frozen-runtime correction,
+  migration rehearsal, diff review, documentation, and integration were owned
+  by the primary `gpt-6-astra` agent. The runtime did not expose a trustworthy
+  reasoning-effort label, so none is invented.
+- Public commit ledger: `gpt-5.6-luna`, low reasoning, read-only.
+- Windows packaging/Python declaration inventory: `gpt-5.6-luna`, medium
+  reasoning, read-only.
+- BBS/VarAC/FLAMP parity audit: `gpt-5.6-terra`, medium reasoning, read-only.
+  The primary reviewed every report; delegates made no filesystem changes.
+
+Acceptance evidence:
+
+- `QT_QPA_PLATFORM=offscreen ./.venv/bin/python -m pytest -q` across the nine
+  BBS/VarAC/FLAMP files: **156 passed, 1 skipped**.
+- Packaging/interpreter/install/migration focus across seven files:
+  **240 passed**.
+- `./.venv/bin/python tools/release_preflight.py`, changed-tree compilation,
+  `bash -n` for the Linux installer/launcher/uninstaller, `uv lock --check`, and
+  `git diff --check`: pass.
+- The full suite in one process reaches about 3% before a reproducible PySide
+  6.8/macOS native crash when one real-widget test's deferred native teardown
+  overlaps a later Qt paint/layout event. The fixture evaluation below proves
+  that a JS8 predecessor is not required. Running all 376 test files in
+  isolated processes completed the inventory and exposed six unrelated failing
+  modules plus two skipped-only modules and two Qt teardown exit-139 modules.
+  The current focused reconciliation suites do not share those failures.
+- Remaining assertion modules are `test_config_lab_preset.py`,
+  `test_message_file_projection_pipeline_core.py`,
+  `test_multi_rig_wave1_slice_b.py`, `test_performance_regression_boundaries.py`,
+  `test_sdr_receiver_setup_ui.py`, and
+  `test_varac_bbs_filename_normalization_1_2_3.py`. They concern stale lab path
+  expectations, one changed-file tombstone expectation, older Guided Add Radio
+  fixtures, an immediate-button-label race, lightweight SDR store doubles, and
+  lightweight BBS reader doubles/delegate naming. They remain visible blockers
+  to the final all-private-tests gate rather than being waived here.
+
+Exit gate: focused reconciliation passes. Public promotion remains blocked
+until the listed private-suite items are reconciled, a native Windows packaged
+build/install/uninstall smoke passes, Python 3.10 and primary-version clean-host
+installs pass, and the final operator upgrade/export review is complete.
+
+## 2026-09-23 — Public 2.0 launcher and installer reconciliation
+
+Status: implemented; native Windows packaging smoke remains a release gate.
+
+The root source launcher no longer redirects ordinary upgrades into
+`~/.freqinout/runtime/multi-rig` or a sibling checkout runtime. Linux and macOS
+now use FIO's standard profile by default, with only an explicit
+`FREQINOUT_CONFIG_DIR` selecting isolation. A matching Windows command launcher
+supports both `.venv` and `venv`, forwards arguments, and follows the same
+profile contract. The older `FREQINOUT_RUNTIME_ROOT` remains only as a warned
+compatibility alias.
+
+The Linux installer includes the operator launcher and public metadata in its
+runtime sparse tree and no longer writes multi-rig migration state. Migration
+remains owned by the in-app informed review after backup. Runtime
+`requirements.txt` no longer installs the internal PyYAML tool dependency, and
+the paired uninstaller now removes all icon sizes and the pixmap installed by
+the installer while leaving the operator profile intact. The installer target
+is now explicitly the canonical public HTTPS repository
+`https://github.com/N1MAG/FreqInOut.git` on `main`; private-preview use requires
+an explicit private repository and branch.
+
+The update audit also corrected an existing-checkout defect: an explicit
+`--repo` previously remained advisory while `git fetch` still used the old
+origin. The installer now changes origin only for an explicit repo selection,
+records the previous URL for error rollback, fetches the target into a named
+remote-tracking ref, and creates a missing local branch from that ref before a
+fast-forward-only pull.
+
+The private preview instructions still name the private source explicitly.
+Contract tests cover the public installer defaults, migration ownership, both
+launcher layouts/profile behavior, explicit-repository update handling, and
+runtime dependency separation.
+
+## 2026-09-23 — macOS PySide fixture teardown evaluation
+
+Status: evaluation complete; no production lifecycle change justified.
+
+The primary `gpt-6-astra` agent owned the concurrency/lifecycle decision and
+reviewed all evidence. A read-only fixture audit used `gpt-5.6-luna` with low
+reasoning, and a read-only reproduction/ordering package used
+`gpt-5.6-terra` with medium reasoning. Delegates made no filesystem changes.
+The primary's experimental fixture edits were reverted after evaluation, so
+the two target test modules have no residual diff.
+
+The fault is reproducible without the monolithic suite. In an isolated test
+profile, Compose's keystroke test followed by its layout-coalescing test exits
+139 at `QTest.qWait`; each passes alone. In the Inbox reader module, the
+CommStat table-layout test followed by bounded reader navigation exits 139 in
+the paint-settle path; the reverse order passes. The JS8 API module can also
+precede a construction-time abort, but it is not required to reproduce the
+fault. The live `concurrent.futures` worker seen in traces is the shared
+dependency-status executor started by the test-created launch orchestrator,
+not proof of a surviving JS8 socket reader.
+
+Fixture experiments separated production ownership from native widget
+destruction. Calling `MessageViewerTab.shutdown()` before the existing
+`close()`/`deleteLater()` sequence did not prevent the second-test crash.
+Stubbing the launch orchestrator and using a temporary `FREQINOUT_CONFIG_DIR`
+removed the shared executor and operator-profile dependency, but explicitly
+draining `QEvent.DeferredDelete` then caused the first isolated test to fault
+inside native PySide teardown. Retaining closed wrappers merely moved the
+fault to interpreter exit. These results do not prove that a production-owned
+worker outlives its owner, and changing shared Linux/Windows/macOS runtime
+lifecycle would add risk without supporting evidence.
+
+Acceptance policy for this host is therefore process isolation for the two
+real-widget modules, followed by a native macOS startup/use/shutdown soak. All
+**32 collected test nodes** across those modules pass and exit normally when
+run in fresh isolated processes with temporary configuration roots. The
+remaining six Python assertion modules remain separate release blockers. The
+single-process macOS/PySide 6.8 aggregate is recorded as a harness limitation,
+not waived as a passing test and not represented as an operator crash.
+No production profile, database, external application, or device was modified.
+
+## 2026-09-23 — Public runtime projection and private release-gate closure
+
+Status: local/private readiness checks pass; external platform, operator, and
+immutable-candidate gates remain open.
+
+The release boundary is now enforced by the private
+`tools/build_public_runtime_export.py` allowlist exporter. It copies only
+reviewed application/runtime files, public documentation and launch/install
+assets, and required licenses/data. It substitutes the public 2.0 README draft
+at the exported root and excludes tests, engineering tools, internal documents,
+GUI lab/emulators, the lab preset module, caches, and third-party JS8Net example
+programs. The current export contains 408 validated files. Its scanner rejects
+private repository/branch markers and named-user paths. A fresh temporary
+profile launched and shut down cleanly from the exact exported tree using the
+bounded `--smoke-test` path.
+
+Runtime packaging now includes the net-resource, propagation-profile, and
+resource-catalog data used by installed FIO. JS8Net packaging is limited to the
+runtime module and license. Public installation documents target the canonical
+repository and describe Windows, macOS, and Linux installation/update,
+single-radio upgrade review, backups, logs, and troubleshooting without private
+preview instructions. Current-operator NBEMS/CommStat discovery no longer names
+developer accounts or assumes their home directories.
+
+The earlier six stale assertion modules are closed. Lab preset paths now use the
+same platform-native managed JS8 paths saved into radio profiles; the production
+proposal helper no longer carries a lab-specific name; projection metadata-only
+refresh and true-content-change tombstone expectations are distinct; older
+Guided Add Radio/SDR/performance fixtures match current contracts; and the
+managed-BBS normalization fixture creates the station catalog target now
+required by runtime policy. These modules pass 42 tests together.
+
+The isolated full inventory accounted for 378 private test modules: 374 pass,
+two are intentional skip-only modules, and the Compose and Inbox reader modules
+encounter the already-characterized PySide 6.8/macOS cross-test teardown crash
+when multiple real-widget tests share a process. All 32 nodes across those two
+modules pass and exit normally when run in fresh processes. This reinforces the
+fixture-teardown finding and does not justify a cross-platform production
+lifecycle change.
+
+Work-package ownership and review:
+
+- Primary `gpt-6-astra`: release architecture, persistence/portability safety,
+  implementation integration, delegated-diff review, acceptance, documentation,
+  and exit-gate decision. No reasoning-effort label was exposed by the runtime.
+- `release_projection_contract`: `gpt-5.6-luna`, low reasoning; bounded
+  projection-contract test review.
+- `release_stale_fixtures`: `gpt-5.6-terra`, medium reasoning; bounded stale
+  fixture review/correction.
+- `release_public_audit`: `gpt-5.6-luna`, medium reasoning; read-only public
+  boundary and documentation audit.
+
+Acceptance evidence:
+
+- isolated module sweep: 378 accounted for; 374 pass, 2 skip-only, 2 documented
+  Qt teardown modules whose 32 individual nodes all pass;
+- stale-module focus: 42 passed;
+- help/packaging/export/portability/BBS focus: 55 passed;
+- public 408-file projection: validation pass and clean macOS offscreen
+  `--smoke-test` startup/shutdown;
+- release preflight, changed Python compilation, Linux installer/launcher/
+  uninstaller `bash -n`, and `git diff --check`: pass.
+
+Exit gate: local source/projection readiness passes. Promotion remains blocked
+on native Windows frozen build/install/update/uninstall, clean-host Python 3.10
+and primary-version supported-platform installs, macOS native soak,
+operator-assisted public-1.2.8 upgrade and companion/hardware qualification,
+the immutable candidate/export fingerprint, and final public diff/inventory
+approval. No public push, tag, or release was performed.
+
+## 2026-09-24 — Maintainer acceptance of bounded 2.0 release risks
+
+Status: accepted for a source-only release; final candidate/export review still
+required.
+
+The maintainer explicitly waived native executable qualification because no
+2.0 executable or signed bundle will be offered. Python 3.11 remains the tested
+and recommended release interpreter; local Python 3.10 clean-host testing is
+deferred while the declared 3.10-3.13 metadata range remains accepted rather
+than represented as fully platform-qualified. Stable local macOS operation is
+accepted as source-runtime evidence.
+
+The maintainer also waived a final production-shaped public-1.2.8 operator
+migration as a release prerequisite. This does not remove the automated
+backup/preview/explicit-apply/idempotency/rollback rehearsal. Public guidance
+now makes the verified backup mandatory, preserves the recoverable `v1.2.8`
+tag, and states that operators may need to review or rebuild affected companion
+application configuration. These decisions are recorded as accepted residual
+risk, not as passed tests.
+
+Primary `gpt-6-astra` owns this release-scope decision and documentation update;
+the runtime did not expose a trustworthy reasoning-effort label. No delegation
+was used for this primary-owned release integration decision.
+
+Exit gate: proceed to the immutable private candidate and exact public source
+projection. Public push, merge, and `v2.0.0` tag remain outside this gate.
