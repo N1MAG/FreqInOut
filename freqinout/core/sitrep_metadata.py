@@ -14,16 +14,26 @@ _STATUS_ORDER = {
 _SOURCE_FAMILY_LABELS = {
     "COMMSTAT": "CommStat",
     "JS8SPOTTER": "JS8Spotter",
+    "CONDITION_ALERT": "Condition Alert",
+    "RF_PIN": "RF Pin",
     "MANUAL": "Manual",
     "FUSED": "Fused",
+    "MESH": "Mesh",
+    "MESHCORE": "MeshCore",
+    "MESHTASTIC": "Meshtastic",
     "UNKNOWN": "Unknown",
 }
 
 _SOURCE_SHORT_LABELS = {
     "COMMSTAT": "CS",
     "JS8SPOTTER": "SPT",
+    "CONDITION_ALERT": "ALRT",
+    "RF_PIN": "PIN",
     "MANUAL": "MAN",
     "FUSED": "FUS",
+    "MESH": "MSH",
+    "MESHCORE": "MCR",
+    "MESHTASTIC": "MST",
     "UNKNOWN": "UNK",
 }
 
@@ -33,6 +43,8 @@ _SUBTYPE_LABELS = {
     "SPOTTER_301": "F!301",
     "SPOTTER_304": "F!304",
     "SPOTTER_104": "F!104",
+    "SPOTTER_701B": "F!701B",
+    "SPOTTER_701C": "F!701C",
 }
 
 
@@ -81,8 +93,18 @@ def source_family_key(source: object) -> str:
         return "UNKNOWN"
     if src in {"COMMSTAT3", "COMMSTAT23", "COMMSTAT", "COMMSTAT_12", "COMMSTAT_FWD"}:
         return "COMMSTAT"
-    if src in {"JS8SPOTTER", "SPOTTER"}:
+    if src in {"JS8SPOTTER", "JS8SPOTTER_IMPORT", "SPOTTER"}:
         return "JS8SPOTTER"
+    if src in {"CONDITION_ALERT", "CONDITIONALERT", "ALERT"}:
+        return "CONDITION_ALERT"
+    if src in {"RF_PIN", "RFPIN", "PIN", "MAP_PIN"}:
+        return "RF_PIN"
+    if src in {"MESHTASTIC", "MESH_CLIENT", "LOCAL_MESH"}:
+        return "MESHTASTIC"
+    if src in {"MESHCORE", "MESH_CORE"}:
+        return "MESHCORE"
+    if src == "MESH":
+        return "MESH"
     if src == "MANUAL":
         return "MANUAL"
     if src == "FUSED":
@@ -107,7 +129,7 @@ def source_short_label(source: object) -> str:
 def source_families_from_sources(sources: Iterable[object]) -> List[str]:
     families = {source_family_key(src) for src in sources if str(src or "").strip()}
     ordered = []
-    for key in ("COMMSTAT", "JS8SPOTTER", "MANUAL", "FUSED", "UNKNOWN"):
+    for key in ("COMMSTAT", "JS8SPOTTER", "MESHTASTIC", "MESHCORE", "MESH", "CONDITION_ALERT", "RF_PIN", "MANUAL", "FUSED", "UNKNOWN"):
         if key in families:
             ordered.append(key)
             families.discard(key)

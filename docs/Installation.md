@@ -1,75 +1,157 @@
-# FreqInOut Installation Guide (Windows)
+# Installing and Updating FreqInOut 2.0
 
-This guide assumes a fresh Windows system. Adjust paths as needed.
+FreqInOut 2.0 supports source installation on Windows 10/11, current macOS
+releases, and common Linux desktop distributions. Python 3.10 through 3.13 is
+accepted; Python 3.11 is the tested and recommended release interpreter.
+Companion radio applications are installed separately. No 2.0 executable or
+signed application bundle is currently published.
 
-## 1) Prerequisites
-- Python 3.9 through 3.13 installed and on PATH (3.11 recommended; 3.14 is not yet supported)
-- Git (if cloning)
-- Optional: FLRig/FLDigi/JS8Call/VarAC installed if you plan to auto-launch them
+## Before an upgrade
 
-## 2) Get the code
-Clone or download the repository:
-```
-git clone https://github.com/N1MAG/FreqInOut.git FreqInOut
-cd FreqInOut
-```
+An existing single-radio station can be upgraded in place. Before changing the
+application:
 
-## 3) Create a virtual environment
-```
-python -m venv venv
-```
+1. Close FreqInOut and the companion radio applications it manages.
+2. Back up the FIO profile and verify that the backup can be opened.
+3. Keep the existing application folder and profile until the upgraded station
+   has been reviewed.
+4. Use the same profile location during the update.
 
-## 4) Activate the virtual environment (PowerShell)
-```
-.\venv\Scripts\Activate.ps1
-```
+On first 2.0 launch, FIO presents the proposed conversion of the existing
+station to the default radio. Nothing is migrated until the operator confirms
+that review. Cancel or Defer leaves the legacy profile unchanged.
 
-## 5) Install dependencies
-```
-pip install -r requirements.txt
-```
+The conversion path has automated rehearsal coverage. A production-shaped
+operator migration was not a release prerequisite for 2.0, so the verified
+backup is mandatory and operators should be prepared to review or rebuild
+affected companion-application settings when an older station differs from the
+rehearsed profile.
 
-`requirements.txt` includes `keyring`, which FIO uses for secure GPG signing passphrase storage in the operating system credential store. On Linux, make sure a supported keyring backend is available, such as Secret Service or KWallet; FIO will not fall back to plaintext storage.
+The detailed cross-platform procedure is in the
+[FreqInOut 2.0 upgrade guide](FreqInOut%20Version%202%20Upgrade%20Guide%20for%20Current%20Single%20Radio%20Users.docx).
 
-If you will control JS8Call, also install:
-```
-pip install pyjs8call
-```
+## Windows 10/11
 
-## 6) Run FreqInOut
-```
-python -m freqinout.main
-```
+Install 64-bit Python 3.11 from Python.org and Git for Windows, then open
+PowerShell:
 
-## 7) Configure paths
-- Open the Settings tab and set executable paths for FLRig, FLDigi, FLMsg, FLAmp, VarAC, JS8Call.
-- Set JS8Call DIRECTED.TXT path (for JS8 net control).
-- Watch the Settings left-nav for warning highlights. In `1.2.2`, these indicate sections where a companion field is still missing.
-- Typical examples:
-  - `JS8Call Settings`: if `JS8Call Install Folder` is set, also set host, TCP port, and `DIRECTED.TXT`.
-  - `JS8Call Settings`: if `JS8Spotter Launch Path` is set, also set `JS8Spotter forms`.
-  - `Fast Light Settings`: if `FLRig` or `FLDigi` executable paths are set, also set their endpoint fields; if `FLMsg` or `FLAmp` executable paths are set, also set their message folders.
-  - `VarAC Settings`: if `VarAC Install Folder` is set, also set `Incoming Files`.
-
-## 8) Data storage
-- Settings and schedules are stored in the runtime profile under `FreqInOut\config\freqinout.db` (SQLite).
-- On Windows, the default profile root is `%LOCALAPPDATA%\FreqInOut` (fallback `%APPDATA%\FreqInOut`).
-- Logs are stored in the profile root as `freqinout.log`.
-
-## 9) Building an executable (optional)
-If `build_executable.py` is provided, activate the venv then run:
-```
-python build_executable.py
+```powershell
+git clone https://github.com/N1MAG/FreqInOut.git "$HOME\FreqInOut"
+Set-Location "$HOME\FreqInOut"
+py -3.11 install_freqinout.py
+.\start-multi-rig.cmd
 ```
 
-## 10) Troubleshooting
-- If saving settings fails on OneDrive, run the app from a local folder.
-- Ensure JS8Call API port matches `js8_port` in settings (default 2442).
-- For FLRig control, verify FLRig is running and reachable at 127.0.0.1:12345 (default).
+The launcher accepts normal FIO command-line options. An explicit
+`FREQINOUT_CONFIG_DIR` is honored when a separate profile is intentionally
+required.
 
-## 11) Linux installer
-For Linux users, prefer the guided installer:
+To update a source checkout, close FIO and its companion applications, then:
+
+```powershell
+Set-Location "$HOME\FreqInOut"
+git pull --ff-only origin main
+py -3.11 install_freqinout.py
 ```
+
+The repository contains maintainer packaging support, but a signed Windows
+installer should only be treated as available when it is attached to an
+official FreqInOut release.
+
+## macOS
+
+Install Git and Python 3.11 from Python.org or Homebrew. Do not use an obsolete
+system Python.
+
+```bash
+git clone https://github.com/N1MAG/FreqInOut.git "$HOME/FreqInOut"
+cd "$HOME/FreqInOut"
+python3.11 install_freqinout.py
+./start-multi-rig.sh
+```
+
+For an update:
+
+```bash
+cd "$HOME/FreqInOut"
+git pull --ff-only origin main
+python3.11 install_freqinout.py
+```
+
+FIO is currently supported as a source installation on macOS. A signed and
+notarized macOS application bundle is not currently published. macOS may ask
+for file or automation access when configured companion applications are first
+used; grant only the access needed by those configured paths.
+
+## Linux
+
+The guided installer recognizes `apt`, `dnf`, `yum`, `pacman`, and `zypper`,
+installs supported system dependencies, creates a virtual environment, and
+prepares the launcher and desktop entry.
+
+```bash
+git clone https://github.com/N1MAG/FreqInOut.git "$HOME/FreqInOut"
+cd "$HOME/FreqInOut"
 bash install_FreqInOut_linux.sh
 ```
-This installer is the recommended end-user path. It keeps the installed app checkout runtime-focused, excluding `tests/` and other developer-only paths, so later `git pull` updates in that installed folder do not materialize the test suite.
+
+Rerun the same installer to update. Preserve any explicit `--dir` and
+`--config-root` values used for the original installation. See the
+[Linux installer reference](FreqInOut-linux-installer.md) for repair, offline,
+unattended, rollback, and uninstall options.
+
+The native Map may require `libxcb-cursor0` and `libxcb-xinerama0` on
+Debian/Ubuntu-family desktops. The guided installer offers applicable platform
+packages when they are missing.
+
+## First launch
+
+1. Enter the station callsign, location, and time preferences under
+   **Configuration**.
+2. Define the operating groups used by schedules, filtering, access policies,
+   and publication rules.
+3. Add or review the first radio and select only the software it uses.
+4. Review Software Administration and Launch Control for that radio.
+5. Assign a plan and schedule, then verify Ops Center and Station Health.
+6. Restart FIO and confirm that the selected profile and radio settings persist.
+
+FIO vendors its supported JS8 networking integration. Do not install
+`pyjs8call` as a replacement for that integration.
+
+## Profile and log locations
+
+Unless `FREQINOUT_CONFIG_DIR` selects another profile, the normal roots are:
+
+| OS | Default profile root |
+|---|---|
+| Windows | `%LOCALAPPDATA%\FreqInOut` (or `%APPDATA%\FreqInOut`) |
+| macOS | `~/.freqinout` |
+| Linux | `~/.freqinout` |
+
+The settings and operational databases are under the profile's `config`
+folder. Support evidence in the profile root includes:
+
+- `freqinout.log` — primary application log;
+- `perf_metrics.log` — bounded performance observations;
+- `fio_cpu_hotspot_*.txt` — CPU hotspot evidence when generated;
+- UI hang evidence generated by the watchdog, when present.
+
+Review attachments for callsigns, message content, access codes, local paths,
+and other private information. Database files are not normally needed unless
+support specifically requests them.
+
+## Troubleshooting
+
+- **Python rejected:** use Python 3.10 through 3.13. Python 3.14 is not yet
+  supported.
+- **Module or import error:** rerun `install_freqinout.py`, or use the Linux
+  installer's `--repair` option with the original paths.
+- **Wrong configuration appears:** close FIO and check
+  `FREQINOUT_CONFIG_DIR` before changing any settings.
+- **A companion app is unavailable:** verify that the selected radio owns the
+  correct executable, endpoint, profile, and data paths.
+- **Map is blank:** capture the logs; the Map is designed to use bundled
+  geography and does not require an online tile API key.
+
+The in-app FreqInOut Guide contains configuration, recovery, and feature-level
+reference material.

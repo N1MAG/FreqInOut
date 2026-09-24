@@ -1,0 +1,583 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+import datetime as dt
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+from freqinout.core.condition_alert_ingest import condition_alert_observations_for_message_intelligence
+from freqinout.core.message_file_scanner import FileRecord, IMAGE_EXTS
+from freqinout.core.message_intelligence import MessageIntelligence, analyze_commstat_fields, analyze_form_text, analyze_spotter_text
+from freqinout.core.observation_projection import (
+    observation_from_local_report,
+    observation_from_message_intelligence,
+    utc_now_iso,
+)
+from freqinout.core.observation_store import ensure_observation_schema, upsert_observation_conn
+from freqinout.core.sqlite_utils import connect_sqlite, table_exists
+
+
+LOCAL_REPORT_SOURCE_KEY = "local_operator_reports"
+SPOTTER_TRAFFIC_SOURCE_KEY = "spotter_traffic"
+COMMSTAT_ARTIFACT_SOURCE_KEY = "commstat_artifacts"
+FORM_FILE_ORIGINS = {"flmsg", "flamp"}
+
+
+def backfill_observations(
+    db_path: str | Path,
+    *,
+    include_local_reports: bool = True,
+    include_spotter_traffic: bool = True,
+    include_commstat_artifacts: bool = True,
+    condition_alert_rules: Any = None,
+    batch_limit: int = 500,
+) -> dict[str, int]:
+    conn = connect_sqlite(db_path)
+    try:
+        ensure_observation_schema(conn)
+        counts = {"local_reports": 0, "spotter_traffic": 0, "commstat_artifacts": 0}
+        with conn:
+            if include_local_reports:
+                counts["local_reports"] = _backfill_local_reports(conn, batch_limit=batch_limit)
+            if include_spotter_traffic:
+                counts["spotter_traffic"] = _backfill_spotter_traffic(
+                    conn,
+                    batch_limit=batch_limit,
+                    condition_alert_rules=condition_alert_rules,
+                )
+            if include_commstat_artifacts:
+                counts["commstat_artifacts"] = _backfill_commstat_artifacts(
+                    conn,
+                    batch_limit=batch_limit,
+                    condition_alert_rules=condition_alert_rules,
+                )
+        return counts
+    finally:
+        conn.close()
+
+
+def project_message_file_observations(
+    db_path: str | Path,
+    records: Mapping[str, Sequence[FileRecord]],
+    *,
+    origins: Sequence[str] = ("flmsg", "flamp"),
+    condition_alert_rules: Any = None,
+    batch_limit: int = 100,
+) -> int:
+    allowed = {str(origin or "").strip().lower() for origin in origins if str(origin or "").strip()}
+    allowed &= FORM_FILE_ORIGINS
+    if not allowed:
+        return 0
+    candidates: list[FileRecord] = []
+    for origin in sorted(allowed):
+        candidates.extend(record for record in records.get(origin, ()) if isinstance(record, FileRecord))
+    candidates = [
+        record
+        for record in candidates
+        if str(record.path.suffix or "").strip().lower() not in IMAGE_EXTS
+        and str(record.path or "").strip()
+    ]
+    candidates.sort(key=lambda record: float(record.mtime or 0.0), reverse=True)
+    candidates = candidates[: max(1, int(batch_limit or 100))]
+    if not candidates:
+        return 0
+    conn = connect_sqlite(db_path)
+    try:
+        ensure_observation_schema(conn)
+        count = 0
+        with conn:
+            for record in candidates:
+                projection = _file_record_projection(record)
+                if projection is None:
+                    continue
+                info, observation = projection
+                upsert_observation_conn(conn, observation)
+                _upsert_condition_alert_observations(
+                    conn,
+                    info,
+                    condition_alert_rules=condition_alert_rules,
+                    source_ref=observation.source_ref,
+                    source_family=observation.source_family,
+                    received_utc=observation.received_utc,
+                )
+                count += 1
+        return count
+    finally:
+        conn.close()
+
+
+def _backfill_local_reports(conn: sqlite3.Connection, *, batch_limit: int) -> int:
+    if not table_exists(conn, "local_operator_reports"):
+        return 0
+    last_id = _checkpoint_id(conn, LOCAL_REPORT_SOURCE_KEY)
+    rows = conn.execute(
+        """
+        SELECT
+            id,
+            created_utc,
+            updated_utc,
+            source_kind,
+            source_channel,
+            net_session_id,
+            callsign,
+            operator_id,
+            from_name,
+            city,
+            county,
+            state,
+            grid,
+            lat,
+            lon,
+            location_source,
+            location_confidence,
+            status,
+            topics_json,
+            topic_evidence_json,
+            subject,
+            body,
+            confirmed_state,
+            followup_state,
+            exercise_flag,
+            source_radio_id,
+            source_app,
+            raw_reference,
+            created_by,
+            updated_by
+        FROM local_operator_reports
+        WHERE id > ?
+        ORDER BY id ASC
+        LIMIT ?
+        """,
+        (last_id, max(1, int(batch_limit or 500))),
+    ).fetchall()
+    count = 0
+    last_seen = last_id
+    for row in rows:
+        report = _local_report_row_to_dict(row)
+        upsert_observation_conn(conn, observation_from_local_report(report))
+        count += 1
+        last_seen = max(last_seen, int(row[0] or 0))
+    if count:
+        _set_checkpoint(conn, LOCAL_REPORT_SOURCE_KEY, last_id=last_seen)
+    return count
+
+
+def _file_record_projection(record: FileRecord) -> tuple[MessageIntelligence, Any] | None:
+    origin = str(record.origin or "").strip().lower()
+    if origin not in FORM_FILE_ORIGINS:
+        return None
+    text = _read_text_head(record.path, limit=131072)
+    if not text:
+        return None
+    info = analyze_spotter_text(text) if text.strip().upper().startswith("F!") else None
+    if info is None:
+        info = analyze_form_text(
+            text,
+            source_type=origin,
+            path=record.path,
+        )
+    mtime_utc = _mtime_utc(record.mtime)
+    return (
+        info,
+        observation_from_message_intelligence(
+            info,
+            source_ref=f"file:{record.path}",
+            source_family=origin,
+            received_utc=mtime_utc,
+            event_utc=mtime_utc,
+            status="NEW",
+            extra_provenance={
+                "file_path": str(record.path),
+                "file_name": record.path.name,
+                "file_mtime": float(record.mtime or 0.0),
+                "file_size": int(record.size or 0),
+                "projection_source": "message_file_scan",
+            },
+        ),
+    )
+
+
+def _observation_from_file_record(record: FileRecord):
+    projection = _file_record_projection(record)
+    if projection is None:
+        return None
+    return projection[1]
+
+
+def _backfill_spotter_traffic(conn: sqlite3.Connection, *, batch_limit: int, condition_alert_rules: Any = None) -> int:
+    if not table_exists(conn, "spotter_traffic"):
+        return 0
+    last_id = _checkpoint_id(conn, SPOTTER_TRAFFIC_SOURCE_KEY)
+    rows = conn.execute(
+        """
+        SELECT
+            id,
+            utc_str,
+            from_call,
+            to_call,
+            form_id,
+            raw_text,
+            state,
+            source_radio_id,
+            js8_instance_id
+        FROM spotter_traffic
+        WHERE id > ?
+        ORDER BY id ASC
+        LIMIT ?
+        """,
+        (last_id, max(1, int(batch_limit or 500))),
+    ).fetchall()
+    count = 0
+    last_seen = last_id
+    for row in rows:
+        imported_id = int(row[0] or 0)
+        raw_text = str(row[5] or "").strip()
+        form_id = str(row[4] or "").strip()
+        if not imported_id or not raw_text:
+            last_seen = max(last_seen, imported_id)
+            continue
+        info = analyze_spotter_text(
+            raw_text,
+            form_name=f"MCF{form_id}" if form_id else "",
+            from_call=row[2] or "",
+            to_call=row[3] or "",
+        )
+        upsert_observation_conn(
+            conn,
+            observation_from_message_intelligence(
+                info,
+                source_ref=f"spotter_traffic:{imported_id}",
+                source_family="spotter",
+                source_radio_id=_int_or_none(row[7]),
+                source_app=str(row[8] or "").strip(),
+                received_utc=str(row[1] or ""),
+                event_utc=str(row[1] or ""),
+                status=str(row[6] or "").strip().upper() or "UNREAD",
+                extra_provenance={"backfill_source": "spotter_traffic"},
+            ),
+        )
+        _upsert_condition_alert_observations(
+            conn,
+            info,
+            condition_alert_rules=condition_alert_rules,
+            source_ref=f"spotter_traffic:{imported_id}",
+            source_family="JS8Spotter",
+            source_radio_id=_int_or_none(row[7]),
+            source_app=str(row[8] or "").strip(),
+            received_utc=str(row[1] or ""),
+        )
+        count += 1
+        last_seen = max(last_seen, imported_id)
+    if count:
+        _set_checkpoint(conn, SPOTTER_TRAFFIC_SOURCE_KEY, last_id=last_seen)
+    return count
+
+
+def _backfill_commstat_artifacts(conn: sqlite3.Connection, *, batch_limit: int, condition_alert_rules: Any = None) -> int:
+    if not table_exists(conn, "commstat_artifacts"):
+        return 0
+    last_id = _checkpoint_id(conn, COMMSTAT_ARTIFACT_SOURCE_KEY)
+    columns = _table_columns(conn, "commstat_artifacts")
+    select_columns = [
+        "id",
+        "artifact_key",
+        "artifact_kind",
+        "subtype",
+        "event_ts_utc",
+        "from_call",
+        "target",
+        "report_group",
+        "grid",
+        "state_code",
+        "scope",
+        "transport_mode",
+        "reach_mode",
+        "origin_path",
+        "status_label",
+        "alert_color",
+        "title",
+        "body_text",
+        "remarks_text",
+        "source_first",
+        "source_last",
+        "sources_json",
+        "source_refs_json",
+        "external_ids_json",
+        "payload_json",
+    ]
+    projection = ", ".join(_select_expr(name, columns) for name in select_columns)
+    rows = conn.execute(
+        f"""
+        SELECT {projection}
+        FROM commstat_artifacts
+        WHERE id > ?
+        ORDER BY id ASC
+        LIMIT ?
+        """,
+        (last_id, max(1, int(batch_limit or 500))),
+    ).fetchall()
+    count = 0
+    last_seen = last_id
+    for row in rows:
+        artifact = dict(zip(select_columns, row))
+        artifact_id = _int_or_none(artifact.get("id")) or 0
+        last_seen = max(last_seen, artifact_id)
+        if artifact_id <= 0:
+            continue
+        info = analyze_commstat_fields(
+            artifact_kind=artifact.get("artifact_kind"),
+            title=artifact.get("title"),
+            body=artifact.get("body_text"),
+            from_call=artifact.get("from_call"),
+            target=artifact.get("target"),
+            report_group=artifact.get("report_group"),
+            state=artifact.get("state_code"),
+            grid=artifact.get("grid"),
+            scope=artifact.get("scope"),
+            status=artifact.get("status_label"),
+            alert_color=artifact.get("alert_color"),
+            subtype=artifact.get("subtype"),
+            remarks=artifact.get("remarks_text"),
+            transport=artifact.get("transport_mode"),
+            source_family="CommStat",
+            event_utc=artifact.get("event_ts_utc"),
+        )
+        alert_count = _upsert_condition_alert_observations(
+            conn,
+            info,
+            condition_alert_rules=condition_alert_rules,
+            source_ref=f"commstat_artifacts:{artifact_id}",
+            source_family="CommStat",
+            source_app="CommStat",
+            received_utc=str(artifact.get("event_ts_utc") or ""),
+        )
+        if not _commstat_artifact_has_observation_signal(artifact, info):
+            if alert_count:
+                count += 1
+            continue
+        upsert_observation_conn(
+            conn,
+            observation_from_message_intelligence(
+                info,
+                source_ref=f"commstat_artifacts:{artifact_id}",
+                source_family="commstat",
+                source_app="CommStat",
+                received_utc=str(artifact.get("event_ts_utc") or ""),
+                event_utc=str(artifact.get("event_ts_utc") or ""),
+                status=str(artifact.get("status_label") or "").strip().upper(),
+                urgency=str(artifact.get("alert_color") or "").strip().upper(),
+                extra_provenance={
+                    "backfill_source": "commstat_artifacts",
+                    "artifact_key": str(artifact.get("artifact_key") or "").strip(),
+                    "artifact_kind": str(artifact.get("artifact_kind") or "").strip().upper(),
+                    "subtype": str(artifact.get("subtype") or "").strip().upper(),
+                    "transport_mode": str(artifact.get("transport_mode") or "").strip(),
+                    "reach_mode": str(artifact.get("reach_mode") or "").strip(),
+                    "origin_path": str(artifact.get("origin_path") or "").strip(),
+                    "source_first": str(artifact.get("source_first") or "").strip(),
+                    "source_last": str(artifact.get("source_last") or "").strip(),
+                    "sources": _json_list(artifact.get("sources_json")),
+                    "source_refs": _json_list(artifact.get("source_refs_json")),
+                    "external_ids": _json_list(artifact.get("external_ids_json")),
+                    "body_text": str(artifact.get("body_text") or "").strip(),
+                    "remarks_text": str(artifact.get("remarks_text") or "").strip(),
+                    "scope": str(artifact.get("scope") or info.metadata.get("scope") or "").strip(),
+                    "state_confidence": str(info.metadata.get("state_confidence") or "").strip(),
+                    "geo_confidence": str(info.metadata.get("geo_confidence") or "").strip(),
+                },
+            ),
+        )
+        count += 1
+    if rows:
+        _set_checkpoint(conn, COMMSTAT_ARTIFACT_SOURCE_KEY, last_id=last_seen)
+    return count
+
+
+def _upsert_condition_alert_observations(
+    conn: sqlite3.Connection,
+    info,
+    *,
+    condition_alert_rules: Any,
+    source_ref: str,
+    source_family: str,
+    source_radio_id: int | None = None,
+    source_app: str = "",
+    received_utc: str = "",
+) -> int:
+    if not condition_alert_rules:
+        return 0
+    count = 0
+    for observation in condition_alert_observations_for_message_intelligence(
+        info,
+        condition_alert_rules,
+        source_ref=source_ref,
+        source_family=source_family,
+        source_radio_id=source_radio_id,
+        source_app=source_app,
+        received_utc=received_utc,
+    ):
+        upsert_observation_conn(conn, observation)
+        count += 1
+    return count
+
+
+def _commstat_artifact_has_observation_signal(artifact: Mapping[str, Any], info) -> bool:
+    kind = str(artifact.get("artifact_kind") or "").strip().upper()
+    if kind in {"STATREP", "ALERT"}:
+        return True
+    status = str(artifact.get("status_label") or "").strip().upper()
+    alert = str(artifact.get("alert_color") or "").strip().upper()
+    elevated = status not in {"", "INFO", "READ", "NEW", "GREEN", "OK", "NORMAL", "NOT REPORTED"} or alert in {
+        "RED",
+        "YELLOW",
+        "ORANGE",
+    }
+    return bool(
+        info.operator_attention
+        and (
+            _has_content_topic_evidence(info)
+            or info.state
+            or info.grid
+            or str(artifact.get("report_group") or "").strip()
+            or str(artifact.get("scope") or "").strip()
+            or elevated
+        )
+    )
+
+
+def _has_content_topic_evidence(info) -> bool:
+    for values in getattr(info, "topic_evidence", {}).values():
+        for value in values:
+            label = str(value or "").split(":", 1)[0].strip().lower()
+            if label and label not in {"kind", "source", "transport"}:
+                return True
+    return False
+
+
+def _read_text_head(path: Path, *, limit: int) -> str:
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            return fh.read(max(1, int(limit or 131072)))
+    except Exception:
+        return ""
+
+
+def _mtime_utc(value: object) -> str:
+    try:
+        ts = float(value or 0.0)
+    except Exception:
+        ts = 0.0
+    if ts <= 0:
+        return ""
+    return dt.datetime.fromtimestamp(ts, tz=dt.timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _checkpoint_id(conn: sqlite3.Connection, source_key: str) -> int:
+    row = conn.execute(
+        """
+        SELECT last_source_ref
+        FROM observation_projection_checkpoint
+        WHERE source_key=?
+        """,
+        (source_key,),
+    ).fetchone()
+    if not row:
+        return 0
+    text = str(row[0] or "").strip()
+    if ":" in text:
+        text = text.rsplit(":", 1)[-1]
+    try:
+        return int(text)
+    except Exception:
+        return 0
+
+
+def _set_checkpoint(conn: sqlite3.Connection, source_key: str, *, last_id: int) -> None:
+    source_ref = f"{source_key}:{int(last_id or 0)}"
+    conn.execute(
+        """
+        INSERT INTO observation_projection_checkpoint (
+            source_key,
+            last_source_ref,
+            last_event_utc,
+            updated_utc
+        )
+        VALUES (?, ?, '', ?)
+        ON CONFLICT(source_key) DO UPDATE SET
+            last_source_ref=excluded.last_source_ref,
+            updated_utc=excluded.updated_utc
+        """,
+        (source_key, source_ref, utc_now_iso()),
+    )
+
+
+def _local_report_row_to_dict(row: Sequence[Any]) -> Mapping[str, Any]:
+    return {
+        "id": int(row[0] or 0),
+        "created_utc": row[1] or "",
+        "updated_utc": row[2] or "",
+        "source_kind": row[3] or "",
+        "source_channel": row[4] or "",
+        "net_session_id": row[5] or "",
+        "callsign": row[6] or "",
+        "operator_id": row[7] or "",
+        "from_name": row[8] or "",
+        "city": row[9] or "",
+        "county": row[10] or "",
+        "state": row[11] or "",
+        "grid": row[12] or "",
+        "lat": row[13],
+        "lon": row[14],
+        "location_source": row[15] or "",
+        "location_confidence": row[16] or "",
+        "status": row[17] or "",
+        "topics": _json_list(row[18]),
+        "topic_evidence": _json_mapping(row[19]),
+        "subject": row[20] or "",
+        "body": row[21] or "",
+        "confirmed_state": row[22] or "",
+        "followup_state": row[23] or "",
+        "exercise_flag": bool(row[24]),
+        "source_radio_id": row[25],
+        "source_app": row[26] or "",
+        "raw_reference": row[27] or "",
+        "created_by": row[28] or "",
+        "updated_by": row[29] or "",
+    }
+
+
+def _json_list(value: object) -> list[str]:
+    try:
+        loaded = json.loads(str(value or "[]"))
+    except Exception:
+        return []
+    if not isinstance(loaded, list):
+        return []
+    return [str(item or "").strip() for item in loaded if str(item or "").strip()]
+
+
+def _json_mapping(value: object) -> Mapping[str, Any]:
+    try:
+        loaded = json.loads(str(value or "{}"))
+    except Exception:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1] or "").strip().lower() for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _select_expr(name: str, columns: set[str]) -> str:
+    clean = str(name or "").strip()
+    if clean.lower() in columns:
+        return clean
+    return f"NULL AS {clean}"
+
+
+def _int_or_none(value: object) -> int | None:
+    try:
+        return int(value) if str(value or "").strip() else None
+    except Exception:
+        return None

@@ -1,0 +1,33 @@
+MAGNET Basic Check-in|F!701C
+
+. Version: 05-13-26 - MAGNET
+
+
+!! Basic Check-in
+
+[ST] State (2-letter code):
+[GR] Maidenhead Grid Square:
+
+? Current Operational Status (QTH)
+@1 *Operations steady, no significant issues or noteworthy activity - Green
+@2 Operations stable, but current or anticipated conditions may impact normal activity - Yellow
+@3 Major operational issues or adverse conditions affecting normal activity - Red
+.
+
+!!! Current Operational Reporting
+? Situation Report
+@0 *No significant issues or noteworthy activity
+@1 Detailed Sitrep / Intel to report - E? F!701A for details
+@2 Status report currently active - E? F!701B for details
+
+? Additional information sources available
+@0 *No additional information to report at this time
+@1 Will send more detailed information via FLMSG SITREP/STATREP/GENERAL
+@2 Additional Information available on BBS
+.
+.
+.
+.
+.
+
+. More info - https://www.MAGNETHF.COM

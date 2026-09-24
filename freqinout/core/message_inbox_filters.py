@@ -1,0 +1,798 @@
+from __future__ import annotations
+
+import datetime
+import re
+from dataclasses import dataclass
+from typing import Mapping, Protocol, Sequence
+
+from freqinout.core.group_utils import normalize_group_name
+from freqinout.core.message_search_values import searchable_text_values
+from freqinout.core.sitrep_metadata import parse_filter_subtype_label
+
+
+MESSAGE_SOURCE_LABELS = {
+    "js8": "JS8Call",
+    "spotter": "Spotter",
+    "varac": "VarAC",
+    "flmsg": "FLMSG",
+    "flamp": "FLAmp",
+    "bbs": "BBS",
+    "commstat": "CommStat",
+    "mesh": "Mesh",
+    "meshcore": "MeshCore",
+    "meshtastic": "Meshtastic",
+}
+
+class MessageRowLike(Protocol):
+    msg_type: str
+    status: str
+    origin: str
+    payload: object
+    rcv_ts: float
+    rcv_display: str
+    from_call: str
+    to_call: str
+    title: str
+    search_text: str
+    actionable: bool
+
+
+@dataclass(frozen=True)
+class InboxFilterCriteria:
+    focus: str = "all"
+    type_sel: str = "MSG Type..."
+    status_sel: str = "Status..."
+    from_sel: str = ""
+    to_sel: str = ""
+    age_filter_seconds: object = 0
+    search_query: str = ""
+    excluded_types: frozenset[str] = frozenset()
+    now_ts: float | None = None
+
+    @property
+    def applies_hidden_types(self) -> bool:
+        return str(self.type_sel or "").strip() in {"", "MSG Type..."}
+
+
+def row_matches_type_filter(row: MessageRowLike, type_sel: str) -> bool:
+    type_sel = str(type_sel or "").strip()
+    if type_sel in ("", "MSG Type..."):
+        return True
+    origin = str(getattr(row, "origin", "") or "").strip().lower()
+    msg_type = str(getattr(row, "msg_type", "") or "")
+    if type_sel == "CommStat":
+        return "commstat" in message_source_aliases(row)
+    if type_sel == "Spotter":
+        # Historical Spotter projections were stored under the internal
+        # ``sitrep`` family. Source aliases also apply the semantic CommStat
+        # exclusion, so legacy Spotter rows cannot leak into CommStat or vice
+        # versa.
+        return "spotter" in message_source_aliases(row)
+    if type_sel == "JS8Call":
+        return origin == "js8"
+    if type_sel == "FLMSG/FLAMP":
+        return _is_fast_light_row(row)
+    if type_sel == "SitRep":
+        return msg_type == "SitRep"
+    if type_sel.startswith("SitRep/"):
+        subtype = parse_filter_subtype_label(type_sel)
+        if msg_type != "SitRep":
+            return False
+        row_subtype = str(getattr(getattr(row, "payload", None), "subtype", "") or "").strip().upper()
+        return row_subtype == subtype
+    return msg_type == type_sel
+
+
+def _fast_light_source_family(row: MessageRowLike) -> str:
+    """Return the authoritative Fast Light source family for a row, if known.
+
+    ``msg_type`` and display labels can be safe fallbacks such as ``FLMsg
+    K2S`` while file metadata is still sparse.  They are presentation values,
+    not source identity.  Prefer the row origin, then the projected payload's
+    canonical source-family fields; a known non-Fast-Light origin deliberately
+    prevents a legacy type label from admitting (for example) a BBS row.
+    """
+
+    origin = _normalize_source_alias(message_source_value(row))
+    if origin:
+        return origin
+    payload = getattr(row, "payload", None)
+    for attr in ("source_family", "source_family_label"):
+        source = _normalize_source_alias(getattr(payload, attr, "") if payload is not None else "")
+        if source:
+            return source
+    return ""
+
+
+def _is_fast_light_row(row: MessageRowLike) -> bool:
+    """Match FLMsg/FLAmp by source identity, with a strict legacy fallback."""
+
+    source = _fast_light_source_family(row)
+    if source:
+        return source in {"flmsg", "flamp"}
+    # Pre-projection legacy rows did not always retain an origin.  Preserve
+    # their exact historical labels, but do not treat suffix-bearing fallback
+    # display labels as identity.
+    return str(getattr(row, "msg_type", "") or "").strip().upper() in {"FLMSG", "FLAMP"}
+
+
+def message_source_value(row: MessageRowLike) -> str:
+    """Return the canonical operator-facing source family for one row.
+
+    ``sitrep`` is a retained projection/storage family, not a separate Inbox
+    source.  Non-CommStat rows from that legacy store belong to Spotter.
+    """
+
+    return _normalize_source_alias(getattr(row, "origin", ""))
+
+
+def _normalize_source_alias(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    aliases = {
+        "js8call": "js8",
+        "js8": "js8",
+        "js8spotter": "spotter",
+        "fiospotter": "spotter",
+        "spotter": "spotter",
+        "varac": "varac",
+        "varac_bbs": "bbs",
+        "bbs_archive": "bbs",
+        "bbs": "bbs",
+        "flmsg": "flmsg",
+        "flamp": "flamp",
+        "fastlight": "flmsg",
+        "sitrep": "spotter",
+        "commstat": "commstat",
+        "commstat_rf": "commstat",
+        "commstat rf": "commstat",
+        "local_report": "local_report",
+    }
+    if "commstat" in text:
+        return "commstat"
+    return aliases.get(text, text)
+
+
+def message_source_aliases(row: MessageRowLike) -> set[str]:
+    origin = message_source_value(row)
+    aliases = {_normalize_source_alias(origin)} if origin else set()
+    payload = getattr(row, "payload", None)
+    for attr in (
+        "source_family",
+        "source_family_label",
+        "source_label",
+        "source_first",
+        "source_last",
+        "message_type",
+        "display_type",
+        "subtype",
+        "artifact_kind",
+    ):
+        candidate = getattr(payload, attr, "") if payload is not None else ""
+        normalized = _normalize_source_alias(candidate)
+        if normalized:
+            aliases.add(normalized)
+    for candidate in (getattr(row, "msg_type", ""), getattr(row, "title", "")):
+        normalized = _normalize_source_alias(candidate)
+        if normalized == "commstat":
+            aliases.add("commstat")
+    # The legacy sitrep projection contains both Spotter and CommStat-derived
+    # records.  Once semantic evidence says CommStat, do not also present or
+    # filter the same row as Spotter merely because of its storage family.
+    if "commstat" in aliases:
+        aliases.discard("spotter")
+    return {alias for alias in aliases if alias}
+
+
+def row_matches_source_filter(
+    row: MessageRowLike,
+    selected_sources: set[str] | frozenset[str] | None,
+) -> bool:
+    if selected_sources is None:
+        return True
+    selected = {_normalize_source_alias(source) for source in selected_sources if _normalize_source_alias(source)}
+    if not selected:
+        return False
+    return bool(message_source_aliases(row) & selected)
+
+
+def message_source_label(source: object) -> str:
+    value = str(source or "").strip().lower()
+    return MESSAGE_SOURCE_LABELS.get(value, value.upper())
+
+
+def message_source_options(rows: list[MessageRowLike]) -> list[tuple[str, str]]:
+    origins = set(MESSAGE_SOURCE_LABELS)
+    origins.update({message_source_value(row) for row in rows})
+    return [
+        (origin, message_source_label(origin))
+        for origin in sorted(origin for origin in origins if origin)
+    ]
+
+
+def active_inbox_scope_summary(
+    *,
+    focus: object = "all",
+    focus_labels: Mapping[str, str] | None = None,
+    groups: Sequence[object] | set[object] | frozenset[object] | None = None,
+    sources: Sequence[object] | set[object] | frozenset[object] | None = None,
+    age_label: object = "",
+    search_query: object = "",
+    type_sel: object = "MSG Type...",
+    status_sel: object = "Status...",
+    from_sel: object = "",
+    to_sel: object = "",
+) -> str:
+    parts: list[str] = []
+    focus_key = str(focus or "all").strip().lower()
+    labels = dict(focus_labels or {})
+    if focus_key != "all":
+        parts.append(f"Focus {labels.get(focus_key, focus_key)}")
+    if groups is not None:
+        group_labels = sorted("Unassigned" if str(group) == "unassigned" else str(group) for group in groups)
+        if group_labels:
+            parts.append(
+                "Groups "
+                + ", ".join(group_labels[:3])
+                + (f" +{len(group_labels) - 3}" if len(group_labels) > 3 else "")
+            )
+    if sources is not None:
+        source_labels = sorted(message_source_label(source) for source in sources)
+        if source_labels:
+            parts.append(
+                "Sources "
+                + ", ".join(source_labels[:3])
+                + (f" +{len(source_labels) - 3}" if len(source_labels) > 3 else "")
+            )
+    age_text = str(age_label or "").strip()
+    if age_text:
+        parts.append(age_text)
+    query = str(search_query or "").strip()
+    if query:
+        parts.append(f'Search "{query}"')
+    type_text = str(type_sel or "").strip()
+    if type_text not in ("", "MSG Type..."):
+        parts.append(f"Type {type_text}")
+    status_text = str(status_sel or "").strip()
+    if status_text not in ("", "Status..."):
+        parts.append(f"Status {status_text}")
+    from_text = str(from_sel or "").strip()
+    if from_text:
+        parts.append(f"From {from_text}")
+    to_text = str(to_sel or "").strip()
+    if to_text:
+        parts.append(f"To {to_text}")
+    return "; ".join(parts) if parts else "current view"
+
+
+def looks_like_callsign_text(value: object) -> bool:
+    text = str(value or "").strip().upper()
+    return bool(re.fullmatch(r"[A-Z]{1,2}\d[A-Z0-9]{1,5}(?:/[A-Z0-9]{1,4})?", text))
+
+
+def clean_js8_route_target(value: object) -> str:
+    text = str(value or "").strip().upper()
+    while text.startswith("@"):
+        text = text[1:].strip()
+    return text.rstrip(">").strip()
+
+
+def is_js8_relay_marker(value: object) -> bool:
+    return str(value or "").strip().endswith(">")
+
+
+def normalize_message_group_filter_value(value: object) -> str:
+    group = normalize_group_name(value)
+    group = re.sub(r"\s+\*$", "", group).strip()
+    group = re.sub(r"\s+", " ", group).strip()
+    if group.lower() == "unassigned":
+        return "unassigned"
+    return group
+
+
+def is_message_group_candidate(value: object, *, configured_groups: set[str] | frozenset[str] | None = None) -> bool:
+    group = normalize_message_group_filter_value(value)
+    if not group:
+        return False
+    if group == "unassigned":
+        return True
+    configured = configured_groups or set()
+    if group.startswith("MR") and any(ch.isdigit() for ch in group[2:]):
+        return True
+    if is_js8_relay_marker(str(value or "")):
+        return group in configured
+    if looks_like_callsign_text(group):
+        return group in configured
+    return True
+
+
+def message_group_value(row: MessageRowLike, *, configured_groups: set[str] | frozenset[str] | None = None) -> str:
+    payload = getattr(row, "payload", None)
+    configured = set(configured_groups or set())
+    for attr in ("report_group", "group", "operating_group"):
+        value = normalize_message_group_filter_value(getattr(payload, attr, "") if payload is not None else "")
+        if is_message_group_candidate(value, configured_groups=configured):
+            return value
+    raw_target = str(getattr(payload, "to_call", "") if payload is not None else "").strip()
+    target = normalize_message_group_filter_value(clean_js8_route_target(raw_target))
+    if is_js8_relay_marker(raw_target) and target not in configured:
+        return "unassigned"
+    if (
+        target
+        and is_message_group_candidate(target, configured_groups=configured)
+        and (raw_target.startswith("@") or target in configured or target.startswith("MR"))
+    ):
+        return target
+    raw_route_target = str(getattr(row, "to_call", "") or "").strip()
+    route_target = normalize_message_group_filter_value(clean_js8_route_target(raw_route_target))
+    if is_js8_relay_marker(raw_route_target) and route_target not in configured:
+        return "unassigned"
+    if route_target.startswith("MR"):
+        return route_target
+    if (
+        route_target
+        and is_message_group_candidate(route_target, configured_groups=configured)
+        and (
+            route_target in configured
+            or route_target.startswith("MR")
+            or (len(route_target) >= 2 and not looks_like_callsign_text(route_target))
+        )
+    ):
+        return route_target
+    return "unassigned"
+
+
+def message_group_values(
+    row: MessageRowLike,
+    *,
+    configured_groups: set[str] | frozenset[str] | None = None,
+    candidate_groups: set[str] | frozenset[str] | None = None,
+) -> set[str]:
+    """Return every canonical group evidenced by a projected message row.
+
+    ``group_name`` remains the fast primary projection field, but Spotter forms
+    can legitimately contain more than one group (transport destination,
+    report group, and query groups).  Projected ``search_text`` is already the
+    bounded canonical evidence cache, so exact token checks may recover those
+    additional groups without reopening a source or parsing a file on the UI
+    thread.
+    """
+
+    configured = {
+        normalize_message_group_filter_value(value)
+        for value in (configured_groups or set())
+        if normalize_message_group_filter_value(value)
+    }
+    candidates = configured | {
+        normalize_message_group_filter_value(value)
+        for value in (candidate_groups or set())
+        if normalize_message_group_filter_value(value)
+    }
+    primary = message_group_value(row, configured_groups=configured)
+    values = {primary} if primary and primary != "unassigned" else set()
+    payload = getattr(row, "payload", None)
+    texts = [str(getattr(row, "search_text", "") or "")]
+    for attr in ("raw_text", "decoded_text", "body_preview", "summary", "subject"):
+        texts.append(str(getattr(payload, attr, "") if payload is not None else ""))
+    evidence = " ".join(texts).upper()
+    for group in candidates:
+        if group == "unassigned":
+            continue
+        if re.search(rf"(?<![A-Z0-9_-])@?{re.escape(group)}(?![A-Z0-9_-])", evidence):
+            values.add(group)
+    if not values:
+        values.add("unassigned")
+    return values
+
+
+def row_matches_workspace_scope(
+    row: MessageRowLike,
+    *,
+    selected_sources: set[str] | frozenset[str] | None = None,
+    selected_groups: set[str] | frozenset[str] | None = None,
+    configured_groups: set[str] | frozenset[str] | None = None,
+) -> bool:
+    if not row_matches_source_filter(row, selected_sources):
+        return False
+    if selected_groups is not None:
+        row_groups = message_group_values(
+            row,
+            configured_groups=configured_groups,
+            candidate_groups=selected_groups,
+        )
+        if not row_groups.intersection(selected_groups):
+            return False
+    return True
+
+
+def message_group_candidate_set(values: object) -> set[str]:
+    out: set[str] = set()
+    try:
+        iterator = iter(values or [])
+    except TypeError:
+        iterator = iter(())
+    for value in iterator:
+        group = normalize_message_group_filter_value(value)
+        if is_message_group_candidate(group, configured_groups=set()):
+            out.add(group)
+    return out
+
+
+def _family_members(value: object) -> set[str]:
+    members = getattr(value, "members", None)
+    if members is None:
+        members = value
+    try:
+        return {normalize_message_group_filter_value(item) for item in members or () if normalize_message_group_filter_value(item)}
+    except TypeError:
+        return set()
+
+
+def message_group_source_map(
+    group_source_pairs: Sequence[tuple[object, object]],
+    *,
+    family_map: Mapping[str, object] | None = None,
+) -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {}
+    families = {
+        normalize_message_group_filter_value(parent): _family_members(family)
+        for parent, family in (family_map or {}).items()
+        if normalize_message_group_filter_value(parent)
+    }
+    for raw_group, raw_source in group_source_pairs:
+        group = normalize_message_group_filter_value(raw_group)
+        if not is_message_group_candidate(raw_group, configured_groups=set()):
+            continue
+        source = str(raw_source or "").strip().lower()
+        out.setdefault(group, set()).add(source)
+        for parent, members in families.items():
+            if group in members:
+                out.setdefault(parent, set()).add(source)
+    return out
+
+
+def primary_message_group_values(
+    group_sources: Mapping[str, set[str] | frozenset[str]],
+    *,
+    fio_configured_groups: set[str] | frozenset[str] | None = None,
+    commstat_active_groups: set[str] | frozenset[str] | None = None,
+    commstat_configured_groups: set[str] | frozenset[str] | None = None,
+) -> set[str]:
+    return {
+        value
+        for _section, options in message_group_option_sections(
+            group_sources,
+            fio_configured_groups=fio_configured_groups,
+            commstat_active_groups=commstat_active_groups,
+            commstat_configured_groups=commstat_configured_groups,
+            show_all_groups=False,
+        )
+        for value, _label in options
+    }
+
+
+def message_group_rebuild_selection(
+    group_sources: Mapping[str, set[str] | frozenset[str]],
+    *,
+    current_selected: set[str] | frozenset[str] | Sequence[object] | None,
+    current_all_selected: bool,
+    fio_configured_groups: set[str] | frozenset[str] | None = None,
+    commstat_active_groups: set[str] | frozenset[str] | None = None,
+    commstat_configured_groups: set[str] | frozenset[str] | None = None,
+    show_all_groups: bool = False,
+    prefer_primary: bool = False,
+) -> tuple[list[str] | None, bool]:
+    """Choose selected group values when the dynamic group menu is rebuilt.
+
+    Returning ``None, True`` means the checklist should select every visible
+    focused option. Returning a list with ``False`` preserves an explicit user
+    selection, including an intentionally empty selection.
+    """
+    sections = message_group_option_sections(
+        group_sources,
+        fio_configured_groups=fio_configured_groups,
+        commstat_active_groups=commstat_active_groups,
+        commstat_configured_groups=commstat_configured_groups,
+        show_all_groups=show_all_groups,
+    )
+    option_values = {value for _section, options in sections for value, _label in options}
+    primary_values = primary_message_group_values(
+        group_sources,
+        fio_configured_groups=fio_configured_groups,
+        commstat_active_groups=commstat_active_groups,
+        commstat_configured_groups=commstat_configured_groups,
+    ) & option_values
+    if show_all_groups and (prefer_primary or current_all_selected):
+        return sorted(primary_values), False
+    if current_all_selected:
+        return None, True
+    if current_selected is None:
+        if show_all_groups:
+            return sorted(primary_values), False
+        return None, True
+    selected = {
+        normalize_message_group_filter_value(value)
+        for value in current_selected
+        if normalize_message_group_filter_value(value)
+    }
+    if not selected:
+        return [], False
+    preserved = selected & option_values
+    if preserved:
+        return sorted(preserved), False
+    if selected:
+        return [], False
+    if show_all_groups:
+        return sorted(primary_values), False
+    return None, True
+
+
+def message_group_option_sections(
+    group_sources: Mapping[str, set[str] | frozenset[str]],
+    *,
+    fio_configured_groups: set[str] | frozenset[str] | None = None,
+    commstat_active_groups: set[str] | frozenset[str] | None = None,
+    commstat_configured_groups: set[str] | frozenset[str] | None = None,
+    show_all_groups: bool = False,
+) -> list[tuple[str, list[tuple[str, str]]]]:
+    sources = {group: set(values or set()) for group, values in (group_sources or {}).items() if group}
+    if not sources:
+        sources = {"unassigned": {"system"}}
+    fio_groups = set(fio_configured_groups or set())
+    active_groups = set(commstat_active_groups or set())
+    configured_commstat = set(commstat_configured_groups or set())
+    ordered = sorted(sources)
+    configured_order = [group for group in ordered if group in fio_groups]
+    commstat_active_order = [
+        group
+        for group in ordered
+        if group not in fio_groups and group in active_groups
+    ]
+    if not configured_order and not commstat_active_order:
+        show_all_groups = True
+
+    def option(group: str) -> tuple[str, str] | None:
+        if not group:
+            return None
+        label = "Unassigned" if group == "unassigned" else group
+        return (group, label)
+
+    def options(groups: list[str]) -> list[tuple[str, str]]:
+        return [opt for group in groups if (opt := option(group)) is not None]
+
+    if not show_all_groups:
+        display_order = configured_order + commstat_active_order
+        if not display_order:
+            display_order = ["unassigned"] if "unassigned" in sources else []
+        sections: list[tuple[str, list[tuple[str, str]]]] = []
+        fio_options = options(configured_order)
+        commstat_options = options(commstat_active_order)
+        unassigned_options = options([group for group in display_order if group == "unassigned"])
+        if fio_options:
+            sections.append(("Configured Groups", fio_options))
+        if commstat_options:
+            sections.append(("CommStat Active Groups", commstat_options))
+        if unassigned_options:
+            sections.append(("Other", unassigned_options))
+        return sections or [("Groups", options(display_order))]
+
+    commstat_order = [
+        group
+        for group in ordered
+        if group not in fio_groups
+        and group not in active_groups
+        and (group in configured_commstat or "commstat" in sources.get(group, set()))
+    ]
+    other_order = [
+        group
+        for group in ordered
+        if group not in fio_groups
+        and group not in active_groups
+        and group not in commstat_order
+    ]
+    sections = []
+    fio_options = options(configured_order)
+    commstat_active_options = options(commstat_active_order)
+    commstat_other_options = options(commstat_order)
+    other_options = options(other_order)
+    if fio_options:
+        sections.append(("Configured Groups", fio_options))
+    if commstat_active_options:
+        sections.append(("CommStat Active Groups", commstat_active_options))
+    if commstat_other_options:
+        sections.append(("Other CommStat Groups", commstat_other_options))
+    if other_options:
+        sections.append(("Other Discovered Groups", other_options))
+    return sections or [("Groups", options(["unassigned"] if "unassigned" in sources else []))]
+
+
+def row_matches_inbox_focus(row: MessageRowLike, focus: str) -> bool:
+    focus = str(focus or "all").strip().lower()
+    if focus == "all":
+        return True
+    if focus == "new":
+        return str(getattr(row, "status", "") or "").strip().upper() not in {"", "READ", "INFO"}
+    if focus == "forms":
+        return row_matches_type_filter(row, "FLMSG/FLAMP")
+    if focus == "spotter":
+        return row_matches_type_filter(row, "Spotter") or str(getattr(row, "msg_type", "") or "").startswith("F!")
+    if focus == "commstat":
+        return row_matches_type_filter(row, "CommStat")
+    if focus == "js8call":
+        return bool(message_source_aliases(row) & {"js8", "commstat", "spotter"})
+    if focus == "mesh":
+        origin = str(getattr(row, "origin", "") or "").strip().lower()
+        if origin not in {"mesh", "meshcore", "meshtastic", "mesh_client", "local_mesh"}:
+            return False
+        return mesh_row_is_inbox_message(row)
+    if focus == "varac":
+        return str(getattr(row, "origin", "") or "").strip().lower() == "varac" or (
+            str(getattr(row, "msg_type", "") or "").strip() == "VarAC"
+        )
+    if focus == "bbs":
+        return str(getattr(row, "origin", "") or "").strip().lower() in {"bbs", "bbs_archive"}
+    return True
+
+
+def mesh_row_is_inbox_message(row: MessageRowLike) -> bool:
+    """Return true for mesh traffic rows, excluding topology/node projections."""
+    source_ref = ""
+    payload = getattr(row, "payload", None)
+    provenance = getattr(payload, "provenance", {}) if payload is not None else {}
+    for candidate in (
+        getattr(row, "source_ref", ""),
+        getattr(payload, "source_ref", ""),
+    ):
+        text = str(candidate or "").strip().lower()
+        if text:
+            source_ref = text
+            break
+    if source_ref.startswith(("mesh-node:", "mesh-channel:")):
+        return False
+    if source_ref.startswith("mesh:"):
+        return True
+    subject = str(getattr(row, "title", "") or getattr(payload, "subject", "") or "").strip().lower()
+    summary = str(getattr(payload, "summary", "") or "").strip().lower()
+    if subject.startswith("mesh node:") or summary.startswith("mesh node:"):
+        return False
+    if isinstance(provenance, Mapping):
+        if str(provenance.get("node_id") or "").strip() and not str(provenance.get("message_id") or "").strip():
+            return False
+        surfaces = provenance.get("surfaces")
+        if isinstance(surfaces, (list, tuple, set)):
+            normalized = {str(surface or "").strip().lower() for surface in surfaces}
+            if normalized:
+                return "inbox" in normalized
+    # Preserve legacy mesh message rows that predate the source_ref contract.
+    return True
+
+
+def age_filter_bounds(age_filter: object) -> tuple[int, int]:
+    """Return inclusive ``(minimum_age, maximum_age)`` bounds in seconds.
+
+    ``0`` keeps the historic unbounded behavior, a positive integer means
+    "newer than this many seconds", and a negative integer means "this old or
+    older".  A two-item sequence expresses a non-overlapping review band.  A
+    zero endpoint is unbounded.  This compatibility contract lets existing
+    Map/Ops callers keep passing integers while Inbox can offer precise age
+    ranges without loading a larger, overlapping history into the UI.
+    """
+
+    if isinstance(age_filter, (tuple, list)) and len(age_filter) == 2:
+        try:
+            minimum = max(0, int(age_filter[0] or 0))
+            maximum = max(0, int(age_filter[1] or 0))
+        except Exception:
+            return 0, 0
+        if minimum and maximum and minimum > maximum:
+            minimum, maximum = maximum, minimum
+        return minimum, maximum
+    try:
+        seconds = int(age_filter or 0)
+    except Exception:
+        seconds = 0
+    if seconds > 0:
+        return 0, seconds
+    if seconds < 0:
+        return abs(seconds), 0
+    return 0, 0
+
+
+def row_matches_age_filter(
+    row: MessageRowLike,
+    age_filter_seconds: object,
+    *,
+    now_ts: float | None = None,
+) -> bool:
+    minimum_age, maximum_age = age_filter_bounds(age_filter_seconds)
+    if minimum_age == 0 and maximum_age == 0:
+        return True
+    try:
+        ts = float(getattr(row, "rcv_ts", 0.0) or 0.0)
+    except Exception:
+        return False
+    if ts <= 0:
+        return False
+    if now_ts is None:
+        now_ts = datetime.datetime.now(datetime.timezone.utc).timestamp()
+    age = max(0.0, float(now_ts) - ts)
+    if minimum_age and age < minimum_age:
+        return False
+    if maximum_age and age > maximum_age:
+        return False
+    return True
+
+
+def row_matches_status_filter(row: MessageRowLike, status_sel: str) -> bool:
+    status_sel = str(status_sel or "").strip()
+    if status_sel in {"", "Status..."}:
+        return True
+    if status_sel == "Action Needed":
+        return bool(getattr(getattr(row, "payload", None), "flag_state", 0) == 1 or getattr(row, "actionable", False))
+    return str(getattr(row, "status", "") or "") == status_sel
+
+
+def row_search_text(row: MessageRowLike) -> str:
+    values = [
+        str(getattr(row, "search_text", "") or ""),
+        str(getattr(row, "msg_type", "") or ""),
+        str(getattr(row, "status", "") or ""),
+        str(getattr(row, "from_call", "") or ""),
+        str(getattr(row, "to_call", "") or ""),
+        str(getattr(row, "rcv_display", "") or ""),
+        str(getattr(row, "title", "") or ""),
+    ]
+    values.extend(searchable_text_values(getattr(row, "payload", None)))
+    haystack = " ".join(value for value in values if value)
+    aliases = haystack.replace("@", " ").replace(">", " ")
+    return f"{haystack} {aliases}".lower()
+
+
+def row_matches_search_query(row: MessageRowLike, query: str) -> bool:
+    query = str(query or "").strip().lower()
+    if not query:
+        return True
+    haystack = row_search_text(row)
+    if query in haystack:
+        return True
+    normalized_query = query.replace("@", " ").replace(">", " ")
+    if normalized_query.strip() and normalized_query in haystack:
+        return True
+    tokens = [token for token in re.split(r"[\s,;/|]+", normalized_query) if token]
+    if not tokens:
+        return True
+    return all(token in haystack for token in tokens)
+
+
+def row_matches_excluded_types(row: MessageRowLike, excluded_types: set[str] | frozenset[str]) -> bool:
+    for label in excluded_types or ():
+        if row_matches_type_filter(row, str(label or "")):
+            return True
+    return False
+
+
+def row_matches_inbox_criteria(row: MessageRowLike, criteria: InboxFilterCriteria) -> bool:
+    if not row_matches_inbox_focus(row, criteria.focus):
+        return False
+    if not row_matches_age_filter(row, criteria.age_filter_seconds, now_ts=criteria.now_ts):
+        return False
+    if not row_matches_type_filter(row, criteria.type_sel):
+        return False
+    hidden_types_apply = str(criteria.focus or "all").strip().lower() in {"", "all", "new"}
+    if (
+        hidden_types_apply
+        and criteria.applies_hidden_types
+        and criteria.excluded_types
+        and row_matches_excluded_types(row, criteria.excluded_types)
+    ):
+        return False
+    if not row_matches_status_filter(row, criteria.status_sel):
+        return False
+    if criteria.from_sel and str(getattr(row, "from_call", "") or "") != criteria.from_sel:
+        return False
+    if criteria.to_sel and str(getattr(row, "to_call", "") or "") != criteria.to_sel:
+        return False
+    if not row_matches_search_query(row, criteria.search_query):
+        return False
+    return True

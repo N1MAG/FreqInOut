@@ -14,31 +14,47 @@ from freqinout.core.commstat_artifacts import ensure_commstat_artifact_tables
 from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.group_utils import normalize_group_name
+from freqinout.core.message_projection_store import ensure_message_projection_schema
+from freqinout.core.message_projection_queue import ensure_source_dirty_triggers
+from freqinout.core.multi_radio_store import ensure_multi_radio_settings_schema
 from freqinout.core.operator_activity import ensure_js8_callsign_stats
+from freqinout.core.perf_metrics import span as perf_span
+from freqinout.core.resource_catalog_migration import cutover_resource_catalog_to_canonical
+from freqinout.core.shortwave_store import ensure_shortwave_schema
 from freqinout.core.sqlite_utils import connect_sqlite
 from freqinout.core.varac_ingest import ensure_varac_local_tables
+from freqinout.core.varac_bbs_library_store import (
+    ensure_bbs_library_schema,
+    import_legacy_station_bbs_profiles,
+)
 
-# Base config directory (user-writable)
-CONFIG_DIR = get_config_dir() / "config"
+def _config_dir() -> Path:
+    """Resolve the active profile config directory at call time."""
+    return get_config_dir() / "config"
 
 
 def _ensure_settings_db() -> None:
     """
-    Ensure settings DB (freqinout.db) has the kv table.
+    Ensure settings DB (freqinout.db) has the compatibility kv table and
+    Wave 1 multi-rig settings schema.
     """
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    db_path = CONFIG_DIR / "freqinout.db"
+    config_dir = _config_dir()
+    config_dir.mkdir(parents=True, exist_ok=True)
+    db_path = config_dir / "freqinout.db"
     conn = connect_sqlite(db_path)
     try:
-        with conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS kv (
-                    key TEXT PRIMARY KEY,
-                    value TEXT
-                )
-                """
-            )
+        ensure_multi_radio_settings_schema(conn)
+        conn.commit()
+        ensure_bbs_library_schema(conn)
+        conn.row_factory = sqlite3.Row
+        profile_rows = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM device_profiles ORDER BY runtime_primary DESC, runtime_active DESC, display_order, id"
+            ).fetchall()
+        ]
+        import_legacy_station_bbs_profiles(conn, profile_rows)
+        conn.commit()
     finally:
         conn.close()
 
@@ -140,6 +156,83 @@ def _ensure_local_operator_tables(conn: sqlite3.Connection) -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_local_ncs_checkins_ts ON local_ncs_checkins(checkin_utc)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_local_ncs_checkins_callsign ON local_ncs_checkins(callsign)")
 
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS local_operator_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_utc TEXT NOT NULL,
+            updated_utc TEXT,
+            source_kind TEXT,
+            source_channel TEXT,
+            net_session_id TEXT,
+            callsign TEXT,
+            operator_id TEXT,
+            from_name TEXT,
+            city TEXT,
+            county TEXT,
+            state TEXT,
+            grid TEXT,
+            lat REAL,
+            lon REAL,
+            location_source TEXT,
+            location_confidence TEXT,
+            status TEXT,
+            topics_json TEXT,
+            topic_evidence_json TEXT,
+            subject TEXT,
+            body TEXT,
+            confirmed_state TEXT,
+            followup_state TEXT,
+            exercise_flag INTEGER DEFAULT 0,
+            source_radio_id INTEGER,
+            source_app TEXT,
+            raw_reference TEXT,
+            created_by TEXT,
+            updated_by TEXT
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "local_operator_reports",
+        {
+            "created_utc": "TEXT",
+            "updated_utc": "TEXT",
+            "source_kind": "TEXT",
+            "source_channel": "TEXT",
+            "net_session_id": "TEXT",
+            "callsign": "TEXT",
+            "operator_id": "TEXT",
+            "from_name": "TEXT",
+            "city": "TEXT",
+            "county": "TEXT",
+            "state": "TEXT",
+            "grid": "TEXT",
+            "lat": "REAL",
+            "lon": "REAL",
+            "location_source": "TEXT",
+            "location_confidence": "TEXT",
+            "status": "TEXT",
+            "topics_json": "TEXT",
+            "topic_evidence_json": "TEXT",
+            "subject": "TEXT",
+            "body": "TEXT",
+            "confirmed_state": "TEXT",
+            "followup_state": "TEXT",
+            "exercise_flag": "INTEGER DEFAULT 0",
+            "source_radio_id": "INTEGER",
+            "source_app": "TEXT",
+            "raw_reference": "TEXT",
+            "created_by": "TEXT",
+            "updated_by": "TEXT",
+        },
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_local_reports_created ON local_operator_reports(created_utc)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_local_reports_callsign ON local_operator_reports(callsign)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_local_reports_state ON local_operator_reports(state)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_local_reports_grid ON local_operator_reports(grid)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_local_reports_status ON local_operator_reports(status)")
+
 
 def _ensure_js8_links(conn: sqlite3.Connection) -> None:
     """
@@ -155,20 +248,28 @@ def _ensure_js8_links(conn: sqlite3.Connection) -> None:
             snr REAL,
             band TEXT,
             freq_hz REAL,
+            source_id TEXT,
+            app_instance_id TEXT,
+            source_radio_id TEXT,
             is_relay INTEGER DEFAULT 0,
             relay_via TEXT,
-            is_spotter INTEGER DEFAULT 0
+            is_spotter INTEGER DEFAULT 0,
+            last_seen_utc TEXT
         )
         """
     )
     cur.execute("PRAGMA table_info(js8_links)")
     cols = {row[1] for row in cur.fetchall()}
-    if "last_seen_utc" not in cols:
-        cur.execute("ALTER TABLE js8_links ADD COLUMN last_seen_utc TEXT")
+    for name in ("source_id", "app_instance_id", "source_radio_id", "last_seen_utc"):
+        if name not in cols:
+            cur.execute(f"ALTER TABLE js8_links ADD COLUMN {name} TEXT")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_ts ON js8_links(ts)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_origin_ts ON js8_links(origin, ts)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_destination_ts ON js8_links(destination, ts)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_band ON js8_links(band)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_source ON js8_links(source_id, ts)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_app_instance ON js8_links(app_instance_id, ts)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_radio ON js8_links(source_radio_id, ts)")
     ensure_js8_callsign_stats(conn, rebuild_if_empty=True)
 
 
@@ -191,6 +292,508 @@ def _ensure_controlfreq_support_indexes(conn: sqlite3.Connection) -> None:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_fldigi_checkins_last_seen_ts ON fldigi_checkins(last_seen_ts DESC, callsign)"
         )
+
+
+def _ensure_js8_expect_tables(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS js8_msg_auth_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_name TEXT,
+            callsign TEXT,
+            label TEXT,
+            key_text TEXT,
+            key_scope TEXT DEFAULT 'signing',
+            enabled INTEGER DEFAULT 1,
+            notes TEXT,
+            created_ts REAL,
+            updated_ts REAL
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "js8_msg_auth_keys",
+        {
+            "group_name": "TEXT",
+            "callsign": "TEXT",
+            "label": "TEXT",
+            "key_text": "TEXT",
+            "key_scope": "TEXT DEFAULT 'signing'",
+            "enabled": "INTEGER DEFAULT 1",
+            "notes": "TEXT",
+            "created_ts": "REAL",
+            "updated_ts": "REAL",
+        },
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_msg_auth_keys_scope ON js8_msg_auth_keys(group_name, callsign)")
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_js8_msg_auth_keys_purpose ON js8_msg_auth_keys(key_scope, group_name, callsign)"
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS js8_expect_allow_policies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE,
+            allowed_callsigns_json TEXT DEFAULT '[]',
+            allowed_groups_json TEXT DEFAULT '[]',
+            allow_trusted_operators INTEGER DEFAULT 0,
+            trusted_operator_groups_json TEXT DEFAULT '[]',
+            blocked_callsigns_json TEXT DEFAULT '[]',
+            source_scope TEXT DEFAULT 'all',
+            source_radio_ids_json TEXT DEFAULT '[]',
+            enabled INTEGER DEFAULT 1,
+            import_source TEXT,
+            notes TEXT,
+            created_ts REAL,
+            updated_ts REAL
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "js8_expect_allow_policies",
+        {
+            "name": "TEXT",
+            "allowed_callsigns_json": "TEXT DEFAULT '[]'",
+            "allowed_groups_json": "TEXT DEFAULT '[]'",
+            "allow_trusted_operators": "INTEGER DEFAULT 0",
+            "trusted_operator_groups_json": "TEXT DEFAULT '[]'",
+            "blocked_callsigns_json": "TEXT DEFAULT '[]'",
+            "source_scope": "TEXT DEFAULT 'all'",
+            "source_radio_ids_json": "TEXT DEFAULT '[]'",
+            "enabled": "INTEGER DEFAULT 1",
+            "import_source": "TEXT",
+            "notes": "TEXT",
+            "created_ts": "REAL",
+            "updated_ts": "REAL",
+        },
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_expect_allow_policies_name ON js8_expect_allow_policies(name)")
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS js8_expect_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_radio_id TEXT,
+            source_scope TEXT DEFAULT 'all',
+            js8_instance_id TEXT,
+            allow_policy_id INTEGER,
+            expect_key TEXT,
+            response_text TEXT,
+            msg_auth_sign_enabled INTEGER DEFAULT 0,
+            msg_auth_sign_callsign TEXT,
+            msg_auth_include_datecode INTEGER DEFAULT 0,
+            msg_auth_datecode TEXT,
+            allowed_callsigns_json TEXT DEFAULT '[]',
+            allowed_groups_json TEXT DEFAULT '[]',
+            allow_any INTEGER DEFAULT 0,
+            allow_trusted_operators INTEGER DEFAULT 0,
+            trusted_operator_groups_json TEXT DEFAULT '[]',
+            blocked_callsigns_json TEXT DEFAULT '[]',
+            max_replies INTEGER DEFAULT 1,
+            cooldown_seconds INTEGER DEFAULT 0,
+            tx_speed TEXT,
+            auto_tx_schedule TEXT,
+            auto_reply_enabled INTEGER DEFAULT 0,
+            unattended_auto_reply_enabled INTEGER DEFAULT 0,
+            enabled INTEGER DEFAULT 1,
+            import_source TEXT,
+            created_ts REAL,
+            updated_ts REAL
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "js8_expect_entries",
+        {
+            "source_radio_id": "TEXT",
+            "source_scope": "TEXT DEFAULT 'all'",
+            "js8_instance_id": "TEXT",
+            "allow_policy_id": "INTEGER",
+            "expect_key": "TEXT",
+            "response_text": "TEXT",
+            "msg_auth_sign_enabled": "INTEGER DEFAULT 0",
+            "msg_auth_sign_callsign": "TEXT",
+            "msg_auth_include_datecode": "INTEGER DEFAULT 0",
+            "msg_auth_datecode": "TEXT",
+            "allowed_callsigns_json": "TEXT DEFAULT '[]'",
+            "allowed_groups_json": "TEXT DEFAULT '[]'",
+            "allow_any": "INTEGER DEFAULT 0",
+            "allow_trusted_operators": "INTEGER DEFAULT 0",
+            "trusted_operator_groups_json": "TEXT DEFAULT '[]'",
+            "blocked_callsigns_json": "TEXT DEFAULT '[]'",
+            "max_replies": "INTEGER DEFAULT 1",
+            "cooldown_seconds": "INTEGER DEFAULT 0",
+            "tx_speed": "TEXT",
+            "auto_tx_schedule": "TEXT",
+            "auto_reply_enabled": "INTEGER DEFAULT 0",
+            "unattended_auto_reply_enabled": "INTEGER DEFAULT 0",
+            "enabled": "INTEGER DEFAULT 1",
+            "import_source": "TEXT",
+            "created_ts": "REAL",
+            "updated_ts": "REAL",
+        },
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_expect_entries_key ON js8_expect_entries(expect_key)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_expect_entries_policy ON js8_expect_entries(allow_policy_id)")
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_js8_expect_entries_source ON js8_expect_entries(source_scope, source_radio_id, js8_instance_id)"
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS js8_expect_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT,
+            expect_entry_id INTEGER,
+            expect_key TEXT,
+            source_radio_id TEXT,
+            source_js8_instance_id TEXT,
+            requesting_callsign TEXT,
+            target_group TEXT,
+            decision TEXT,
+            reason TEXT,
+            reply_radio_id TEXT,
+            reply_js8_instance_id TEXT,
+            created_ts REAL
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "js8_expect_audit",
+        {
+            "event_id": "TEXT",
+            "expect_entry_id": "INTEGER",
+            "expect_key": "TEXT",
+            "source_radio_id": "TEXT",
+            "source_js8_instance_id": "TEXT",
+            "requesting_callsign": "TEXT",
+            "target_group": "TEXT",
+            "decision": "TEXT",
+            "reason": "TEXT",
+            "reply_radio_id": "TEXT",
+            "reply_js8_instance_id": "TEXT",
+            "created_ts": "REAL",
+        },
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_js8_expect_audit_created_call ON js8_expect_audit(created_ts DESC, requesting_callsign)"
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS js8_expect_dispatch_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT,
+            expect_entry_id INTEGER,
+            expect_key TEXT,
+            source_radio_id TEXT,
+            source_js8_instance_id TEXT,
+            requesting_callsign TEXT,
+            target_group TEXT,
+            decision TEXT,
+            reason TEXT,
+            reply_radio_id TEXT,
+            reply_js8_instance_id TEXT,
+            transmitted_text TEXT,
+            created_ts REAL
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "js8_expect_dispatch_audit",
+        {
+            "event_id": "TEXT",
+            "expect_entry_id": "INTEGER",
+            "expect_key": "TEXT",
+            "source_radio_id": "TEXT",
+            "source_js8_instance_id": "TEXT",
+            "requesting_callsign": "TEXT",
+            "target_group": "TEXT",
+            "decision": "TEXT",
+            "reason": "TEXT",
+            "reply_radio_id": "TEXT",
+            "reply_js8_instance_id": "TEXT",
+            "transmitted_text": "TEXT",
+            "created_ts": "REAL",
+        },
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_js8_expect_dispatch_audit_created ON js8_expect_dispatch_audit(created_ts DESC, expect_key)"
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS js8_expect_management_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            expect_entry_id INTEGER,
+            action TEXT NOT NULL,
+            expect_key TEXT,
+            source_radio_id TEXT,
+            source_scope TEXT,
+            js8_instance_id TEXT,
+            enabled INTEGER,
+            auto_reply_enabled INTEGER,
+            import_source TEXT,
+            detail_json TEXT,
+            created_ts REAL NOT NULL
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "js8_expect_management_audit",
+        {
+            "expect_entry_id": "INTEGER",
+            "action": "TEXT",
+            "expect_key": "TEXT",
+            "source_radio_id": "TEXT",
+            "source_scope": "TEXT",
+            "js8_instance_id": "TEXT",
+            "enabled": "INTEGER",
+            "auto_reply_enabled": "INTEGER",
+            "import_source": "TEXT",
+            "detail_json": "TEXT",
+            "created_ts": "REAL",
+        },
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_js8_expect_management_audit_recent
+        ON js8_expect_management_audit(created_ts DESC, expect_entry_id)
+        """
+    )
+    _ensure_fio_spotter_tables(conn)
+    _ensure_flamp_dynamic_tables(conn)
+
+
+def _ensure_fio_spotter_tables(conn: sqlite3.Connection) -> None:
+    """Create the additive station-owned watch service schema."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fio_spotter_watches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            watch_kind TEXT NOT NULL,
+            pattern TEXT NOT NULL,
+            criteria_json TEXT NOT NULL DEFAULT '{}',
+            match_mode TEXT NOT NULL DEFAULT 'contains',
+            priority TEXT NOT NULL DEFAULT 'watch',
+            source_families_json TEXT NOT NULL DEFAULT '[]',
+            source_radio_ids_json TEXT NOT NULL DEFAULT '[]',
+            notification_mode TEXT NOT NULL DEFAULT 'in-app',
+            expires_ts REAL NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            last_match_ts REAL NOT NULL DEFAULT 0,
+            match_count INTEGER NOT NULL DEFAULT 0,
+            health TEXT NOT NULL DEFAULT 'ready',
+            import_source TEXT,
+            notes TEXT,
+            created_ts REAL NOT NULL,
+            updated_ts REAL NOT NULL
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "fio_spotter_watches",
+        {
+            "name": "TEXT NOT NULL DEFAULT ''",
+            "watch_kind": "TEXT NOT NULL DEFAULT 'keyword'",
+            "pattern": "TEXT NOT NULL DEFAULT ''",
+            "criteria_json": "TEXT NOT NULL DEFAULT '{}'",
+            "match_mode": "TEXT NOT NULL DEFAULT 'contains'",
+            "priority": "TEXT NOT NULL DEFAULT 'watch'",
+            "source_families_json": "TEXT NOT NULL DEFAULT '[]'",
+            "source_radio_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+            "notification_mode": "TEXT NOT NULL DEFAULT 'in-app'",
+            "expires_ts": "REAL NOT NULL DEFAULT 0",
+            "enabled": "INTEGER NOT NULL DEFAULT 1",
+            "last_match_ts": "REAL NOT NULL DEFAULT 0",
+            "match_count": "INTEGER NOT NULL DEFAULT 0",
+            "health": "TEXT NOT NULL DEFAULT 'ready'",
+            "import_source": "TEXT",
+            "notes": "TEXT",
+            "created_ts": "REAL NOT NULL DEFAULT 0",
+            "updated_ts": "REAL NOT NULL DEFAULT 0",
+        },
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fio_spotter_watches_enabled_kind "
+        "ON fio_spotter_watches(enabled, watch_kind, priority, updated_ts DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fio_spotter_watches_expiry "
+        "ON fio_spotter_watches(expires_ts, enabled)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fio_spotter_watch_matches (
+            watch_id INTEGER NOT NULL,
+            message_id TEXT NOT NULL,
+            matched_ts REAL NOT NULL,
+            PRIMARY KEY (watch_id, message_id),
+            FOREIGN KEY (watch_id) REFERENCES fio_spotter_watches(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fio_spotter_watch_matches_recent "
+        "ON fio_spotter_watch_matches(matched_ts DESC, watch_id)"
+    )
+
+
+def _ensure_flamp_dynamic_tables(conn: sqlite3.Connection) -> None:
+    """Create the durable, source-scoped state used by dynamic FLAMP Expect.
+
+    These tables are additive and intentionally do not alter or delete any
+    existing traffic/message rows.  They live beside the Expect tables because
+    both the transfer projection and request claims are part of the FIO Spotter
+    runtime database.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS flamp_transfer_state (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            q_id TEXT NOT NULL,
+            source_radio_id TEXT NOT NULL DEFAULT '',
+            source_js8_instance_id TEXT NOT NULL DEFAULT '',
+            source_path TEXT NOT NULL DEFAULT '',
+            source_mtime_ns INTEGER NOT NULL DEFAULT 0,
+            source_size_bytes INTEGER NOT NULL DEFAULT 0,
+            source_sha256 TEXT NOT NULL DEFAULT '',
+            transfer_filename TEXT NOT NULL DEFAULT '',
+            expected_file_size INTEGER,
+            completion_path TEXT NOT NULL DEFAULT '',
+            evidence_kind TEXT NOT NULL DEFAULT 'relay_snapshot',
+            parser_version INTEGER NOT NULL DEFAULT 0,
+            total_blocks INTEGER,
+            available_blocks_json TEXT NOT NULL DEFAULT '[]',
+            missing_blocks_json TEXT NOT NULL DEFAULT '[]',
+            state TEXT NOT NULL DEFAULT 'unavailable',
+            parser_confidence REAL NOT NULL DEFAULT 0,
+            observed_ts REAL NOT NULL DEFAULT 0,
+            validated_scan_ts REAL NOT NULL DEFAULT 0,
+            updated_ts REAL NOT NULL DEFAULT 0,
+            UNIQUE(q_id, source_radio_id, source_js8_instance_id)
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "flamp_transfer_state",
+        {
+            "q_id": "TEXT NOT NULL DEFAULT ''",
+            "source_radio_id": "TEXT NOT NULL DEFAULT ''",
+            "source_js8_instance_id": "TEXT NOT NULL DEFAULT ''",
+            "source_path": "TEXT NOT NULL DEFAULT ''",
+            "source_mtime_ns": "INTEGER NOT NULL DEFAULT 0",
+            "source_size_bytes": "INTEGER NOT NULL DEFAULT 0",
+            "source_sha256": "TEXT NOT NULL DEFAULT ''",
+            "transfer_filename": "TEXT NOT NULL DEFAULT ''",
+            "expected_file_size": "INTEGER",
+            "completion_path": "TEXT NOT NULL DEFAULT ''",
+            "evidence_kind": "TEXT NOT NULL DEFAULT 'relay_snapshot'",
+            "parser_version": "INTEGER NOT NULL DEFAULT 0",
+            "total_blocks": "INTEGER",
+            "available_blocks_json": "TEXT NOT NULL DEFAULT '[]'",
+            "missing_blocks_json": "TEXT NOT NULL DEFAULT '[]'",
+            "state": "TEXT NOT NULL DEFAULT 'unavailable'",
+            "parser_confidence": "REAL NOT NULL DEFAULT 0",
+            "observed_ts": "REAL NOT NULL DEFAULT 0",
+            "validated_scan_ts": "REAL NOT NULL DEFAULT 0",
+            "updated_ts": "REAL NOT NULL DEFAULT 0",
+        },
+    )
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_flamp_transfer_state_source ON flamp_transfer_state(q_id, source_radio_id, source_js8_instance_id)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_flamp_transfer_state_lookup ON flamp_transfer_state(q_id, state, source_radio_id, source_js8_instance_id)"
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS flamp_transfer_state_scans (
+            source_radio_id TEXT NOT NULL DEFAULT '',
+            source_js8_instance_id TEXT NOT NULL DEFAULT '',
+            relay_dir TEXT NOT NULL DEFAULT '',
+            receive_dir TEXT NOT NULL DEFAULT '',
+            scan_success INTEGER NOT NULL DEFAULT 0,
+            file_count INTEGER NOT NULL DEFAULT 0,
+            error_text TEXT NOT NULL DEFAULT '',
+            scanned_ts REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY(source_radio_id, source_js8_instance_id)
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "flamp_transfer_state_scans",
+        {
+            "source_radio_id": "TEXT NOT NULL DEFAULT ''",
+            "source_js8_instance_id": "TEXT NOT NULL DEFAULT ''",
+            "relay_dir": "TEXT NOT NULL DEFAULT ''",
+            "receive_dir": "TEXT NOT NULL DEFAULT ''",
+            "scan_success": "INTEGER NOT NULL DEFAULT 0",
+            "file_count": "INTEGER NOT NULL DEFAULT 0",
+            "error_text": "TEXT NOT NULL DEFAULT ''",
+            "scanned_ts": "REAL NOT NULL DEFAULT 0",
+        },
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS js8_expect_request_claims (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_key TEXT NOT NULL UNIQUE,
+            expect_entry_id INTEGER NOT NULL DEFAULT 0,
+            q_id TEXT NOT NULL DEFAULT '',
+            source_radio_id TEXT NOT NULL DEFAULT '',
+            source_js8_instance_id TEXT NOT NULL DEFAULT '',
+            requesting_callsign TEXT NOT NULL DEFAULT '',
+            target_group TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'claimed',
+            reply_text TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            attempts INTEGER NOT NULL DEFAULT 1,
+            claimed_ts REAL NOT NULL DEFAULT 0,
+            sent_ts REAL,
+            next_retry_ts REAL NOT NULL DEFAULT 0,
+            updated_ts REAL NOT NULL DEFAULT 0
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "js8_expect_request_claims",
+        {
+            "event_key": "TEXT NOT NULL DEFAULT ''",
+            "expect_entry_id": "INTEGER NOT NULL DEFAULT 0",
+            "q_id": "TEXT NOT NULL DEFAULT ''",
+            "source_radio_id": "TEXT NOT NULL DEFAULT ''",
+            "source_js8_instance_id": "TEXT NOT NULL DEFAULT ''",
+            "requesting_callsign": "TEXT NOT NULL DEFAULT ''",
+            "target_group": "TEXT NOT NULL DEFAULT ''",
+            "status": "TEXT NOT NULL DEFAULT 'claimed'",
+            "reply_text": "TEXT NOT NULL DEFAULT ''",
+            "reason": "TEXT NOT NULL DEFAULT ''",
+            "attempts": "INTEGER NOT NULL DEFAULT 1",
+            "claimed_ts": "REAL NOT NULL DEFAULT 0",
+            "sent_ts": "REAL",
+            "next_retry_ts": "REAL NOT NULL DEFAULT 0",
+            "updated_ts": "REAL NOT NULL DEFAULT 0",
+        },
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_js8_expect_claims_policy ON js8_expect_request_claims(expect_entry_id, q_id, source_radio_id, source_js8_instance_id, requesting_callsign, status)"
+    )
 
 
 def _ensure_columns(conn: sqlite3.Connection, table: str, columns: Dict[str, str]) -> None:
@@ -227,7 +830,20 @@ def _repair_group_column(conn: sqlite3.Connection, table: str, column: str, *, p
     if not _table_exists(conn, table) or column not in _table_columns(conn, table):
         return 0
     cur = conn.cursor()
-    cur.execute(f"SELECT rowid, {column} FROM {table}")
+    # This is a compatibility repair, not a startup projection.  Older builds
+    # loaded every row from several traffic tables into Python on every launch,
+    # even after all values were canonical.  On production histories that made
+    # database initialization take more than a minute.  Let SQLite identify
+    # only values which normalization can actually change.
+    cur.execute(
+        f"""SELECT rowid, {column} FROM {table}
+             WHERE COALESCE({column}, '') <> ''
+               AND (
+                    {column} <> TRIM({column})
+                    OR {column} <> UPPER({column})
+                    OR SUBSTR(TRIM({column}), 1, 1) = '@'
+               )"""
+    )
     changed = 0
     for rowid, value in cur.fetchall():
         original = str(value or "").strip()
@@ -249,7 +865,10 @@ def _repair_sitrep_commstat_groups(conn: sqlite3.Connection) -> None:
         ("commstat_artifacts", "report_group", False),
     ):
         changed += _repair_group_column(conn, table, column, preserve_all=preserve_all)
-    if _table_exists(conn, "sitrep_latest_by_callsign") and _table_exists(conn, "sitrep_state_rollup"):
+    # Rebuilding the rollup is expensive and is only necessary when the source
+    # repair changed at least one identity.  Recomputing it unconditionally was
+    # the dominant startup cost on mature production databases.
+    if changed and _table_exists(conn, "sitrep_latest_by_callsign") and _table_exists(conn, "sitrep_state_rollup"):
         try:
             from freqinout.core.sitrep_fusion import _refresh_state_rollups
 
@@ -281,6 +900,9 @@ def _ensure_prop_contact_events(conn: sqlite3.Connection) -> None:
             outcome TEXT NOT NULL,
             source TEXT NOT NULL,
             source_ref TEXT,
+            source_key TEXT,
+            app_instance_id TEXT,
+            source_radio_id TEXT,
             inserted_utc TEXT NOT NULL
         )
         """
@@ -304,6 +926,9 @@ def _ensure_prop_contact_events(conn: sqlite3.Connection) -> None:
             "outcome": "TEXT",
             "source": "TEXT",
             "source_ref": "TEXT",
+            "source_key": "TEXT",
+            "app_instance_id": "TEXT",
+            "source_radio_id": "TEXT",
             "inserted_utc": "TEXT",
         },
     )
@@ -317,24 +942,44 @@ def _ensure_prop_contact_events(conn: sqlite3.Connection) -> None:
             WHERE event_key IS NULL OR TRIM(event_key) = ''
             """
         )
-    # Safety: normalize categorical fields to reduce downstream parsing edge-cases.
-    cur.execute("UPDATE prop_contact_events SET target_type = UPPER(TRIM(target_type)) WHERE target_type IS NOT NULL")
-    cur.execute("UPDATE prop_contact_events SET outcome = UPPER(TRIM(outcome)) WHERE outcome IS NOT NULL")
-    cur.execute("UPDATE prop_contact_events SET source = UPPER(TRIM(source)) WHERE source IS NOT NULL")
-    cur.execute("UPDATE prop_contact_events SET band = UPPER(TRIM(band)) WHERE band IS NOT NULL")
-    cur.execute("UPDATE prop_contact_events SET origin_grid6 = UPPER(TRIM(origin_grid6)) WHERE origin_grid6 IS NOT NULL")
-    cur.execute("UPDATE prop_contact_events SET target_grid6 = UPPER(TRIM(target_grid6)) WHERE target_grid6 IS NOT NULL")
-    # Safety: collapse duplicate event_key rows to avoid index creation failure.
-    cur.execute(
-        """
-        DELETE FROM prop_contact_events
-        WHERE id NOT IN (
-            SELECT MIN(id)
-            FROM prop_contact_events
-            GROUP BY event_key
+    # Safety repairs must be idempotent *and* cheap on a mature database.  The
+    # old unconditional UPDATEs rewrote every propagation row on every launch,
+    # while the unconditional GROUP BY/DELETE scanned the whole table even
+    # after uniqueness had already been enforced.  Repair only malformed rows,
+    # and perform the legacy de-duplication only once while creating the unique
+    # index that prevents future duplicates.
+    for column in (
+        "target_type",
+        "outcome",
+        "source",
+        "band",
+        "origin_grid6",
+        "target_grid6",
+    ):
+        cur.execute(
+            f"""UPDATE prop_contact_events
+                   SET {column} = UPPER(TRIM({column}))
+                 WHERE {column} IS NOT NULL
+                   AND {column} <> UPPER(TRIM({column}))"""
         )
-        """
+    unique_index_exists = bool(
+        cur.execute(
+            """SELECT 1 FROM sqlite_master
+                 WHERE type='index' AND name='idx_prop_contact_events_event_key'
+                 LIMIT 1"""
+        ).fetchone()
     )
+    if not unique_index_exists:
+        cur.execute(
+            """
+            DELETE FROM prop_contact_events
+            WHERE id NOT IN (
+                SELECT MIN(id)
+                FROM prop_contact_events
+                GROUP BY event_key
+            )
+            """
+        )
     cur.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_prop_contact_events_event_key ON prop_contact_events(event_key)"
     )
@@ -342,6 +987,12 @@ def _ensure_prop_contact_events(conn: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_prop_contact_events_lookup
         ON prop_contact_events(origin_grid6, target_type, target_id, band, ts_utc)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_prop_contact_events_pooled_lookup
+        ON prop_contact_events(origin_grid6, target_type, band, ts_utc DESC)
         """
     )
     cur.execute(
@@ -421,23 +1072,41 @@ def _ensure_prop_outcome_stats(conn: sqlite3.Connection) -> None:
             "updated_utc": "TEXT",
         },
     )
-    # Safety: keep stats in valid ranges after schema drift/manual edits.
-    cur.execute("UPDATE prop_outcome_stats SET month = MIN(12, MAX(1, CAST(month AS INTEGER))) WHERE month IS NOT NULL")
+    # As above, repair only malformed legacy rows.  Unconditional normalization
+    # made this table a full write transaction during every cold start.
+    cur.execute(
+        """UPDATE prop_outcome_stats
+              SET month = MIN(12, MAX(1, CAST(month AS INTEGER)))
+            WHERE month IS NOT NULL
+              AND (typeof(month) <> 'integer' OR month < 1 OR month > 12)"""
+    )
     cur.execute(
         """
         UPDATE prop_outcome_stats
         SET utc_hour_bucket = MIN(23, MAX(0, CAST(utc_hour_bucket AS INTEGER)))
         WHERE utc_hour_bucket IS NOT NULL
+          AND (typeof(utc_hour_bucket) <> 'integer' OR utc_hour_bucket < 0 OR utc_hour_bucket > 23)
         """
     )
-    cur.execute("UPDATE prop_outcome_stats SET attempt_count = MAX(0, CAST(attempt_count AS INTEGER))")
-    cur.execute("UPDATE prop_outcome_stats SET success_count = MAX(0, CAST(success_count AS INTEGER))")
-    cur.execute("UPDATE prop_outcome_stats SET weighted_attempt = MAX(0, weighted_attempt)")
-    cur.execute("UPDATE prop_outcome_stats SET weighted_success = MAX(0, weighted_success)")
-    cur.execute("UPDATE prop_outcome_stats SET band = UPPER(TRIM(band)) WHERE band IS NOT NULL")
-    cur.execute("UPDATE prop_outcome_stats SET origin_grid6 = UPPER(TRIM(origin_grid6)) WHERE origin_grid6 IS NOT NULL")
-    cur.execute("UPDATE prop_outcome_stats SET distance_bucket = UPPER(TRIM(distance_bucket)) WHERE distance_bucket IS NOT NULL")
-    cur.execute("UPDATE prop_outcome_stats SET target_type = UPPER(TRIM(target_type)) WHERE target_type IS NOT NULL")
+    for column in ("attempt_count", "success_count"):
+        cur.execute(
+            f"""UPDATE prop_outcome_stats
+                   SET {column} = MAX(0, CAST({column} AS INTEGER))
+                 WHERE typeof({column}) <> 'integer' OR {column} < 0"""
+        )
+    for column in ("weighted_attempt", "weighted_success"):
+        cur.execute(
+            f"""UPDATE prop_outcome_stats
+                   SET {column} = MAX(0, {column})
+                 WHERE {column} < 0"""
+        )
+    for column in ("band", "origin_grid6", "distance_bucket", "target_type"):
+        cur.execute(
+            f"""UPDATE prop_outcome_stats
+                   SET {column} = UPPER(TRIM({column}))
+                 WHERE {column} IS NOT NULL
+                   AND {column} <> UPPER(TRIM({column}))"""
+        )
     cur.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_prop_outcome_stats_lookup
@@ -492,6 +1161,8 @@ def _ensure_sitrep_ingest_tables(conn: sqlite3.Connection) -> None:
             grid TEXT,
             scope TEXT,
             transport_mode TEXT,
+            reach_mode TEXT,
+            origin_path TEXT,
             remarks_text TEXT,
             brevity_code TEXT,
             brevity_summary TEXT,
@@ -521,6 +1192,8 @@ def _ensure_sitrep_ingest_tables(conn: sqlite3.Connection) -> None:
             "grid": "TEXT",
             "scope": "TEXT",
             "transport_mode": "TEXT",
+            "reach_mode": "TEXT",
+            "origin_path": "TEXT",
             "remarks_text": "TEXT",
             "brevity_code": "TEXT",
             "brevity_summary": "TEXT",
@@ -853,8 +1526,9 @@ def _ensure_nets_db() -> None:
     """
     Ensure nets DB (freqinout_nets.db) has required tables.
     """
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    db_path = CONFIG_DIR / "freqinout_nets.db"
+    config_dir = _config_dir()
+    config_dir.mkdir(parents=True, exist_ok=True)
+    db_path = config_dir / "freqinout_nets.db"
     conn = connect_sqlite(db_path)
     try:
         cur = conn.cursor()
@@ -871,7 +1545,10 @@ def _ensure_nets_db() -> None:
                 start_utc TEXT NOT NULL,
                 end_utc TEXT NOT NULL,
                 group_name TEXT,
-                auto_tune INTEGER DEFAULT 0
+                auto_tune INTEGER DEFAULT 0,
+                target_scope TEXT NOT NULL DEFAULT 'station',
+                target_device_profile_id INTEGER,
+                target_operating_profile_id INTEGER
             )
             """
         )
@@ -888,6 +1565,9 @@ def _ensure_nets_db() -> None:
                 "end_utc": "TEXT",
                 "group_name": "TEXT",
                 "auto_tune": "INTEGER DEFAULT 0",
+                "target_scope": "TEXT NOT NULL DEFAULT 'station'",
+                "target_device_profile_id": "INTEGER",
+                "target_operating_profile_id": "INTEGER",
             },
         )
         cur.execute(
@@ -909,9 +1589,17 @@ def _ensure_nets_db() -> None:
                 primary_js8call_group TEXT,
                 comment TEXT,
                 net_name TEXT,
+                group_name TEXT,
                 fldigi_mode TEXT,
                 fldigi_offset TEXT,
-                resource_id INTEGER
+                resource_id INTEGER,
+                net_session_key TEXT,
+                accepted_session_version_hash TEXT,
+                accepted_resource_version_hash TEXT,
+                accepted_snapshot_json TEXT,
+                target_scope TEXT NOT NULL DEFAULT 'station',
+                target_device_profile_id INTEGER,
+                target_operating_profile_id INTEGER
             )
             """
         )
@@ -934,9 +1622,17 @@ def _ensure_nets_db() -> None:
                 "primary_js8call_group": "TEXT",
                 "comment": "TEXT",
                 "net_name": "TEXT",
+                "group_name": "TEXT",
                 "fldigi_mode": "TEXT",
                 "fldigi_offset": "TEXT",
                 "resource_id": "INTEGER",
+                "net_session_key": "TEXT",
+                "accepted_session_version_hash": "TEXT",
+                "accepted_resource_version_hash": "TEXT",
+                "accepted_snapshot_json": "TEXT",
+                "target_scope": "TEXT NOT NULL DEFAULT 'station'",
+                "target_device_profile_id": "INTEGER",
+                "target_operating_profile_id": "INTEGER",
             },
         )
         cur.execute(
@@ -957,8 +1653,16 @@ def _ensure_nets_db() -> None:
                 primary_js8call_group TEXT,
                 comment TEXT,
                 net_name TEXT,
+                group_name TEXT,
                 fldigi_mode TEXT,
-                fldigi_offset TEXT
+                fldigi_offset TEXT,
+                net_session_key TEXT,
+                accepted_session_version_hash TEXT,
+                accepted_resource_version_hash TEXT,
+                accepted_snapshot_json TEXT,
+                target_scope TEXT NOT NULL DEFAULT 'station',
+                target_device_profile_id INTEGER,
+                target_operating_profile_id INTEGER
             )
             """
         )
@@ -980,8 +1684,16 @@ def _ensure_nets_db() -> None:
                 "primary_js8call_group": "TEXT",
                 "comment": "TEXT",
                 "net_name": "TEXT",
+                "group_name": "TEXT",
                 "fldigi_mode": "TEXT",
                 "fldigi_offset": "TEXT",
+                "net_session_key": "TEXT",
+                "accepted_session_version_hash": "TEXT",
+                "accepted_resource_version_hash": "TEXT",
+                "accepted_snapshot_json": "TEXT",
+                "target_scope": "TEXT NOT NULL DEFAULT 'station'",
+                "target_device_profile_id": "INTEGER",
+                "target_operating_profile_id": "INTEGER",
             },
         )
         cur.execute(
@@ -1222,9 +1934,12 @@ def _ensure_nets_db() -> None:
         )
 
         # Propagation outcomes (offline scoring support)
-        _ensure_propagation_outcome_tables(conn)
-        _ensure_sitrep_ingest_tables(conn)
-        _ensure_sitrep_fusion_tables(conn)
+        with perf_span("startup.database.nets.propagation", min_ms=10.0):
+            _ensure_propagation_outcome_tables(conn)
+        with perf_span("startup.database.nets.sitrep_ingest", min_ms=10.0):
+            _ensure_sitrep_ingest_tables(conn)
+        with perf_span("startup.database.nets.sitrep_fusion", min_ms=10.0):
+            _ensure_sitrep_fusion_tables(conn)
 
         # SOP profiles/actions/state
         cur.execute(
@@ -1377,12 +2092,90 @@ def _ensure_nets_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_sop_layer_profile_day ON sop_schedule_layer(profile_id, day_utc, start_utc)"
         )
 
-        _ensure_operator_checkins(conn)
-        _ensure_local_operator_tables(conn)
-        _ensure_js8_links(conn)
-        ensure_varac_local_tables(conn)
-        _ensure_controlfreq_support_indexes(conn)
-        _repair_sitrep_commstat_groups(conn)
+        # Local Nets are reminder-only station calendars.  These tables are
+        # intentionally separate from every SchedulerEngine input table.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS local_net_schedules (
+                local_net_schedule_key TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL,
+                service TEXT NOT NULL,
+                recurrence TEXT NOT NULL,
+                local_start_time TEXT NOT NULL,
+                timezone_name TEXT NOT NULL,
+                duration_minutes INTEGER NOT NULL DEFAULT 60,
+                weekdays_json TEXT NOT NULL DEFAULT '[]',
+                month_weeks_json TEXT NOT NULL DEFAULT '[]',
+                biweekly_anchor_date TEXT,
+                one_time_local_date TEXT,
+                effective_start_date TEXT,
+                effective_end_date TEXT,
+                exception_dates_json TEXT NOT NULL DEFAULT '[]',
+                reminder_minutes INTEGER NOT NULL DEFAULT 15,
+                net_entry_key TEXT,
+                net_session_key TEXT,
+                frequency_resource_key TEXT,
+                operating_group_key TEXT,
+                operating_group_name TEXT,
+                sop_id INTEGER,
+                participation_notes TEXT,
+                accepted_session_version_hash TEXT,
+                accepted_resource_version_hash TEXT,
+                accepted_snapshot_json TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                next_occurrence_utc TEXT,
+                created_utc TEXT NOT NULL,
+                updated_utc TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            """CREATE INDEX IF NOT EXISTS idx_local_net_schedules_next
+               ON local_net_schedules(enabled, next_occurrence_utc, local_net_schedule_key)"""
+        )
+        cur.execute(
+            """CREATE INDEX IF NOT EXISTS idx_local_net_schedules_filter
+               ON local_net_schedules(operating_group_key, service, enabled)"""
+        )
+        cur.execute(
+            """CREATE INDEX IF NOT EXISTS idx_local_net_schedules_session
+               ON local_net_schedules(net_session_key)"""
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS local_net_occurrence_state (
+                occurrence_key TEXT PRIMARY KEY NOT NULL,
+                local_net_schedule_key TEXT NOT NULL,
+                occurrence_start_utc TEXT NOT NULL,
+                state TEXT NOT NULL,
+                operator_note TEXT,
+                updated_utc TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            """CREATE INDEX IF NOT EXISTS idx_local_net_occurrence_schedule
+               ON local_net_occurrence_state(local_net_schedule_key, occurrence_start_utc)"""
+        )
+
+        with perf_span("startup.database.nets.operator_checkins", min_ms=10.0):
+            _ensure_operator_checkins(conn)
+        with perf_span("startup.database.nets.local_operators", min_ms=10.0):
+            _ensure_local_operator_tables(conn)
+        with perf_span("startup.database.nets.message_projection", min_ms=10.0):
+            ensure_message_projection_schema(conn)
+        with perf_span("startup.database.nets.js8_links", min_ms=10.0):
+            _ensure_js8_links(conn)
+        with perf_span("startup.database.nets.varac", min_ms=10.0):
+            ensure_varac_local_tables(conn)
+        with perf_span("startup.database.nets.dirty_triggers", min_ms=10.0):
+            ensure_source_dirty_triggers(conn)
+        with perf_span("startup.database.nets.expect", min_ms=10.0):
+            _ensure_js8_expect_tables(conn)
+        with perf_span("startup.database.nets.ops_indexes", min_ms=10.0):
+            _ensure_controlfreq_support_indexes(conn)
+        with perf_span("startup.database.nets.sitrep_group_repair", min_ms=10.0):
+            _repair_sitrep_commstat_groups(conn)
 
         conn.commit()
     finally:
@@ -1410,5 +2203,40 @@ def ensure_nets_tables() -> None:
     """
     Public entry point to ensure nets DB tables and migrations are applied.
     """
-    _ensure_nets_db()
+    with perf_span("startup.database.nets.schema", min_ms=10.0):
+        _ensure_nets_db()
+    config_dir = _config_dir()
+    try:
+        with perf_span("startup.database.nets.resource_catalog", min_ms=10.0):
+            report = cutover_resource_catalog_to_canonical(
+                config_dir / "freqinout_nets.db",
+                config_dir / "freqinout.db",
+            )
+        log.info(
+            "Resource catalog: %s (%d legacy row(s), %d review required).",
+            report.authority_state,
+            report.total_legacy_rows,
+            report.review_required_count,
+        )
+    except Exception as exc:
+        # Cutover is transactional and backup-first; failure leaves the legacy
+        # schedule surfaces usable and Resources navigation stays hidden.
+        log.error("Resource catalog cutover failed safely; legacy resources remain active: %s", exc)
+        report = None
+    if report is not None and report.authority_state == "canonical":
+        nets_path = config_dir / "freqinout_nets.db"
+        try:
+            shortwave_conn = connect_sqlite(nets_path)
+            try:
+                with shortwave_conn:
+                    with perf_span("startup.database.nets.shortwave", min_ms=10.0):
+                        ensure_shortwave_schema(shortwave_conn)
+            finally:
+                shortwave_conn.close()
+        except Exception as exc:
+            # Shortwave is an additive, independently gated resource surface.
+            # Its failure must not misreport or roll back a completed canonical
+            # catalog cutover; the UI verifies schema availability before
+            # exposing Shortwave.
+            log.error("Shortwave schema initialization failed safely; Shortwave remains unavailable: %s", exc)
     log.info("DB init: ensured nets tables.")

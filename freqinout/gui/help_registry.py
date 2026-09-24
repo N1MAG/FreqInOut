@@ -22,29 +22,41 @@ DEFAULT_HELP_CONTEXT = HelpContext(
 
 HELP_CONTEXTS: Dict[str, HelpContext] = {
     "help.overview": DEFAULT_HELP_CONTEXT,
+    "help.glossary": HelpContext(
+        key="help.glossary",
+        anchor="operating-plan-glossary",
+        title="Operating Plan Glossary",
+        summary="Plain-language definitions for Frequency Plan, Assigned Plan, Operating Plan, Schedule Source, Radio Profile, and the shared plan context cue.",
+    ),
+    "help.plan-context": HelpContext(
+        key="help.plan-context",
+        anchor="plan-context-cue",
+        title="Plan Context Cue Help",
+        summary="Read-only radio and Frequency Plan context shown on planning and operating tabs.",
+    ),
     "tab.controlfreq": HelpContext(
         key="tab.controlfreq",
         anchor="controlfreq",
-        title="ControlFreq Help",
-        summary="Frequency control, schedule awareness, activity panels, unread message and BBS file awareness, and operator decision support.",
+        title="Ops Center Help",
+        summary="Operational awareness, frequency control, schedule guidance, peer finder, traffic attention, and operator decision support.",
     ),
     "controlfreq.actions": HelpContext(
         key="controlfreq.actions",
         anchor="controlfreq-actions",
-        title="ControlFreq Actions Help",
-        summary="Buttons and controls used to hold, resume, refresh, and filter ControlFreq.",
+        title="Ops Center Actions Help",
+        summary="Buttons and controls used to hold, resume, refresh, filter, and act from Ops Center.",
     ),
     "tab.messages": HelpContext(
         key="tab.messages",
         anchor="messages",
         title="Messages Help",
-        summary="Inbox review, visible-tab refresh, BBS status, message filters, and traffic actions.",
+        summary="Inbox review, plan context cue, visible-tab refresh, BBS status, message filters, and traffic actions.",
     ),
     "messages.compose": HelpContext(
         key="messages.compose",
         anchor="messages-compose",
         title="Messages Compose Help",
-        summary="Compose and stage outbound traffic for FLMsg, FLAmp, and VarAC destinations.",
+        summary="Compose FLMsg/FLAmp files, JS8Call directed or traffic messages, JS8Spotter MCForms, and short CommStat RF traffic. Map-launched compose uses peer schedule, path, and last-heard hints to recommend the send radio and tune action.",
     ),
     "messages.bbs": HelpContext(
         key="messages.bbs",
@@ -52,17 +64,23 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         title="Messages BBS Help",
         summary="BBS copy, archive, and auto-archive behavior for staged and received files.",
     ),
+    "tab.bbs": HelpContext(
+        key="tab.bbs",
+        anchor="fio-bbs",
+        title="FIO BBS Help",
+        summary="Configure serving radios, location access and retention, publication, the visitor view, and visitor helpers for the station BBS.",
+    ),
     "messages.compose-setup": HelpContext(
         key="messages.compose-setup",
         anchor="messages-compose",
         title="Compose Setup Help",
-        summary="Form family selection, priority, send targets, VarAC copy behavior, and FLAmp signing choices.",
+        summary="Form family selection, Fast Light filename rules, JS8 target handling, CommStat RF fields, VarAC copy behavior, and FLAmp signing choices.",
     ),
     "tab.map": HelpContext(
         key="tab.map",
         anchor="map",
         title="Map Help",
-        summary="Map layers, report icons, filters, traffic overlays, and station-visibility controls.",
+        summary="Map plan context cue, layers, report icons, filters, traffic overlays, and station-visibility controls.",
     ),
     "tab.station-health": HelpContext(
         key="tab.station-health",
@@ -92,13 +110,31 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         key="tab.hf-daily",
         anchor="hf-daily",
         title="HF Frequency Schedule Help",
-        summary="Active HF schedule rows, resource-backed candidates, and SOP-aware conflict review.",
+        summary="Active HF schedule rows, plan context cue, resource-backed candidates, and SOP-aware conflict review.",
     ),
     "tab.hf-nets": HelpContext(
         key="tab.hf-nets",
         anchor="hf-nets",
         title="Net Schedules Help",
-        summary="Net schedule editing, net resources, and Net or SOP policy decisions.",
+        summary="Net schedule editing, plan context cue, net resources, and Net or SOP policy decisions.",
+    ),
+    "tab.local-nets": HelpContext(
+        key="tab.local-nets",
+        anchor="local-nets",
+        title="Local Nets Help",
+        summary="Non-commanding local-net reminders, frequency resources, Operating Group context, and manual SOP review.",
+    ),
+    "tab.tools-resources": HelpContext(
+        key="tab.tools-resources",
+        anchor="tools-resources",
+        title="Tools & Resources Help",
+        summary="Reusable frequency and net-directory reference data, safe updates, retirement, and preview-first import/export.",
+    ),
+    "tab.shortwave": HelpContext(
+        key="tab.shortwave",
+        anchor="shortwave",
+        title="Shortwave Help",
+        summary="Source-attributed Shortwave listings, accepted manual listening reminders, UTC/local schedule interpretation, data-source preview/rollback, and receive-only safety boundaries.",
     ),
     "tab.hf-peers": HelpContext(
         key="tab.hf-peers",
@@ -106,10 +142,16 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         title="HF Peers Help",
         summary="Peer schedule imports, manual entries, cleanup actions, filters, and overlap review.",
     ),
+    "tab.sop-builder": HelpContext(
+        key="tab.sop-builder",
+        anchor="sop-builder",
+        title="SOP Builder Help",
+        summary="SOP profile editing, plan context cue, conflict-aware activation, versions, and export workflow.",
+    ),
     "tab.settings": HelpContext(
         key="tab.settings",
         anchor="settings",
-        title="Settings Help",
+        title="Configuration Help",
         summary="Station identity, software choices, paths, scheduler help, launch readiness, and troubleshooting.",
     ),
     "settings.operator": HelpContext(
@@ -130,11 +172,17 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         title="Software Used Help",
         summary="Choose only the station programs you actually use so FIO shows useful readiness guidance.",
     ),
+    "settings.software": HelpContext(
+        key="settings.software",
+        anchor="settings-software-administration",
+        title="Software Administration Help",
+        summary="Choose software, see the radios using it, choose a radio and task, then save only that software scope. Discovery and health checks run only when requested.",
+    ),
     "settings.js8call": HelpContext(
         key="settings.js8call",
         anchor="settings-js8call-details",
         title="JS8Call Settings Help",
-        summary="JS8Call connection, JS8 traffic files, CommStat, JS8Spotter, and JS8Spotter form mapping.",
+        summary="Radio-scoped JS8Call application, API, message storage, ingest, launch, health, and advanced tasks. CommStat and Spotter are separate software families.",
     ),
     "settings.fast-light": HelpContext(
         key="settings.fast-light",
@@ -145,8 +193,8 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
     "settings.hf-groups": HelpContext(
         key="settings.hf-groups",
         anchor="settings-hf-groups-details",
-        title="HF Operating Groups Help",
-        summary="HF operating group rows, expected FLDigi behavior, and conflict-aware schedule inputs.",
+        title="Operating Groups Help",
+        summary="Required HF scheduling foundation: named groups, band/mode/frequency configurations, VFO, FLDigi expectations, auto-tune, condition levels, and known-group enablement.",
     ),
     "settings.local-comms": HelpContext(
         key="settings.local-comms",
@@ -154,17 +202,29 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         title="Local Comms Groups Help",
         summary="Local group profiles, resources, targets, and notes used for nearby communications planning.",
     ),
+    "settings.local-mesh": HelpContext(
+        key="settings.local-mesh",
+        anchor="settings-local-mesh",
+        title="Local Mesh Help",
+        summary="Configure saved MeshCore or Meshtastic connections, supported transports, Inbox/Map ingest, and channel policy safely.",
+    ),
     "settings.varac": HelpContext(
         key="settings.varac",
         anchor="settings-varac-details",
         title="VarAC Settings Help",
-        summary="VarAC paths, incoming/outbox folders, BBS management, Managed BBS Services, relay, and VGuard.",
+        summary="Radio-scoped VarAC application, runtime, inbox/outbox, inbound guard, cluster, launch, and health tasks. Station BBS administration is a separate top-level service.",
     ),
     "settings.message-auth": HelpContext(
         key="settings.message-auth",
         anchor="settings-message-auth",
         title="Message Auth Help",
-        summary="Plain-language signature and checksum verification, trusted hashes, GPG keys, and signing identity.",
+        summary="Plain-language signature and checksum verification, JS8 MsgAuth keys scoped by group/callsign, trusted hashes, GPG keys, and signing identity.",
+    ),
+    "settings.condition-alerts": HelpContext(
+        key="settings.condition-alerts",
+        anchor="settings-condition-alerts",
+        title="Condition Alerts Help",
+        summary="Configure trusted received-message rules that prompt or, when explicitly allowed, apply matching SOP condition layers.",
     ),
     "settings.launch-control": HelpContext(
         key="settings.launch-control",

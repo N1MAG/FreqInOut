@@ -1,0 +1,130 @@
+Impromptu Net Notice|F!106
+
+# Release date 20250323 - KN4AM - @SITREP - SitRepNet.com
+# Updated 20250422, 20250625
+
+! Impromptu Net Notice - @SITREP
+
+. Impromptu, special purpose net to address a specific event.
+.
+[DS] Brief description of net purpose:
+? Expected duration of this net series:
+@1 One time net
+@2 Unknown / indefinite
+.
+
+!!! Scheduled Date/Time:
+? Date - current or following month:
+@A 01
+@B 02
+@C 03
+@D 04
+@E 05
+@F 06
+@G 07
+@H 08
+@I 09
+@J 10
+@K 11
+@L 12
+@M 13
+@N 14
+@O 15
+@P 16
+@Q 17
+@R 18
+@S 19
+@T 20
+@U 21
+@V 22
+@W 23
+@X 24
+@Y 25
+@Z 26
+@1 27
+@2 28
+@3 29
+@4 30
+@5 31
+@6 See Additional Info.
+
+? Time standard:
+@L Local time
+@Z Zulu (UTC/GMT)
+
+? Scheduled HOUR start time of net:
+@A 01:00
+@B 02:00
+@C 03:00
+@D 04:00
+@E 05:00
+@F 06:00
+@G 07:00
+@H 08:00
+@I 09:00
+@J 10:00
+@K 11:00
+@L 12:00
+@M 13:00
+@N 14:00
+@O 15:00
+@P 16:00
+@Q 17:00
+@R 18:00
+@S 19:00
+@T 20:00
+@U 21:00
+@V 22:00
+@W 23:00
+@X 24:00
+
+? Scheduled MINUTE start time of net:
+@A 00
+@B 05
+@C 10
+@F 15
+@E 20
+@F 25
+@G 30
+@H 35
+@I 40
+@J 45
+@K 50
+@L 55
+
+? Early Check-ins?
+@N No - Net starts at specified time
+@Y Yes - Early check-ins accepted
+@U Unknown at this time
+.
+
+!!! Net Operations
+
+? Mode at start of net:
+@J JS8
+@C Contestia 4/250
+@M MFSK-32
+@V Voice
+@O Other - See Additional Information field
+
+? Frequency for this impromptu net:
+@0 None of these - See Additional Information field
+@A Built-in JS8Call Standard 80m, 3.578 MHz
+@B 80m 3.585 MHz
+@C 80m 3.588 MHz
+@D Built-in JS8Call Standard 40m, 7.078 MHz
+@E 40m 7.107 MHz
+@F 40m 7.110 MHz
+@G 40m 7.115 MHz
+@H Built-in JS8Call Standard 20m, 14.078 MHz
+@I 20m 14.107 MHz
+@J 20m 14.110 MHz
+@K 20m 14.115 MHz
+. Set Waterfall to 900 for FLDIGI, 2300 for JS8Call unless otherwise specified.
+.
+
+[AI] Additional Information:
+
+
+. ________________________________________________________________________
+. For impromptu / event-driven nets.

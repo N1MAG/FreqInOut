@@ -452,14 +452,7 @@ def _resolve_quarantine_dir(settings, incoming_dir: Path) -> Path:
             return path
         except Exception:
             pass
-    managed_root = str(settings.get("varac_bbs_vault_managed_root", "") or "").strip() if settings is not None else ""
-    if managed_root:
-        return Path(managed_root).expanduser() / "quarantine"
-    bbs_dir = str(settings.get("varac_bbs_dir", "") or "").strip() if settings is not None else ""
-    if bbs_dir:
-        bbs_path = Path(bbs_dir).expanduser()
-        return bbs_path.parent / "FIO_BBS_Vault" / "quarantine"
-    return incoming_dir.parent / "FIO_BBS_Vault" / "quarantine"
+    return incoming_dir / "VGuard_Quarantine"
 
 
 def _local_operator_db_path() -> Path:
@@ -607,14 +600,7 @@ def evaluate_varac_guard_event(
 
     # VarAC writes and moves files outside FIO's control. This mtime check is a
     # conservative heuristic to avoid acting on an older same-name file.
-    src_mtime = float(st.st_mtime or 0.0)
-    now_val = float(now_utc if now_utc is not None else time.time())
-    recent_file_window = max(float(retry_seconds), 300.0)
-    if (
-        event.timestamp_utc > 0
-        and src_mtime < (float(event.timestamp_utc) - 30.0)
-        and src_mtime < (now_val - recent_file_window)
-    ):
+    if event.timestamp_utc > 0 and float(st.st_mtime or 0.0) < (float(event.timestamp_utc) - 30.0):
         return (
             VaracGuardDecision(action="skip", reason="preexisting_file", sender=sender, filename=filename, source_path=str(src), log_path=event.log_path),
             None,
@@ -654,11 +640,11 @@ def evaluate_varac_guard_event(
 
 def run_varac_guard(settings, *, retry_seconds: Optional[int] = None) -> VaracGuardRunResult:
     if not bool(settings.get("varac_guard_enabled", False) if settings is not None else False):
-        return VaracGuardRunResult(0, 0, 0, 0, 0, 0, 0, 0, "VGuard disabled")
+        return VaracGuardRunResult(0, 0, 0, 0, 0, 0, 0, 0, "BBS Access Guard disabled")
 
     log_paths = resolve_varac_traffic_log_paths(settings)
     if not log_paths:
-        summary = "VGuard enabled, but no VarAC traffic log was found"
+        summary = "BBS Access Guard enabled, but no VarAC traffic log was found"
         try:
             settings.set("varac_guard_last_summary", summary)
         except Exception:
@@ -774,7 +760,7 @@ def run_varac_guard(settings, *, retry_seconds: Optional[int] = None) -> VaracGu
     _save_guard_state(settings, state)
 
     summary = (
-        f"VGuard {str(settings.get('varac_guard_mode', 'Log only') or 'Log only')} | "
+        f"BBS Access Guard {str(settings.get('varac_guard_mode', 'Log only') or 'Log only')} | "
         f"scanned {scanned}, processed {processed}, allowed {allowed}, unauthorized {unauthorized}, "
         f"deleted {deleted}, quarantined {quarantined}, pending {pending}, skipped {skipped}"
     )

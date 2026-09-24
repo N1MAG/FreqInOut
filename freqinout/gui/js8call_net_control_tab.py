@@ -6,7 +6,6 @@ import sqlite3
 import time
 import json
 import queue
-import socket
 from pathlib import Path
 from typing import List, Dict, Set, Optional
 
@@ -16,6 +15,8 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QGridLayout,
+    QGroupBox,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -26,6 +27,8 @@ from PySide6.QtWidgets import (
     QCompleter,
     QTableWidget,
     QTableWidgetItem,
+    QSizePolicy,
+    QScrollArea,
 )
 
 from freqinout.core.settings_manager import SettingsManager
@@ -41,8 +44,21 @@ from freqinout.core.js8_spotter_forms import (
     extract_form_codes,
     forms_enabled_for,
     legacy_default_forms_for,
+    resolve_spotter_forms_dir,
 )
+from freqinout.core.message_ingest import MessageIngestor
+from freqinout.core.ingest_runtime_status import active_runtime_ingest_inventory
+from freqinout.core.js8_ncs_offsets import ncs_offset_keys_for_directed_path
+from freqinout.core.js8_send_service import (
+    js8_profile_allows_transmit,
+    js8_speed_name,
+    send_js8_message_guarded,
+)
+from freqinout.core.js8_source_context import resolve_js8_source_context
+from freqinout.core.multi_radio_store import MultiRadioStore
+from freqinout.core.ncs_session_contract import NcsSessionSnapshot, write_ncs_session_snapshot
 from freqinout.utils.timezones import get_timezone
+from freqinout.radio_interface.js8_api_client import JS8ApiClientRegistry, JS8ApiEndpoint
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
 from freqinout.gui.qsy_helper import (
     load_operating_groups as qsy_load_operating_groups,
@@ -68,7 +84,10 @@ from freqinout.gui.qsy_helper import (
     active_hold_status_text,
 )
 from freqinout.core.config_paths import get_config_dir
-from freqinout.gui.theme import resolve_theme, button_style, fit_child_combo_boxes, fit_combo_box_to_contents
+from freqinout.gui.theme import (
+    resolve_theme, button_style, fit_child_combo_boxes, fit_combo_box_to_contents,
+    font_derived_widget_height,
+)
 
 
 def _nets_db_path() -> Path:
@@ -132,6 +151,8 @@ class JS8CallNetControlTab(QWidget):
         self._directed_path: Path | None = None
         self._last_directed_size: int = 0
         self._startup_directed_size: int = 0
+        self._directed_offset_key: str = ""
+        self._all_offset_key: str = ""
 
         self._all_calls_seen: Set[str] = set()
         self._queried_msg_ids: Set[str] = set()
@@ -145,6 +166,11 @@ class JS8CallNetControlTab(QWidget):
         self._js8_rx_timer: QTimer | None = None
         self._js8_rx_hub: JS8RxHub | None = None
         self._js8_rx_registered = False
+        self._js8_live_source_context_cache: Dict[str, object] = {
+            "endpoint": "",
+            "expires": 0.0,
+            "context": {},
+        }
         self._last_rx_ts: float = 0.0
         self._pending_grid_queries: List[tuple[Optional[float], str]] = []
         self._grid_waiting: bool = False
@@ -210,28 +236,167 @@ class JS8CallNetControlTab(QWidget):
 
     def _send_js8_message(self, text: str) -> bool:
         """
-        Send a one-shot TX.SEND_MESSAGE to JS8Call over the TCP API.
+        Send through the shared endpoint-scoped JS8 API client with safety preflight.
         """
         host = (self.settings.get("js8_host", "") or "").strip() or "127.0.0.1"
         try:
             port = int(self.settings.get("js8_port", 2442) or 2442)
         except Exception:
             port = 2442
-        payload = json.dumps({"params": {}, "type": "TX.SEND_MESSAGE", "value": text}) + "\r\n"
         try:
-            with socket.create_connection((host, port), timeout=3) as sock:
-                sock.sendall(payload.encode("utf-8"))
-            self._last_tx_ts = time.time()
-            log.info("JS8CallNetControl: sent TX.SEND_MESSAGE to %s:%s text=%s", host, port, text)
-            return True
+            endpoint = JS8ApiEndpoint(host, port)
+            client = JS8ApiClientRegistry.get(endpoint, timeout_s=1.0, auto_reconnect=True)
+            result = send_js8_message_guarded(
+                client,
+                text,
+                timeout_s=0.6,
+                allow_uncertain_target_state=True,
+            )
+            if result.sent:
+                self._last_tx_ts = time.time()
+                log.info("JS8CallNetControl: sent TX.SEND_MESSAGE to %s:%s text=%s", host, port, text)
+                return True
+            log.warning("JS8CallNetControl: JS8 send blocked for %s:%s: %s", host, port, result.detail)
         except Exception as e:
             log.error("JS8CallNetControl: failed TX.SEND_MESSAGE to %s:%s text=%s err=%s", host, port, text, e)
-            return False
+        return False
+
+    def _ncs_radio_profiles(self) -> List[Dict]:
+        try:
+            profiles = MultiRadioStore().list_runtime_active_device_profiles()
+        except Exception as exc:
+            log.debug("JS8 NCS: failed to read runtime radio profiles: %s", exc)
+            profiles = []
+        profiles = [p for p in profiles if js8_profile_allows_transmit(p)]
+        js8_profiles = [p for p in profiles if bool(p.get("use_js8call", False))]
+        if js8_profiles:
+            profiles = js8_profiles
+        return sorted(
+            [dict(p) for p in profiles if isinstance(p, dict)],
+            key=lambda p: (int(p.get("display_order", 0) or 0), int(p.get("id", 0) or 0)),
+        )
+
+    @staticmethod
+    def _ncs_profile_name(profile: Optional[Dict]) -> str:
+        if not profile:
+            return "Radio"
+        return str(profile.get("name") or profile.get("label") or f"Radio {profile.get('id', '')}").strip()
+
+    def _ncs_selected_radio_id(self, profiles: List[Dict]) -> int:
+        ids = {int(p.get("id", 0) or 0) for p in profiles}
+        try:
+            selected = int(getattr(self.window(), "_station_command_selected_profile_id", 0) or 0)
+            if selected in ids:
+                return selected
+        except Exception:
+            pass
+        try:
+            primary = MultiRadioStore().get_runtime_primary_device_profile()
+            primary_id = int((primary or {}).get("id", 0) or 0)
+            if primary_id in ids:
+                return primary_id
+        except Exception:
+            pass
+        return next(iter(ids), 0)
+
+    def _clear_ncs_session_chip_layout(self) -> None:
+        layout = getattr(self, "ncs_session_chip_layout", None)
+        if layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
+    def _select_ncs_radio_session(self, profile_id: int) -> None:
+        ident = int(profile_id or 0)
+        if ident <= 0:
+            return
+        try:
+            MultiRadioStore().set_runtime_primary_device_profile(ident)
+        except Exception as exc:
+            log.debug("JS8 NCS: failed to set runtime radio session %s: %s", ident, exc)
+        try:
+            win = self.window()
+            if win is not None and hasattr(win, "_activate_station_command_radio"):
+                win._activate_station_command_radio(ident)  # type: ignore[attr-defined]
+        except Exception as exc:
+            log.debug("JS8 NCS: failed to focus station command radio %s: %s", ident, exc)
+        self._load_settings()
+        self._refresh_qsy_options()
+        self._persist_ncs_session_snapshot()
+        self._refresh_ncs_session_context()
+
+    def _current_ncs_session_snapshot(self, *, timing_state: Optional[str] = None) -> NcsSessionSnapshot:
+        profiles = self._ncs_radio_profiles()
+        selected_id = self._ncs_selected_radio_id(profiles)
+        selected_profile = next((p for p in profiles if int(p.get("id", 0) or 0) == selected_id), None)
+        state = timing_state or ("active" if self._net_in_progress else "idle")
+        return NcsSessionSnapshot(
+            protocol="JS8Call",
+            source_id=str(selected_id or "radio"),
+            source_name=self._ncs_profile_name(selected_profile),
+            role=self.role_combo.currentText().strip() if hasattr(self, "role_combo") else "NCS",
+            net_name=self.net_name_edit.text().strip() if hasattr(self, "net_name_edit") else "",
+            timing_state=state,
+            started_utc=self._net_start_utc or "",
+            ended_utc=self._net_end_utc or "",
+            detail="JS8 NCS session scoped to one configured radio.",
+        )
+
+    def _persist_ncs_session_snapshot(self, *, timing_state: Optional[str] = None) -> None:
+        try:
+            write_ncs_session_snapshot(self.settings, self._current_ncs_session_snapshot(timing_state=timing_state))
+        except Exception as exc:
+            log.debug("JS8 NCS: failed to persist session snapshot: %s", exc)
+
+    def _refresh_ncs_session_context(self) -> None:
+        if not hasattr(self, "ncs_session_chip_layout") or not hasattr(self, "ncs_session_summary_label"):
+            return
+        profiles = self._ncs_radio_profiles()
+        selected_id = self._ncs_selected_radio_id(profiles)
+        theme = resolve_theme(self.settings)
+        self._clear_ncs_session_chip_layout()
+        if not profiles:
+            self.ncs_session_chip_layout.addWidget(QLabel("No active JS8 radio"))
+        for profile in profiles:
+            ident = int(profile.get("id", 0) or 0)
+            name = self._ncs_profile_name(profile)
+            chip = QPushButton(name)
+            chip.setToolTip(f"Switch this NCS workspace to {name}.")
+            chip.setStyleSheet(button_style("success" if ident == selected_id else "info", theme))
+            chip.clicked.connect(lambda _checked=False, profile_id=ident: self._select_ncs_radio_session(profile_id))
+            self.ncs_session_chip_layout.addWidget(chip)
+        self.ncs_session_chip_layout.addStretch()
+        selected_profile = next((p for p in profiles if int(p.get("id", 0) or 0) == selected_id), None)
+        radio_name = self._ncs_profile_name(selected_profile)
+        role = self.role_combo.currentText().strip() if hasattr(self, "role_combo") else "NCS"
+        net_name = self.net_name_edit.text().strip() if hasattr(self, "net_name_edit") else ""
+        summary = f"Session: {radio_name} | JS8Call | {role}"
+        if net_name:
+            summary = f"{summary} | {net_name}"
+        if self._net_in_progress:
+            summary = f"{summary} | Active"
+        self.ncs_session_summary_label.setText(summary)
+        self.ncs_session_summary_label.setToolTip(summary)
 
     # ---------------- UI ---------------- #
 
     def _build_ui(self):
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        self.js8_ncs_scroll_area = QScrollArea(self)
+        self.js8_ncs_scroll_area.setWidgetResizable(True)
+        self.js8_ncs_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.js8_ncs_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        content = QWidget(self.js8_ncs_scroll_area)
+        self.js8_ncs_scroll_area.setWidget(content)
+        outer_layout.addWidget(self.js8_ncs_scroll_area)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
 
         # Header with clocks
         header = QHBoxLayout()
@@ -239,65 +404,102 @@ class JS8CallNetControlTab(QWidget):
         header.addStretch()
         self.utc_label = QLabel()
         self.local_label = QLabel()
+        self.utc_label.setVisible(False)
+        self.local_label.setVisible(False)
         header.addWidget(self.utc_label)
         header.addWidget(self.local_label)
         layout.addLayout(header)
 
-        # Role + Net Name + refresh
-        top_row = QHBoxLayout()
-        top_row.addWidget(QLabel("Role:"))
+        session_group = QGroupBox("NCS Session")
+        session_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        session_layout = QVBoxLayout()
+        session_layout.setContentsMargins(12, 10, 12, 10)
+        session_layout.setSpacing(6)
+        chip_row = QHBoxLayout()
+        chip_row.addWidget(QLabel("Radio:"))
+        self.ncs_session_chip_layout = QHBoxLayout()
+        self.ncs_session_chip_layout.setSpacing(8)
+        chip_row.addLayout(self.ncs_session_chip_layout, 1)
+        self.ncs_session_summary_label = QLabel("Session: Radio | JS8Call | NCS")
+        self.ncs_session_summary_label.setWordWrap(True)
+        session_layout.addLayout(chip_row)
+        session_layout.addWidget(self.ncs_session_summary_label)
+        session_group.setLayout(session_layout)
+        layout.addWidget(session_group)
+
+        setup_group = QGroupBox("Net Setup")
+        setup_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        controls_grid = QGridLayout()
+        self._js8_setup_grid = controls_grid
+        controls_grid.setContentsMargins(12, 12, 12, 12)
+        controls_grid.setHorizontalSpacing(12)
+        controls_grid.setVerticalSpacing(10)
+        self._js8_role_label = QLabel("Role:")
+        controls_grid.addWidget(self._js8_role_label, 0, 0)
         self.role_combo = QComboBox()
         self.role_combo.addItems(["NCS", "ANCS"])
-        top_row.addWidget(self.role_combo)
+        controls_grid.addWidget(self.role_combo, 0, 1)
 
-        top_row.addSpacing(20)
-        top_row.addWidget(QLabel("Net Name:"))
+        self._js8_net_name_label = QLabel("Net Name:")
+        controls_grid.addWidget(self._js8_net_name_label, 0, 2)
         self.net_name_edit = QLineEdit()
         self.net_name_edit.setPlaceholderText("Type net name (auto-complete from schedule)...")
-        top_row.addWidget(self.net_name_edit, stretch=1)
+        self.net_name_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        controls_grid.addWidget(self.net_name_edit, 0, 3, 1, 5)
 
-        top_row.addSpacing(20)
-        top_row.addWidget(QLabel("Refresh (sec):"))
+        self._js8_refresh_label = QLabel("Refresh (sec):")
+        controls_grid.addWidget(self._js8_refresh_label, 0, 8)
         self.refresh_spin = QSpinBox()
         self.refresh_spin.setRange(5, 300)
         self.refresh_spin.setValue(15)
-        top_row.addWidget(self.refresh_spin)
+        controls_grid.addWidget(self.refresh_spin, 0, 9)
 
-        top_row.addStretch()
-        layout.addLayout(top_row)
-
-        # Group / Spotter controls
-        gs_row = QHBoxLayout()
+        self._js8_group_label = QLabel("Group:")
+        controls_grid.addWidget(self._js8_group_label, 1, 0)
         self.set_group_btn = QPushButton("Set Group")
         self.group_edit = QLineEdit()
         self.group_edit.setPlaceholderText("@GROUP")
-        gs_row.addWidget(self.set_group_btn)
-        gs_row.addWidget(self.group_edit)
-        gs_row.addSpacing(12)
+        controls_grid.addWidget(self.set_group_btn, 1, 1)
+        controls_grid.addWidget(self.group_edit, 1, 2, 1, 2)
+
+        self._js8_expect_label = QLabel("Expect:")
+        controls_grid.addWidget(self._js8_expect_label, 1, 4)
         self.set_spotter_btn = QPushButton("Set Expect Query")
         self.spotter_combo = QComboBox()
-        self.spotter_combo.setMinimumWidth(240)
+        self.spotter_combo.setMinimumWidth(220)
         self.spotter_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
-        gs_row.addWidget(self.set_spotter_btn)
-        gs_row.addWidget(self.spotter_combo)
-        gs_row.addStretch()
+        controls_grid.addWidget(self.set_spotter_btn, 1, 5)
+        controls_grid.addWidget(self.spotter_combo, 1, 6, 1, 4)
+
+        self._js8_qsy_label = QLabel("QSY:")
+        controls_grid.addWidget(self._js8_qsy_label, 2, 0)
         self.qsy_combo = QComboBox()
         self.qsy_combo.currentIndexChanged.connect(self._update_qsy_button_enabled)
-        gs_row.addWidget(self.qsy_combo)
+        controls_grid.addWidget(self.qsy_combo, 2, 1, 1, 3)
         self.hold_duration_combo = QComboBox()
         self.hold_duration_combo.setToolTip("Temporary schedule hold duration after QSY.")
         self.hold_duration_combo.currentIndexChanged.connect(self._on_hold_duration_changed)
-        gs_row.addWidget(self.hold_duration_combo)
+        self._js8_hold_label = QLabel("Hold:")
+        controls_grid.addWidget(self.hold_duration_combo, 2, 4)
         self.suspend_btn = QPushButton("QSY + Hold")
-        gs_row.addWidget(self.suspend_btn)
+        controls_grid.addWidget(self.suspend_btn, 2, 5)
         self.ad_hoc_btn = QPushButton("Ad Hoc Net")
-        gs_row.addWidget(self.ad_hoc_btn)
-        layout.addLayout(gs_row)
-        layout.addSpacing(24)
+        controls_grid.addWidget(self.ad_hoc_btn, 2, 6)
+        controls_grid.setColumnStretch(2, 1)
+        controls_grid.setColumnStretch(3, 2)
+        controls_grid.setColumnStretch(6, 2)
+        controls_grid.setColumnStretch(7, 2)
+        controls_grid.setColumnStretch(8, 2)
+        controls_grid.setColumnStretch(9, 2)
+        setup_group.setLayout(controls_grid)
+        layout.addWidget(setup_group)
 
         # Check-ins table
+        checkins_group = QGroupBox("Check-Ins")
+        checkins_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         table_layout = QVBoxLayout()
-        table_layout.addWidget(QLabel("<b>Check-Ins</b>"))
+        table_layout.setContentsMargins(12, 12, 12, 12)
+        table_layout.setSpacing(8)
         filter_row = QHBoxLayout()
         filter_row.addWidget(QLabel("Check-in Filter:"))
         self.checkin_filter_combo = QComboBox()
@@ -313,11 +515,23 @@ class JS8CallNetControlTab(QWidget):
         self.checkin_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.checkin_table.setSelectionMode(QTableWidget.SingleSelection)
         self.checkin_table.horizontalHeader().setStretchLastSection(True)
-        table_layout.addWidget(self.checkin_table)
-        layout.addLayout(table_layout)
+        self.checkin_table.setMinimumHeight(
+            font_derived_widget_height(self.checkin_table, vertical_padding=12, floor=120, include_size_hints=False)
+        )
+        self.checkin_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.checkin_empty_label = QLabel(
+            "No JS8 check-ins yet. Start the net and accept mapped MCF forms as stations check in."
+        )
+        self.checkin_empty_label.setObjectName("js8NcsCheckinEmptyState")
+        self.checkin_empty_label.setWordWrap(True)
+        self.checkin_empty_label.setVisible(False)
+        table_layout.addWidget(self.checkin_empty_label)
+        table_layout.addWidget(self.checkin_table, 1)
 
         # Buttons row
         btn_row = QHBoxLayout()
+        self._js8_action_row = btn_row
+        btn_row.setSpacing(8)
         self.start_btn = QPushButton("Start Net")
         self.ack_btn = QPushButton("ACK GROUP")
         self.ack_callsign_btn = QPushButton("ACK CALLSIGN")
@@ -339,9 +553,11 @@ class JS8CallNetControlTab(QWidget):
         btn_row.addWidget(self.save_btn)
         btn_row.addWidget(self.end_btn)
         btn_row.addStretch()
-        # Ad hoc button already placed in group row
 
-        layout.addLayout(btn_row)
+        table_layout.addLayout(btn_row)
+        checkins_group.setLayout(table_layout)
+        layout.addWidget(checkins_group, 1)
+        self._update_checkin_empty_state()
 
         # Signals
         self.start_btn.clicked.connect(self._start_net)
@@ -360,8 +576,97 @@ class JS8CallNetControlTab(QWidget):
         self.refresh_spin.valueChanged.connect(self._update_timer_interval)
         self.suspend_btn.clicked.connect(self._on_suspend_clicked)
         self.ad_hoc_btn.clicked.connect(self._start_ad_hoc_net)
+        self.role_combo.currentTextChanged.connect(lambda _text: self._on_ncs_session_context_changed())
+        self.net_name_edit.textChanged.connect(lambda _text: self._on_ncs_session_context_changed())
 
         self._set_net_button_styles(active=False)
+        self._refresh_ncs_session_context()
+        QTimer.singleShot(0, self._reflow_ncs_layouts)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._reflow_ncs_layouts()
+
+    def _reflow_ncs_layouts(self) -> None:
+        """Reposition existing controls only; never reload NCS state on resize."""
+        controls = (
+            self._js8_role_label,
+            self.role_combo,
+            self._js8_net_name_label,
+            self.net_name_edit,
+            self._js8_refresh_label,
+            self.refresh_spin,
+            self._js8_group_label,
+            self.group_edit,
+            self.set_group_btn,
+            self._js8_expect_label,
+            self.spotter_combo,
+            self.set_spotter_btn,
+            self._js8_qsy_label,
+            self.qsy_combo,
+            self._js8_hold_label,
+            self.hold_duration_combo,
+            self.suspend_btn,
+            self.ad_hoc_btn,
+        )
+        metrics = self.fontMetrics()
+        widest_control = max(
+            max(int(widget.minimumSizeHint().width()), int(widget.sizeHint().width()))
+            for widget in controls
+        )
+        compact = self.width() < max(1000, (widest_control * 4) + (metrics.horizontalAdvance("M") * 8))
+        grid = getattr(self, "_js8_setup_grid", None)
+        if grid is not None:
+            while grid.count():
+                grid.takeAt(0)
+            for column in range(10):
+                grid.setColumnStretch(column, 0)
+            if compact:
+                rows = (
+                    (self._js8_role_label, self.role_combo),
+                    (self._js8_net_name_label, self.net_name_edit),
+                    (self._js8_refresh_label, self.refresh_spin),
+                    (self._js8_group_label, self.group_edit),
+                    (self._js8_expect_label, self.spotter_combo),
+                    (self._js8_qsy_label, self.qsy_combo),
+                    (self._js8_hold_label, self.hold_duration_combo),
+                )
+                for row, (label, field) in enumerate(rows):
+                    grid.addWidget(label, row, 0)
+                    grid.addWidget(field, row, 1)
+                grid.addWidget(self.set_group_btn, 7, 1)
+                grid.addWidget(self.set_spotter_btn, 8, 1)
+                grid.addWidget(self.suspend_btn, 9, 0)
+                grid.addWidget(self.ad_hoc_btn, 9, 1)
+                grid.setColumnStretch(1, 1)
+            else:
+                grid.addWidget(self._js8_role_label, 0, 0)
+                grid.addWidget(self.role_combo, 0, 1)
+                grid.addWidget(self._js8_net_name_label, 0, 2)
+                grid.addWidget(self.net_name_edit, 0, 3, 1, 3)
+                grid.addWidget(self._js8_refresh_label, 0, 6)
+                grid.addWidget(self.refresh_spin, 0, 7)
+                grid.addWidget(self._js8_group_label, 1, 0)
+                grid.addWidget(self.group_edit, 1, 1, 1, 2)
+                grid.addWidget(self.set_group_btn, 1, 3)
+                grid.addWidget(self._js8_expect_label, 1, 4)
+                grid.addWidget(self.spotter_combo, 1, 5, 1, 2)
+                grid.addWidget(self.set_spotter_btn, 1, 7)
+                grid.addWidget(self._js8_qsy_label, 2, 0)
+                grid.addWidget(self.qsy_combo, 2, 1, 1, 2)
+                grid.addWidget(self._js8_hold_label, 2, 3)
+                grid.addWidget(self.hold_duration_combo, 2, 4)
+                grid.addWidget(self.suspend_btn, 2, 5)
+                grid.addWidget(self.ad_hoc_btn, 2, 6, 1, 2)
+                for column in (3, 5):
+                    grid.setColumnStretch(column, 1)
+        action_row = getattr(self, "_js8_action_row", None)
+        if action_row is not None:
+            action_row.setDirection(QHBoxLayout.TopToBottom if compact else QHBoxLayout.LeftToRight)
+
+    def _on_ncs_session_context_changed(self) -> None:
+        self._persist_ncs_session_snapshot()
+        self._refresh_ncs_session_context()
 
     # ---------------- SETTINGS & TIMER ---------------- #
 
@@ -380,6 +685,7 @@ class JS8CallNetControlTab(QWidget):
         self._maybe_reload_operating_groups()
         self._apply_theme()
         self._refresh_group_completer()
+        self._setup_js8_rx_timer()
 
     def show_loading_toast(self) -> None:
         # NCS tabs do not use a loading banner/toast.
@@ -428,10 +734,14 @@ class JS8CallNetControlTab(QWidget):
             p = Path(directed_path)
             if p.exists() and p.is_file():
                 self._directed_path = p
+                self._refresh_ncs_offset_keys()
                 try:
                     size_now = p.stat().st_size
                     self._startup_directed_size = size_now
-                    saved_off = int(data.get("js8_directed_offset", 0) or 0)
+                    saved_off = self._settings_int(
+                        self._directed_offset_key,
+                        self._settings_int("js8_directed_offset", 0),
+                    )
                     if saved_off <= 0:
                         self._last_directed_size = size_now
                     else:
@@ -440,14 +750,21 @@ class JS8CallNetControlTab(QWidget):
                     self._startup_directed_size = 0
             else:
                 self._directed_path = None
+                self._directed_offset_key = ""
+                self._all_offset_key = ""
                 log.warning("JS8CallNetControl: js8_directed_path not found: %s", directed_path)
         else:
             self._directed_path = None
+            self._directed_offset_key = ""
+            self._all_offset_key = ""
         if self._directed_path:
             try:
                 all_path = self._directed_path.parent / "ALL.TXT"
                 size_now = all_path.stat().st_size if all_path.exists() else 0
-                saved_all = int(data.get("js8_all_offset", 0) or 0)
+                saved_all = self._settings_int(
+                    self._all_offset_key,
+                    self._settings_int("js8_all_offset", 0),
+                )
                 if saved_all <= 0:
                     self._last_all_size = size_now
                 else:
@@ -462,15 +779,14 @@ class JS8CallNetControlTab(QWidget):
             self._poll_timer.setInterval(refresh * 1000)
 
         # Spotter forms dropdown
-        forms_dir = Path(data.get("js8_forms_path", "") or "")
+        forms_dir = resolve_spotter_forms_dir(data.get("js8_forms_path", ""))
         self.spotter_combo.clear()
         forms = []
-        if forms_dir.exists() and forms_dir.is_dir():
-            for definition in discover_spotter_forms(forms_dir):
-                label = definition.form_code
-                if definition.title:
-                    label = f"{definition.form_code} - {definition.title}"
-                forms.append((definition.form_code, label))
+        for definition in discover_spotter_forms(forms_dir):
+            label = definition.form_code
+            if definition.title:
+                label = f"{definition.form_code} - {definition.title}"
+            forms.append((definition.form_code, label))
         if forms:
             for code, label in forms:
                 self.spotter_combo.addItem(label, code)
@@ -485,6 +801,38 @@ class JS8CallNetControlTab(QWidget):
             self.group_spotter_btn.setEnabled(False)
             self.single_spotter_btn.setEnabled(False)
         fit_combo_box_to_contents(self.spotter_combo)
+        self._refresh_ncs_session_context()
+
+    def _refresh_ncs_offset_keys(self):
+        if not self._directed_path:
+            self._directed_offset_key = ""
+            self._all_offset_key = ""
+            return
+        try:
+            inventory = active_runtime_ingest_inventory()
+        except Exception:
+            inventory = None
+        keys = ncs_offset_keys_for_directed_path(self._directed_path, inventory=inventory)
+        self._directed_offset_key = keys.directed_offset_key
+        self._all_offset_key = keys.all_offset_key
+
+    def _settings_int(self, key: object, default: int = 0) -> int:
+        key_txt = str(key or "").strip()
+        if not key_txt:
+            return int(default or 0)
+        try:
+            return int(self.settings.get(key_txt, default) or default)
+        except Exception:
+            return int(default or 0)
+
+    def _save_ncs_offset(self, key: object, value: int):
+        key_txt = str(key or "").strip()
+        if not key_txt:
+            return
+        try:
+            self.settings.set(key_txt, int(value))
+        except Exception:
+            pass
 
     def _save_refresh_setting(self):
         try:
@@ -515,17 +863,60 @@ class JS8CallNetControlTab(QWidget):
         self._update_clock_labels()
 
     def _setup_js8_rx_timer(self):
-        if self._js8_rx_hub is None:
-            self._js8_rx_hub = JS8RxHub.instance()
-        if not self._js8_rx_registered:
-            self._js8_rx_hub.register_listener(self._on_js8_rx_messages)
-            self._js8_rx_registered = True
         host = (self.settings.get("js8_host", "") or "").strip() or "127.0.0.1"
         try:
             port = int(self.settings.get("js8_port", 2442) or 2442)
         except Exception:
             port = 2442
-        self._js8_rx_hub.start(host, port)
+        hub_valid = False
+        if self._js8_rx_hub is not None:
+            try:
+                hub_valid = bool(self._js8_rx_hub.is_valid())
+            except Exception:
+                hub_valid = False
+        if not hub_valid:
+            self._js8_rx_hub = None
+            self._js8_rx_registered = False
+        if self._js8_rx_hub is None or self._js8_rx_hub.endpoint() != (host, port):
+            if self._js8_rx_hub is not None and self._js8_rx_registered:
+                try:
+                    self._js8_rx_hub.unregister_listener(self._on_js8_rx_messages)
+                except Exception:
+                    pass
+                self._js8_rx_registered = False
+            self._js8_rx_hub = JS8RxHub.instance(host, port)
+        if not self._js8_rx_registered:
+            self._js8_rx_hub.register_listener(self._on_js8_rx_messages)
+            self._js8_rx_registered = True
+        try:
+            self._js8_rx_hub.start(host, port)
+        except RuntimeError:
+            self._js8_rx_hub = JS8RxHub.instance(host, port)
+            self._js8_rx_hub.register_listener(self._on_js8_rx_messages)
+            self._js8_rx_registered = True
+            self._js8_rx_hub.start(host, port)
+
+    def _js8_live_source_context(self) -> Dict[str, str]:
+        host = (self.settings.get("js8_host", "") or "").strip() or "127.0.0.1"
+        try:
+            port = int(self.settings.get("js8_port", 2442) or 2442)
+        except Exception:
+            port = 2442
+        endpoint = f"{host}:{port}".strip().lower()
+        cache = getattr(self, "_js8_live_source_context_cache", {}) or {}
+        if (
+            str(cache.get("endpoint", "") or "") == endpoint
+            and float(cache.get("expires", 0.0) or 0.0) > time.time()
+            and isinstance(cache.get("context"), dict)
+        ):
+            return dict(cache.get("context") or {})
+        context = resolve_js8_source_context(self.settings, host=host, port=port)
+        self._js8_live_source_context_cache = {
+            "endpoint": endpoint,
+            "expires": time.time() + 30.0,
+            "context": context,
+        }
+        return context
 
     def _update_timer_interval(self):
         if self._poll_timer:
@@ -695,6 +1086,7 @@ class JS8CallNetControlTab(QWidget):
         self.suspend_btn.setStyleSheet(button_style("warning", theme))
         self._update_group_button_state()
         self._update_spotter_button_state()
+        self._refresh_ncs_session_context()
 
     def apply_theme(self) -> None:
         self._apply_theme()
@@ -803,7 +1195,6 @@ class JS8CallNetControlTab(QWidget):
         self._net_in_progress = True
         self._net_start_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
         self._net_end_utc = None
-        self.net_status_changed.emit("JS8", True)
         self._all_calls_seen.clear()
         self._queried_msg_ids.clear()
         self._pending_queries.clear()
@@ -822,6 +1213,9 @@ class JS8CallNetControlTab(QWidget):
         self.end_btn.setEnabled(True)
         self.ack_btn.setEnabled(True)
         self.ack_callsign_btn.setEnabled(True)
+        self._persist_ncs_session_snapshot(timing_state="active")
+        self.net_status_changed.emit("JS8", True)
+        self._refresh_ncs_session_context()
 
           # Track file size so we only read new lines
         try:
@@ -903,7 +1297,9 @@ class JS8CallNetControlTab(QWidget):
         self._write_net_log_file()
 
         self._net_in_progress = False
+        self._persist_ncs_session_snapshot(timing_state="ended")
         self.net_status_changed.emit("JS8", False)
+        self._refresh_ncs_session_context()
         self._auto_query_paused_by_net = False
         self.end_btn.setEnabled(False)
         self._set_net_button_styles(active=False)
@@ -1097,9 +1493,7 @@ class JS8CallNetControlTab(QWidget):
                             speed_guess = self._call_last_speed.get(self._base_callsign(call_primary))
                             mode_name = ""
                             if speed_guess is not None:
-                                mode_name = {0: "Normal", 1: "Fast", 2: "Turbo", 4: "Slow"}.get(
-                                    speed_guess, str(speed_guess)
-                                )
+                                mode_name = js8_speed_name(speed_guess)
                             base_call = self._base_callsign(call_primary) if call_primary else ""
                             if base_call and self._checkins.get(base_call, {}).get("offset") is not None:
                                 offset_line = None
@@ -1112,10 +1506,7 @@ class JS8CallNetControlTab(QWidget):
                             )
 
                     self._last_directed_size = int(last_pos)
-                    try:
-                        self.settings.set("js8_directed_offset", int(self._last_directed_size))
-                    except Exception:
-                        pass
+                    self._save_ncs_offset(self._directed_offset_key, self._last_directed_size)
             except Exception as e:
                 log.error("JS8CallNetControl: failed reading DIRECTED.TXT: %s", e)
                 return
@@ -1171,10 +1562,7 @@ class JS8CallNetControlTab(QWidget):
                     # Track outbound direct transmissions to add untrusted operators
                     self._maybe_register_outgoing_call(line)
                 self._last_all_size = int(last_pos)
-                try:
-                    self.settings.set("js8_all_offset", int(self._last_all_size))
-                except Exception:
-                    pass
+                self._save_ncs_offset(self._all_offset_key, self._last_all_size)
         except Exception as e:
             log.error("JS8CallNetControl: failed reading ALL.TXT: %s", e)
             return
@@ -1203,12 +1591,21 @@ class JS8CallNetControlTab(QWidget):
 
     def _clear_table(self) -> None:
         self.checkin_table.setRowCount(0)
+        self._update_checkin_empty_state()
 
     def _rebuild_checkin_table(self) -> None:
         self._checkin_rows = {}
         self._clear_table()
         for cs, data in self._checkins.items():
             self._update_row(cs, data)
+        self._update_checkin_empty_state()
+
+    def _update_checkin_empty_state(self) -> None:
+        if not hasattr(self, "checkin_empty_label") or not hasattr(self, "checkin_table"):
+            return
+        has_rows = self.checkin_table.rowCount() > 0
+        self.checkin_empty_label.setVisible(not has_rows)
+        self.checkin_table.setVisible(has_rows)
 
     def _checkin_filter_mode(self) -> str:
         if hasattr(self, "checkin_filter_combo"):
@@ -1410,6 +1807,7 @@ class JS8CallNetControlTab(QWidget):
                     item.setBackground(bg)
                 else:
                     item.setBackground(QColor(theme["surface_alt"]))
+        self._update_checkin_empty_state()
 
     def _upsert_checkin(
         self,
@@ -1488,7 +1886,7 @@ class JS8CallNetControlTab(QWidget):
 
     def _set_spotter_form(self):
         if not self.spotter_combo.isEnabled():
-            QMessageBox.warning(self, "Spotter", "No JS8Spotter forms found.")
+            QMessageBox.warning(self, "Spotter", "No MCF forms found.")
             return
         self._spotter_form = self._current_spotter_code()
         self._expected_form = self._spotter_form
@@ -1628,7 +2026,7 @@ class JS8CallNetControlTab(QWidget):
             return
         mycall = self._my_callsign()
         if not mycall:
-            QMessageBox.warning(self, "Callsign", "Configure your callsign in Settings.")
+            QMessageBox.warning(self, "Callsign", "Configure your callsign in Configuration.")
             return
         text = f"{mycall}: {group} E? {self._spotter_form}"
         resp = QMessageBox.question(
@@ -1656,7 +2054,7 @@ class JS8CallNetControlTab(QWidget):
             return
         mycall = self._my_callsign()
         if not mycall:
-            QMessageBox.warning(self, "Callsign", "Configure your callsign in Settings.")
+            QMessageBox.warning(self, "Callsign", "Configure your callsign in Configuration.")
             return
         text = f"{mycall}: {cs} E? {self._spotter_form}"
         resp = QMessageBox.question(
@@ -1922,7 +2320,7 @@ class JS8CallNetControlTab(QWidget):
             port = 2442
         host = (self.settings.get("js8_host", "") or "").strip() or "127.0.0.1"
         try:
-            hub = self._js8_rx_hub or JS8RxHub.instance()
+            hub = self._js8_rx_hub or JS8RxHub.instance(host, port)
             if not hub.start(host, port):
                 log.error("JS8CallNetControl: shared js8net connection could not start.")
                 return None
@@ -2534,6 +2932,17 @@ class JS8CallNetControlTab(QWidget):
             return
         self._polling_rx = True
         try:
+            source_context = self._js8_live_source_context()
+            try:
+                if any("F!" in str((msg.get("params", {}) or {}).get("TEXT") or msg.get("value") or "").upper() for msg in messages if isinstance(msg, dict)):
+                    MessageIngestor(self.settings).ingest_spotter_from_js8_events(
+                        messages,
+                        source_radio_id=source_context.get("source_radio_id", ""),
+                        js8_instance_id=source_context.get("js8_instance_id", ""),
+                        source_key=source_context.get("source_id", ""),
+                    )
+            except Exception as exc:
+                log.debug("JS8CallNetControl: Spotter live ingest failed: %s", exc)
             for msg in messages:
                 now_ts = time.time()
                 self._last_rx_ts = now_ts
@@ -2569,9 +2978,7 @@ class JS8CallNetControlTab(QWidget):
                             if speed_val is not None:
                                 try:
                                     sval = int(speed_val)
-                                    mode_name = {0: "Normal", 1: "Fast", 2: "Turbo", 4: "Slow"}.get(
-                                        sval, str(speed_val)
-                                    )
+                                    mode_name = js8_speed_name(sval)
                                 except Exception:
                                     mode_name = str(speed_val)
                                 if sval is not None:

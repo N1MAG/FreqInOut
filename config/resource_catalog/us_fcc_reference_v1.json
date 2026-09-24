@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "catalog_key": "us-fcc-reference-v1",
+  "jurisdiction": "US",
+  "content_version": "us-fcc-reference-v1-2026-09-09",
+  "effective_date": "2026-09-03",
+  "verified_date": "2026-09-09",
+  "sources": [
+    {
+      "source_key": "ecfr-47-cfr-97-301",
+      "citation": "47 CFR 97.301",
+      "url": "https://www.ecfr.gov/current/title-47/chapter-I/subchapter-D/part-97/subpart-D/section-97.301",
+      "effective_date": "2026-09-03",
+      "verified_date": "2026-09-09"
+    },
+    {
+      "source_key": "ecfr-47-cfr-97-305",
+      "citation": "47 CFR 97.305",
+      "url": "https://www.ecfr.gov/current/title-47/chapter-I/subchapter-D/part-97/subpart-D/section-97.305",
+      "effective_date": "2026-09-03",
+      "verified_date": "2026-09-09"
+    },
+    {
+      "source_key": "ecfr-47-cfr-95-1763",
+      "citation": "47 CFR 95.1763",
+      "url": "https://www.ecfr.gov/current/title-47/chapter-I/subchapter-D/part-95/subpart-E/section-95.1763",
+      "effective_date": "2026-09-03",
+      "verified_date": "2026-09-09"
+    }
+  ],
+  "references": [
+    {"reference_key": "us-amateur-6m", "kind": "band_range", "service": "Amateur", "label": "Amateur 6 m", "lower_hz": 50000000, "upper_hz": 54000000, "citation": "47 CFR 97.301(a)", "source_key": "ecfr-47-cfr-97-301", "emission_citation": "47 CFR 97.305(c)(4)(i)-(ii)"},
+    {"reference_key": "us-amateur-2m", "kind": "band_range", "service": "Amateur", "label": "Amateur 2 m", "lower_hz": 144000000, "upper_hz": 148000000, "citation": "47 CFR 97.301(a)", "source_key": "ecfr-47-cfr-97-301", "emission_citation": "47 CFR 97.305(c)(4)(iii)"},
+    {"reference_key": "us-amateur-1-25m-219", "kind": "band_range", "service": "Amateur", "label": "Amateur 1.25 m (219-220 MHz)", "lower_hz": 219000000, "upper_hz": 220000000, "citation": "47 CFR 97.301(a)", "source_key": "ecfr-47-cfr-97-301", "emission_citation": "47 CFR 97.305(c)(4)(iv)"},
+    {"reference_key": "us-amateur-1-25m-222", "kind": "band_range", "service": "Amateur", "label": "Amateur 1.25 m (222-225 MHz)", "lower_hz": 222000000, "upper_hz": 225000000, "citation": "47 CFR 97.301(a)", "source_key": "ecfr-47-cfr-97-301", "emission_citation": "47 CFR 97.305(c)(4)(v)"},
+    {"reference_key": "us-amateur-70cm", "kind": "band_range", "service": "Amateur", "label": "Amateur 70 cm", "lower_hz": 420000000, "upper_hz": 450000000, "citation": "47 CFR 97.301(a)", "source_key": "ecfr-47-cfr-97-301", "emission_citation": "47 CFR 97.305(c)(5)(i)"},
+    {"reference_key": "us-amateur-33cm", "kind": "band_range", "service": "Amateur", "label": "Amateur 33 cm", "lower_hz": 902000000, "upper_hz": 928000000, "citation": "47 CFR 97.301(a)", "source_key": "ecfr-47-cfr-97-301", "emission_citation": "47 CFR 97.305(c)(5)(ii)"},
+    {"reference_key": "us-amateur-23cm", "kind": "band_range", "service": "Amateur", "label": "Amateur 23 cm", "lower_hz": 1240000000, "upper_hz": 1300000000, "citation": "47 CFR 97.301(a)", "source_key": "ecfr-47-cfr-97-301", "emission_citation": "47 CFR 97.305(c)(5)(iii)"},
+    {"reference_key": "us-gmrs-462-main-01", "kind": "channel", "service": "GMRS", "label": "GMRS 462 MHz main 1", "center_hz": 462550000, "purpose": "mobile, hand-held portable, repeater, base, and fixed", "citation": "47 CFR 95.1763(a)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-462-main-02", "kind": "channel", "service": "GMRS", "label": "GMRS 462 MHz main 2", "center_hz": 462575000, "purpose": "mobile, hand-held portable, repeater, base, and fixed", "citation": "47 CFR 95.1763(a)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-462-main-03", "kind": "channel", "service": "GMRS", "label": "GMRS 462 MHz main 3", "center_hz": 462600000, "purpose": "mobile, hand-held portable, repeater, base, and fixed", "citation": "47 CFR 95.1763(a)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-462-main-04", "kind": "channel", "service": "GMRS", "label": "GMRS 462 MHz main 4", "center_hz": 462625000, "purpose": "mobile, hand-held portable, repeater, base, and fixed", "citation": "47 CFR 95.1763(a)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-462-main-05", "kind": "channel", "service": "GMRS", "label": "GMRS 462 MHz main 5", "center_hz": 462650000, "purpose": "mobile, hand-held portable, repeater, base, and fixed", "citation": "47 CFR 95.1763(a)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-462-main-06", "kind": "channel", "service": "GMRS", "label": "GMRS 462 MHz main 6", "center_hz": 462675000, "purpose": "mobile, hand-held portable, repeater, base, and fixed", "citation": "47 CFR 95.1763(a)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-462-main-07", "kind": "channel", "service": "GMRS", "label": "GMRS 462 MHz main 7", "center_hz": 462700000, "purpose": "mobile, hand-held portable, repeater, base, and fixed", "citation": "47 CFR 95.1763(a)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-462-main-08", "kind": "channel", "service": "GMRS", "label": "GMRS 462 MHz main 8", "center_hz": 462725000, "purpose": "mobile, hand-held portable, repeater, base, and fixed", "citation": "47 CFR 95.1763(a)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-462-interstitial-01", "kind": "channel", "service": "GMRS", "label": "GMRS 462 MHz interstitial 1", "center_hz": 462562500, "purpose": "mobile, hand-held portable, and base", "citation": "47 CFR 95.1763(b)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-462-interstitial-02", "kind": "channel", "service": "GMRS", "label": "GMRS 462 MHz interstitial 2", "center_hz": 462587500, "purpose": "mobile, hand-held portable, and base", "citation": "47 CFR 95.1763(b)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-462-interstitial-03", "kind": "channel", "service": "GMRS", "label": "GMRS 462 MHz interstitial 3", "center_hz": 462612500, "purpose": "mobile, hand-held portable, and base", "citation": "47 CFR 95.1763(b)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-462-interstitial-04", "kind": "channel", "service": "GMRS", "label": "GMRS 462 MHz interstitial 4", "center_hz": 462637500, "purpose": "mobile, hand-held portable, and base", "citation": "47 CFR 95.1763(b)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-462-interstitial-05", "kind": "channel", "service": "GMRS", "label": "GMRS 462 MHz interstitial 5", "center_hz": 462662500, "purpose": "mobile, hand-held portable, and base", "citation": "47 CFR 95.1763(b)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-462-interstitial-06", "kind": "channel", "service": "GMRS", "label": "GMRS 462 MHz interstitial 6", "center_hz": 462687500, "purpose": "mobile, hand-held portable, and base", "citation": "47 CFR 95.1763(b)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-462-interstitial-07", "kind": "channel", "service": "GMRS", "label": "GMRS 462 MHz interstitial 7", "center_hz": 462712500, "purpose": "mobile, hand-held portable, and base", "citation": "47 CFR 95.1763(b)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-467-main-01", "kind": "channel", "service": "GMRS", "label": "GMRS 467 MHz main 1", "center_hz": 467550000, "purpose": "repeater input or brief test; specified station classes", "citation": "47 CFR 95.1763(c)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-467-main-02", "kind": "channel", "service": "GMRS", "label": "GMRS 467 MHz main 2", "center_hz": 467575000, "purpose": "repeater input or brief test; specified station classes", "citation": "47 CFR 95.1763(c)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-467-main-03", "kind": "channel", "service": "GMRS", "label": "GMRS 467 MHz main 3", "center_hz": 467600000, "purpose": "repeater input or brief test; specified station classes", "citation": "47 CFR 95.1763(c)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-467-main-04", "kind": "channel", "service": "GMRS", "label": "GMRS 467 MHz main 4", "center_hz": 467625000, "purpose": "repeater input or brief test; specified station classes", "citation": "47 CFR 95.1763(c)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-467-main-05", "kind": "channel", "service": "GMRS", "label": "GMRS 467 MHz main 5", "center_hz": 467650000, "purpose": "repeater input or brief test; specified station classes", "citation": "47 CFR 95.1763(c)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-467-main-06", "kind": "channel", "service": "GMRS", "label": "GMRS 467 MHz main 6", "center_hz": 467675000, "purpose": "repeater input or brief test; specified station classes", "citation": "47 CFR 95.1763(c)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-467-main-07", "kind": "channel", "service": "GMRS", "label": "GMRS 467 MHz main 7", "center_hz": 467700000, "purpose": "repeater input or brief test; specified station classes", "citation": "47 CFR 95.1763(c)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-467-main-08", "kind": "channel", "service": "GMRS", "label": "GMRS 467 MHz main 8", "center_hz": 467725000, "purpose": "repeater input or brief test; specified station classes", "citation": "47 CFR 95.1763(c)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-467-interstitial-01", "kind": "channel", "service": "GMRS", "label": "GMRS 467 MHz interstitial 1", "center_hz": 467562500, "purpose": "hand-held portable only", "citation": "47 CFR 95.1763(d)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-467-interstitial-02", "kind": "channel", "service": "GMRS", "label": "GMRS 467 MHz interstitial 2", "center_hz": 467587500, "purpose": "hand-held portable only", "citation": "47 CFR 95.1763(d)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-467-interstitial-03", "kind": "channel", "service": "GMRS", "label": "GMRS 467 MHz interstitial 3", "center_hz": 467612500, "purpose": "hand-held portable only", "citation": "47 CFR 95.1763(d)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-467-interstitial-04", "kind": "channel", "service": "GMRS", "label": "GMRS 467 MHz interstitial 4", "center_hz": 467637500, "purpose": "hand-held portable only", "citation": "47 CFR 95.1763(d)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-467-interstitial-05", "kind": "channel", "service": "GMRS", "label": "GMRS 467 MHz interstitial 5", "center_hz": 467662500, "purpose": "hand-held portable only", "citation": "47 CFR 95.1763(d)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-467-interstitial-06", "kind": "channel", "service": "GMRS", "label": "GMRS 467 MHz interstitial 6", "center_hz": 467687500, "purpose": "hand-held portable only", "citation": "47 CFR 95.1763(d)", "source_key": "ecfr-47-cfr-95-1763"},
+    {"reference_key": "us-gmrs-467-interstitial-07", "kind": "channel", "service": "GMRS", "label": "GMRS 467 MHz interstitial 7", "center_hz": 467712500, "purpose": "hand-held portable only", "citation": "47 CFR 95.1763(d)", "source_key": "ecfr-47-cfr-95-1763"}
+  ],
+  "content_sha256": "17ef00680108713f194a79d16d8e7799e8e6ae390d5454f3aa21bdfc14ec83c3"
+}

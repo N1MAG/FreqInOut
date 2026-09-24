@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import math
 import sqlite3
 from typing import Dict, Iterable, Optional, Tuple
@@ -16,18 +17,25 @@ def parse_utc_timestamp(value: object) -> Optional[float]:
     text = str(value or "").strip()
     if not text:
         return None
-    try:
-        numeric = float(text)
-        if math.isfinite(numeric) and numeric > 0:
-            return numeric
-    except Exception:
-        pass
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if len(digits) >= 14:
+        try:
+            dt = datetime.datetime.strptime(digits[:14], "%Y%m%d%H%M%S").replace(tzinfo=datetime.timezone.utc)
+            return dt.timestamp()
+        except Exception:
+            pass
     if len(text) == 8 and text.isdigit():
         try:
             dt = datetime.datetime.strptime(text, "%Y%m%d").replace(tzinfo=datetime.timezone.utc)
             return dt.timestamp()
         except Exception:
             return None
+    try:
+        numeric = float(text)
+        if math.isfinite(numeric) and numeric > 0:
+            return numeric
+    except Exception:
+        pass
     if len(text) == 10 and text.count("-") == 2:
         try:
             dt = datetime.datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
@@ -46,13 +54,6 @@ def parse_utc_timestamp(value: object) -> Optional[float]:
     if len(text) >= 19 and " " in text:
         try:
             dt = datetime.datetime.strptime(text[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc)
-            return dt.timestamp()
-        except Exception:
-            pass
-    digits = "".join(ch for ch in text if ch.isdigit())
-    if len(digits) >= 14:
-        try:
-            dt = datetime.datetime.strptime(digits[:14], "%Y%m%d%H%M%S").replace(tzinfo=datetime.timezone.utc)
             return dt.timestamp()
         except Exception:
             pass
@@ -101,11 +102,21 @@ def ensure_js8_callsign_stats(conn: sqlite3.Connection, *, rebuild_if_empty: boo
             callsign TEXT PRIMARY KEY,
             last_seen_ts REAL,
             last_band TEXT,
-            last_freq_hz REAL
+            last_freq_hz REAL,
+            last_source_id TEXT,
+            last_app_instance_id TEXT,
+            last_source_radio_id TEXT
         )
         """
     )
+    cur.execute("PRAGMA table_info(js8_callsign_stats)")
+    cols = {str(row[1] or "") for row in cur.fetchall()}
+    for name in ("last_source_id", "last_app_instance_id", "last_source_radio_id"):
+        if name not in cols:
+            cur.execute(f"ALTER TABLE js8_callsign_stats ADD COLUMN {name} TEXT")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_callsign_stats_last_seen ON js8_callsign_stats(last_seen_ts)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_callsign_stats_source ON js8_callsign_stats(last_source_id, last_seen_ts)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_callsign_stats_radio ON js8_callsign_stats(last_source_radio_id, last_seen_ts)")
     if rebuild_if_empty and _table_has_rows(conn, "js8_links") and not _table_has_rows(conn, "js8_callsign_stats"):
         rebuild_js8_callsign_stats(conn)
 
@@ -118,12 +129,45 @@ def _table_has_rows(conn: sqlite3.Connection, table_name: str) -> bool:
         return False
 
 
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    try:
+        return {str(row[1] or "") for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    except Exception:
+        return set()
+
+
+def _js8_links_stats_select_sql(conn: sqlite3.Connection) -> str:
+    cols = _table_columns(conn, "js8_links")
+    source_id = "source_id" if "source_id" in cols else "'' AS source_id"
+    app_instance_id = "app_instance_id" if "app_instance_id" in cols else "'' AS app_instance_id"
+    source_radio_id = "source_radio_id" if "source_radio_id" in cols else "'' AS source_radio_id"
+    return f"""
+        SELECT ts, origin, destination, band, freq_hz, {source_id}, {app_instance_id}, {source_radio_id}
+          FROM js8_links
+    """
+
+
+def _coerce_js8_activity_row(row: Tuple) -> Tuple[object, object, object, object, str, str, str]:
+    values = tuple(row or ())
+    padded = (*values, "", "", "")[:7]
+    return (
+        padded[0],
+        padded[1],
+        padded[2],
+        padded[3],
+        str(padded[4] or "").strip(),
+        str(padded[5] or "").strip(),
+        str(padded[6] or "").strip(),
+    )
+
+
 def rebuild_js8_callsign_stats(conn: sqlite3.Connection) -> int:
     ensure_js8_callsign_stats(conn, rebuild_if_empty=False)
-    stats: Dict[str, Tuple[float, str, Optional[float]]] = {}
+    stats: Dict[str, Tuple[float, str, Optional[float], str, str, str]] = {}
     try:
-        cur = conn.execute("SELECT ts, origin, destination, band, freq_hz FROM js8_links")
-        for ts, origin, destination, band, freq_hz in cur.fetchall():
+        select_sql = _js8_links_stats_select_sql(conn)
+        cur = conn.execute(select_sql)
+        for ts, origin, destination, band, freq_hz, source_id, app_instance_id, source_radio_id in cur.fetchall():
             ts_val = parse_utc_timestamp(ts)
             if ts_val is None or ts_val <= 0:
                 continue
@@ -137,15 +181,25 @@ def rebuild_js8_callsign_stats(conn: sqlite3.Connection) -> int:
                     continue
                 existing = stats.get(callsign)
                 if existing is None or ts_val > existing[0]:
-                    stats[callsign] = (ts_val, band_val, freq_val)
+                    stats[callsign] = (
+                        ts_val,
+                        band_val,
+                        freq_val,
+                        str(source_id or "").strip(),
+                        str(app_instance_id or "").strip(),
+                        str(source_radio_id or "").strip(),
+                    )
         conn.execute("DELETE FROM js8_callsign_stats")
         if stats:
             conn.executemany(
                 """
-                INSERT INTO js8_callsign_stats (callsign, last_seen_ts, last_band, last_freq_hz)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO js8_callsign_stats (
+                    callsign, last_seen_ts, last_band, last_freq_hz,
+                    last_source_id, last_app_instance_id, last_source_radio_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                [(cs, entry[0], entry[1], entry[2]) for cs, entry in stats.items()],
+                [(cs, entry[0], entry[1], entry[2], entry[3], entry[4], entry[5]) for cs, entry in stats.items()],
             )
         return len(stats)
     except Exception as exc:
@@ -155,11 +209,12 @@ def rebuild_js8_callsign_stats(conn: sqlite3.Connection) -> int:
 
 def record_js8_activity_batch(
     conn: sqlite3.Connection,
-    rows: Iterable[Tuple[str, object, str, object]],
+    rows: Iterable[Tuple],
 ) -> int:
     ensure_js8_callsign_stats(conn, rebuild_if_empty=False)
-    latest: Dict[str, Tuple[float, str, Optional[float]]] = {}
-    for callsign, ts, band, freq_hz in rows:
+    latest: Dict[str, Tuple[float, str, Optional[float], str, str, str]] = {}
+    for row in rows:
+        callsign, ts, band, freq_hz, source_id, app_instance_id, source_radio_id = _coerce_js8_activity_row(row)
         cs = _clean_callsign(callsign)
         ts_val = parse_utc_timestamp(ts)
         if not cs or ts_val is None or ts_val <= 0:
@@ -171,13 +226,23 @@ def record_js8_activity_batch(
             freq_val = None
         current = latest.get(cs)
         if current is None or ts_val > current[0]:
-            latest[cs] = (ts_val, band_val, freq_val)
+            latest[cs] = (
+                ts_val,
+                band_val,
+                freq_val,
+                str(source_id or "").strip(),
+                str(app_instance_id or "").strip(),
+                str(source_radio_id or "").strip(),
+            )
     if not latest:
         return 0
     conn.executemany(
         """
-        INSERT INTO js8_callsign_stats (callsign, last_seen_ts, last_band, last_freq_hz)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO js8_callsign_stats (
+            callsign, last_seen_ts, last_band, last_freq_hz,
+            last_source_id, last_app_instance_id, last_source_radio_id
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(callsign) DO UPDATE SET
             last_seen_ts=CASE
                 WHEN COALESCE(excluded.last_seen_ts, 0) > COALESCE(js8_callsign_stats.last_seen_ts, 0)
@@ -199,9 +264,33 @@ def record_js8_activity_batch(
                      AND js8_callsign_stats.last_freq_hz IS NULL
                     THEN excluded.last_freq_hz
                 ELSE js8_callsign_stats.last_freq_hz
+            END,
+            last_source_id=CASE
+                WHEN COALESCE(excluded.last_seen_ts, 0) > COALESCE(js8_callsign_stats.last_seen_ts, 0)
+                    THEN excluded.last_source_id
+                WHEN COALESCE(excluded.last_seen_ts, 0) = COALESCE(js8_callsign_stats.last_seen_ts, 0)
+                     AND COALESCE(js8_callsign_stats.last_source_id, '') = ''
+                    THEN excluded.last_source_id
+                ELSE js8_callsign_stats.last_source_id
+            END,
+            last_app_instance_id=CASE
+                WHEN COALESCE(excluded.last_seen_ts, 0) > COALESCE(js8_callsign_stats.last_seen_ts, 0)
+                    THEN excluded.last_app_instance_id
+                WHEN COALESCE(excluded.last_seen_ts, 0) = COALESCE(js8_callsign_stats.last_seen_ts, 0)
+                     AND COALESCE(js8_callsign_stats.last_app_instance_id, '') = ''
+                    THEN excluded.last_app_instance_id
+                ELSE js8_callsign_stats.last_app_instance_id
+            END,
+            last_source_radio_id=CASE
+                WHEN COALESCE(excluded.last_seen_ts, 0) > COALESCE(js8_callsign_stats.last_seen_ts, 0)
+                    THEN excluded.last_source_radio_id
+                WHEN COALESCE(excluded.last_seen_ts, 0) = COALESCE(js8_callsign_stats.last_seen_ts, 0)
+                     AND COALESCE(js8_callsign_stats.last_source_radio_id, '') = ''
+                    THEN excluded.last_source_radio_id
+                ELSE js8_callsign_stats.last_source_radio_id
             END
         """,
-        [(cs, entry[0], entry[1], entry[2]) for cs, entry in latest.items()],
+        [(cs, entry[0], entry[1], entry[2], entry[3], entry[4], entry[5]) for cs, entry in latest.items()],
     )
     return len(latest)
 
@@ -219,6 +308,7 @@ def load_operator_activity_summary(
     summary: Dict[str, Dict[str, object]] = {}
     _load_js8_summary(conn, summary)
     _load_varac_summary(conn, summary)
+    _load_imported_spotter_summary(conn, summary)
     if include_operator_checkins_fallback:
         _load_operator_checkins_fallback(conn, summary)
     return summary
@@ -282,6 +372,9 @@ def _summary_entry(summary: Dict[str, Dict[str, object]], callsign: str) -> Dict
             "varac_last_seen_ts": 0.0,
             "varac_last_band": "",
             "varac_last_freq_hz": None,
+            "spotter_last_seen_ts": 0.0,
+            "spotter_last_band": "",
+            "spotter_last_freq_hz": None,
             "legacy_last_seen_ts": 0.0,
         }
         summary[callsign] = entry
@@ -339,6 +432,78 @@ def _load_varac_summary(conn: sqlite3.Connection, summary: Dict[str, Dict[str, o
         _apply_overall(entry, ts_val, "varac", str(last_band or "").strip().upper(), last_freq_hz)
 
 
+def _load_imported_spotter_summary(conn: sqlite3.Connection, summary: Dict[str, Dict[str, object]]) -> None:
+    query = """
+        SELECT source_table, payload_json, imported_ts
+        FROM js8spotter_import_archive
+        WHERE lower(source_table) IN ('grid', 'signal', 'activity')
+        ORDER BY
+            COALESCE(
+                json_extract(payload_json, '$.sig_timestamp'),
+                json_extract(payload_json, '$.grid_timestamp'),
+                json_extract(payload_json, '$.spotdate'),
+                json_extract(payload_json, '$.timestamp'),
+                json_extract(payload_json, '$.lm'),
+                imported_ts
+            ) DESC,
+            id DESC
+        LIMIT 5000
+    """
+    try:
+        cur = conn.execute(query)
+    except Exception:
+        try:
+            cur = conn.execute(
+                """
+                SELECT source_table, payload_json, imported_ts
+                FROM js8spotter_import_archive
+                WHERE lower(source_table) IN ('grid', 'signal', 'activity')
+                ORDER BY id DESC
+                LIMIT 5000
+                """
+            )
+        except Exception:
+            return
+    for source_table, payload_json, imported_ts in cur.fetchall():
+        table = str(source_table or "").strip().lower()
+        try:
+            payload = json.loads(str(payload_json or "{}"))
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            continue
+        callsign = ""
+        timestamp = None
+        freq_value = None
+        if table == "grid":
+            callsign = _first_payload_text(payload, "grid_callsign", "callsign", "call")
+            timestamp = payload.get("grid_timestamp") or payload.get("timestamp") or payload.get("lm")
+            freq_value = payload.get("grid_dial") or payload.get("dial") or payload.get("freq")
+        elif table == "signal":
+            callsign = _first_payload_text(payload, "sig_callsign", "callsign", "call")
+            timestamp = payload.get("sig_timestamp") or payload.get("timestamp") or payload.get("lm")
+            freq_value = payload.get("sig_freq") or payload.get("sig_dial") or payload.get("freq") or payload.get("dial")
+        elif table == "activity":
+            callsign = _first_payload_text(payload, "call", "callsign", "fromcall")
+            timestamp = payload.get("spotdate") or payload.get("timestamp") or payload.get("lm")
+            freq_value = payload.get("freq") or payload.get("dial")
+        cs = _clean_callsign(callsign)
+        ts_val = parse_utc_timestamp(timestamp)
+        if ts_val is None:
+            ts_val = parse_utc_timestamp(imported_ts)
+        if not cs or ts_val is None or ts_val <= 0:
+            continue
+        freq_hz = _freq_hz_from_value(freq_value)
+        band = _band_from_freq_hz(freq_hz)
+        entry = _summary_entry(summary, cs)
+        existing = float(entry.get("spotter_last_seen_ts", 0.0) or 0.0)
+        if ts_val > existing:
+            entry["spotter_last_seen_ts"] = float(ts_val)
+            entry["spotter_last_band"] = band
+            entry["spotter_last_freq_hz"] = freq_hz
+        _apply_overall(entry, ts_val, "spotter_import", band, freq_hz)
+
+
 def _load_operator_checkins_fallback(conn: sqlite3.Connection, summary: Dict[str, Dict[str, object]]) -> None:
     try:
         cur = conn.execute("SELECT callsign, last_seen_utc FROM operator_checkins")
@@ -355,3 +520,57 @@ def _load_operator_checkins_fallback(conn: sqlite3.Connection, summary: Dict[str
         entry["legacy_last_seen_ts"] = float(ts_val)
         if float(entry.get("overall_last_seen_ts", 0.0) or 0.0) <= 0:
             _apply_overall(entry, ts_val, "operator_checkins")
+
+
+def _first_payload_text(payload: Dict[str, object], *keys: str) -> str:
+    for key in keys:
+        value = str(payload.get(key, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _freq_hz_from_value(value: object) -> Optional[float]:
+    text = str(value or "").strip().replace(",", "")
+    if not text:
+        return None
+    try:
+        numeric = float(text)
+    except Exception:
+        return None
+    if numeric <= 0:
+        return None
+    if numeric < 1000:
+        return numeric * 1_000_000.0
+    if numeric < 100_000:
+        return numeric * 1_000.0
+    return numeric
+
+
+def _band_from_freq_hz(freq_hz: Optional[float]) -> str:
+    if not freq_hz or freq_hz <= 0:
+        return ""
+    mhz = float(freq_hz) / 1_000_000.0
+    if 1.8 <= mhz < 2.0:
+        return "160M"
+    if 3.0 <= mhz < 4.0:
+        return "80M"
+    if 5.0 <= mhz < 5.5:
+        return "60M"
+    if 7.0 <= mhz < 7.4:
+        return "40M"
+    if 10.0 <= mhz < 10.2:
+        return "30M"
+    if 14.0 <= mhz < 14.35:
+        return "20M"
+    if 18.0 <= mhz < 18.2:
+        return "17M"
+    if 21.0 <= mhz < 21.45:
+        return "15M"
+    if 24.8 <= mhz < 25.0:
+        return "12M"
+    if 28.0 <= mhz < 29.7:
+        return "10M"
+    if 50.0 <= mhz < 54.0:
+        return "6M"
+    return ""

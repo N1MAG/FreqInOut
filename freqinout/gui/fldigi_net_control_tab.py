@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QBoxLayout,
     QLabel,
     QCheckBox,
     QLineEdit,
@@ -40,10 +41,13 @@ from PySide6.QtGui import QFontMetrics, QColor
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
 from freqinout.core.perf_metrics import span as perf_span
-from freqinout.core.checkins_db import upsert_checkins
+from freqinout.core.checkins_db import lookup_operator_identity, upsert_checkins
 from freqinout.core.config_paths import get_fldigi_checkin_dir
+from freqinout.core.fldigi_log_checkin_parser import FldigiLogCheckinCandidate, scan_fldigi_log_file
 from freqinout.core.fldigi_macro_parser import scan_macro_profile, count_detected_file_references
 from freqinout.core.fldigi_macro_profile import macro_mapping_path_leaf
+from freqinout.core.multi_radio_store import MultiRadioStore
+from freqinout.core.ncs_session_contract import NcsSessionSnapshot, write_ncs_session_snapshot
 from freqinout.core.fldigi_role_workspace import (
     default_role_workspace_prefs,
     get_role_workspace_preset,
@@ -78,7 +82,14 @@ from freqinout.gui.qsy_helper import (
     active_hold_button_text,
     active_hold_status_text,
 )
-from freqinout.gui.theme import resolve_theme, button_style
+from freqinout.gui.theme import (
+    button_height_for_font,
+    contrast_text_for_background,
+    resolve_theme,
+    button_style,
+    horizontal_layout_breakpoint,
+    style_splitter_handles,
+)
 
 CURRENT_CHECKIN_FILE_NAMES = {
     "TFC": "CheckIns_TFC.txt",
@@ -135,6 +146,7 @@ class FldigiNetControlTab(QWidget):
         * Late Check-in Macro File (feed for late/new check-ins)
     """
     net_status_changed = Signal(str, bool)
+    LOG_ASSISTED_INTAKE_VISIBLE = False
     FLDIGI_MACRO_PROFILES_KEY = "fldigi_macro_profiles_v1"
     FLDIGI_SELECTED_MACRO_PROFILE_KEY = "fldigi_selected_macro_profile"
     COL_SEQ = 0
@@ -156,9 +168,11 @@ class FldigiNetControlTab(QWidget):
 
         self._net_in_progress = False
         self._net_start_utc: Optional[str] = None
+        self._net_end_utc: Optional[str] = None
         self._active = False
 
         self._clock_timer: Optional[QTimer] = None
+        self._log_assisted_timer: Optional[QTimer] = None
 
         # Next frequency change tracking
         self._next_change_utc: Optional[datetime.datetime] = None
@@ -199,6 +213,11 @@ class FldigiNetControlTab(QWidget):
         self._roster_action_scope: str = "NCS"
         self._roster_action_scope_user_selected: bool = False
         self._next_roster_seq: int = 1
+        self._log_assisted_session_path: str = ""
+        self._log_assisted_session_offset: int = 0
+        self._log_assisted_session_tx_context: str = ""
+        self._log_assisted_seen_normalized: set[str] = set()
+        self._log_assisted_candidates_by_callsign: Dict[str, FldigiLogCheckinCandidate] = {}
 
         self._build_ui()
         self._apply_theme()
@@ -210,6 +229,126 @@ class FldigiNetControlTab(QWidget):
         self._sync_roster_action_scope_to_role(force=True)
 
     # ---------------- UI BUILD ---------------- #
+
+    def _ncs_radio_profiles(self) -> List[Dict]:
+        try:
+            profiles = MultiRadioStore().list_runtime_active_device_profiles()
+        except Exception as exc:
+            log.debug("FLDigi NCS: failed to read runtime radio profiles: %s", exc)
+            profiles = []
+        fldigi_profiles = [p for p in profiles if bool(p.get("use_fldigi", False))]
+        if fldigi_profiles:
+            profiles = fldigi_profiles
+        return sorted(
+            [dict(p) for p in profiles if isinstance(p, dict)],
+            key=lambda p: (int(p.get("display_order", 0) or 0), int(p.get("id", 0) or 0)),
+        )
+
+    @staticmethod
+    def _ncs_profile_name(profile: Optional[Dict]) -> str:
+        if not profile:
+            return "Radio"
+        return str(profile.get("name") or profile.get("label") or f"Radio {profile.get('id', '')}").strip()
+
+    def _ncs_selected_radio_id(self, profiles: List[Dict]) -> int:
+        ids = {int(p.get("id", 0) or 0) for p in profiles}
+        try:
+            selected = int(getattr(self.window(), "_station_command_selected_profile_id", 0) or 0)
+            if selected in ids:
+                return selected
+        except Exception:
+            pass
+        try:
+            primary = MultiRadioStore().get_runtime_primary_device_profile()
+            primary_id = int((primary or {}).get("id", 0) or 0)
+            if primary_id in ids:
+                return primary_id
+        except Exception:
+            pass
+        return next(iter(ids), 0)
+
+    def _clear_ncs_session_chip_layout(self) -> None:
+        layout = getattr(self, "ncs_session_chip_layout", None)
+        if layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
+    def _select_ncs_radio_session(self, profile_id: int) -> None:
+        ident = int(profile_id or 0)
+        if ident <= 0:
+            return
+        try:
+            MultiRadioStore().set_runtime_primary_device_profile(ident)
+        except Exception as exc:
+            log.debug("FLDigi NCS: failed to set runtime radio session %s: %s", ident, exc)
+        try:
+            win = self.window()
+            if win is not None and hasattr(win, "_activate_station_command_radio"):
+                win._activate_station_command_radio(ident)  # type: ignore[attr-defined]
+        except Exception as exc:
+            log.debug("FLDigi NCS: failed to focus station command radio %s: %s", ident, exc)
+        self._load_settings()
+        self._refresh_qsy_options()
+        self._persist_ncs_session_snapshot()
+        self._refresh_ncs_session_context()
+
+    def _current_ncs_session_snapshot(self, *, timing_state: Optional[str] = None) -> NcsSessionSnapshot:
+        profiles = self._ncs_radio_profiles()
+        selected_id = self._ncs_selected_radio_id(profiles)
+        selected_profile = next((p for p in profiles if int(p.get("id", 0) or 0) == selected_id), None)
+        state = timing_state or ("active" if self._net_in_progress else "idle")
+        return NcsSessionSnapshot(
+            protocol="FLDigi/SSB",
+            source_id=str(selected_id or "radio"),
+            source_name=self._ncs_profile_name(selected_profile),
+            role=self.role_combo.currentText().strip() if hasattr(self, "role_combo") else "NCS",
+            net_name=self.net_name_combo.currentText().strip() if hasattr(self, "net_name_combo") else "",
+            timing_state=state,
+            started_utc=self._net_start_utc or "",
+            ended_utc=self._net_end_utc or "",
+            detail="FLDigi/SSB NCS session scoped to one configured radio.",
+        )
+
+    def _persist_ncs_session_snapshot(self, *, timing_state: Optional[str] = None) -> None:
+        try:
+            write_ncs_session_snapshot(self.settings, self._current_ncs_session_snapshot(timing_state=timing_state))
+        except Exception as exc:
+            log.debug("FLDigi NCS: failed to persist session snapshot: %s", exc)
+
+    def _refresh_ncs_session_context(self) -> None:
+        if not hasattr(self, "ncs_session_chip_layout") or not hasattr(self, "ncs_session_summary_label"):
+            return
+        profiles = self._ncs_radio_profiles()
+        selected_id = self._ncs_selected_radio_id(profiles)
+        theme = resolve_theme(self.settings)
+        self._clear_ncs_session_chip_layout()
+        if not profiles:
+            self.ncs_session_chip_layout.addWidget(QLabel("No active FLDigi radio"))
+        for profile in profiles:
+            ident = int(profile.get("id", 0) or 0)
+            name = self._ncs_profile_name(profile)
+            chip = QPushButton(name)
+            chip.setToolTip(f"Switch this NCS workspace to {name}.")
+            chip.setStyleSheet(button_style("success" if ident == selected_id else "info", theme))
+            chip.clicked.connect(lambda _checked=False, profile_id=ident: self._select_ncs_radio_session(profile_id))
+            self.ncs_session_chip_layout.addWidget(chip)
+        self.ncs_session_chip_layout.addStretch()
+        selected_profile = next((p for p in profiles if int(p.get("id", 0) or 0) == selected_id), None)
+        radio_name = self._ncs_profile_name(selected_profile)
+        role = self.role_combo.currentText().strip() if hasattr(self, "role_combo") else "NCS"
+        net_name = self.net_name_combo.currentText().strip() if hasattr(self, "net_name_combo") else ""
+        summary = f"Session: {radio_name} | FLDigi/SSB | {role}"
+        if net_name:
+            summary = f"{summary} | {net_name}"
+        if self._net_in_progress:
+            summary = f"{summary} | Active"
+        self.ncs_session_summary_label.setText(summary)
+        self.ncs_session_summary_label.setToolTip(summary)
 
     def _build_session_bar(self, layout: QVBoxLayout) -> None:
         session_frame = QFrame()
@@ -224,14 +363,36 @@ class FldigiNetControlTab(QWidget):
         title_row.addStretch()
         self.utc_label = QLabel()
         self.local_label = QLabel()
+        self.utc_label.setVisible(False)
+        self.local_label.setVisible(False)
         title_row.addWidget(self.utc_label)
         title_row.addWidget(self.local_label)
         self.total_checkins_label = QLabel("Total Check-ins: 0")
-        self.total_checkins_label.setStyleSheet("QLabel { border: 1px solid #888888; padding: 2px 6px; border-radius: 3px; }")
+        self.total_checkins_label.setStyleSheet(self._count_chip_style(resolve_theme(self.settings)))
         self.total_checkins_label.setVisible(False)
         session_layout.addLayout(title_row)
 
+        session_context_row = QHBoxLayout()
+        self._session_context_row = session_context_row
+        session_context_row.setSpacing(8)
+        session_context_row.addWidget(QLabel("Radio:"))
+        self.ncs_session_chip_layout = QHBoxLayout()
+        self.ncs_session_chip_layout.setSpacing(8)
+        session_context_row.addLayout(self.ncs_session_chip_layout, 1)
+        self.start_btn = QPushButton("Start Net")
+        self.end_btn = QPushButton("End Net")
+        self.ad_hoc_btn = QPushButton("Ad Hoc Net")
+        self.ad_hoc_btn.clicked.connect(self._start_ad_hoc_net)
+        for btn in (self.start_btn, self.end_btn, self.ad_hoc_btn):
+            btn.setMinimumWidth(max(110, button_height_for_font(btn) * 3))
+            session_context_row.addWidget(btn)
+        self.ncs_session_summary_label = QLabel("Session: Radio | FLDigi/SSB | NCS")
+        self.ncs_session_summary_label.setWordWrap(True)
+        session_layout.addLayout(session_context_row)
+        session_layout.addWidget(self.ncs_session_summary_label)
+
         context_row = QHBoxLayout()
+        self._session_context_details_row = context_row
         context_row.addWidget(QLabel("Role:"))
         self.role_combo = QComboBox()
         self.role_combo.addItems(["NCS", "ANCS", "Joiner"])
@@ -245,18 +406,25 @@ class FldigiNetControlTab(QWidget):
         self.net_name_combo.setEditable(True)
         self.net_name_combo.setInsertPolicy(QComboBox.NoInsert)
         self.net_name_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
-        context_row.addWidget(self.net_name_combo, stretch=1)
+        self.net_name_combo.setMinimumWidth(220)
+        self.net_name_combo.setMaximumWidth(440)
+        self.net_name_combo.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        context_row.addWidget(self.net_name_combo)
 
         context_row.addSpacing(16)
         self.next_change_label = QLabel("Next Scheduled Net: (unknown)")
-        self.next_change_label.setAlignment(Qt.AlignCenter)
-        self.next_change_label.setStyleSheet(
-            "QLabel { border: 1px solid #888888; padding: 2px 6px; border-radius: 3px; }"
-        )
+        self.next_change_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self.next_change_label.setWordWrap(False)
+        self.next_change_label.setMinimumWidth(360)
+        self.next_change_label.setMaximumWidth(620)
+        self.next_change_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.next_change_label.setStyleSheet("QLabel { padding: 2px 4px; }")
         context_row.addWidget(self.next_change_label)
+        context_row.addStretch(1)
         session_layout.addLayout(context_row)
 
         partner_row = QHBoxLayout()
+        self._session_partner_row = partner_row
         self.partner_primary_label = QLabel("ANCS Callsign:")
         self.partner_primary_edit = QLineEdit()
         self.partner_primary_edit.setMaximumWidth(150)
@@ -269,6 +437,12 @@ class FldigiNetControlTab(QWidget):
         self.joiner_ancs_edit.setMaximumWidth(130)
         self.joiner_add_btn = QPushButton("Add to Roster")
         self.partner_status_label = QLabel("")
+        self.log_assisted_enable_chk = QCheckBox("Log-assisted intake")
+        self.log_assisted_enable_chk.setToolTip("Watch the configured FLDigi log for new RX check-ins during a net.")
+        self.log_assisted_enable_chk.setVisible(bool(self.LOG_ASSISTED_INTAKE_VISIBLE))
+        self.log_assisted_enable_chk.toggled.connect(self._on_log_assisted_toggled)
+        self.session_tools_layout = QHBoxLayout()
+        self.session_tools_layout.setSpacing(6)
         self.help_btn = QPushButton("Help")
         self.help_btn.setToolTip("Open FLDigi / SSB Net Control help.")
         self.help_btn.clicked.connect(lambda: self._open_context_help("tab.ncs-fldigi"))
@@ -281,49 +455,46 @@ class FldigiNetControlTab(QWidget):
         partner_row.addWidget(self.joiner_ancs_label)
         partner_row.addWidget(self.joiner_ancs_edit)
         partner_row.addWidget(self.joiner_add_btn)
+        partner_row.addWidget(self.log_assisted_enable_chk)
         partner_row.addWidget(self.partner_status_label, stretch=1)
+        partner_row.addLayout(self.session_tools_layout)
         partner_row.addWidget(self.help_btn, 0, Qt.AlignRight)
 
-        qsy_row = QHBoxLayout()
-        self.start_btn = QPushButton("Start Net")
-        self.end_btn = QPushButton("End Net")
-        qsy_row.addWidget(self.start_btn)
-        qsy_row.addWidget(self.end_btn)
-        qsy_row.addSpacing(16)
-        self.ad_hoc_btn = QPushButton("Ad Hoc Net")
-        self.ad_hoc_btn.clicked.connect(self._start_ad_hoc_net)
-        qsy_row.addWidget(self.ad_hoc_btn)
-        qsy_row.addSpacing(32)
-        qsy_row.addStretch()
-        self.qsy_combo = QComboBox()
+        # The Station Command Bar owns QSY and temporary hold control. Keep
+        # these widgets alive for legacy helpers/signals, but do not duplicate
+        # schedule-control UI inside the NCS cockpit.
+        self.qsy_combo = QComboBox(session_frame)
         self.qsy_combo.currentIndexChanged.connect(self._update_qsy_button_enabled)
-        qsy_row.addWidget(self.qsy_combo)
-        self.hold_duration_combo = QComboBox()
+        self.hold_duration_combo = QComboBox(session_frame)
         self.hold_duration_combo.setToolTip("Temporary schedule hold duration after QSY.")
         self.hold_duration_combo.currentIndexChanged.connect(self._on_hold_duration_changed)
-        qsy_row.addWidget(self.hold_duration_combo)
-        self.suspend_btn = QPushButton("QSY + Hold")
+        self.suspend_btn = QPushButton("QSY + Hold", session_frame)
         self.suspend_btn.clicked.connect(self._on_suspend_clicked)
-        qsy_row.addWidget(self.suspend_btn)
-        session_layout.addLayout(qsy_row)
+        for widget in (self.qsy_combo, self.hold_duration_combo, self.suspend_btn):
+            widget.setVisible(False)
         session_layout.addLayout(partner_row)
 
         layout.addWidget(session_frame)
 
     def _build_setup_strip(self, layout: QVBoxLayout) -> None:
         setup_frame = QFrame()
-        setup_frame.setFrameShape(QFrame.StyledPanel)
-        setup_frame.setFrameShadow(QFrame.Raised)
+        setup_frame.setFrameShape(QFrame.NoFrame)
+        setup_frame.setFrameShadow(QFrame.Plain)
+        self.setup_frame = setup_frame
         setup_layout = QVBoxLayout(setup_frame)
-        setup_layout.setContentsMargins(10, 6, 10, 6)
+        setup_layout.setContentsMargins(10, 4, 10, 4)
         setup_layout.setSpacing(4)
 
         self.macro_profile_details_btn = QToolButton()
         self.macro_profile_details_btn.setCheckable(True)
         self.macro_profile_details_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self.macro_profile_details_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.macro_profile_details_btn.setMinimumHeight(28)
-        setup_layout.addWidget(self.macro_profile_details_btn)
+        self.macro_profile_details_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.macro_profile_details_btn.setMaximumWidth(220)
+        self.macro_profile_details_btn.setMinimumHeight(button_height_for_font(self.macro_profile_details_btn))
+        if hasattr(self, "session_tools_layout"):
+            self.session_tools_layout.addWidget(self.macro_profile_details_btn)
+        else:
+            setup_layout.addWidget(self.macro_profile_details_btn, 0, Qt.AlignLeft)
 
         self.setup_details_frame = QFrame()
         self.setup_details_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
@@ -337,12 +508,14 @@ class FldigiNetControlTab(QWidget):
         macro_setup_controls_layout.setSpacing(4)
 
         summary_row = QHBoxLayout()
+        self._macro_summary_row = summary_row
         summary_row.addWidget(QLabel("Macro Set:"))
         self.macro_profile_combo = QComboBox()
         self.macro_profile_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
-        self.macro_profile_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.macro_profile_combo.setMinimumWidth(220)
-        summary_row.addWidget(self.macro_profile_combo, stretch=1)
+        self.macro_profile_combo.setMaximumWidth(420)
+        self.macro_profile_combo.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        summary_row.addWidget(self.macro_profile_combo)
         self.macro_profile_refresh_btn = QPushButton("Refresh")
         self.macro_profile_map_btn = QPushButton("Mappings...")
         summary_row.addWidget(self.macro_profile_refresh_btn)
@@ -350,11 +523,13 @@ class FldigiNetControlTab(QWidget):
         macro_setup_controls_layout.addLayout(summary_row)
 
         path_row = QHBoxLayout()
+        self._macro_path_row = path_row
         path_row.addWidget(QLabel("Macro File:"))
         self.macro_profile_edit = QLineEdit()
         self.macro_profile_edit.setPlaceholderText("Select an FLDigi macro profile (.mdf)")
-        self.macro_profile_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        path_row.addWidget(self.macro_profile_edit, stretch=1)
+        self.macro_profile_edit.setMaximumWidth(520)
+        self.macro_profile_edit.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        path_row.addWidget(self.macro_profile_edit)
         self.macro_profile_browse_btn = QPushButton("Browse...")
         self.macro_profile_clear_btn = QPushButton("Clear")
         path_row.addWidget(self.macro_profile_browse_btn)
@@ -366,6 +541,14 @@ class FldigiNetControlTab(QWidget):
         self.macro_profile_status.setWordWrap(True)
         details_layout.addWidget(self.macro_profile_status)
 
+        mapping_action_row = QHBoxLayout()
+        self.macro_profile_edit_mappings_btn = QPushButton("Edit Mappings...")
+        self.macro_profile_edit_mappings_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.macro_profile_edit_mappings_btn.clicked.connect(self._open_macro_mapping_dialog)
+        mapping_action_row.addWidget(self.macro_profile_edit_mappings_btn)
+        mapping_action_row.addStretch()
+        details_layout.addLayout(mapping_action_row)
+
         self.macro_mapping_locations_label = QLabel()
         self.macro_mapping_locations_label.setWordWrap(True)
         self.macro_mapping_locations_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -375,6 +558,17 @@ class FldigiNetControlTab(QWidget):
 
         layout.addWidget(setup_frame)
         self._set_setup_details_expanded(False)
+
+    @staticmethod
+    def _count_chip_style(theme: Dict[str, str]) -> str:
+        return (
+            "QLabel {"
+            f" border: 1px solid {theme['border']};"
+            f" color: {theme['text']};"
+            f" background-color: {theme['surface_alt']};"
+            " padding: 2px 6px; border-radius: 3px;"
+            " }"
+        )
 
     def _make_status_chip(self, text: str) -> QLabel:
         chip = QLabel(text)
@@ -447,6 +641,8 @@ class FldigiNetControlTab(QWidget):
     def _set_setup_details_expanded(self, expanded: bool) -> None:
         self._setup_details_expanded = bool(expanded)
         self.setup_details_frame.setVisible(self._setup_details_expanded)
+        if hasattr(self, "setup_frame"):
+            self.setup_frame.setVisible(self._setup_details_expanded)
         self.macro_profile_details_btn.setChecked(self._setup_details_expanded)
         self.macro_profile_details_btn.setArrowType(Qt.DownArrow if self._setup_details_expanded else Qt.RightArrow)
         self.macro_profile_details_btn.setStyleSheet(self._macro_header_style())
@@ -454,15 +650,19 @@ class FldigiNetControlTab(QWidget):
 
     def _build_operator_action_band(self, layout: QVBoxLayout) -> None:
         known_row = QHBoxLayout()
+        self._known_operator_layout = known_row
         known_row.addWidget(QLabel("Operator Lookup/Add:"))
         self.known_op_edit = QLineEdit()
         self.known_op_edit.setPlaceholderText("Enter Callsign Name State...")
-        self.known_op_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        known_row.addWidget(self.known_op_edit, stretch=1)
-        known_row.addStretch()
+        self.known_op_edit.setMinimumWidth(240)
+        self.known_op_edit.setMaximumWidth(520)
+        self.known_op_edit.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        known_row.addWidget(self.known_op_edit)
+        known_row.addStretch(1)
         layout.addLayout(known_row)
 
         known_btn_row = QHBoxLayout()
+        self._known_buttons_layout = known_btn_row
         self.add_known_tfc_btn = QPushButton("Add to TFC")
         self.add_known_qru_btn = QPushButton("Add to QRU")
         self.add_known_late_btn = QPushButton("Add to LATE")
@@ -482,15 +682,15 @@ class FldigiNetControlTab(QWidget):
             "seen_locally": self.add_known_seen_locally_btn,
         }
         self._known_add_button_targets = {button: target for target, button in self._known_add_buttons.items()}
-        known_btn_row.addStretch()
         self.roster_total_label = QLabel("Total Check-ins: 0")
-        self.roster_total_label.setStyleSheet("QLabel { border: 1px solid #888888; padding: 2px 6px; border-radius: 3px; }")
+        self.roster_total_label.setStyleSheet(self._count_chip_style(resolve_theme(self.settings)))
         self.roster_tfc_label = QLabel("TFC: 0")
         self.roster_qru_label = QLabel("QRU: 0")
         self.roster_late_label = QLabel("LATE: 0")
         for label in (self.roster_total_label, self.roster_tfc_label, self.roster_qru_label, self.roster_late_label):
-            label.setStyleSheet("QLabel { border: 1px solid #888888; padding: 2px 6px; border-radius: 3px; }")
+            label.setStyleSheet(self._count_chip_style(resolve_theme(self.settings)))
             known_btn_row.addWidget(label)
+        known_btn_row.addStretch(1)
         layout.addLayout(known_btn_row)
 
     def _build_ui(self):
@@ -501,9 +701,12 @@ class FldigiNetControlTab(QWidget):
         self._ncs_scroll_area = QScrollArea()
         self._ncs_scroll_area.setWidgetResizable(True)
         self._ncs_scroll_area.setFrameShape(QFrame.NoFrame)
-        outer_layout.addWidget(self._ncs_scroll_area)
+        self._ncs_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._ncs_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        outer_layout.addWidget(self._ncs_scroll_area, 1)
 
         self._ncs_scroll_content = QWidget()
+        self._ncs_scroll_content.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         layout = QVBoxLayout(self._ncs_scroll_content)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(10)
@@ -520,7 +723,7 @@ class FldigiNetControlTab(QWidget):
         layout.addLayout(self._left_bucket_col, stretch=1)
 
         self.roster_compare_splitter = QSplitter(Qt.Vertical)
-        self.roster_compare_splitter.setChildrenCollapsible(False)
+        style_splitter_handles(self.roster_compare_splitter, resolve_theme(self.settings))
         self.roster_compare_splitter.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._left_bucket_col.addWidget(self.roster_compare_splitter, stretch=1)
 
@@ -533,8 +736,17 @@ class FldigiNetControlTab(QWidget):
         roster_layout.setSpacing(6)
 
         roster_header = QHBoxLayout()
+        self._roster_header_layout = roster_header
         roster_header.addWidget(QLabel("<h3>Net Roster</h3>"))
         roster_header.addStretch()
+        self.roster_compare_status_btn = QPushButton("Compare Rosters")
+        self.roster_compare_status_btn.setToolTip("Show Roster Compare for NCS/ANCS roster gaps.")
+        self.roster_compare_status_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        roster_header.addWidget(self.roster_compare_status_btn)
+        self.copy_roster_gap_btn = QPushButton("Copy Gap")
+        self.copy_roster_gap_btn.setToolTip("Copy the current NCS/ANCS roster gap.")
+        self.copy_roster_gap_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        roster_header.addWidget(self.copy_roster_gap_btn)
         self.default_sort_btn = QPushButton("Default Sort")
         roster_header.addWidget(self.default_sort_btn)
         self.save_btn = QPushButton("Save Check-ins")
@@ -542,7 +754,8 @@ class FldigiNetControlTab(QWidget):
         roster_layout.addLayout(roster_header)
 
         roster_scope_row = QHBoxLayout()
-        roster_scope_row.addWidget(QLabel("Action For:"))
+        self._roster_scope_layout = roster_scope_row
+        roster_scope_row.addWidget(QLabel("Managed By:"))
         self.roster_scope_group = QButtonGroup(self)
         self.roster_scope_group.setExclusive(True)
         self.roster_scope_buttons: Dict[str, QToolButton] = {}
@@ -552,7 +765,7 @@ class FldigiNetControlTab(QWidget):
             scope_btn.setCheckable(True)
             scope_btn.setAutoRaise(False)
             scope_btn.setProperty("roster_action_scope", scope)
-            scope_btn.setToolTip(f"Apply roster actions to {label}.")
+            scope_btn.setToolTip(f"Manage roster changes as {label}.")
             scope_btn.clicked.connect(lambda _checked=False, s=scope: self._set_roster_action_scope(s, user_selected=True))
             self.roster_scope_group.addButton(scope_btn)
             self.roster_scope_buttons[scope] = scope_btn
@@ -560,16 +773,20 @@ class FldigiNetControlTab(QWidget):
         roster_scope_row.addStretch()
         roster_layout.addLayout(roster_scope_row)
 
-        roster_actions = QHBoxLayout()
-        roster_actions.addWidget(QLabel("Live Actions:"))
+        roster_actions = QVBoxLayout()
+        roster_actions.setSpacing(6)
+        roster_primary_actions = QHBoxLayout()
+        self._roster_primary_actions_layout = roster_primary_actions
+        roster_primary_actions.addWidget(QLabel("Actions:"))
         self.next_tfc_btn = QPushButton("Next TFC")
         self.copy_tfc_btn = QPushButton("TFC")
         self.copy_qru_btn = QPushButton("QRU")
         self.copy_late_btn = QPushButton("LATE")
         self.copy_seen_locally_btn = QPushButton("Copy Seen Locally")
         self.copy_roster_summary_btn = QPushButton("All Check-ins")
-        self.relay_compare_btn = QPushButton("Stations to Relay")
-        self.copy_relays_btn = QPushButton("Copy Relays")
+        self.copy_state_summary_btn = QPushButton("Copy Summary by State")
+        self.relay_compare_btn = QPushButton("Find Relay Gaps")
+        self.copy_relays_btn = QPushButton("Copy Relay List")
         self.copy_needs_sync_btn = QPushButton("ACK Needed")
         for primary_btn in (self.copy_needs_sync_btn, self.next_tfc_btn):
             primary_btn.setMinimumWidth(118)
@@ -580,22 +797,35 @@ class FldigiNetControlTab(QWidget):
             self.copy_needs_sync_btn,
             self.next_tfc_btn,
         ):
-            roster_actions.addWidget(btn)
-        roster_actions.addSpacing(12)
+            roster_primary_actions.addWidget(btn)
+        roster_primary_actions.addSpacing(12)
         for btn in (
             self.copy_tfc_btn,
             self.copy_qru_btn,
             self.copy_late_btn,
             self.copy_roster_summary_btn,
-            self.relay_compare_btn,
-            self.copy_relays_btn,
         ):
-            roster_actions.addWidget(btn)
+            roster_primary_actions.addWidget(btn)
+        roster_primary_actions.addStretch(1)
+        self.relay_compare_btn.setVisible(False)
+        self.copy_relays_btn.setVisible(False)
+        roster_secondary_actions = QHBoxLayout()
+        self._roster_secondary_actions_layout = roster_secondary_actions
         self.roster_action_status = QLabel("")
-        self.roster_action_status.setWordWrap(False)
-        self.roster_action_status.setMinimumWidth(220)
-        self.roster_action_status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        roster_actions.addWidget(self.roster_action_status, stretch=1)
+        self.roster_action_status.setWordWrap(True)
+        self.roster_action_status.setMaximumWidth(520)
+        self.roster_action_status.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        roster_secondary_actions.addWidget(self.roster_action_status)
+        roster_secondary_actions.addStretch(1)
+        roster_actions.addLayout(roster_primary_actions)
+        roster_actions.addLayout(roster_secondary_actions)
+        roster_post_net_actions = QHBoxLayout()
+        self._roster_post_net_actions_layout = roster_post_net_actions
+        self.post_net_actions_label = QLabel("Post-net:")
+        roster_post_net_actions.addWidget(self.post_net_actions_label)
+        roster_post_net_actions.addWidget(self.copy_state_summary_btn)
+        roster_post_net_actions.addStretch(1)
+        roster_actions.addLayout(roster_post_net_actions)
         roster_layout.addLayout(roster_actions)
 
         self.roster_table = QTableWidget(0, 12)
@@ -632,8 +862,16 @@ class FldigiNetControlTab(QWidget):
         self.roster_table.setColumnHidden(self.COL_ROLE, True)
         self.roster_table.setStyleSheet(self._roster_table_style(resolve_theme(self.settings)))
         self.roster_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.roster_table.setMinimumHeight(300)
+        self.roster_table.setMinimumHeight(0)
+        self.roster_empty_label = QLabel(
+            "No roster entries yet. Start a net, add an operator, or paste/import check-ins when traffic begins."
+        )
+        self.roster_empty_label.setObjectName("fldigiRosterEmptyState")
+        self.roster_empty_label.setWordWrap(True)
+        self.roster_empty_label.setVisible(False)
+        roster_layout.addWidget(self.roster_empty_label)
         roster_layout.addWidget(self.roster_table)
+        self._update_roster_empty_state()
 
         self.roster_compare_splitter.addWidget(self.roster_frame)
 
@@ -693,7 +931,7 @@ class FldigiNetControlTab(QWidget):
         compare_workspace_layout.setSpacing(6)
 
         compare_header = QHBoxLayout()
-        compare_header.addWidget(QLabel("<b>Compare / Reference</b>"))
+        compare_header.addWidget(QLabel("<b>Roster Compare</b>"))
         compare_header.addStretch()
         self.compare_workspace_toggle_btn = QToolButton()
         self.compare_workspace_toggle_btn.setText("Show")
@@ -703,13 +941,13 @@ class FldigiNetControlTab(QWidget):
         compare_workspace_layout.addLayout(compare_header)
 
         self.compare_workspace_body = QWidget()
-        self.compare_workspace_body.setMinimumHeight(260)
+        self.compare_workspace_body.setMinimumHeight(0)
         compare_workspace_body_layout = QVBoxLayout(self.compare_workspace_body)
         compare_workspace_body_layout.setContentsMargins(0, 0, 0, 0)
         compare_workspace_body_layout.setSpacing(6)
         self.compare_workspace_tabs = QTabWidget()
         self.compare_workspace_tabs.setDocumentMode(True)
-        self.compare_workspace_tabs.setMinimumHeight(240)
+        self.compare_workspace_tabs.setMinimumHeight(0)
         self.compare_workspace_tabs.addTab(self.reference_card, "Reference")
         self.compare_workspace_tabs.addTab(self.compare_results_card, "Compare Results")
         self.compare_workspace_tabs.addTab(self.review_card, "Review")
@@ -751,9 +989,12 @@ class FldigiNetControlTab(QWidget):
         self.next_tfc_btn.clicked.connect(self._copy_next_tfc)
         self.copy_seen_locally_btn.clicked.connect(self._copy_roster_seen_locally)
         self.copy_roster_summary_btn.clicked.connect(self._copy_roster_summary)
+        self.copy_state_summary_btn.clicked.connect(self._copy_state_summary)
         self.default_sort_btn.clicked.connect(self._restore_default_roster_sort)
         self.relay_compare_btn.clicked.connect(self._run_relay_compare)
         self.copy_relays_btn.clicked.connect(self._copy_selected_relays)
+        self.roster_compare_status_btn.clicked.connect(self._show_roster_compare)
+        self.copy_roster_gap_btn.clicked.connect(self._copy_roster_gap)
         self.copy_needs_sync_btn.clicked.connect(self._copy_needs_sync)
         self.setTabOrder(self.known_op_edit, self.add_known_tfc_btn)
 
@@ -777,6 +1018,11 @@ class FldigiNetControlTab(QWidget):
         self.macro_profile_details_btn.clicked.connect(self._toggle_setup_details)
         self.compare_workspace_toggle_btn.clicked.connect(self._toggle_compare_workspace)
         self.role_combo.currentTextChanged.connect(self._on_role_changed)
+        self.role_combo.currentTextChanged.connect(lambda _text: self._on_ncs_session_context_changed())
+        self.net_name_combo.currentTextChanged.connect(lambda _text: self._on_ncs_session_context_changed())
+        net_name_line_edit = self.net_name_combo.lineEdit()
+        if net_name_line_edit is not None:
+            net_name_line_edit.textChanged.connect(lambda _text: self._on_ncs_session_context_changed())
         self.partner_primary_btn.clicked.connect(self._set_partner_from_primary_controls)
         self.partner_primary_edit.returnPressed.connect(self._set_partner_from_primary_controls)
         self.joiner_add_btn.clicked.connect(self._add_joiner_net_control_rows)
@@ -786,12 +1032,88 @@ class FldigiNetControlTab(QWidget):
         self.late_text.textChanged.connect(self._on_workspace_text_changed)
         self.qru_text.textChanged.connect(self._on_workspace_text_changed)
         self.reference_text.textChanged.connect(self._on_workspace_text_changed)
+        self.reference_text.textChanged.connect(self._update_roster_compare_status)
         self.compare_results_text.textChanged.connect(self._on_workspace_text_changed)
         self.review_card.text_edit.textChanged.connect(self._on_workspace_text_changed)
 
         self._apply_role_workspace(self.role_combo.currentText())
         self._refresh_partner_controls()
+        self._refresh_ncs_session_context()
         self._ncs_scroll_area.setWidget(self._ncs_scroll_content)
+        self._refresh_responsive_geometry()
+
+    @staticmethod
+    def _set_responsive_layout_direction(layout, compact: bool) -> None:
+        if isinstance(layout, QBoxLayout):
+            layout.setDirection(
+                QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight
+            )
+
+    @staticmethod
+    def _set_responsive_min_width(widget: QWidget, compact: bool) -> None:
+        if widget.property("fldigiOriginalMinimumWidth") is None:
+            widget.setProperty("fldigiOriginalMinimumWidth", int(widget.minimumWidth()))
+        if compact:
+            widget.setMinimumWidth(0)
+        else:
+            original = widget.property("fldigiOriginalMinimumWidth")
+            widget.setMinimumWidth(max(0, int(original or 0)))
+
+    def _refresh_responsive_geometry(self) -> None:
+        """Stack task actions and release child width floors on compact rails."""
+        if not hasattr(self, "_ncs_scroll_content"):
+            return
+        try:
+            width = int(self._ncs_scroll_area.viewport().width() or self.width() or 0)
+        except Exception:
+            width = int(self.width() or 0)
+        compact_threshold = max(
+            horizontal_layout_breakpoint(
+                getattr(self, name, None), reserve_controls=1
+            )
+            for name in (
+                "_session_context_row",
+                "_session_context_details_row",
+                "_session_partner_row",
+                "_macro_summary_row",
+                "_macro_path_row",
+                "_known_operator_layout",
+                "_known_buttons_layout",
+                "_roster_header_layout",
+                "_roster_scope_layout",
+                "_roster_primary_actions_layout",
+                "_roster_secondary_actions_layout",
+                "_roster_post_net_actions_layout",
+            )
+        )
+        compact = width < compact_threshold
+        for name in (
+            "_session_context_row",
+            "_session_context_details_row",
+            "_session_partner_row",
+            "_macro_summary_row",
+            "_macro_path_row",
+            "_known_operator_layout",
+            "_known_buttons_layout",
+            "_roster_header_layout",
+            "_roster_scope_layout",
+            "_roster_primary_actions_layout",
+            "_roster_secondary_actions_layout",
+            "_roster_post_net_actions_layout",
+            "ncs_session_chip_layout",
+        ):
+            self._set_responsive_layout_direction(getattr(self, name, None), compact)
+        for child in self._ncs_scroll_content.findChildren(QWidget):
+            self._set_responsive_min_width(child, compact)
+        self._ncs_scroll_content.updateGeometry()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._refresh_responsive_geometry)
+
+    def _on_ncs_session_context_changed(self) -> None:
+        self._persist_ncs_session_snapshot()
+        self._refresh_ncs_session_context()
 
     def _toggle_setup_details(self, *_args) -> None:
         self._set_setup_details_expanded(not self._setup_details_expanded)
@@ -805,6 +1127,19 @@ class FldigiNetControlTab(QWidget):
         if hasattr(self, "roster_compare_splitter"):
             sizes = [520, 360] if self._compare_workspace_expanded else [780, 60]
             QTimer.singleShot(0, lambda: self.roster_compare_splitter.setSizes(sizes))
+
+    def _scroll_to_roster_compare(self) -> None:
+        if not hasattr(self, "_ncs_scroll_area") or not hasattr(self, "compare_workspace_frame"):
+            return
+
+        def scroll() -> None:
+            try:
+                self._ncs_scroll_area.ensureWidgetVisible(self.compare_workspace_frame, 0, 16)
+            except Exception as exc:
+                log.debug("FLDigi NCS: failed to scroll to roster compare: %s", exc)
+
+        QTimer.singleShot(0, scroll)
+        QTimer.singleShot(75, scroll)
 
     def _toggle_compare_workspace(self, *_args) -> None:
         self._set_compare_workspace_expanded(not self._compare_workspace_expanded)
@@ -1076,7 +1411,7 @@ class FldigiNetControlTab(QWidget):
             border = theme.get("accent", "#2E6F9E")
         else:
             bg = theme.get("success", "#2E7D32")
-            fg = "#FFFFFF"
+            fg = contrast_text_for_background(bg, theme)
             border = bg
         self.roster_action_status.setStyleSheet(
             "QLabel {"
@@ -1319,7 +1654,11 @@ class FldigiNetControlTab(QWidget):
 
     def _roster_action_scope_label(self, scope: str = "") -> str:
         scope_key = str(scope or self._current_roster_action_scope()).strip().upper()
-        return {"NCS": "NCS", "ANCS": "ANCS", "SHARED": "Shared", "ALL": "All"}.get(scope_key, "All")
+        if scope_key == "NCS":
+            return f"NCS {self._ncs_partner_call}" if self._ncs_partner_call else "NCS"
+        if scope_key == "ANCS":
+            return f"ANCS {self._ancs_partner_call}" if self._ancs_partner_call else "ANCS"
+        return {"SHARED": "Shared", "ALL": "All"}.get(scope_key, "All")
 
     def _refresh_roster_action_scope_styles(self) -> None:
         if not hasattr(self, "roster_scope_buttons"):
@@ -1334,9 +1673,12 @@ class FldigiNetControlTab(QWidget):
         accent_active = theme.get("accent_active", accent)
         selected = self._current_roster_action_scope()
         for scope, button in self.roster_scope_buttons.items():
+            label = self._roster_action_scope_label(scope)
+            button.setText(label)
+            button.setToolTip(f"Manage roster changes as {label}.")
             checked_bg = accent if scope in {"NCS", "ANCS"} else surface_alt
             checked_border = accent_active if scope in {"NCS", "ANCS"} else accent
-            checked_text = "#FFFFFF" if scope in {"NCS", "ANCS"} else text
+            checked_text = contrast_text_for_background(checked_bg, theme)
             button.setStyleSheet(
                 "QToolButton {"
                 f" background-color: {surface}; color: {muted}; border: 1px solid {border};"
@@ -1352,17 +1694,44 @@ class FldigiNetControlTab(QWidget):
             )
             button.setChecked(scope == selected)
 
+    def _attendance_rows_for_state_summary(self) -> List[Dict[str, str]]:
+        rows: List[Dict[str, str]] = []
+        seen_callsigns: set[str] = set()
+        for row in self._roster_table_rows():
+            callsign = str(row.get("callsign") or "").strip().upper()
+            if not callsign or callsign in seen_callsigns:
+                continue
+            if self._roster_station_role(row) in {"NCS", "ANCS"}:
+                continue
+            seen_callsigns.add(callsign)
+            rows.append(row)
+        return rows
+
+    def _state_summary_text(self) -> str:
+        rows = self._attendance_rows_for_state_summary()
+        if not rows:
+            return ""
+        counts: Dict[str, int] = {}
+        for row in rows:
+            state = str(row.get("state") or "").strip().upper() or "Unknown"
+            counts[state] = counts.get(state, 0) + 1
+        ordered = sorted(counts.items(), key=lambda item: (item[0] == "Unknown", item[0]))
+        parts = [f"{state}: {count}" for state, count in ordered]
+        net_name = self.net_name_combo.currentText().strip() if hasattr(self, "net_name_combo") else ""
+        prefix = f"{net_name} " if net_name else ""
+        return f"{prefix}Check-ins by state/province: {', '.join(parts)}. Total: {len(rows)}."
+
     def _roster_table_style(self, theme: Dict[str, str]) -> str:
         surface = theme.get("surface", "#F0F2F4")
         surface_alt = theme.get("surface_alt", "#DDE1E6")
         text = theme.get("text", "#1C1F21")
         border = theme.get("border", "#D3D7DD")
         selected_bg = theme.get("accent_active") or theme.get("accent", "#1F5A83")
-        selected_fg = "#FFFFFF" if selected_bg != theme.get("info") else "#FFFFFF"
+        selected_fg = contrast_text_for_background(selected_bg, theme)
         return (
             "QTableWidget#fldigiRosterTable {"
             f" background-color: {surface}; color: {text}; border: 1px solid {border};"
-            " gridline-color: rgba(127, 127, 127, 0.45);"
+            f" gridline-color: {border};"
             " selection-background-color: "
             f"{selected_bg}; selection-color: {selected_fg};"
             "}"
@@ -1473,6 +1842,7 @@ class FldigiNetControlTab(QWidget):
             self.roster_table.setSortingEnabled(was_sorting)
         finally:
             self._roster_syncing = False
+            self._update_roster_empty_state()
         return True
 
     def _roster_rebuild_rows(self, rows: List[Dict[str, str]]) -> None:
@@ -1496,6 +1866,7 @@ class FldigiNetControlTab(QWidget):
                 keyword=entry.get("keyword", ""),
                 checkin_seq=entry.get("checkin_seq", ""),
             )
+        self._update_roster_empty_state()
 
     def _sort_roster_table_by_column(self, column: int) -> None:
         if self._roster_syncing or not hasattr(self, "roster_table"):
@@ -1613,15 +1984,9 @@ class FldigiNetControlTab(QWidget):
             return
         self._roster_syncing = True
         try:
-            has_roster_rows = bool(self._roster_table_rows())
-            if has_roster_rows:
-                main_text = self._roster_table_text("TFC")
-                qru_text = self._roster_table_text("QRU")
-                late_text = self._roster_table_text("LATE")
-            else:
-                main_text = self.main_text.toPlainText()
-                qru_text = self.qru_text.toPlainText()
-                late_text = self.late_text.toPlainText()
+            main_text = self._roster_table_text("TFC")
+            qru_text = self._roster_table_text("QRU")
+            late_text = self._roster_table_text("LATE")
             self.main_text.setPlainText(main_text)
             self.qru_text.setPlainText(qru_text)
             self.late_text.setPlainText(late_text)
@@ -1632,10 +1997,7 @@ class FldigiNetControlTab(QWidget):
                 self._write_file(main_path, main_text)
                 self._write_file(qru_path, qru_text)
                 self._write_file(late_path, late_text)
-                all_text = self._roster_table_text() if has_roster_rows else "\n".join(
-                    text for text in (main_text, qru_text, late_text) if text.strip()
-                )
-                self._write_file(self._all_checkins_file_path(), all_text)
+                self._write_file(self._all_checkins_file_path(), self._roster_table_text())
                 self._sync_role_roster_files()
                 self._sync_role_ack_pending_files()
                 self._sync_next_tfc_action_files()
@@ -1711,6 +2073,7 @@ class FldigiNetControlTab(QWidget):
     def _roster_clear(self) -> None:
         self.roster_table.setRowCount(0)
         self._next_roster_seq = 1
+        self._update_roster_empty_state()
         self._mark_roster_dirty()
 
     def _roster_find_row(self, callsign: str) -> int:
@@ -1736,6 +2099,7 @@ class FldigiNetControlTab(QWidget):
         row = self._roster_find_row(callsign)
         if row >= 0:
             self.roster_table.removeRow(row)
+            self._update_roster_empty_state()
             self._mark_roster_dirty()
 
     def _roster_text_columns(self) -> tuple[int, ...]:
@@ -1759,6 +2123,14 @@ class FldigiNetControlTab(QWidget):
         self._roster_configure_tfc_status_cell(row)
         self._roster_configure_side_editor(row, self.COL_HEARD)
         self._roster_configure_side_editor(row, self.COL_ACKED)
+        self._update_roster_empty_state()
+
+    def _update_roster_empty_state(self) -> None:
+        if not hasattr(self, "roster_empty_label") or not hasattr(self, "roster_table"):
+            return
+        has_rows = self.roster_table.rowCount() > 0
+        self.roster_empty_label.setVisible(not has_rows)
+        self.roster_table.setVisible(has_rows)
 
     def _roster_set_category(self, row: int, category: str) -> None:
         widget = self.roster_table.cellWidget(row, self.COL_CATEGORY)
@@ -1978,11 +2350,11 @@ class FldigiNetControlTab(QWidget):
         muted = theme.get("text_muted", "#5B6570")
         if status == "Now":
             background = theme.get("accent", "#2E6F9E")
-            text = "#FFFFFF"
+            text = contrast_text_for_background(background, theme)
             border = theme.get("accent_active", background)
         elif status == "Called":
             background = theme.get("success", "#2E7D32")
-            text = "#FFFFFF"
+            text = contrast_text_for_background(background, theme)
             border = background
         else:
             background = theme.get("warning_bg", "#FFF3CD")
@@ -2061,7 +2433,7 @@ class FldigiNetControlTab(QWidget):
         focus = theme.get("focus", accent)
         checked_bg = accent
         checked_border = accent_active
-        checked_text = "#FFFFFF"
+        checked_text = contrast_text_for_background(checked_bg, theme)
         if column == self.COL_HEARD and role and role != self._current_net_control_role():
             checked_bg = surface_alt
             checked_border = accent
@@ -2080,7 +2452,7 @@ class FldigiNetControlTab(QWidget):
             " padding: 1px 6px;"
             " }"
             " QToolButton:checked:hover {"
-            f" background-color: {checked_border}; color: #FFFFFF;"
+            f" background-color: {checked_border}; color: {contrast_text_for_background(checked_border, theme)};"
             " }"
             " QToolButton:focus {"
             f" border: 2px solid {focus}; padding: 1px 6px;"
@@ -2240,6 +2612,7 @@ class FldigiNetControlTab(QWidget):
             self.roster_table.setSortingEnabled(was_sorting)
         finally:
             self._roster_syncing = False
+            self._update_roster_empty_state()
         self._roster_apply_pinned_order()
         self._roster_sync_legacy_buffers(write_files=False)
         self._mark_roster_dirty()
@@ -2294,6 +2667,90 @@ class FldigiNetControlTab(QWidget):
             self._show_roster_action_status(f"Relay list copied for {self._roster_action_scope_label(role_key)}.")
             return
         self._show_roster_action_status(f"No selected relays for {self._roster_action_scope_label(role_key)}.", "info")
+
+    def _gap_candidate_rows(self, role: str) -> List[Dict[str, str]]:
+        rows: List[Dict[str, str]] = []
+        for row in self._scope_filtered_rows(role):
+            callsign = str(row.get("callsign") or "").strip().upper()
+            if not callsign:
+                continue
+            if self._roster_station_role(row) in {"NCS", "ANCS"}:
+                continue
+            rows.append(row)
+        return rows
+
+    def _roster_gap_sections(self) -> List[tuple[str, List[Dict[str, str]]]]:
+        role_key = self._exact_net_control_role(self._current_roster_action_scope()) or self._current_net_control_role() or "ANCS"
+        reference_text = self.reference_text.toPlainText() if hasattr(self, "reference_text") else ""
+        reference_entries = self._extract_unique_entries(reference_text)
+        if reference_entries:
+            reference_label = self._reference_role_label_for_role(role_key)
+            return [(f"Missing from {reference_label}", self._relay_entries_missing_from_reference(role_key))]
+
+        ncs_rows = self._gap_candidate_rows("NCS")
+        ancs_rows = self._gap_candidate_rows("ANCS")
+        if not ncs_rows or not ancs_rows:
+            return []
+
+        ncs_calls = {str(row.get("callsign") or "").strip().upper() for row in ncs_rows}
+        ancs_calls = {str(row.get("callsign") or "").strip().upper() for row in ancs_rows}
+        missing_from_ncs = [row for row in ancs_rows if str(row.get("callsign") or "").strip().upper() not in ncs_calls]
+        missing_from_ancs = [row for row in ncs_rows if str(row.get("callsign") or "").strip().upper() not in ancs_calls]
+        return [
+            ("Missing from NCS", missing_from_ncs),
+            ("Missing from ANCS", missing_from_ancs),
+        ]
+
+    def _roster_gap_text_for_sections(self, sections: List[tuple[str, List[Dict[str, str]]]]) -> str:
+        parts: List[str] = []
+        for title, rows in sections:
+            if not rows:
+                continue
+            text = self._roster_table_text_for_rows(rows)
+            if not text:
+                continue
+            parts.append(f"{title}:\n{text}")
+        return "\n\n".join(parts)
+
+    def _update_roster_compare_status(self) -> None:
+        if not hasattr(self, "roster_compare_status_btn"):
+            return
+        sections = self._roster_gap_sections()
+        gap_sections = [(title, rows) for title, rows in sections if rows]
+        if gap_sections:
+            labels = []
+            for title, rows in gap_sections:
+                suffix = title.replace("Missing from ", "").strip()
+                labels.append(f"{suffix} +{len(rows)}")
+            text = "Compare: " + " | ".join(labels)
+            tooltip = "Roster gaps found. Show Roster Compare for details."
+            self.copy_roster_gap_btn.setEnabled(True)
+        elif sections:
+            text = "Compare: Match"
+            tooltip = "NCS and ANCS rosters match for the current compare source."
+            self.copy_roster_gap_btn.setEnabled(False)
+        else:
+            text = "Compare Rosters"
+            tooltip = "Paste or load a partner roster in Roster Compare to check NCS/ANCS gaps."
+            self.copy_roster_gap_btn.setEnabled(False)
+        self.roster_compare_status_btn.setText(text)
+        self.roster_compare_status_btn.setToolTip(tooltip)
+
+    def _show_roster_compare(self) -> None:
+        self._run_relay_compare()
+        if not self._roster_gap_sections():
+            self.compare_workspace_tabs.setCurrentWidget(self.reference_card)
+        self._scroll_to_roster_compare()
+
+    def _copy_roster_gap(self) -> None:
+        sections = self._roster_gap_sections()
+        text = self._roster_gap_text_for_sections(sections)
+        if text:
+            QApplication.clipboard().setText(text)
+            self._show_roster_action_status("Roster gap copied.")
+            self._run_relay_compare()
+            return
+        self._show_roster_action_status("No roster gap to copy. Set a reference roster if needed.", "info")
 
     def _needs_ack_row_indexes(self, role: str = "") -> List[int]:
         role_key = self._exact_net_control_role(role) or self._current_net_control_role()
@@ -2488,6 +2945,148 @@ class FldigiNetControlTab(QWidget):
     @staticmethod
     def _strip_inline_review_context(line: str) -> str:
         return re.sub(r"\s*\[ctx:\s*.*\]\s*$", "", str(line or "").strip(), flags=re.IGNORECASE)
+
+    def _log_assisted_enabled(self) -> bool:
+        if not bool(getattr(self, "LOG_ASSISTED_INTAKE_VISIBLE", True)):
+            return False
+        checkbox = getattr(self, "log_assisted_enable_chk", None)
+        if checkbox is None or not hasattr(checkbox, "isChecked"):
+            return False
+        try:
+            return bool(checkbox.isChecked())
+        except Exception:
+            return False
+
+    def _fldigi_log_path(self) -> str:
+        try:
+            return str(self.settings.get("fldigi_log_path", "") or "").strip()
+        except Exception:
+            return ""
+
+    def _log_assisted_session_start_utc(self) -> datetime.datetime:
+        raw = str(getattr(self, "_net_start_utc", "") or "").strip()
+        if raw:
+            try:
+                parsed = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+                return parsed.astimezone(datetime.timezone.utc)
+            except Exception:
+                pass
+        return datetime.datetime.now(datetime.timezone.utc)
+
+    def _log_assisted_candidate_line(self, candidate: object) -> str:
+        parts = [
+            str(getattr(candidate, "callsign", "") or "").strip().upper(),
+            str(getattr(candidate, "name", "") or "").strip(),
+            str(getattr(candidate, "state", "") or "").strip().upper(),
+        ]
+        traffic = str(getattr(candidate, "traffic", "") or "").strip()
+        if traffic:
+            parts.append(traffic)
+        line = " / ".join(part for part in parts if part)
+        context = str(getattr(candidate, "tx_context", "") or "").strip()
+        if context:
+            line = f"{line} [ctx: {context}]"
+        return line
+
+    @staticmethod
+    def _log_assisted_candidate_key(candidate: object) -> str:
+        callsign = str(getattr(candidate, "callsign", "") or "").strip().upper()
+        bucket = str(getattr(candidate, "bucket", "") or "").strip().upper()
+        traffic = str(getattr(candidate, "traffic", "") or "").strip().upper()
+        return "|".join(part for part in (callsign, bucket, traffic) if part)
+
+    def _clear_log_assisted_candidates(self, *, remove_applied: bool = True) -> None:
+        candidates = list(getattr(self, "_log_assisted_candidates_by_callsign", {}).values())
+        if remove_applied and hasattr(self, "roster_table"):
+            for candidate in candidates:
+                bucket = str(getattr(candidate, "bucket", "") or "").strip().upper()
+                callsign = str(getattr(candidate, "callsign", "") or "").strip().upper()
+                if callsign and bucket in {"TFC", "QRU", "LATE"}:
+                    self._roster_remove_callsign(callsign)
+        if hasattr(self, "review_card"):
+            self.review_card.set_text("")
+        self._log_assisted_candidates_by_callsign = {}
+        self._log_assisted_seen_normalized = set()
+        self._log_assisted_session_tx_context = ""
+
+    def _capture_log_assisted_session(self) -> None:
+        path = self._fldigi_log_path()
+        self._log_assisted_session_path = path
+        self._log_assisted_session_offset = 0
+        self._log_assisted_session_tx_context = ""
+        self._log_assisted_seen_normalized = set()
+        self._log_assisted_candidates_by_callsign = {}
+        if path:
+            try:
+                self._log_assisted_session_offset = Path(path).stat().st_size
+            except Exception:
+                self._log_assisted_session_offset = 0
+
+    def _apply_log_assisted_candidate(self, candidate: object) -> None:
+        callsign = str(getattr(candidate, "callsign", "") or "").strip().upper()
+        if not callsign:
+            return
+        bucket = str(getattr(candidate, "bucket", "REVIEW") or "REVIEW").strip().upper()
+        name = str(getattr(candidate, "name", "") or "").strip()
+        state = str(getattr(candidate, "state", "") or "").strip().upper()
+        traffic = str(getattr(candidate, "traffic", "") or "").strip()
+        self._log_assisted_candidates_by_callsign[self._log_assisted_candidate_key(candidate)] = candidate  # type: ignore[assignment]
+        if bucket in {"TFC", "QRU", "LATE"}:
+            self._roster_append_row(callsign, name, state, traffic, bucket, "Local")
+            return
+        line = self._log_assisted_candidate_line(candidate)
+        existing = self.review_card.text().splitlines() if hasattr(self, "review_card") else []
+        if line and line not in existing:
+            self.review_card.set_text("\n".join([*existing, line]).strip())
+            self._update_bucket_card_states()
+
+    def _poll_log_assisted_intake(self) -> None:
+        if not self._log_assisted_enabled():
+            self._stop_log_assisted_timer()
+            return
+        path = self._fldigi_log_path()
+        if not path:
+            return
+        if path != getattr(self, "_log_assisted_session_path", ""):
+            self._clear_log_assisted_candidates(remove_applied=True)
+            self._capture_log_assisted_session()
+            return
+        candidates, offset, tx_context = scan_fldigi_log_file(
+            path,
+            start_offset=int(getattr(self, "_log_assisted_session_offset", 0) or 0),
+            session_start_utc=self._log_assisted_session_start_utc(),
+            seen_normalized=getattr(self, "_log_assisted_seen_normalized", set()),
+            last_tx_context=str(getattr(self, "_log_assisted_session_tx_context", "") or ""),
+            include_tx_context=True,
+            lookup_identity=lookup_operator_identity,
+        )
+        self._log_assisted_session_offset = int(offset or 0)
+        self._log_assisted_session_tx_context = str(tx_context or "")
+        for candidate in candidates:
+            if self._log_assisted_candidate_key(candidate) not in self._log_assisted_candidates_by_callsign:
+                self._apply_log_assisted_candidate(candidate)
+
+    def _start_log_assisted_timer(self) -> None:
+        if not self._log_assisted_enabled():
+            return
+        timer = getattr(self, "_log_assisted_timer", None)
+        if timer is not None and hasattr(timer, "isActive") and not timer.isActive():
+            timer.start()
+
+    def _stop_log_assisted_timer(self) -> None:
+        timer = getattr(self, "_log_assisted_timer", None)
+        if timer is not None and hasattr(timer, "isActive") and timer.isActive():
+            timer.stop()
+
+    def _on_log_assisted_toggled(self, enabled: bool) -> None:
+        if not enabled or not self._log_assisted_enabled():
+            self._stop_log_assisted_timer()
+            return
+        self._capture_log_assisted_session()
+        if self._net_in_progress:
+            self._start_log_assisted_timer()
 
     def _insert_left_bucket_widget(self, widget: WorkspaceBucketCard) -> None:
         if self._left_bucket_col.indexOf(widget) >= 0:
@@ -2688,6 +3287,7 @@ class FldigiNetControlTab(QWidget):
                 ancs_call = row.get("callsign", "")
         self._ncs_partner_call = ncs_call
         self._ancs_partner_call = ancs_call
+        self._refresh_roster_action_scope_styles()
         if not hasattr(self, "partner_primary_edit"):
             return
         active_role = normalize_role(self.role_combo.currentText()) if hasattr(self, "role_combo") else ""
@@ -2730,6 +3330,7 @@ class FldigiNetControlTab(QWidget):
             self._apply_local_net_control_role()
             self._add_net_control_roster_row(cs, "ANCS")
             self.partner_status_label.setText(f"ANCS {cs} set in roster.")
+        self._refresh_roster_action_scope_styles()
 
     def _add_joiner_net_control_rows(self) -> None:
         if not self._net_in_progress:
@@ -2754,6 +3355,7 @@ class FldigiNetControlTab(QWidget):
         self.partner_status_label.setText(
             f"{', '.join(added)} added to roster." if added else "No net control callsigns entered."
         )
+        self._refresh_roster_action_scope_styles()
 
     def _on_role_changed(self, role: str) -> None:
         if self._workspace_role_loading:
@@ -2996,22 +3598,23 @@ class FldigiNetControlTab(QWidget):
         return "NCS" if role_key == "ANCS" else "ANCS"
 
     def _run_relay_compare(self) -> None:
-        role_key = self._exact_net_control_role(self._current_roster_action_scope()) or self._current_net_control_role() or "ANCS"
-        reference_label = self._reference_role_label_for_role(role_key)
-        relay_rows = self._relay_entries_missing_from_reference(role_key)
-        relay_text = self._roster_table_text_for_rows(relay_rows)
-        lines = [
-            f"Stations to Relay to {reference_label}: {len(relay_rows)}",
-            "",
-            relay_text if relay_text else "(none)",
-        ]
-        self.compare_results_card.set_title(f"Stations to Relay to {reference_label}")
-        self.compare_results_card.set_text("\n".join(lines))
-        self.compare_results_card.set_count(len(relay_rows))
-        self._compare_missing_text = relay_text
-        self._compare_reference_missing_entries = relay_rows
+        sections = self._roster_gap_sections()
+        gap_text = self._roster_gap_text_for_sections(sections)
+        gap_rows = [row for _title, rows in sections for row in rows]
+        if gap_text:
+            result_text = gap_text
+        elif sections:
+            result_text = "NCS and ANCS rosters match for this comparison."
+        else:
+            result_text = "Set or paste a partner roster reference to compare NCS/ANCS roster gaps."
+        self.compare_results_card.set_title("Roster Gap")
+        self.compare_results_card.set_text(result_text)
+        self.compare_results_card.set_count(len(gap_rows))
+        self._compare_missing_text = gap_text
+        self._compare_reference_missing_entries = gap_rows
         self.compare_workspace_tabs.setCurrentWidget(self.compare_results_card)
         self._set_compare_workspace_expanded(True)
+        self._update_roster_compare_status()
 
     def _run_inline_compare(self) -> None:
         defaults = self._workspace_compare_defaults()
@@ -3027,11 +3630,11 @@ class FldigiNetControlTab(QWidget):
                     f"Net Roster: {len(self._extract_unique_entries(self._roster_table_text()))}",
                     f"{reference_label} List: {len(self._extract_unique_entries(self.reference_text.toPlainText()))}",
                     "",
-                    f"Stations to Relay to {reference_label}:",
+                    f"Missing from {reference_label}:",
                     relay_text if relay_text else "(none)",
                 ]
             )
-            self.compare_results_card.set_title(f"Stations to Relay to {reference_label}")
+            self.compare_results_card.set_title("Roster Gap")
             self.compare_results_card.set_text(result_text)
             self.compare_results_card.set_count(len(relay_rows))
             self._compare_missing_text = relay_text
@@ -3158,8 +3761,8 @@ class FldigiNetControlTab(QWidget):
                 self.copy_late_btn.setVisible(True)
                 self.copy_seen_locally_btn.setVisible(False)
                 self.default_sort_btn.setVisible(True)
-                self.relay_compare_btn.setVisible(True)
-                self.copy_relays_btn.setVisible(True)
+                self.relay_compare_btn.setVisible(False)
+                self.copy_relays_btn.setVisible(False)
                 self.copy_needs_sync_btn.setVisible(True)
             self.tfc_card.set_title("Seen Locally" if normalized == "JOINER" else f"{normalized} / TFC")
             self.qru_card.set_title(f"{normalized} / QRU")
@@ -3328,6 +3931,9 @@ class FldigiNetControlTab(QWidget):
     def _setup_timers(self):
         self._clock_timer = QTimer(self)
         self._clock_timer.timeout.connect(self._on_timer_tick)
+        self._log_assisted_timer = QTimer(self)
+        self._log_assisted_timer.setInterval(5000)
+        self._log_assisted_timer.timeout.connect(self._poll_log_assisted_intake)
         self._update_clock_labels()
         self._update_suspend_state()
         self._update_next_change_display()
@@ -3562,6 +4168,15 @@ class FldigiNetControlTab(QWidget):
 
     def _apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
+        count_style = self._count_chip_style(theme)
+        for label in (
+            self.total_checkins_label,
+            self.roster_total_label,
+            self.roster_tfc_label,
+            self.roster_qru_label,
+            self.roster_late_label,
+        ):
+            label.setStyleSheet(count_style)
         self.start_btn.setStyleSheet(button_style("success", theme))
         self.end_btn.setStyleSheet(button_style("danger", theme))
         self._start_btn_default_style = self.start_btn.styleSheet()
@@ -3579,6 +4194,7 @@ class FldigiNetControlTab(QWidget):
         self._apply_known_op_styles(theme)
         self._update_add_buttons_state()
         self._set_setup_details_expanded(self._setup_details_expanded)
+        self._refresh_ncs_session_context()
 
     def apply_theme(self) -> None:
         self._apply_theme()
@@ -3889,7 +4505,11 @@ class FldigiNetControlTab(QWidget):
 
     def _update_next_change_display(self):
         now_utc = datetime.datetime.now(datetime.timezone.utc)
-        base_style = "QLabel { border: 1px solid #888888; padding: 4px; border-radius: 3px; }"
+        theme = resolve_theme(self.settings)
+        muted = theme.get("text_muted", theme.get("text", "#1C1F21"))
+        accent = theme.get("accent", theme.get("text", "#1C1F21"))
+        base_style = f"QLabel {{ color: {muted}; padding: 2px 4px; }}"
+        alert_style = f"QLabel {{ color: {accent}; padding: 2px 4px; font-weight: 700; }}"
 
         # If schedule is suspended, show resume info and skip change handling
         if self._suspend_active():
@@ -3897,10 +4517,9 @@ class FldigiNetControlTab(QWidget):
             resume_str = su.strftime("%H:%M UTC") if su else ""
             suspended_text = f"Next Scheduled Net: (suspended until {resume_str})"
             suspended_text = f"{suspended_text} : {self._format_current_band(now_utc)}"
-            self.next_change_label.setText(suspended_text)
-            self.next_change_label.setStyleSheet(
-                "QLabel { border: 1px solid #888888; padding: 4px; border-radius: 3px; background-color: #E3F2FD; }"
-            )
+            self.next_change_label.setText(f"Suspended until {resume_str or 'set time'}")
+            self.next_change_label.setToolTip(suspended_text)
+            self.next_change_label.setStyleSheet(alert_style)
             return
 
         # Refresh next_change_utc if we don't have one or it's in the past
@@ -3915,7 +4534,10 @@ class FldigiNetControlTab(QWidget):
         next_net_text = self._format_next_net_summary()
         current_band_text = self._format_current_band(now_utc)
         display_text = f"Next Scheduled Net: {next_net_text} : {current_band_text}"
-        self.next_change_label.setText(display_text)
+        compact_current = current_band_text.replace("Current Band:", "Now:").strip()
+        compact_next = next_net_text.replace(" - ", " ").strip()
+        self.next_change_label.setText(f"Next: {compact_next} | {compact_current}")
+        self.next_change_label.setToolTip(display_text)
         self.next_change_label.setStyleSheet(base_style)
 
         # Auto end net exactly at change time if not paused
@@ -4014,9 +4636,24 @@ class FldigiNetControlTab(QWidget):
         self.macro_profile_details_btn.setStyleSheet(self._macro_header_style())
         if hasattr(self, "macro_setup_controls"):
             self.macro_setup_controls.setVisible(not selected_path or needs_mapping)
+        if hasattr(self, "macro_profile_edit_mappings_btn"):
+            self.macro_profile_edit_mappings_btn.setVisible(bool(selected_path))
+            self.macro_profile_edit_mappings_btn.setEnabled(bool(selected_path))
         self._refresh_macro_mapping_locations()
 
     def _macro_mapping_locations_text(self) -> str:
+        selected = self._normalize_macro_profile_path(self._selected_macro_profile_path())
+        record = self._macro_profile_record(selected)
+        mappings = record.get("mappings")
+        active_mappings = [
+            mapping for mapping in mappings if self._macro_profile_mapping_is_complete(mapping)
+        ] if isinstance(mappings, list) else []
+        if active_mappings:
+            lines = ["Mapped macro files:"]
+            for mapping in active_mappings:
+                lines.append(self._macro_mapping_location_line(mapping))
+            return "\n".join(lines)
+
         checkin_dir = self._resolve_checkin_dir()
         default_paths = [
             (label, checkin_dir / filename)
@@ -4027,30 +4664,28 @@ class FldigiNetControlTab(QWidget):
                 (f"{role}_{label}", checkin_dir / filename)
                 for label, filename in ROLE_CHECKIN_FILE_NAMES[role].items()
             )
-        lines = ["Macro check-in files:"]
+        lines = ["Default macro check-in files:"]
         lines.extend(f"{label}: {path}" for label, path in default_paths)
         lines.append(f"Archive: {checkin_dir / 'archive'}")
-
-        selected = self._normalize_macro_profile_path(self._selected_macro_profile_path())
-        record = self._macro_profile_record(selected)
-        mappings = record.get("mappings")
-        active_mappings = [
-            mapping for mapping in mappings if self._macro_profile_mapping_is_complete(mapping)
-        ] if isinstance(mappings, list) else []
-        if not active_mappings:
+        if selected:
             lines.append("Mapped macro files: none active.")
             return "\n".join(lines)
-
-        lines.append("Mapped macro files:")
-        for mapping in active_mappings:
-            function = str(mapping.get("function") or "").strip().upper() or "CUSTOM"
-            if function == "CUSTOM":
-                function = str(mapping.get("custom_name") or "").strip() or "CUSTOM"
-            scope = str(mapping.get("scope") or "").strip().upper()
-            source_file = str(mapping.get("source_file") or "").strip()
-            label = f"{scope} {function}".strip()
-            lines.append(f"{label}: {source_file or '(macro-only mapping)'}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _macro_mapping_location_line(mapping: Dict[str, object]) -> str:
+        function = str(mapping.get("function") or "").strip().upper() or "CUSTOM"
+        if function == "CUSTOM":
+            function = str(mapping.get("custom_name") or "").strip() or "CUSTOM"
+        scope = str(mapping.get("scope") or "").strip().upper()
+        macro_label = str(mapping.get("macro_label") or "").strip()
+        macro_id = str(mapping.get("macro_id") or "").strip()
+        source_file = str(mapping.get("source_file") or "").strip()
+        label = f"{scope} {function}".strip()
+        macro_bits = " / ".join(bit for bit in (macro_label, macro_id) if bit)
+        if macro_bits:
+            label = f"{label} ({macro_bits})"
+        return f"{label}: {source_file or '(macro-only mapping)'}"
 
     def _refresh_macro_mapping_locations(self) -> None:
         if hasattr(self, "macro_mapping_locations_label"):
@@ -4083,6 +4718,7 @@ class FldigiNetControlTab(QWidget):
 
         self._populate_net_name_from_schedule()
         self._update_net_name_min_width()
+        self._refresh_ncs_session_context()
 
     def _macro_profile_store(self) -> Dict[str, Dict[str, object]]:
         data = self.settings.all()
@@ -4552,6 +5188,15 @@ class FldigiNetControlTab(QWidget):
 
     def _update_copy_buttons_state(self) -> None:
         self._update_bucket_card_states()
+        self._update_roster_compare_status()
+        if hasattr(self, "copy_state_summary_btn"):
+            rows_available = bool(self._attendance_rows_for_state_summary())
+            post_net_available = bool(self._net_end_utc) and not bool(self._net_in_progress)
+            visible = post_net_available and rows_available
+            self.copy_state_summary_btn.setVisible(visible)
+            self.copy_state_summary_btn.setEnabled(visible)
+            if hasattr(self, "post_net_actions_label"):
+                self.post_net_actions_label.setVisible(visible)
 
     def _update_add_buttons_state(self) -> None:
         theme = resolve_theme(self.settings)
@@ -4596,7 +5241,7 @@ class FldigiNetControlTab(QWidget):
         if ready:
             style += (
                 " QPushButton:focus {"
-                f" background-color: {role_color}; color: #FFFFFF; border: 2px solid {role_color};"
+                f" background-color: {role_color}; color: {contrast_text_for_background(role_color, theme)}; border: 2px solid {role_color};"
                 " padding: 3px 9px;"
                 " }"
             )
@@ -4917,6 +5562,10 @@ class FldigiNetControlTab(QWidget):
 
         self._net_in_progress = True
         self._net_start_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+        self._net_end_utc = None
+        if self._log_assisted_enabled():
+            self._capture_log_assisted_session()
+            self._start_log_assisted_timer()
         role = normalize_role(self.role_combo.currentText())
         if role in {"NCS", "ANCS"}:
             self._apply_local_net_control_role()
@@ -4932,10 +5581,13 @@ class FldigiNetControlTab(QWidget):
             self._add_joiner_net_control_rows()
         self._roster_sync_legacy_buffers(write_files=True)
         self._set_roster_dirty(False)
-        self.net_status_changed.emit("FLDIGI", True)
         self._set_net_button_styles(active=True)
+        self._update_copy_buttons_state()
+        self._persist_ncs_session_snapshot(timing_state="active")
+        self.net_status_changed.emit("FLDIGI", True)
+        self._refresh_ncs_session_context()
         log.info("FLDigi net started: %s (%s)", self.net_name_combo.currentText().strip(), self.role_combo.currentText())
-        self._refresh_operator_history_views()
+        QTimer.singleShot(0, self._refresh_operator_history_views)
 
     def _start_ad_hoc_net(self):
         """
@@ -4960,32 +5612,47 @@ class FldigiNetControlTab(QWidget):
         self.net_name_combo.setEditText(ad_hoc_name)
         self._start_net()
 
-    def _save_checkins(self):
+    def _save_checkins(self, *, quiet: bool = False):
         main_path, qru_path, late_path = self._ensure_checkin_files()
-        has_roster_rows = bool(self._roster_table_rows())
         self._roster_sync_legacy_buffers(write_files=False)
-        if has_roster_rows:
-            main_text = self._roster_table_text("TFC")
-            qru_text = self._roster_table_text("QRU")
-            late_text = self._roster_table_text("LATE")
-            all_text = self._roster_table_text()
-        else:
-            main_text = self.main_text.toPlainText()
-            qru_text = self.qru_text.toPlainText()
-            late_text = self.late_text.toPlainText()
-            all_text = "\n".join(text for text in (main_text, qru_text, late_text) if text.strip())
+        main_text = self._roster_table_text("TFC")
+        qru_text = self._roster_table_text("QRU")
+        late_text = self._roster_table_text("LATE")
         self._write_file(main_path, main_text)
         self._write_file(qru_path, qru_text)
         self._write_file(late_path, late_text)
-        self._write_file(self._all_checkins_file_path(), all_text)
+        self._write_file(self._all_checkins_file_path(), self._roster_table_text())
         self._sync_role_roster_files()
         self._sync_role_ack_pending_files()
         self._sync_next_tfc_action_files()
         self._sync_mapped_roster_files()
         self._set_roster_dirty(False)
 
-        QMessageBox.information(self, "Saved", "Check-in logs saved.")
+        if not quiet:
+            QMessageBox.information(self, "Saved", "Check-in logs saved.")
         self._refresh_operator_history_views()
+
+    def _confirm_end_net(self) -> tuple[bool, bool]:
+        rows_available = bool(self._attendance_rows_for_state_summary())
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("End Net")
+        box.setText("End net now?")
+        if rows_available:
+            box.setInformativeText("Accepted check-ins are available for the post-net state summary.")
+        else:
+            box.setInformativeText("No accepted check-ins are currently logged.")
+        end_button = box.addButton("End Net", QMessageBox.AcceptRole)
+        cancel_button = box.addButton("Cancel", QMessageBox.RejectRole)
+        box.setDefaultButton(cancel_button)
+        summary_chk = None
+        if rows_available:
+            summary_chk = QCheckBox("Copy state summary when net ends")
+            box.setCheckBox(summary_chk)
+        box.exec()
+        if box.clickedButton() is not end_button:
+            return False, False
+        return True, bool(summary_chk and summary_chk.isChecked())
 
     def _merge_late_into_main(self):
         main_path, _qru_path, late_path = self._ensure_checkin_files()
@@ -5027,6 +5694,17 @@ class FldigiNetControlTab(QWidget):
             self._show_roster_action_status("Check-ins copied.")
         else:
             self._show_roster_action_status("No check-ins to copy.", "info")
+
+    def _copy_state_summary(self) -> None:
+        """
+        Copy an aggregate attendance summary grouped by state/province.
+        """
+        text = self._state_summary_text()
+        if text:
+            QApplication.clipboard().setText(text)
+            self._show_roster_action_status("State summary copied.")
+        else:
+            self._show_roster_action_status("No accepted check-ins to summarize.", "info")
 
     def _copy_text_to_clipboard(self, text: str):
         """
@@ -5091,18 +5769,13 @@ class FldigiNetControlTab(QWidget):
             setattr(self, flag_attr, False)
 
     def _end_net(self):
-        resp = QMessageBox.question(
-            self,
-            "End Net",
-            "End net now?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if resp != QMessageBox.Yes:
+        confirmed, copy_state_summary = self._confirm_end_net()
+        if not confirmed:
             return
+        self._stop_log_assisted_timer()
         if not self._net_in_progress:
             log.info("End Net clicked but no net_in_progress flag set; proceeding with DB load from file.")
-        self._save_checkins()
+        self._save_checkins(quiet=True)
 
         main_path, qru_path, _ = self._checkin_file_paths()
 
@@ -5110,23 +5783,19 @@ class FldigiNetControlTab(QWidget):
         qru_text = self._roster_table_text("QRU") or self._read_file(qru_path)
         late_path = self._checkin_file_paths()[2]
         late_text = self._roster_table_text("LATE") or self._read_file(late_path)
-        import_text = "\n".join(text for text in (main_text, qru_text) if text.strip())
-        saved_text = "\n".join(text for text in (main_text, qru_text, late_text) if text.strip())
-        if not saved_text.strip():
-            resp = QMessageBox.question(
-                self,
-                "End Net?",
-                "Main, QRU, and LATE check-in logs are empty. End the net without importing any check-ins?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if resp != QMessageBox.Yes:
-                return
+        combined_text = "\n".join(text for text in (main_text, qru_text, late_text) if text.strip())
+        if not combined_text.strip():
             self._archive_checkin_files()
             # End net even though no check-ins exist
             self._net_in_progress = False
-            self.net_status_changed.emit("FLDIGI", False)
+            self._net_end_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+            self._stop_log_assisted_timer()
             self._set_net_button_styles(active=False)
+            self._update_copy_buttons_state()
+            self._persist_ncs_session_snapshot(timing_state="ended")
+            self.net_status_changed.emit("FLDIGI", False)
+            self._refresh_ncs_session_context()
+            self._show_roster_action_status("Net ended. No check-ins were logged.", "info")
             log.info("FLDigi net ended (no check-ins file content).")
             return
 
@@ -5137,7 +5806,7 @@ class FldigiNetControlTab(QWidget):
 
         entries: List[Dict] = []
         seen_callsigns = set()
-        for line in import_text.splitlines():
+        for line in combined_text.splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
@@ -5189,22 +5858,27 @@ class FldigiNetControlTab(QWidget):
             upsert_checkins(entries)
             self._bump_operator_history(entries)
             self._roster_sync_legacy_buffers(write_files=True)
-            QMessageBox.information(
-                self,
-                "Net Ended",
-                f"Net ended. {len(entries)} check-ins imported into the operator database.",
-            )
+            status_message = f"Net ended. {len(entries)} check-ins imported."
         else:
-            QMessageBox.information(
-                self,
-                "Net Ended",
-                "Net ended. No valid check-ins found to import.",
-            )
+            status_message = "Net ended. No valid check-ins found to import."
 
         self._archive_checkin_files()
         self._net_in_progress = False
-        self.net_status_changed.emit("FLDIGI", False)
+        self._net_end_utc = now_utc
+        self._stop_log_assisted_timer()
         self._set_net_button_styles(active=False)
+        self._update_copy_buttons_state()
+        self._persist_ncs_session_snapshot(timing_state="ended")
+        self.net_status_changed.emit("FLDIGI", False)
+        self._refresh_ncs_session_context()
+        if copy_state_summary:
+            state_summary = self._state_summary_text()
+            if state_summary:
+                QApplication.clipboard().setText(state_summary)
+                status_message += " State summary copied."
+            else:
+                status_message += " No state summary was available."
+        self._show_roster_action_status(status_message)
         log.info("FLDigi net ended: %s (%s)", net_name, role)
 
     # ---------------- INSERT KNOWN OPERATOR ---------------- #

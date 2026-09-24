@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import configparser
 import os
 import platform
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+
+from freqinout.core.config_autodiscovery import (
+    JS8CALL_APP_NAMES,
+    JS8CALL_COMMAND_NAMES,
+    discover_js8call_file_profiles,
+    select_js8call_file_profile,
+)
 
 
 @dataclass(frozen=True)
@@ -25,8 +33,17 @@ class SoftwarePathDetector:
         self.system = platform.system()
         self.home = Path.home()
 
-    def detect_fast_light(self) -> Dict[str, PathDetectionResult]:
+    def detect_fast_light(
+        self,
+        *,
+        include_application_paths: bool = True,
+    ) -> Dict[str, PathDetectionResult]:
         results: Dict[str, PathDetectionResult] = {}
+        if not include_application_paths:
+            results["fldigi_log_path"] = self._detect_fldigi_log_dir()
+            results["message_paths.flmsg"] = self._detect_flmsg_messages_dir()
+            results["message_paths.flamp"] = self._detect_flamp_messages_dir()
+            return results
         results["path_flrig"] = self._detect_program_path(
             key="path_flrig",
             label="FLRig launch path",
@@ -80,26 +97,56 @@ class SoftwarePathDetector:
         results["message_paths.flamp"] = self._detect_flamp_messages_dir()
         return results
 
-    def detect_js8(self) -> Dict[str, PathDetectionResult]:
+    def detect_js8(
+        self,
+        *,
+        file_profiles: Optional[Sequence[Any]] = None,
+        include_application_paths: bool = True,
+    ) -> Dict[str, PathDetectionResult]:
         results: Dict[str, PathDetectionResult] = {}
+        if not include_application_paths:
+            results["js8_directed_path"] = self._detect_js8_directed_path(file_profiles=file_profiles)
+            results["js8_forms_path"] = self._detect_js8_forms_path()
+            return results
         results["path_js8call"] = self._detect_install_target(
             key="path_js8call",
             label="JS8Call install folder",
-            tokens=("js8call", "JS8Call"),
-            bundle_names=("JS8Call", "js8call"),
+            tokens=JS8CALL_COMMAND_NAMES,
+            bundle_names=JS8CALL_APP_NAMES,
             windows_files=(
                 Path(os.environ.get("ProgramFiles", "")) / "JS8Call" / "js8call.exe",
                 Path(os.environ.get("ProgramFiles(x86)", "")) / "JS8Call" / "js8call.exe",
                 self.home / "AppData" / "Local" / "JS8Call" / "js8call.exe",
+                Path(os.environ.get("ProgramFiles", "")) / "JS8Call-improved" / "js8call.exe",
+                Path(os.environ.get("ProgramFiles(x86)", "")) / "JS8Call-improved" / "js8call.exe",
+                self.home / "AppData" / "Local" / "JS8Call-improved" / "js8call.exe",
+                Path(os.environ.get("ProgramFiles", "")) / "JS8Call Subspace" / "js8call.exe",
+                Path(os.environ.get("ProgramFiles(x86)", "")) / "JS8Call Subspace" / "js8call.exe",
+                self.home / "AppData" / "Local" / "JS8Call Subspace" / "js8call.exe",
             ),
-            linux_files=(Path("/usr/bin/js8call"), Path("/usr/local/bin/js8call"), Path("/opt/js8call/js8call")),
+            linux_files=(
+                Path("/usr/bin/js8call"),
+                Path("/usr/local/bin/js8call"),
+                Path("/usr/bin/JS8Call"),
+                Path("/usr/local/bin/JS8Call"),
+                self.home / ".local" / "bin" / "JS8Call",
+                Path("/opt/js8call/js8call"),
+                Path("/usr/bin/js8call-improved"),
+                Path("/usr/local/bin/js8call-improved"),
+                Path("/opt/js8call-improved/js8call"),
+                Path("/opt/JS8Call-improved/bin/JS8Call"),
+                Path("/usr/bin/js8call-subspace"),
+                Path("/usr/local/bin/js8call-subspace"),
+                Path("/opt/js8call-subspace/js8call"),
+                Path("/opt/JS8Call Subspace/JS8Call"),
+            ),
             prefer_bundle_dir=True,
         )
-        results["js8_directed_path"] = self._detect_js8_directed_path()
+        results["js8_directed_path"] = self._detect_js8_directed_path(file_profiles=file_profiles)
         results["js8_forms_path"] = self._detect_js8_forms_path()
         results["path_js8spotter"] = self._detect_program_path(
             key="path_js8spotter",
-            label="JS8Spotter launch path",
+            label="External JS8Spotter app",
             tokens=("js8spotter", "JS8Spotter"),
             bundle_names=("JS8Spotter", "js8spotter"),
             windows_files=(
@@ -138,6 +185,7 @@ class SoftwarePathDetector:
         install = self._detect_varac_install_dir()
         results["varac_path"] = install
         install_dir = Path(install.path) if install.path else None
+        results["varac_db_path"] = self._detect_varac_db_file(install_dir)
         results["varac_ini_path"] = self._detect_varac_ini_file(install_dir)
         results["message_paths.varac"] = self._detect_varac_incoming_dir(install_dir)
         results["varac_outbox_dir"] = self._detect_varac_outbox_dir(install_dir)
@@ -156,6 +204,9 @@ class SoftwarePathDetector:
         linux_files: Sequence[Path],
     ) -> PathDetectionResult:
         if self.system == "Darwin":
+            base_match = self._first_existing_path(self._base_program_candidates(tokens, bundle_names))
+            if base_match is not None:
+                return self._result(key, label, base_match, "high", "Found from Radio Apps Base Folder", "file")
             for bundle_name in bundle_names:
                 bundle = self._existing_paths(self._macos_bundle_candidates(bundle_name))
                 if bundle:
@@ -167,6 +218,10 @@ class SoftwarePathDetector:
                 if resolved:
                     return self._result(key, label, Path(resolved), "verified", "Found on PATH", "file")
             return self._not_found(key, label, "No installed app bundle or PATH command found", "file")
+
+        base_match = self._first_existing_path(self._base_program_candidates(tokens, bundle_names))
+        if base_match is not None:
+            return self._result(key, label, base_match, "high", "Found from Radio Apps Base Folder", "file")
 
         for token in tokens:
             resolved = shutil.which(token)
@@ -191,6 +246,17 @@ class SoftwarePathDetector:
         prefer_bundle_dir: bool,
     ) -> PathDetectionResult:
         if self.system == "Darwin":
+            base_candidates = self._base_program_candidates(tokens, bundle_names)
+            base_preferred = [
+                path
+                for path in base_candidates
+                if path.exists() and (path.suffix.lower() == ".app" or path.is_file())
+            ]
+            base_match = base_preferred[0] if base_preferred else self._first_existing_path(base_candidates)
+            if base_match is not None:
+                target = base_match if base_match.suffix.lower() == ".app" else base_match.parent
+                target_type = "app_bundle" if target.suffix.lower() == ".app" else "directory"
+                return self._result(key, label, target, "high", "Found from Radio Apps Base Folder", target_type)
             for bundle_name in bundle_names:
                 bundle = self._existing_paths(self._macos_bundle_candidates(bundle_name))
                 if bundle:
@@ -203,6 +269,11 @@ class SoftwarePathDetector:
                 if resolved:
                     return self._result(key, label, Path(resolved).parent, "high", "Derived install folder from PATH command", "directory")
             return self._not_found(key, label, "No installed app bundle or PATH command found", "directory")
+
+        base_match = self._first_existing_path(self._base_program_candidates(tokens, bundle_names))
+        if base_match is not None:
+            target = base_match if base_match.is_dir() else base_match.parent
+            return self._result(key, label, target, "high", "Found from Radio Apps Base Folder", "directory")
 
         for token in tokens:
             resolved = shutil.which(token)
@@ -283,7 +354,32 @@ class SoftwarePathDetector:
                 )
         return self._not_found("message_paths.flamp", "FLAmp message path", "No NBEMS FLAMP directory found", "directory")
 
-    def _detect_js8_directed_path(self) -> PathDetectionResult:
+    def _detect_js8_directed_path(
+        self,
+        *,
+        file_profiles: Optional[Sequence[Any]] = None,
+    ) -> PathDetectionResult:
+        profiles = tuple(file_profiles) if file_profiles is not None else discover_js8call_file_profiles(
+            platform=self.system,
+            home=self.home,
+        )
+        selected_profile = select_js8call_file_profile(profiles)
+        if selected_profile is not None:
+            return self._result(
+                "js8_directed_path",
+                "JS8Call DIRECTED.TXT path",
+                Path(selected_profile.directed_path),
+                selected_profile.confidence,
+                selected_profile.reason,
+                "file",
+            )
+        if sum(1 for profile in profiles if profile.directed_path) > 1:
+            return self._not_found(
+                "js8_directed_path",
+                "JS8Call DIRECTED.TXT path",
+                "Multiple JS8Call profiles have DIRECTED.TXT; select a radio/profile before Auto-Fill.",
+                "file",
+            )
         for base in self._js8_data_roots():
             directed = base / "DIRECTED.TXT"
             if directed.is_file():
@@ -320,13 +416,24 @@ class SoftwarePathDetector:
                 continue
             p = Path(raw)
             candidates.extend([p / "CUSTOM", *[parent / "CUSTOM" for parent in p.parents]])
+        for root in self._radio_apps_base_roots():
+            candidates.extend(
+                [
+                    root / "JS8Spotter" / "forms",
+                    root / "JS8Spotter" / "Forms",
+                    root / "JS8Spotter" / "MCForms",
+                    root / "MCForms",
+                    root / "forms",
+                    root / "Forms",
+                ]
+            )
         for root in self._nbems_roots():
             candidates.append(root / "CUSTOM")
         for candidate in self._unique_paths(candidates):
             if candidate.is_dir() and list(candidate.glob("MCF*.txt")):
                 return self._result(
                     "js8_forms_path",
-                    "JS8Spotter forms path",
+                    "MCF forms folder",
                     candidate,
                     "verified",
                     "Found forms directory containing MCF*.txt files",
@@ -334,7 +441,7 @@ class SoftwarePathDetector:
                 )
         return self._not_found(
             "js8_forms_path",
-            "JS8Spotter forms path",
+            "MCF forms folder",
             "No forms directory containing MCF*.txt files found",
             "directory",
         )
@@ -347,15 +454,20 @@ class SoftwarePathDetector:
                     Path(os.environ.get("ProgramFiles", "")) / "VarAC",
                     Path(os.environ.get("ProgramFiles(x86)", "")) / "VarAC",
                     Path(os.environ.get("LOCALAPPDATA", "")) / "VarAC",
+                    self.home / "RadioTools" / "Programs" / "VarAC_files",
                     self.home / "AppData" / "Local" / "VarAC",
                 ]
             )
         elif self.system == "Darwin":
             candidates.extend(
                 [
+                    *[root / "VarAC_files" for root in self._radio_apps_base_roots()],
+                    *[root / "VarAC" for root in self._radio_apps_base_roots()],
+                    *[root / "VarAC.app" for root in self._radio_apps_base_roots()],
                     self.home / ".wine" / "drive_c" / "VarAC",
                     self.home / ".wine" / "drive_c" / "Program Files" / "VarAC",
                     self.home / ".wine" / "drive_c" / "Program Files (x86)" / "VarAC",
+                    self.home / "RadioTools" / "Programs" / "VarAC_files",
                     self.home / "Applications" / "VarAC.app",
                     Path("/Applications/VarAC.app"),
                 ]
@@ -363,9 +475,12 @@ class SoftwarePathDetector:
         else:
             candidates.extend(
                 [
+                    *[root / "VarAC_files" for root in self._radio_apps_base_roots()],
+                    *[root / "VarAC" for root in self._radio_apps_base_roots()],
                     self.home / ".wine" / "drive_c" / "VarAC",
                     self.home / ".wine" / "drive_c" / "Program Files" / "VarAC",
                     self.home / ".wine" / "drive_c" / "Program Files (x86)" / "VarAC",
+                    self.home / "RadioTools" / "Programs" / "VarAC_files",
                     self.home / ".varac",
                 ]
             )
@@ -388,8 +503,13 @@ class SoftwarePathDetector:
     def _detect_varac_incoming_dir(self, install_dir: Path | None) -> PathDetectionResult:
         candidates: List[Path] = []
         if install_dir is not None:
+            ini_path = self._first_existing_path([install_dir / "VarAC.ini", install_dir / "varac.ini"])
+            ini_incoming = self._varac_ini_existing_path(ini_path, "FILES", "IncomingFilesDir")
+            if ini_incoming is not None:
+                candidates.append(ini_incoming)
             candidates.extend(
                 [
+                    install_dir / "INCOMING",
                     install_dir / "Received Files",
                     install_dir / "ReceivedFiles",
                     install_dir / "Incoming",
@@ -415,6 +535,22 @@ class SoftwarePathDetector:
             "directory",
         )
 
+    def _detect_varac_db_file(self, install_dir: Path | None) -> PathDetectionResult:
+        candidates: List[Path] = []
+        if install_dir is not None:
+            candidates.extend([install_dir / "VarAC.db", install_dir / "varac.db"])
+        existing = self._existing_paths(candidates)
+        if existing:
+            return self._result(
+                "varac_db_path",
+                "VarAC database",
+                existing[0],
+                "verified",
+                "Found conventional VarAC database file",
+                "file",
+            )
+        return self._not_found("varac_db_path", "VarAC database", "No conventional VarAC database found", "file")
+
     def _detect_varac_ini_file(self, install_dir: Path | None) -> PathDetectionResult:
         candidates: List[Path] = []
         if install_dir is not None:
@@ -434,6 +570,10 @@ class SoftwarePathDetector:
     def _detect_varac_bbs_dir(self, install_dir: Path | None) -> PathDetectionResult:
         candidates: List[Path] = []
         if install_dir is not None:
+            ini_path = self._first_existing_path([install_dir / "VarAC.ini", install_dir / "varac.ini"])
+            ini_bbs = self._varac_ini_existing_path(ini_path, "BBS", "BBSDirectory")
+            if ini_bbs is not None:
+                candidates.append(ini_bbs)
             candidates.extend([install_dir / "BBS", install_dir / "bbs", install_dir / "BBS Files"])
         existing = self._existing_paths(candidates)
         if existing:
@@ -450,8 +590,13 @@ class SoftwarePathDetector:
     def _detect_varac_outbox_dir(self, install_dir: Path | None) -> PathDetectionResult:
         candidates: List[Path] = []
         if install_dir is not None:
+            ini_path = self._first_existing_path([install_dir / "VarAC.ini", install_dir / "varac.ini"])
+            ini_outbox = self._varac_ini_existing_path(ini_path, "FILE_TRANSFER", "OutgoingFilesDir")
+            if ini_outbox is not None:
+                candidates.append(ini_outbox)
             candidates.extend(
                 [
+                    install_dir / "OUTGOING",
                     install_dir / "Outbox",
                     install_dir / "OUTBOX",
                     install_dir / "outbox",
@@ -505,6 +650,27 @@ class SoftwarePathDetector:
             "directory",
         )
 
+    def _varac_ini_existing_path(self, ini_path: Path | None, section: str, option: str) -> Path | None:
+        if ini_path is None or not ini_path.is_file():
+            return None
+        parser = configparser.ConfigParser(interpolation=None)
+        try:
+            parser.read(ini_path, encoding="utf-8")
+            value = str(parser.get(section, option, fallback="") or "").strip()
+        except Exception:
+            return None
+        if not value:
+            return None
+        path = Path(os.path.expandvars(os.path.expanduser(value)))
+        return path if path.exists() else None
+
+    @staticmethod
+    def _first_existing_path(candidates: Sequence[Path]) -> Path | None:
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
+
     def _js8_data_roots(self) -> List[Path]:
         if self.system == "Windows":
             return self._unique_paths(
@@ -543,12 +709,52 @@ class SoftwarePathDetector:
 
     def _macos_bundle_candidates(self, app_name: str) -> List[Path]:
         normalized = app_name if app_name.lower().endswith(".app") else f"{app_name}.app"
-        return self._unique_paths(
-            [
-                Path("/Applications") / normalized,
-                self.home / "Applications" / normalized,
-            ]
-        )
+        roots = [
+            *self._radio_apps_base_roots(),
+            Path("/Applications"),
+            Path("/Applications") / "RadioApps",
+            self.home / "Applications",
+            self.home / "Applications" / "RadioApps",
+        ]
+        candidates: List[Path] = [root / normalized for root in roots]
+        stem = Path(normalized).stem
+        for root in roots:
+            if not root.is_dir():
+                continue
+            candidates.extend(sorted(root.glob(f"{stem}-*.app")))
+            candidates.extend(sorted(root.glob(f"{stem.upper()}-*.app")))
+            candidates.extend(sorted(root.glob(f"{stem.lower()}-*.app")))
+        return self._unique_paths(candidates)
+
+    def _radio_apps_base_roots(self) -> List[Path]:
+        try:
+            raw = str(self.settings.get("radio_apps_base_folder", "") or "").strip()
+        except Exception:
+            raw = ""
+        roots: List[Path] = []
+        if raw:
+            roots.append(Path(raw))
+        roots.append(self.home / "RadioTools" / "Programs")
+        return self._unique_paths(roots)
+
+    def _base_program_candidates(self, tokens: Sequence[str], bundle_names: Sequence[str]) -> List[Path]:
+        candidates: List[Path] = []
+        for root in self._radio_apps_base_roots():
+            for name in bundle_names:
+                normalized = name if str(name).lower().endswith(".app") else f"{name}.app"
+                candidates.append(root / normalized)
+                candidates.append(root / str(name) / str(name))
+                candidates.append(root / str(name) / f"{Path(str(name)).stem}.exe")
+                candidates.append(root / str(name))
+            for token in tokens:
+                token_name = Path(str(token)).name
+                token_stem = Path(token_name).stem
+                candidates.append(root / token_name)
+                candidates.append(root / token_stem / token_name)
+                candidates.append(root / token_stem / f"{token_stem}.exe")
+                candidates.append(root / token_stem / f"{token_stem}.py")
+                candidates.append(root / token_stem)
+        return self._unique_paths(candidates)
 
     def _macos_bundle_executable(self, bundle: Path, names: Sequence[str]) -> Path | None:
         candidates: List[Path] = []

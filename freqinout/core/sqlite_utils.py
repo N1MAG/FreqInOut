@@ -40,6 +40,55 @@ def connect_sqlite(
     return configure_connection(conn, busy_timeout_ms=busy_ms)
 
 
+def connect_sqlite_readonly(
+    db_path: str | Path,
+    *,
+    timeout: float = 0.25,
+    row_factory: Any = None,
+    busy_timeout_ms: Optional[int] = None,
+) -> sqlite3.Connection:
+    """Open an existing database without connection-time journal mutations.
+
+    UI list/read helpers use this path so opening a view cannot compete with
+    ingest for a schema or journal-mode write lock.  Schema creation and
+    migrations remain the responsibility of the startup initializer and
+    explicit write services.
+    """
+    path = Path(db_path).expanduser().resolve()
+    uri = f"{path.as_uri()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=max(0.05, float(timeout)))
+    if row_factory is not None:
+        conn.row_factory = row_factory
+    busy_ms = int(busy_timeout_ms if busy_timeout_ms is not None else max(50, float(timeout) * 1000.0))
+    conn.execute(f"PRAGMA busy_timeout={busy_ms}")
+    conn.execute("PRAGMA query_only=ON")
+    conn.execute("PRAGMA temp_store=MEMORY")
+    return conn
+
+
+def connect_sqlite_runtime_write(
+    db_path: str | Path,
+    *,
+    timeout: float = 2.0,
+    row_factory: Any = None,
+    busy_timeout_ms: Optional[int] = None,
+) -> sqlite3.Connection:
+    """Open an initialized database for a latency-sensitive runtime write.
+
+    Startup/explicit administration owns schema and journal-mode setup. Runtime
+    audit and claim paths use this connection so every on-air event does not
+    repeat ``PRAGMA journal_mode=WAL`` or other initialization work.
+    """
+    conn = sqlite3.connect(str(db_path), timeout=max(0.1, float(timeout)))
+    if row_factory is not None:
+        conn.row_factory = row_factory
+    busy_ms = int(busy_timeout_ms if busy_timeout_ms is not None else max(100, float(timeout) * 1000.0))
+    conn.execute(f"PRAGMA busy_timeout={busy_ms}")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA temp_store=MEMORY")
+    return conn
+
+
 def table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     try:
         row = conn.execute(

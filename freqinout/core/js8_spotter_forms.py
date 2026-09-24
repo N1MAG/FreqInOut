@@ -38,8 +38,10 @@ PURPOSE_OPTIONS: Sequence[str] = (
     PURPOSE_CUSTOM,
 )
 
-FORM_TOKEN_RE = re.compile(r"\bF![0-9]{3}[A-Z]?\b", re.IGNORECASE)
-FORM_FILE_RE = re.compile(r"^MCF([0-9]{3}[A-Z]?)$", re.IGNORECASE)
+ALPHABETIC_FORM_IDS = frozenset({"BDN"})
+FORM_ID_PATTERN = rf"(?:[0-9]{{3}}[A-Z]?|{'|'.join(sorted(ALPHABETIC_FORM_IDS))})"
+FORM_TOKEN_RE = re.compile(rf"\bF!{FORM_ID_PATTERN}\b", re.IGNORECASE)
+FORM_FILE_RE = re.compile(rf"^MCF({FORM_ID_PATTERN})$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,60 @@ class SpotterFormDefinition:
     form_code: str
     title: str
     path: str = ""
+
+
+@dataclass(frozen=True)
+class SpotterFormField:
+    key: str
+    label: str
+    options: tuple[tuple[str, str], ...] = ()
+    kind: str = "choice"
+    default_value: str = ""
+    description: str = ""
+
+
+SPOTTER_COMMENTS_KEY = "COMMENTS"
+SPOTTER_COMMENTS_MAX_LENGTH = 50
+
+# These are intentionally explicit form semantics.  A generic label match can
+# incorrectly put the operator's QTH into an incident, affected-area, or
+# "other area" field.  Expand this table only after reviewing the form text.
+_OPERATOR_AUTOFILL_FIELDS: Mapping[str, Mapping[str, str]] = {
+    "F!104": {"ST": "state", "GR": "grid"},
+    "F!105": {"CS": "callsign", "ST": "state", "GR": "grid"},
+    "F!108": {"ST": "state", "GR": "grid"},
+    "F!306": {"ST": "state", "GR": "grid"},
+    "F!500": {"ST": "state", "GR": "grid"},
+    "F!504": {"ST": "state", "GR": "grid"},
+    "F!701A": {"FR": "callsign"},
+    "F!701C": {"ST": "state", "GR": "grid"},
+    "F!BDN": {"GR": "grid"},
+}
+
+
+def bundled_spotter_forms_dir() -> Path:
+    """Return FIO's packaged station-level Spotter form catalog."""
+
+    return Path(__file__).resolve().parent.parent / "resources" / "spotter_forms"
+
+
+def resolve_spotter_forms_dir(configured_dir: object = None) -> Path:
+    """Resolve an optional advanced custom catalog, then the bundled catalog.
+
+    The normal guided path deliberately supplies no per-radio folder.  A
+    configured custom catalog remains an advanced station-level override, but
+    an empty, missing, or invalid override always falls back to FIO's catalog.
+    """
+
+    configured = str(configured_dir or "").strip()
+    if configured:
+        try:
+            candidate = Path(configured).expanduser()
+            if candidate.exists() and candidate.is_dir():
+                return candidate
+        except (OSError, TypeError, ValueError):
+            pass
+    return bundled_spotter_forms_dir()
 
 
 def normalize_form_code(value: object) -> str:
@@ -57,9 +113,11 @@ def normalize_form_code(value: object) -> str:
         text = "F!" + text[3:]
     elif text.startswith("F!"):
         pass
-    elif text.startswith("F"):
+    elif re.fullmatch(r"F[0-9]{3}[A-Z]?", text):
         text = "F!" + text[1:]
     elif text[0].isdigit():
+        text = f"F!{text}"
+    elif text in ALPHABETIC_FORM_IDS:
         text = f"F!{text}"
     match = FORM_TOKEN_RE.search(text)
     return match.group(0).upper() if match else ""
@@ -85,7 +143,7 @@ def _read_form_title(path: Path) -> str:
 
 def discover_spotter_forms(forms_dir: object) -> List[SpotterFormDefinition]:
     try:
-        root = Path(str(forms_dir or "")).expanduser()
+        root = resolve_spotter_forms_dir(forms_dir)
     except Exception:
         return []
     if not root.exists() or not root.is_dir():
@@ -98,6 +156,130 @@ def discover_spotter_forms(forms_dir: object) -> List[SpotterFormDefinition]:
         form_code = f"F!{match.group(1).upper()}"
         out.append(SpotterFormDefinition(form_code=form_code, title=_read_form_title(path), path=str(path)))
     return out
+
+
+def parse_spotter_form_fields(text: object) -> List[SpotterFormField]:
+    """Parse the editable portion of a JS8Spotter MCForms definition.
+
+    Choice questions, their explicit ``*`` defaults, and ``[XX]`` structured
+    prompts are retained in source order.  Heading/instruction text immediately
+    before a field is attached as guidance instead of being silently discarded.
+    The FIO-provided universal Comments field is added by the Compose surface,
+    not by this catalog parser.
+    """
+    fields: List[SpotterFormField] = []
+    current_label = ""
+    current_options: List[tuple[str, str]] = []
+    current_default = ""
+    pending_guidance: List[str] = []
+    current_guidance: List[str] = []
+
+    def flush() -> None:
+        nonlocal current_label, current_options, current_default, current_guidance
+        label = current_label.strip()
+        if not label:
+            current_options = []
+            current_default = ""
+            current_guidance = []
+            return
+        key_base = re.sub(r"[^A-Za-z0-9]+", "_", label.upper()).strip("_") or f"FIELD_{len(fields) + 1}"
+        key = key_base
+        suffix = 2
+        existing = {field.key for field in fields}
+        while key in existing:
+            key = f"{key_base}_{suffix}"
+            suffix += 1
+        fields.append(
+            SpotterFormField(
+                key=key,
+                label=label,
+                options=tuple(current_options),
+                kind="choice",
+                default_value=current_default,
+                description=" ".join(part for part in current_guidance if part).strip(),
+            )
+        )
+        current_label = ""
+        current_options = []
+        current_default = ""
+        current_guidance = []
+
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("?"):
+            flush()
+            current_label = line[1:].strip().strip(":")
+            current_guidance = list(pending_guidance)
+            pending_guidance = []
+            continue
+        if line.startswith("@") and current_label:
+            parts = line[1:].strip().split(maxsplit=1)
+            if not parts:
+                continue
+            token = parts[0].strip()
+            label = parts[1].strip() if len(parts) > 1 else token
+            selected = label.startswith("*")
+            if selected:
+                label = label[1:].lstrip()
+            if token:
+                current_options.append((token, label))
+                if selected:
+                    current_default = token
+            continue
+        prompt_match = re.match(r"^\[([A-Z0-9]{2})\]\s*(.*?)\s*$", line, flags=re.IGNORECASE)
+        if prompt_match:
+            flush()
+            key = prompt_match.group(1).upper()
+            label = prompt_match.group(2).strip().rstrip(":") or key
+            fields.append(
+                SpotterFormField(
+                    key=key,
+                    label=label,
+                    kind="prompt",
+                    description=" ".join(part for part in pending_guidance if part).strip(),
+                )
+            )
+            pending_guidance = []
+            continue
+        if line.startswith(("!", ".")):
+            guidance = line.lstrip("!.").strip()
+            if guidance:
+                pending_guidance.append(guidance)
+            continue
+    flush()
+    return fields
+
+
+def parse_spotter_form_guidance(text: object) -> tuple[str, ...]:
+    """Return concise operator-facing headings/instructions in source order."""
+    guidance: List[str] = []
+    for raw_line in str(text or "").splitlines()[1:]:
+        line = raw_line.strip()
+        if not line or line.startswith("#") or not line.startswith(("!", ".")):
+            continue
+        clean = line.lstrip("!.").strip()
+        if not clean or set(clean) <= {"-", "_"}:
+            continue
+        lower = clean.lower()
+        if lower.startswith("version") or lower.startswith("date:") or lower.startswith("more info"):
+            continue
+        if clean not in guidance:
+            guidance.append(clean)
+    return tuple(guidance)
+
+
+def spotter_operator_autofill_kind(form_code: object, field_key: object) -> str:
+    """Return the reviewed operator-identity default for a form field.
+
+    An empty result is a deliberate deny.  In particular, affected-area,
+    incident, assessment, destination, wildfire, medivac, and "other area"
+    fields must stay operator-entered.
+    """
+    code = normalize_form_code(form_code)
+    key = str(field_key or "").strip().upper()
+    return str(_OPERATOR_AUTOFILL_FIELDS.get(code, {}).get(key, "") or "")
 
 
 def factory_mapping_for_form(form_code: object, title: object = "") -> Dict[str, object]:
@@ -113,7 +295,7 @@ def factory_mapping_for_form(form_code: object, title: object = "") -> Dict[str,
     if code in {"F!103", "F!700", "F!702A"} or "CHECKIN" in title_upper or "CHECK-IN" in title_upper:
         purpose = PURPOSE_NET_CHECKIN
         net = True
-        status = code == "F!104"
+        status = code in {"F!104", "F!701C"}
     elif (
         code in {"F!104", "F!300", "F!301", "F!304", "F!701", "F!701A", "F!701B"}
         or "SITREP" in title_upper
@@ -124,7 +306,7 @@ def factory_mapping_for_form(form_code: object, title: object = "") -> Dict[str,
     ):
         purpose = PURPOSE_SITREP
         map_use = True
-        status = code in {"F!104", "F!301", "F!304"}
+        status = code in {"F!104", "F!301", "F!304", "F!701B", "F!701C"}
     elif code in {"F!106", "F!108"} or "NET NOTICE" in title_upper or "NOTIFICATION" in title_upper:
         purpose = PURPOSE_NET_NOTIFICATION
         alert = True
@@ -141,7 +323,7 @@ def factory_mapping_for_form(form_code: object, title: object = "") -> Dict[str,
         purpose = PURPOSE_INTEL
         map_use = code in {"F!701"}
         alert = code in {"F!107"}
-    elif code in {"F!500", "F!505"} or "SUPPLY" in title_upper or "AREA ASSESSMENT" in title_upper:
+    elif code in {"F!500", "F!505", "F!BDN"} or "SUPPLY" in title_upper or "AREA ASSESSMENT" in title_upper or "PRICE SURVEY" in title_upper:
         purpose = PURPOSE_SUPPLY
         map_use = True
     elif code in {"F!302", "F!303", "F!703"} or "HOSPITAL" in title_upper or "MEDIVAC" in title_upper or "MEDICAL" in title_upper:

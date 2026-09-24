@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QGridLayout,
     QLabel,
     QPushButton,
     QComboBox,
@@ -33,17 +34,52 @@ from PySide6.QtWidgets import (
     QCompleter,
     QToolButton,
     QMenu,
+    QScrollArea,
 )
 from PySide6.QtGui import QRegularExpressionValidator, QAction, QColor
 
+from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
+from freqinout.core.schedule_targeting import (
+    TARGET_SCOPE_DEVICE_PROFILE,
+    TARGET_SCOPE_OPERATING_PROFILE,
+    TARGET_SCOPE_STATION,
+    normalize_schedule_target,
+    normalize_schedule_target_fields,
+    normalize_target_scope,
+    schedule_target_identity_parts,
+)
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.resource_catalog_store import ResourceCatalogStore
+from freqinout.core.schedule_source_sets import (
+    LIVE_SOURCE_SET_ID,
+    HF_NET_SOURCE_CATEGORY,
+    HF_NET_SOURCE_SETS_KEY,
+    SELECTED_HF_NET_SOURCE_SET_KEY,
+    assigned_plan_rf_guard_impacts_for_source_update,
+    delete_source_schedule,
+    rename_source_schedule,
+    reproject_frequency_plans_for_source_update,
+    save_source_schedule,
+    plan_source_usage_summary,
+    selected_source_set_id,
+    source_set_row_by_id_for_category,
+    source_sets_for_category,
+)
+from freqinout.core.plan_context_service import PlanContextService
 from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.sop_manager import SOPManager
 from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.logger import log
+from freqinout.core.legacy_resource_projection import (
+    dedupe_legacy_resources,
+    delete_legacy_resources,
+    finalize_legacy_resource_projection,
+    upsert_legacy_resource,
+)
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.help_registry import resolve_help_host
-from freqinout.gui.theme import resolve_theme, button_style, font_css
+from freqinout.gui.plan_context_label import PlanContextLabel
+from freqinout.gui.theme import resolve_theme, button_style, font_css, item_view_height_for_rows
 
 
 # ---- Band / Mode metadata (keep in sync with HF tab) ----
@@ -110,6 +146,11 @@ DAY_NAMES = [
     "Saturday",
 ]
 DAY_OPTIONS = ["ALL"] + DAY_NAMES
+SCHEDULE_TARGET_SCOPE_ITEMS = [
+    ("Station", TARGET_SCOPE_STATION),
+    ("Radio Profile", TARGET_SCOPE_DEVICE_PROFILE),
+    ("Frequency Plan", TARGET_SCOPE_OPERATING_PROFILE),
+]
 
 _FLDIGI_MODE_OPTIONS_FALLBACK = [
     "Cont-4/250",
@@ -195,6 +236,21 @@ class NetScheduleTab(QWidget):
     COL_FLDIGI_OFFSET = 12
     COL_NETNAME = 13
     COL_AUTOTUNE = 14
+    COL_TARGET_SCOPE = 15
+    COL_TARGET = 16
+    COMPACT_VISIBLE_COLUMNS = frozenset(
+        {
+            COL_SELECT,
+            COL_DAY,
+            COL_GROUP,
+            COL_MODE,
+            COL_BAND,
+            COL_FREQ,
+            COL_START,
+            COL_END,
+            COL_NETNAME,
+        }
+    )
 
     RES_COL_SOURCE = 0
     RES_COL_SET = 1
@@ -215,9 +271,10 @@ class NetScheduleTab(QWidget):
     RES_COL_COMMENT = 16
     RES_COL_UPDATED = 17
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, plan_context_service: Optional[PlanContextService] = None):
         super().__init__(parent)
         self.settings = SettingsManager()
+        self.plan_context_service = plan_context_service or PlanContextService()
         self._status_service = SoftwareStatusService(self.settings)
         self._sop_manager = SOPManager()
         self._net_name_history: List[str] = []
@@ -227,6 +284,9 @@ class NetScheduleTab(QWidget):
         default_mode = (self.settings.get("display_time_mode", "LOCAL") or "LOCAL").upper()
         self._show_local: bool = default_mode != "UTC"
         self._raw_rows: List[Dict] = []
+        self.device_profiles: List[Dict[str, Any]] = []
+        self.operating_profiles: List[Dict[str, Any]] = []
+        self._refresh_schedule_target_catalogs()
         self._resource_rows: List[Dict[str, Any]] = []
         self._resource_view_rows: List[Dict[str, Any]] = []
         self._dirty: bool = False
@@ -242,39 +302,79 @@ class NetScheduleTab(QWidget):
         ] = OrderedDict()
         self._net_sop_conflict_cache_limit: int = 6
         self._net_sop_conflict_cache_epoch: int = 0
+        self._responsive_layout_mode = "wide"
+        self._responsive_compact_width = 1200
 
         self._build_ui()
         self._load()
         self._setup_clock_timer()
         self._suppress_autostart = False
 
+    def _open_context_help(self, context_key: str) -> None:
+        host = resolve_help_host(self)
+        if host is not None and hasattr(host, "open_context_help"):
+            try:
+                host.open_context_help(context_key)
+            except Exception:
+                pass
+
     # --------- UI --------- #
 
     def _build_ui(self):
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        self.net_schedule_scroll_area = QScrollArea()
+        self.net_schedule_scroll_area.setObjectName("netScheduleScrollArea")
+        self.net_schedule_scroll_area.setWidgetResizable(True)
+        self.net_schedule_scroll_area.setFrameShape(QScrollArea.NoFrame)
+        self.net_schedule_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        outer_layout.addWidget(self.net_schedule_scroll_area)
 
-        # header with clocks
+        content = QWidget()
+        content.setObjectName("netScheduleScrollContent")
+        self.net_schedule_scroll_area.setWidget(content)
+        layout = QVBoxLayout(content)
+        layout.setSpacing(10)
+
         header = QHBoxLayout()
-        header.addWidget(QLabel("<h3>Net Schedules</h3>"))
+        self.header_title_label = QLabel("<h3>Net Source Schedule</h3>")
+        header.addWidget(self.header_title_label)
         self.help_btn = QPushButton("Help")
         self.help_btn.setToolTip("Open Net Schedules help.")
         self.help_btn.clicked.connect(lambda: self._open_context_help("tab.hf-nets"))
-        header.addWidget(self.help_btn)
         header.addStretch()
+        header.addWidget(self.help_btn)
         self.utc_label = QLabel()
         self.local_label = QLabel()
-        header.addWidget(self.utc_label)
-        header.addWidget(self.local_label)
-        self.time_toggle_btn = QPushButton("Showing: Local" if self._show_local else "Showing: UTC")
+        self.utc_label.setVisible(False)
+        self.local_label.setVisible(False)
+        self.time_toggle_btn = QPushButton("Times: Local" if self._show_local else "Times: UTC")
         theme = resolve_theme(self.settings)
         self.time_toggle_btn.setStyleSheet(button_style("primary", theme))
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
-        header.addWidget(self.time_toggle_btn)
         layout.addLayout(header)
+
+        self.plan_context_label = PlanContextLabel(
+            "net_schedule",
+            service=self.plan_context_service,
+            fallback_text="Net schedule workspace context is available from Help.",
+        )
+        self.plan_context_label.setToolTip(
+            "Use this context to confirm which radio and assigned Frequency Plan net schedule changes apply to."
+        )
+        self.plan_context_label.setVisible(False)
+        self.plan_context_label.refresh_context(refresh=True)
+        self.source_usage_label = QLabel("")
+        self.source_usage_label.setObjectName("netScheduleSourceUsage")
+        self.source_usage_label.setWordWrap(True)
+        self.source_usage_label.setToolTip(
+            "Shows which linked Frequency Plan(s) and assigned radio(s) use the selected Net schedule."
+        )
+        self.source_usage_label.setVisible(False)
 
         # table
         self.table = QTableWidget()
-        self.table.setColumnCount(15)
+        self.table.setColumnCount(self.COL_TARGET + 1)
         self._set_headers()
         self.table.setSortingEnabled(False)
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
@@ -286,54 +386,90 @@ class NetScheduleTab(QWidget):
         hv.setSectionResizeMode(self.COL_NETNAME, QHeaderView.Stretch)
         hv.setStretchLastSection(False)
         hv.setMinimumSectionSize(50)
-        layout.addWidget(self.table)
 
-        # buttons
-        btn_row = QHBoxLayout()
         self.add_btn = QPushButton("Add Row")
+        self.add_hf_net_btn = QPushButton("Add HF Net")
+        self.add_hf_net_btn.setToolTip("Choose published Net Directory meetings and review them before adding drafts to a named HF Net schedule.")
         self.del_btn = QPushButton("Delete Selected")
-        self.move_to_resources_btn = QPushButton("Move Selected to Resources")
+        self.view_edit_btn = QPushButton("View/Edit")
+        self.view_edit_btn.setCheckable(True)
+        self.view_edit_btn.setToolTip("Show or hide the full editable net schedule fields.")
+        self.move_to_resources_btn = QPushButton("Save Selected to Library")
+        self.move_to_resources_btn.setToolTip(
+            "Copy selected net schedule rows into the reusable Net Row Library. The schedule rows stay in place."
+        )
         self.export_btn = QPushButton("Export Net Schedule")
         self.manage_net_sop_policies_btn = QPushButton("Manage Net/SOP Policies")
-        btn_row.addWidget(self.add_btn)
-        btn_row.addWidget(self.del_btn)
-        btn_row.addWidget(self.move_to_resources_btn)
-        btn_row.addWidget(self.export_btn)
-        btn_row.addWidget(self.manage_net_sop_policies_btn)
-        btn_row.addStretch()
-        self.save_btn = QPushButton("Save Net Schedule")
-        btn_row.addWidget(self.save_btn)
-        layout.addLayout(btn_row)
+        self.schedule_source_label = QLabel("Net Schedule:")
+        self.schedule_source_combo = QComboBox()
+        self.schedule_source_combo.setObjectName("netScheduleSourceCombo")
+        self.schedule_source_combo.setEditable(True)
+        self.schedule_source_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.schedule_source_combo.setMinimumWidth(360)
+        if self.schedule_source_combo.lineEdit() is not None:
+            self.schedule_source_combo.lineEdit().setPlaceholderText("Name or select a net schedule")
+        self.schedule_source_combo.setToolTip(
+            "Select a saved HF Net schedule, or type a clear name here before Save Schedule."
+        )
+        self.new_source_btn = QPushButton("New Schedule")
+        self.new_source_btn.setToolTip("Start a blank HF Net schedule. A name typed before or after New Schedule is retained until Save.")
+        self.save_btn = QPushButton("Save Schedule")
+        self.save_btn.setToolTip(
+            "Save the visible rows as the selected named HF Net schedule, or create a new named schedule."
+        )
+        self.rename_source_btn = QPushButton("Rename Schedule")
+        self.rename_source_btn.setToolTip("Rename the selected HF Net schedule without changing its rows.")
+        self.save_source_btn = QPushButton("Save / Update Schedule")
+        self.save_source_btn.setToolTip("Save the visible HF Net rows as the selected named schedule, or create a new named schedule.")
+        self.save_source_btn.setVisible(False)
+        self.delete_source_btn = QPushButton("Delete Schedule")
+        self.delete_source_btn.setToolTip("Delete the selected named HF Net schedule.")
+        self._net_action_layout = QGridLayout()
+        self._net_action_layout.setContentsMargins(0, 0, 0, 0)
+        self._net_action_layout.setSpacing(8)
+        layout.addLayout(self._net_action_layout)
+        self.source_usage_label.setVisible(True)
+        layout.addWidget(self.source_usage_label)
+        self.subscription_status_label = QLabel("")
+        self.subscription_status_label.setObjectName("netScheduleDirectorySubscriptionStatus")
+        self.subscription_status_label.setWordWrap(True)
+        self.subscription_status_label.setVisible(False)
+        layout.addWidget(self.subscription_status_label)
+        layout.addWidget(self.table)
 
         # Net resources section
         res_header = QHBoxLayout()
-        res_header.addWidget(QLabel("<h3>Net Resources</h3>"))
+        res_header.addWidget(QLabel("<h3>Net Row Library</h3>"))
         res_header.addStretch()
+        self.resources_count_label = QLabel("")
+        self.resources_count_label.setObjectName("netScheduleResourcesCount")
+        res_header.addWidget(self.resources_count_label)
         self.net_resources_hint = QLabel("Visit SitRepNet.com for more information.")
         self.net_resources_hint.setTextFormat(Qt.PlainText)
         res_header.addWidget(self.net_resources_hint)
         layout.addLayout(res_header)
 
-        res_controls = QHBoxLayout()
-        res_controls.addWidget(QLabel("Set:"))
+        self.resource_set_label = QLabel("Library:")
         self.resource_set_combo = QComboBox()
-        self.resource_set_combo.addItem("All", "All")
-        res_controls.addWidget(self.resource_set_combo)
-        res_controls.addWidget(QLabel("Search:"))
+        self.resource_set_combo.addItem("All resources", "All")
+        self.resource_set_combo.setMinimumWidth(260)
+        self.resource_search_label = QLabel("Search:")
         self.resource_search = QLineEdit()
-        self.resource_search.setPlaceholderText("Search all resource fields...")
-        res_controls.addWidget(self.resource_search, 1)
+        self.resource_search.setPlaceholderText("Search set, group, net, band, time...")
         self.add_to_schedule_btn = QToolButton()
         self.add_to_schedule_btn.setPopupMode(QToolButton.MenuButtonPopup)
         add_menu = QMenu(self.add_to_schedule_btn)
-        self.add_selected_resource_action = QAction("Add Selected to Schedule", self)
-        self.add_filtered_resource_action = QAction("Add Filtered to Schedule", self)
+        self.add_selected_resource_action = QAction("Add Selected Rows", self)
+        self.add_filtered_resource_action = QAction("Add Filtered Rows", self)
         add_menu.addAction(self.add_selected_resource_action)
         add_menu.addAction(self.add_filtered_resource_action)
         self.add_to_schedule_btn.setMenu(add_menu)
-        self.add_to_schedule_default_action = QAction("Add to Schedule", self)
+        self.add_to_schedule_default_action = QAction("Add Selected Rows", self)
         self.add_to_schedule_btn.setDefaultAction(self.add_to_schedule_default_action)
         self.add_to_schedule_btn.setFont(self.add_btn.font())
+        self.add_to_schedule_btn.setToolTip(
+            "Copy reusable library rows into the HF Net schedule being edited. Library rows stay saved."
+        )
 
         self.manage_resources_btn = QToolButton()
         self.manage_resources_btn.setPopupMode(QToolButton.MenuButtonPopup)
@@ -344,40 +480,40 @@ class NetScheduleTab(QWidget):
         manage_menu.addSeparator()
         manage_menu.addAction(self.manage_export_new_action)
         self.manage_resources_btn.setMenu(manage_menu)
-        self.manage_resources_default_action = QAction("Manage", self)
+        self.manage_resources_default_action = QAction("Import/Export", self)
         self.manage_resources_btn.setDefaultAction(self.manage_resources_default_action)
         self.manage_resources_btn.setFont(self.add_btn.font())
 
-        self.edit_resource_btn = QPushButton("Edit Selected")
-        self.delete_resource_btn = QPushButton("Delete Selected Resources")
-        res_controls.addWidget(self.add_to_schedule_btn)
-        res_controls.addWidget(self.manage_resources_btn)
-        res_controls.addWidget(self.edit_resource_btn)
-        res_controls.addWidget(self.delete_resource_btn)
-        layout.addLayout(res_controls)
+        self.edit_resource_btn = QPushButton("Edit Library Row")
+        self.delete_resource_btn = QPushButton("Delete Library Rows")
+        self._net_resource_filter_layout = QGridLayout()
+        self._net_resource_filter_layout.setContentsMargins(0, 0, 0, 0)
+        self._net_resource_filter_layout.setSpacing(8)
+        layout.addLayout(self._net_resource_filter_layout)
+        self._arrange_net_action_rows(compact=False)
 
         self.resources_table = QTableWidget()
         self.resources_table.setColumnCount(18)
         self.resources_table.setHorizontalHeaderLabels(
             [
-                "Source",
-                "Set",
-                "Day (UTC)",
+                "From",
+                "Library",
+                "Day",
                 "Recurrence",
                 "Weeks",
                 "Group",
                 "Mode",
                 "Band",
                 "Freq (MHz)",
-                "Start (UTC)",
-                "End (UTC)",
-                "Early (min)",
-                "FLDigi Mode",
-                "FLDigi Offset",
+                "Start",
+                "End",
+                "Early",
+                "FLDigi",
+                "Offset",
                 "Net Name",
                 "Coverage",
                 "Comment",
-                "Updated (UTC)",
+                "Age",
             ]
         )
         self.resources_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -385,17 +521,28 @@ class NetScheduleTab(QWidget):
         self.resources_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.resources_table.setSortingEnabled(True)
         self.resources_table.verticalHeader().setVisible(False)
+        self.resources_table.setMinimumHeight(220)
         res_hv = self.resources_table.horizontalHeader()
         res_hv.setSectionResizeMode(QHeaderView.ResizeToContents)
         res_hv.setStretchLastSection(False)
+        self.resources_table.setColumnWidth(self.RES_COL_SET, 180)
+        self.resources_table.setColumnWidth(self.RES_COL_NETNAME, 220)
+        self.resources_table.setColumnWidth(self.RES_COL_UPDATED, 90)
         layout.addWidget(self.resources_table)
 
         # signals
         self.add_btn.clicked.connect(self._add_row)
+        self.add_hf_net_btn.clicked.connect(self._open_add_hf_net_workflow)
         self.del_btn.clicked.connect(self._delete_rows)
-        self.move_to_resources_btn.clicked.connect(self._move_selected_schedule_rows_to_resources)
+        self.view_edit_btn.toggled.connect(self._apply_compact_schedule_view)
+        self.move_to_resources_btn.clicked.connect(self._save_selected_schedule_rows_as_resources)
         self.export_btn.clicked.connect(self._export_schedule)
-        self.save_btn.clicked.connect(self._save)
+        self.schedule_source_combo.currentIndexChanged.connect(self._on_freqplanner_source_selected)
+        self.new_source_btn.clicked.connect(self._on_new_freqplanner_source_clicked)
+        self.save_btn.clicked.connect(self._on_save_freqplanner_source_clicked)
+        self.save_source_btn.clicked.connect(self._on_save_freqplanner_source_clicked)
+        self.rename_source_btn.clicked.connect(self._on_rename_freqplanner_source_clicked)
+        self.delete_source_btn.clicked.connect(self._on_delete_freqplanner_source_clicked)
         self.manage_net_sop_policies_btn.clicked.connect(self._open_net_sop_policy_manager)
         self.table.itemSelectionChanged.connect(self._update_delete_button_state)
         self.table.itemChanged.connect(self._on_table_item_changed)
@@ -414,28 +561,924 @@ class NetScheduleTab(QWidget):
         self._update_clock_labels()
         self._setup_clock_timer()
         self._apply_theme()
+        self._apply_compact_schedule_view(False)
         self._resize_table_columns()
         self._update_delete_button_state()
         self._update_resource_action_state()
+        self._refresh_freqplanner_source_combo()
         self._conflict_refresh_timer = QTimer(self)
         self._conflict_refresh_timer.setSingleShot(True)
         self._conflict_refresh_timer.setInterval(180)
         self._conflict_refresh_timer.timeout.connect(self._refresh_net_sop_conflict_highlighting)
+        self._update_net_responsive_layout()
 
-    def _open_context_help(self, context_key: str) -> None:
-        host = resolve_help_host(self)
-        if host is not None and hasattr(host, "open_context_help"):
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_net_responsive_layout()
+
+    def _net_responsive_mode_for_width(self, width: int) -> str:
+        try:
+            return "compact" if int(width) < int(self._responsive_compact_width) else "wide"
+        except Exception:
+            return "wide"
+
+    def _update_net_responsive_layout(self) -> None:
+        if not hasattr(self, "_net_resource_filter_layout"):
+            return
+        mode = self._net_responsive_mode_for_width(int(self.width() or 0))
+        if mode == self._responsive_layout_mode and self._net_resource_filter_layout.count() > 0:
+            return
+        self._responsive_layout_mode = mode
+        self._arrange_net_action_rows(compact=(mode == "compact"))
+        self._apply_net_compact_table_sizing(compact=(mode == "compact"))
+
+    @staticmethod
+    def _clear_grid_layout(layout: QGridLayout) -> None:
+        while layout.count():
+            layout.takeAt(0)
+
+    @staticmethod
+    def _place_grid_widgets(layout: QGridLayout, placements: list[tuple]) -> None:
+        for col in range(12):
+            layout.setColumnStretch(col, 0)
+        for item in placements:
+            widget, row, col, *span = item
+            row_span, col_span = span if span else (1, 1)
+            layout.addWidget(widget, row, col, row_span, col_span)
+
+    def _arrange_net_action_rows(self, *, compact: bool) -> None:
+        for grid in (self._net_action_layout, self._net_resource_filter_layout):
+            self._clear_grid_layout(grid)
+
+        if compact:
+            self.schedule_source_combo.setMinimumWidth(0)
+            self.resource_set_combo.setMinimumWidth(0)
+            action_placements = [
+                (self.time_toggle_btn, 0, 0),
+                (self.schedule_source_label, 0, 1),
+                (self.schedule_source_combo, 0, 2, 1, 2),
+                (self.new_source_btn, 0, 4),
+                (self.save_btn, 0, 5),
+                (self.rename_source_btn, 0, 6),
+                (self.delete_source_btn, 0, 7),
+                (self.add_btn, 1, 0),
+                (self.add_hf_net_btn, 1, 1),
+                (self.del_btn, 1, 2),
+                (self.view_edit_btn, 1, 3),
+                (self.move_to_resources_btn, 1, 4, 1, 2),
+                (self.export_btn, 1, 6),
+                (self.manage_net_sop_policies_btn, 1, 7),
+            ]
+            filter_placements = [
+                (self.resource_set_label, 0, 0),
+                (self.resource_set_combo, 0, 1),
+                (self.resource_search_label, 0, 2),
+                (self.resource_search, 0, 3, 1, 2),
+                (self.add_to_schedule_btn, 1, 0),
+                (self.manage_resources_btn, 1, 1),
+                (self.edit_resource_btn, 1, 2),
+                (self.delete_resource_btn, 1, 3),
+            ]
+        else:
+            self.schedule_source_combo.setMinimumWidth(360)
+            self.resource_set_combo.setMinimumWidth(260)
+            action_placements = [
+                (self.time_toggle_btn, 0, 0),
+                (self.schedule_source_label, 0, 1),
+                (self.schedule_source_combo, 0, 2, 1, 3),
+                (self.new_source_btn, 0, 5),
+                (self.save_btn, 0, 6),
+                (self.rename_source_btn, 0, 7),
+                (self.delete_source_btn, 0, 8),
+                (self.add_btn, 1, 0),
+                (self.add_hf_net_btn, 1, 1),
+                (self.del_btn, 1, 2),
+                (self.view_edit_btn, 1, 3),
+                (self.move_to_resources_btn, 1, 4),
+                (self.export_btn, 1, 5),
+                (self.manage_net_sop_policies_btn, 1, 6),
+            ]
+            filter_placements = [
+                (self.resource_set_label, 0, 0),
+                (self.resource_set_combo, 0, 1),
+                (self.resource_search_label, 0, 2),
+                (self.resource_search, 0, 3),
+                (self.add_to_schedule_btn, 0, 4),
+                (self.manage_resources_btn, 0, 5),
+                (self.edit_resource_btn, 0, 6),
+                (self.delete_resource_btn, 0, 7),
+            ]
+
+        self._place_grid_widgets(self._net_action_layout, action_placements)
+        self._place_grid_widgets(self._net_resource_filter_layout, filter_placements)
+        self._net_action_layout.setColumnStretch(8 if not compact else 6, 1)
+        self._net_resource_filter_layout.setColumnStretch(3 if not compact else 4, 1)
+        self._apply_schedule_table_height_hints()
+
+    def _apply_schedule_table_height_hints(self) -> None:
+        if not hasattr(self, "table") or not hasattr(self, "resources_table"):
+            return
+        try:
+            row_count = max(1, int(self.table.rowCount()))
+            visible_rows = max(4, min(row_count, 10))
+            self.table.setMaximumHeight(
+                item_view_height_for_rows(self.table, visible_rows=visible_rows)
+            )
+            self.resources_table.setMinimumHeight(
+                item_view_height_for_rows(self.resources_table, visible_rows=4)
+            )
+        except Exception:
+            pass
+
+    def _refresh_freqplanner_source_combo(self) -> None:
+        if not hasattr(self, "schedule_source_combo"):
+            return
+        selected = selected_source_set_id(self.settings, SELECTED_HF_NET_SOURCE_SET_KEY)
+        self.schedule_source_combo.blockSignals(True)
+        self.schedule_source_combo.clear()
+        self.schedule_source_combo.addItem("Active Net Schedule", LIVE_SOURCE_SET_ID)
+        for row in source_sets_for_category(self.settings, HF_NET_SOURCE_SETS_KEY, HF_NET_SOURCE_CATEGORY):
+            set_id = str(row.get("id") or "").strip()
+            if set_id:
+                self.schedule_source_combo.addItem(str(row.get("name") or set_id), set_id)
+        idx = self.schedule_source_combo.findData(selected)
+        self.schedule_source_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._editing_freqplanner_source_id = str(self.schedule_source_combo.currentData() or LIVE_SOURCE_SET_ID)
+        self.schedule_source_combo.blockSignals(False)
+        self._update_source_action_state()
+        self._update_source_usage_label()
+
+    def _update_source_usage_label(self) -> None:
+        if not hasattr(self, "source_usage_label"):
+            return
+        set_id = self._selected_freqplanner_source_id()
+        name = str(self.schedule_source_combo.currentText() or "Active Net Schedule").strip()
+        try:
+            usage = plan_source_usage_summary(
+                self.plan_context_service.store,
+                category=HF_NET_SOURCE_CATEGORY,
+                set_id=set_id,
+                live_label="hf_nets",
+            )
+            usage_text = str(usage.get("text") or "").strip()
+        except Exception as exc:
+            log.debug("HF Nets: source usage summary skipped: %s", exc)
+            usage_text = "Usage: --"
+        self.source_usage_label.setText(f"<b>Editing:</b> {name or 'Net schedule'} | {usage_text}")
+        self.source_usage_label.setToolTip(
+            "Named net schedules stay linked to plans by default. Updating this source refreshes dependent plans after RF Guard review."
+        )
+
+    def _refresh_directory_subscription_status(self) -> None:
+        """Surface directory changes without applying them to HF schedule rows."""
+        if not hasattr(self, "subscription_status_label") or not hasattr(self, "table"):
+            return
+        from freqinout.core.hf_net_subscription import subscription_update_status
+
+        store = ResourceCatalogStore(self._db_path())
+        notices = []
+        for row_index in range(min(self.table.rowCount(), 200)):
+            widget = self.table.cellWidget(row_index, self.COL_SELECT)
+            if not isinstance(widget, QWidget):
+                continue
+            key = str(widget.property("net_session_key") or "").strip()
+            if not key:
+                continue
+            row = {name: widget.property(name) for name in ("net_session_key", "accepted_session_version_hash", "accepted_snapshot_json")}
+            status = subscription_update_status(store, row)
+            if status.state not in {"current", "unlinked"}:
+                fields = ", ".join(str(getattr(diff, "field_name", "change")) for diff in status.diffs[:4])
+                notices.append(f"{key}: {status.warning}{' Fields: ' + fields if fields else ''}")
+        if notices:
+            self.subscription_status_label.setText("Directory review required — " + " | ".join(notices[:4]) + ". Apply changes only through normal HF Save Schedule review.")
+            self.subscription_status_label.setVisible(True)
+        else:
+            self.subscription_status_label.setVisible(False)
+
+    def _on_freqplanner_source_selected(self, *_args: Any) -> None:
+        if not hasattr(self, "schedule_source_combo"):
+            return
+        set_id = str(self.schedule_source_combo.currentData() or LIVE_SOURCE_SET_ID)
+        previous_id = str(getattr(self, "_editing_freqplanner_source_id", "") or LIVE_SOURCE_SET_ID)
+        if set_id != previous_id and not self._confirm_discard_unsaved_source_load():
+            self.schedule_source_combo.blockSignals(True)
+            idx = self.schedule_source_combo.findData(previous_id)
+            self.schedule_source_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            self.schedule_source_combo.blockSignals(False)
+            self._update_source_action_state()
+            self._update_source_usage_label()
+            return
+        self._editing_freqplanner_source_id = set_id
+        self.settings.set(SELECTED_HF_NET_SOURCE_SET_KEY, set_id)
+        self._update_source_action_state()
+        self._update_source_usage_label()
+        try:
+            self.settings.save()
+        except Exception:
+            pass
+        self._load_selected_freqplanner_source_now()
+        self._refresh_freq_planner()
+
+    def _update_source_action_state(self) -> None:
+        set_id = self._selected_freqplanner_source_id()
+        is_saved = bool(set_id and set_id != LIVE_SOURCE_SET_ID)
+        if hasattr(self, "delete_source_btn"):
+            self.delete_source_btn.setEnabled(is_saved)
+        if hasattr(self, "rename_source_btn"):
+            self.rename_source_btn.setEnabled(is_saved)
+
+    def _selected_freqplanner_source_id(self) -> str:
+        if not hasattr(self, "schedule_source_combo"):
+            return str(getattr(self, "_editing_freqplanner_source_id", "") or LIVE_SOURCE_SET_ID)
+        set_id = str(self.schedule_source_combo.currentData() or "").strip()
+        return set_id or str(getattr(self, "_editing_freqplanner_source_id", "") or LIVE_SOURCE_SET_ID)
+
+    def _on_new_freqplanner_source_clicked(self) -> None:
+        if not hasattr(self, "schedule_source_combo"):
+            return
+        if not self._confirm_discard_unsaved_source_load():
+            return
+        current_name = str(self.schedule_source_combo.currentText() or "").strip()
+        current_index = self.schedule_source_combo.currentIndex()
+        selected_label = (
+            str(self.schedule_source_combo.itemText(current_index) or "").strip()
+            if current_index >= 0
+            else ""
+        )
+        draft_name = current_name if current_index < 0 or current_name != selected_label else ""
+        self._editing_freqplanner_source_id = LIVE_SOURCE_SET_ID
+        self.schedule_source_combo.blockSignals(True)
+        self.schedule_source_combo.setCurrentIndex(-1)
+        self.schedule_source_combo.setEditText(draft_name)
+        self.schedule_source_combo.blockSignals(False)
+        self.settings.set(SELECTED_HF_NET_SOURCE_SET_KEY, LIVE_SOURCE_SET_ID)
+        try:
+            self.settings.save()
+        except Exception:
+            pass
+        self._update_source_action_state()
+        self._update_source_usage_label()
+        line_edit = self.schedule_source_combo.lineEdit()
+        if line_edit is not None:
+            line_edit.setPlaceholderText("New HF Net schedule name")
+            line_edit.setFocus(Qt.OtherFocusReason)
+        self._load_source_rows_into_table([])
+        self._refresh_freq_planner()
+
+    def open_hf_net_subscription(self, session_keys: Tuple[str, ...] | List[str] = ()) -> None:
+        """Open the source-first directory workflow without saving or commanding.
+
+        The dialog selects a named destination.  The canonical service creates
+        reviewed schedule rows; this tab then uses its existing editor and Save
+        Schedule/RF Guard/reprojection path for the actual subscription write.
+        """
+        from freqinout.gui.hf_net_subscription_dialog import HfNetSubscriptionDialog
+
+        store = ResourceCatalogStore(self._db_path())
+        dialog = HfNetSubscriptionDialog(store, self.settings, self, initial_session_keys=session_keys)
+        if dialog.exec() != QDialog.Accepted or dialog.selection is None:
+            return
+        self._add_hf_subscription_draft(store, dialog.selection.destination_id, dialog.selection.destination_name, dialog.selection.session_keys)
+
+    def _open_add_hf_net_workflow(self) -> None:
+        self.open_hf_net_subscription()
+
+    def open_directory_subscription(self, session_keys: Tuple[str, ...] | List[str]) -> None:
+        """Stable Net Directory handoff target for canonical session keys."""
+        self.open_hf_net_subscription(session_keys)
+
+    def open_directory_schedule(self, net_session_key: str) -> None:
+        """Open the named HF source that already follows a directory session."""
+        from freqinout.core.hf_net_subscription import hf_net_destination_for_session
+
+        destination = hf_net_destination_for_session(self.settings, net_session_key)
+        if destination is None:
+            self.net_resources_hint.setText("This directory session is not present in a named HF Net schedule.")
+            return
+        destination_id, destination_name = destination
+        index = self.schedule_source_combo.findData(destination_id)
+        if index < 0:
+            self._refresh_freqplanner_source_combo()
+            index = self.schedule_source_combo.findData(destination_id)
+        if index >= 0:
+            self.schedule_source_combo.setCurrentIndex(index)
+            self.net_resources_hint.setText(f"Opened '{destination_name}' for the selected directory session.")
+
+    def _add_hf_subscription_draft(self, store: ResourceCatalogStore, destination_id: str, destination_name: str, session_keys: Tuple[str, ...]) -> None:
+        """Place service-built drafts in the existing named-source editor only."""
+        from freqinout.core.hf_net_subscription import build_hf_subscription_drafts
+
+        destination_id = str(destination_id or "").strip()
+        if not destination_id or destination_id == LIVE_SOURCE_SET_ID:
+            QMessageBox.warning(self, "Add HF Net", "Choose a named HF Net schedule destination before adding sessions.")
+            return
+        index = self.schedule_source_combo.findData(destination_id)
+        if index < 0:
+            QMessageBox.warning(self, "Add HF Net", "The selected named HF Net schedule is no longer available. Refresh and choose it again.")
+            return
+        # Selecting the target preserves the established unsaved-change prompt
+        # and source loading behavior before any canonical draft is inserted.
+        self.schedule_source_combo.setCurrentIndex(index)
+        if self._selected_freqplanner_source_id() != destination_id:
+            return
+        try:
+            drafts = build_hf_subscription_drafts(store, session_keys)
+        except Exception as exc:
+            QMessageBox.warning(self, "Add HF Net", f"Could not prepare published sessions:\n{exc}")
+            return
+        existing_keys = set()
+        for row_index in range(self.table.rowCount()):
+            widget = self.table.cellWidget(row_index, self.COL_SELECT)
+            if isinstance(widget, QWidget):
+                key = str(widget.property("net_session_key") or "").strip()
+                if key:
+                    existing_keys.add(key)
+        added, duplicates, warnings = 0, 0, []
+        for draft in drafts:
+            if draft.net_session_key in existing_keys:
+                duplicates += 1
+                continue
+            self._add_row(self._to_view_row(dict(draft.schedule_row)))
+            existing_keys.add(draft.net_session_key)
+            added += 1
+            warnings.extend(draft.warnings)
+        if added:
+            self._set_dirty(True)
+            self._apply_schedule_table_height_hints()
+            self._schedule_net_sop_conflict_refresh(force=True)
+            self._refresh_directory_subscription_status()
+        review = " Review the highlighted recurrence/time, target/radio, early check-in, mode, frequency, and conflict policy before Save Schedule."
+        warning_text = f" Warnings: {'; '.join(dict.fromkeys(warnings))}" if warnings else ""
+        self.net_resources_hint.setText(f"Added {added} canonical session draft(s) to '{destination_name}'. Skipped {duplicates} duplicate(s).{review}{warning_text}")
+
+    def _selected_freqplanner_source_row(self) -> Optional[Dict[str, Any]]:
+        if not hasattr(self, "schedule_source_combo"):
+            return None
+        set_id = str(self.schedule_source_combo.currentData() or "").strip()
+        if not set_id:
+            set_id = str(getattr(self, "_editing_freqplanner_source_id", "") or LIVE_SOURCE_SET_ID)
+        return source_set_row_by_id_for_category(
+            self.settings,
+            HF_NET_SOURCE_SETS_KEY,
+            HF_NET_SOURCE_CATEGORY,
+            set_id,
+        )
+
+    def _current_freqplanner_source_name(self) -> str:
+        if not hasattr(self, "schedule_source_combo"):
+            return ""
+        text = str(self.schedule_source_combo.currentText() or "").strip()
+        if text == "Active Net Schedule":
+            return ""
+        return text
+
+    @staticmethod
+    def _default_net_schedule_name() -> str:
+        return "HF Net Schedule"
+
+    @staticmethod
+    def _format_age_label(value: Any, *, now: Optional[datetime.datetime] = None) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return "--"
+        try:
+            dt = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+            dt = dt.astimezone(datetime.timezone.utc)
+            current = now or datetime.datetime.now(datetime.timezone.utc)
+            if current.tzinfo is None:
+                current = current.replace(tzinfo=datetime.timezone.utc)
+            seconds = max(0, int((current.astimezone(datetime.timezone.utc) - dt).total_seconds()))
+        except Exception:
+            return "--"
+        if seconds < 60:
+            return "just now"
+        minutes = seconds // 60
+        if minutes < 60:
+            return f"{minutes} min"
+        hours = minutes // 60
+        if hours < 24:
+            return f"{hours} h"
+        days = hours // 24
+        if days < 14:
+            return f"{days} day" if days == 1 else f"{days} days"
+        weeks = days // 7
+        if days < 60:
+            return f"{weeks} wk" if weeks == 1 else f"{weeks} wks"
+        months = max(1, days // 30)
+        if months < 24:
+            return f"{months} mo"
+        years = max(1, days // 365)
+        return f"{years} yr" if years == 1 else f"{years} yrs"
+
+    def _load_source_rows_into_table(self, rows: List[Dict[str, Any]]) -> None:
+        rows = [normalize_schedule_target_fields(dict(row)) for row in rows if isinstance(row, dict)]
+        self._suspend_dirty_tracking = True
+        try:
+            self.table.setRowCount(0)
+            self._raw_rows = rows
+            for row in self._raw_rows:
+                self._add_row(self._to_view_row(row))
+            self._net_name_history = sorted(
+                {r.get("net_name", "") for r in rows if isinstance(r, dict) and r.get("net_name")}
+            )
+            self._update_clock_labels()
+            self._resize_table_columns()
+            self._saved_rows_signature = self._rows_signature(self._raw_rows)
+            self._set_dirty(False)
+            self._schedule_net_sop_conflict_refresh(force=True)
+            self._refresh_directory_subscription_status()
+        finally:
+            self._suspend_dirty_tracking = False
+        self._apply_schedule_table_height_hints()
+
+    def _load_selected_freqplanner_source_now(self) -> None:
+        row = self._selected_freqplanner_source_row()
+        if row is None:
+            self._load()
+            return
+        self._load_source_rows_into_table([dict(item) for item in row.get("rows", []) if isinstance(item, dict)])
+
+    def _sync_selected_freqplanner_source_table(self) -> None:
+        if bool(getattr(self, "_dirty", False)):
+            return
+        row = self._selected_freqplanner_source_row()
+        if row is None:
+            return
+        source_rows = [dict(item) for item in row.get("rows", []) if isinstance(item, dict)]
+        try:
+            current_rows = [self._strip_internal_row(dict(item)) for item in self._collect_rows()]
+        except Exception:
+            current_rows = []
+        if self._rows_signature(source_rows) == self._rows_signature(current_rows):
+            return
+        self._load_source_rows_into_table(source_rows)
+
+    def _on_load_freqplanner_source_clicked(self) -> None:
+        if not self._confirm_discard_unsaved_source_load():
+            return
+        self._load_selected_freqplanner_source_now()
+
+    def _confirm_discard_unsaved_source_load(self) -> bool:
+        if not bool(getattr(self, "_dirty", False)):
+            return True
+        response = QMessageBox.question(
+            self,
+            "Load Schedule",
+            "Load the selected HF Net schedule? Unsaved edits in the current table will be discarded.",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        return response == QMessageBox.Yes
+
+    def _prompt_for_freqplanner_source_name(self, title: str, label: str, default_name: str) -> Tuple[str, bool]:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        layout = QVBoxLayout(dialog)
+        prompt = QLabel(label)
+        prompt.setWordWrap(True)
+        layout.addWidget(prompt)
+        name_edit = QLineEdit(str(default_name or "").strip())
+        name_edit.setObjectName("netScheduleFreqPlannerSourceNameEdit")
+        name_edit.selectAll()
+        layout.addWidget(name_edit)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        name_edit.setFocus(Qt.OtherFocusReason)
+        if dialog.exec() != QDialog.Accepted:
+            return "", False
+        return name_edit.text().strip(), True
+
+    def _source_rows_for_freqplanner_snapshot(self) -> List[Dict[str, Any]]:
+        return [self._strip_internal_row(dict(row)) for row in self._collect_rows()]
+
+    def _on_save_freqplanner_source_clicked(self) -> None:
+        try:
+            rows = self._source_rows_for_freqplanner_snapshot()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Invalid Net Schedule", str(exc))
+            return
+        if not rows:
+            QMessageBox.warning(
+                self,
+                "No HF Net Rows",
+                "Add at least one HF Net row before saving this schedule.",
+            )
+            return
+        selected = self._selected_freqplanner_source_row()
+        existing_id = int(selected.get("db_id", 0) or 0) if selected else 0
+        name = self._current_freqplanner_source_name()
+        if not name:
+            name = self._default_net_schedule_name()
+            if hasattr(self, "schedule_source_combo"):
+                self.schedule_source_combo.setEditText(name)
+        if selected:
+            selected_name = str(selected.get("name") or "").strip()
+            existing_rows_signature = self._rows_signature([dict(item) for item in selected.get("rows", []) if isinstance(item, dict)])
+            new_rows_signature = self._rows_signature(rows)
+            if name and selected_name and name != selected_name and existing_rows_signature == new_rows_signature:
+                QMessageBox.information(
+                    self,
+                    "Rename Schedule",
+                    "Use Rename Schedule to change the HF Net schedule name without updating row data.",
+                )
+                return
+        if not selected:
+            existing_id = 0
+        if existing_id and not self._confirm_rf_guard_source_update(
+            HF_NET_SOURCE_CATEGORY,
+            f"plan:{existing_id}",
+            rows,
+            name,
+        ):
+            return
+        try:
+            saved = save_source_schedule(
+                self.settings,
+                HF_NET_SOURCE_CATEGORY,
+                SELECTED_HF_NET_SOURCE_SET_KEY,
+                name,
+                rows,
+                existing_plan_id=existing_id or None,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Save Failed", f"Could not save HF Net schedule:\n{exc}")
+            return
+        updated_plans: List[Dict[str, Any]] = []
+        saved_id = str(saved.get("id") or "").strip()
+        if saved_id:
             try:
-                host.open_context_help(context_key)
+                updated_plans = reproject_frequency_plans_for_source_update(
+                    self.settings,
+                    HF_NET_SOURCE_CATEGORY,
+                    saved_id,
+                    rows,
+                )
+            except Exception as exc:
+                log.exception("HF Nets: failed refreshing dependent Frequency Plans.")
+                QMessageBox.warning(
+                    self,
+                    "Plan Refresh Warning",
+                    "The HF Net schedule was saved, but FIO could not refresh dependent Frequency Plans.\n\n"
+                    f"{exc}",
+                )
+        try:
+            self.plan_context_service.invalidate()
+        except Exception:
+            pass
+        if hasattr(self, "schedule_source_combo"):
+            self._refresh_freqplanner_source_combo()
+            if saved_id:
+                idx = self.schedule_source_combo.findData(saved_id)
+                if idx >= 0:
+                    self.schedule_source_combo.blockSignals(True)
+                    self.schedule_source_combo.setCurrentIndex(idx)
+                    self.schedule_source_combo.blockSignals(False)
+                    self._editing_freqplanner_source_id = saved_id
+        if hasattr(self, "table"):
+            try:
+                self._load_source_rows_into_table(rows)
             except Exception:
                 pass
+        self._refresh_freq_planner()
+        verb = "Updated" if existing_id else "Saved"
+        plan_note = f" Refreshed {len(updated_plans)} dependent Frequency Plan(s)." if updated_plans else ""
+        QMessageBox.information(
+            self,
+            f"HF Net Schedule {verb}",
+            f"{verb} '{saved['name']}' with {len(rows)} HF Net row(s).{plan_note} Select it in Plan Builder.",
+        )
+
+    def _on_rename_freqplanner_source_clicked(self) -> None:
+        row = self._selected_freqplanner_source_row()
+        if row is None:
+            QMessageBox.information(self, "Rename Schedule", "Select a saved HF Net schedule before renaming.")
+            return
+        new_name = self._current_freqplanner_source_name()
+        old_name = str(row.get("name") or "").strip()
+        if not new_name:
+            QMessageBox.warning(self, "Rename Schedule", "Type a clear HF Net schedule name before renaming.")
+            return
+        if new_name == old_name:
+            QMessageBox.information(self, "Rename Schedule", f"'{new_name}' is already the selected schedule name.")
+            return
+        try:
+            saved = rename_source_schedule(
+                self.settings,
+                HF_NET_SOURCE_CATEGORY,
+                SELECTED_HF_NET_SOURCE_SET_KEY,
+                str(row.get("id") or ""),
+                new_name,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Rename Failed", f"Could not rename HF Net schedule:\n{exc}")
+            return
+        self._refresh_freqplanner_source_combo()
+        self._refresh_freq_planner()
+        QMessageBox.information(self, "HF Net Schedule Renamed", f"Renamed schedule to '{saved['name']}'.")
+
+    def _confirm_rf_guard_source_update(
+        self,
+        category: str,
+        set_id: str,
+        rows: List[Dict[str, Any]],
+        name: str,
+    ) -> bool:
+        try:
+            impacts = assigned_plan_rf_guard_impacts_for_source_update(self.settings, category, set_id, rows)
+        except Exception as exc:
+            log.exception("Net Schedule: RF Guard impact scan failed.")
+            response = QMessageBox.question(
+                self,
+                "RF Guard Check Unavailable",
+                "RF Guard could not check assigned master schedules before updating this HF Net schedule.\n\n"
+                f"{exc}\n\nSave the schedule anyway?",
+                QMessageBox.Save | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            return response == QMessageBox.Save
+        if not impacts:
+            return True
+        lines: List[str] = []
+        blocked = False
+        for impact in impacts:
+            validation = impact.get("validation", {})
+            state = str(validation.get("state") or "").strip().lower()
+            blocked = blocked or state == "blocked"
+            plan = impact.get("plan", {})
+            device = impact.get("device", {})
+            plan_name = str(plan.get("name") or "assigned Frequency Plan")
+            radio_name = str(device.get("name") or f"Radio {impact.get('assignment', {}).get('device_profile_id')}")
+            messages = [str(item) for item in validation.get("messages", []) if str(item or "").strip()]
+            detail = messages[0] if messages else "RF Guard reported a schedule conflict."
+            lines.append(f"- {radio_name} / {plan_name}: {detail}")
+        body = (
+            f"Updating '{name}' affects one or more master schedules assigned to radios.\n\n"
+            + "\n".join(lines[:6])
+        )
+        if len(lines) > 6:
+            body += f"\n- +{len(lines) - 6} more"
+        if blocked:
+            QMessageBox.warning(self, "RF Guard Blocked Update", body + "\n\nFix the conflict before saving this update.")
+            return False
+        response = QMessageBox.question(
+            self,
+            "RF Guard Warning",
+            body + "\n\nSave this HF Net schedule update anyway?",
+            QMessageBox.Save | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        return response == QMessageBox.Save
+
+    def _on_delete_freqplanner_source_clicked(self) -> None:
+        row = self._selected_freqplanner_source_row()
+        if row is None:
+            return
+        name = str(row.get("name") or "selected HF Net schedule")
+        response = QMessageBox.question(
+            self,
+            "Delete HF Net Schedule",
+            f"Delete '{name}'? This removes the named schedule but does not change the live HF Net schedule.",
+            QMessageBox.Delete | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if response != QMessageBox.Delete:
+            return
+        try:
+            delete_source_schedule(
+                self.settings,
+                HF_NET_SOURCE_SETS_KEY,
+                SELECTED_HF_NET_SOURCE_SET_KEY,
+                str(row.get("id") or ""),
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Delete Failed", f"Could not delete HF Net schedule:\n{exc}")
+            return
+        if hasattr(self, "schedule_source_combo"):
+            self._refresh_freqplanner_source_combo()
+        self._refresh_freq_planner()
 
     def _resize_table_columns(self) -> None:
         try:
             self.table.resizeColumnsToContents()
             self.resources_table.resizeColumnsToContents()
+            self._apply_net_compact_table_sizing(
+                compact=self._net_responsive_mode_for_width(int(self.width() or 0)) == "compact"
+            )
         except Exception:
             pass
+
+    @staticmethod
+    def _set_table_resize_modes(
+        table: QTableWidget,
+        resize_to_contents: set[int],
+        stretch: set[int],
+    ) -> None:
+        header = table.horizontalHeader()
+        header.setStretchLastSection(False)
+        for col in range(table.columnCount()):
+            if col in stretch:
+                header.setSectionResizeMode(col, QHeaderView.Stretch)
+            elif col in resize_to_contents:
+                header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+            else:
+                header.setSectionResizeMode(col, QHeaderView.Interactive)
+
+    def _apply_net_compact_table_sizing(self, *, compact: bool) -> None:
+        if not hasattr(self, "table") or not hasattr(self, "resources_table"):
+            return
+        show_all = bool(getattr(self, "view_edit_btn", None) and self.view_edit_btn.isChecked())
+        if compact and not show_all:
+            self._set_table_resize_modes(
+                self.table,
+                {
+                    self.COL_SELECT,
+                    self.COL_DAY,
+                    self.COL_MODE,
+                    self.COL_BAND,
+                    self.COL_FREQ,
+                    self.COL_START,
+                    self.COL_END,
+                },
+                {self.COL_GROUP, self.COL_NETNAME},
+            )
+        else:
+            self._set_table_resize_modes(
+                self.table,
+                {
+                    self.COL_SELECT,
+                    self.COL_DAY,
+                    self.COL_RECURRENCE,
+                    self.COL_MONTH_WEEKS,
+                    self.COL_MODE,
+                    self.COL_BAND,
+                    self.COL_FREQ,
+                    self.COL_START,
+                    self.COL_END,
+                    self.COL_EARLY,
+                    self.COL_FLDIGI_MODE,
+                    self.COL_FLDIGI_OFFSET,
+                    self.COL_AUTOTUNE,
+                    self.COL_TARGET_SCOPE,
+                },
+                {self.COL_GROUP, self.COL_NETNAME, self.COL_TARGET},
+            )
+
+        self._set_table_resize_modes(
+            self.resources_table,
+            {
+                self.RES_COL_SOURCE,
+                self.RES_COL_SET,
+                self.RES_COL_DAY,
+                self.RES_COL_RECURRENCE,
+                self.RES_COL_MONTH_WEEKS,
+                self.RES_COL_MODE,
+                self.RES_COL_BAND,
+                self.RES_COL_FREQ,
+                self.RES_COL_START,
+                self.RES_COL_END,
+                self.RES_COL_EARLY,
+                self.RES_COL_FLDIGI_MODE,
+                self.RES_COL_FLDIGI_OFFSET,
+                self.RES_COL_UPDATED,
+            },
+            {self.RES_COL_GROUP, self.RES_COL_NETNAME, self.RES_COL_COVERAGE, self.RES_COL_COMMENT},
+        )
+
+    def _apply_compact_schedule_view(self, show_all: bool | None = None) -> None:
+        if not hasattr(self, "table"):
+            return
+        if show_all is None:
+            show_all = bool(getattr(self, "view_edit_btn", None) and self.view_edit_btn.isChecked())
+        for col in range(self.table.columnCount()):
+            self.table.setColumnHidden(col, not show_all and col not in self.COMPACT_VISIBLE_COLUMNS)
+        self._apply_net_compact_table_sizing(
+            compact=self._net_responsive_mode_for_width(int(self.width() or 0)) == "compact"
+        )
+        if hasattr(self, "view_edit_btn"):
+            self.view_edit_btn.setToolTip(
+                "Hide advanced schedule fields for normal net scanning."
+                if show_all
+                else "Show all editable fields for the selected net schedule rows."
+            )
+            try:
+                self.view_edit_btn.setStyleSheet(
+                    button_style("info" if show_all else "muted", resolve_theme(self.settings))
+                )
+            except Exception:
+                pass
+
+    def _refresh_schedule_target_catalogs(self) -> None:
+        try:
+            store = MultiRadioStore(settings_db_path())
+            self.device_profiles = [dict(row) for row in store.list_device_profiles()]
+            self.operating_profiles = [dict(row) for row in store.list_operating_profiles()]
+        except Exception as e:
+            log.debug("Net Schedule: failed loading target catalogs: %s", e)
+            self.device_profiles = []
+            self.operating_profiles = []
+
+    @staticmethod
+    def _device_target_label(row: Dict[str, Any]) -> str:
+        name = str(row.get("name") or "").strip()
+        device_id = int(row.get("id", 0) or 0)
+        return name or f"Device #{device_id}"
+
+    @staticmethod
+    def _operating_target_label(row: Dict[str, Any]) -> str:
+        name = str(row.get("name") or "").strip()
+        profile_id = int(row.get("id", 0) or 0)
+        return name or f"Frequency Plan #{profile_id}"
+
+    @staticmethod
+    def _target_scope_tooltip() -> str:
+        return (
+            "Station rows apply to any current station-default runtime. "
+            "Radio Profile rows apply only when that radio is the station default. "
+            "Frequency Plan rows apply only when the station-default radio carries that assigned plan. "
+            "Full radio-owned schedule orchestration is a later-phase feature and is not modeled by these compatibility targets."
+        )
+
+    def _populate_target_value_combo(
+        self,
+        combo: QComboBox,
+        scope: str,
+        *,
+        target_device_profile_id: Optional[int] = None,
+        target_operating_profile_id: Optional[int] = None,
+    ) -> None:
+        prev_block = combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.setToolTip(self._target_scope_tooltip())
+            if scope == TARGET_SCOPE_STATION:
+                combo.addItem("Station-wide", None)
+                combo.setEnabled(False)
+                return
+            if scope == TARGET_SCOPE_DEVICE_PROFILE:
+                for row in self.device_profiles:
+                    combo.addItem(self._device_target_label(row), int(row.get("id", 0) or 0))
+                if target_device_profile_id is not None and combo.findData(int(target_device_profile_id)) < 0:
+                    combo.addItem(f"Missing device #{int(target_device_profile_id)}", int(target_device_profile_id))
+                if combo.count() <= 0:
+                    combo.addItem("No device profiles", None)
+                    combo.setEnabled(False)
+                    return
+                combo.setEnabled(True)
+                if target_device_profile_id is not None:
+                    idx = combo.findData(int(target_device_profile_id))
+                    if idx >= 0:
+                        combo.setCurrentIndex(idx)
+                return
+            for row in self.operating_profiles:
+                combo.addItem(self._operating_target_label(row), int(row.get("id", 0) or 0))
+            if target_operating_profile_id is not None and combo.findData(int(target_operating_profile_id)) < 0:
+                combo.addItem(
+                    f"Missing Frequency Plan #{int(target_operating_profile_id)}",
+                    int(target_operating_profile_id),
+                )
+            if combo.count() <= 0:
+                combo.addItem("No Frequency Plans", None)
+                combo.setEnabled(False)
+                return
+            combo.setEnabled(True)
+            if target_operating_profile_id is not None:
+                idx = combo.findData(int(target_operating_profile_id))
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+        finally:
+            combo.blockSignals(prev_block)
+
+    def _selected_schedule_target(self, row_index: int) -> Tuple[str, Optional[int], Optional[int]]:
+        scope_widget = self.table.cellWidget(row_index, self.COL_TARGET_SCOPE)
+        target_widget = self.table.cellWidget(row_index, self.COL_TARGET)
+        if not isinstance(scope_widget, QComboBox):
+            return TARGET_SCOPE_STATION, None, None
+        scope = normalize_target_scope(scope_widget.currentData())
+        target_id = target_widget.currentData() if isinstance(target_widget, QComboBox) else None
+        return normalize_schedule_target(
+            scope,
+            target_device_profile_id=target_id if scope == TARGET_SCOPE_DEVICE_PROFILE else None,
+            target_operating_profile_id=target_id if scope == TARGET_SCOPE_OPERATING_PROFILE else None,
+        )
+
+    def _refresh_schedule_target_widgets(self) -> None:
+        self._refresh_schedule_target_catalogs()
+        for row_index in range(self.table.rowCount()):
+            scope_widget = self.table.cellWidget(row_index, self.COL_TARGET_SCOPE)
+            target_widget = self.table.cellWidget(row_index, self.COL_TARGET)
+            if not isinstance(scope_widget, QComboBox) or not isinstance(target_widget, QComboBox):
+                continue
+            scope, target_device_profile_id, target_operating_profile_id = self._selected_schedule_target(row_index)
+            self._populate_target_value_combo(
+                target_widget,
+                scope,
+                target_device_profile_id=target_device_profile_id,
+                target_operating_profile_id=target_operating_profile_id,
+            )
 
     def on_settings_saved(self) -> None:
         """
@@ -443,10 +1486,16 @@ class NetScheduleTab(QWidget):
         Refresh group/band/mode combos in existing rows.
         """
         try:
+            self.plan_context_label.invalidate_context()
+            self.plan_context_label.refresh_context(refresh=True)
+        except Exception:
+            pass
+        try:
             self.settings.reload()
         except Exception:
             pass
         self._load_operating_groups()
+        self._refresh_schedule_target_catalogs()
         prev_suppress = self._suppress_autostart
         self._suppress_autostart = True
         prev_dirty = self._suspend_dirty_tracking
@@ -471,6 +1520,7 @@ class NetScheduleTab(QWidget):
                     if current_band and band_combo.findText(current_band) >= 0:
                         band_combo.setCurrentText(current_band)
                 self._update_mode_freq(r)
+            self._refresh_schedule_target_widgets()
         finally:
             self._suppress_autostart = prev_suppress
             self._suspend_dirty_tracking = prev_dirty
@@ -480,6 +1530,14 @@ class NetScheduleTab(QWidget):
         self._refresh_resources_table()
         self._apply_theme()
         self._resize_table_columns()
+        self._refresh_freqplanner_source_combo()
+        self._sync_selected_freqplanner_source_table()
+
+    def _refresh_freq_planner(self) -> None:
+        try:
+            self.schedule_saved.emit()
+        except Exception:
+            pass
 
     def on_sop_data_changed(self) -> None:
         self._bump_net_sop_conflict_scan_epoch()
@@ -495,6 +1553,9 @@ class NetScheduleTab(QWidget):
             meta={"rows": int(self.table.rowCount())},
             min_ms=0.0,
         ):
+            self._refresh_freqplanner_source_combo()
+            self._sync_selected_freqplanner_source_table()
+            self._refresh_schedule_target_widgets()
             if self._pending_sop_conflict_refresh:
                 self._pending_sop_conflict_refresh = False
                 self._schedule_net_sop_conflict_refresh(force=True)
@@ -506,6 +1567,16 @@ class NetScheduleTab(QWidget):
         self.help_btn.setStyleSheet(button_style("secondary", theme))
         self.add_btn.setStyleSheet(button_style("primary", theme))
         self.del_btn.setStyleSheet(button_style("muted", theme))
+        if hasattr(self, "new_source_btn"):
+            self.new_source_btn.setStyleSheet(button_style("muted", theme))
+        if hasattr(self, "rename_source_btn"):
+            self.rename_source_btn.setStyleSheet(button_style("muted", theme))
+        if hasattr(self, "save_source_btn"):
+            self.save_source_btn.setStyleSheet(button_style("info", theme))
+        if hasattr(self, "delete_source_btn"):
+            self.delete_source_btn.setStyleSheet(button_style("danger", theme))
+        if hasattr(self, "view_edit_btn"):
+            self.view_edit_btn.setStyleSheet(button_style("info" if self.view_edit_btn.isChecked() else "muted", theme))
         self.move_to_resources_btn.setStyleSheet(button_style("muted", theme))
         self.export_btn.setStyleSheet(button_style("info", theme))
         self.manage_net_sop_policies_btn.setStyleSheet(button_style("muted", theme))
@@ -525,7 +1596,7 @@ class NetScheduleTab(QWidget):
     def _rows_signature(self, rows: List[Dict[str, Any]]) -> str:
         normalized: List[Dict[str, Any]] = []
         for raw in rows:
-            row = self._strip_internal_row(raw)
+            row = normalize_schedule_target_fields(self._strip_internal_row(raw))
             recurrence = str(row.get("recurrence") or "Weekly").strip()
             if recurrence == "Monthly":
                 recurrence = "Periodic"
@@ -550,6 +1621,9 @@ class NetScheduleTab(QWidget):
                     "auto_tune": bool(row.get("auto_tune", False)),
                     "fldigi_mode": str(row.get("fldigi_mode") or "").strip(),
                     "fldigi_offset": str(row.get("fldigi_offset") or "").strip(),
+                    "target_scope": str(row.get("target_scope") or TARGET_SCOPE_STATION),
+                    "target_device_profile_id": row.get("target_device_profile_id"),
+                    "target_operating_profile_id": row.get("target_operating_profile_id"),
                 }
             )
         return json.dumps(normalized, sort_keys=True)
@@ -564,7 +1638,9 @@ class NetScheduleTab(QWidget):
             )
         else:
             role = "eligible_success" if self._dirty else "muted"
-            self.save_btn.setToolTip("")
+            self.save_btn.setToolTip(
+                "Save the visible rows as the selected named HF Net schedule, or create a new named schedule for Plan Builder."
+            )
         self.save_btn.setStyleSheet(button_style(role, theme))
 
     def _set_dirty(self, dirty: bool) -> None:
@@ -807,9 +1883,11 @@ class NetScheduleTab(QWidget):
                 "FLDigi Offset",
                 "Net Name",
                 "Auto-Tune",
+                "Target Scope",
+                "Target",
             ]
         )
-        self.time_toggle_btn.setText("Showing: Local" if self._show_local else "Showing: UTC")
+        self.time_toggle_btn.setText("Times: Local" if self._show_local else "Times: UTC")
         self._update_time_toggle_style()
 
     # --------- time conversion helpers --------- #
@@ -887,13 +1965,18 @@ class NetScheduleTab(QWidget):
 
     def _toggle_time_view(self):
         """
-        Flip between UTC and Local view, converting current table contents back to UTC first.
+        Flip between UTC and Local view without changing canonical schedule semantics.
         """
-        try:
-            # Normalize current table to UTC before flipping
-            rows_utc = self._collect_rows()
-        except Exception:
-            rows_utc = self._raw_rows or []
+        was_dirty = bool(self._dirty)
+        if was_dirty:
+            try:
+                # Preserve in-progress user edits by normalizing the current view to UTC before flipping.
+                rows_utc = self._collect_rows()
+            except Exception as e:
+                self._publish_time_toggle_blocked_feedback(str(e))
+                return
+        else:
+            rows_utc = [dict(row) for row in (self._raw_rows or [])]
         self._raw_rows = rows_utc
         self._show_local = not self._show_local
         self._set_headers()
@@ -906,8 +1989,34 @@ class NetScheduleTab(QWidget):
             self._suspend_dirty_tracking = False
         self._update_clock_labels()
         self._resize_table_columns()
-        self._mark_dirty()
+        self._set_dirty(was_dirty)
         self._schedule_net_sop_conflict_refresh(force=True)
+
+    def _publish_time_toggle_blocked_feedback(self, detail: str = "") -> None:
+        summary = "Finish the current Net Schedule row before changing the time view."
+        win = self.window()
+        service = getattr(win, "action_feedback_service", None) if win is not None else None
+        if service is not None and hasattr(service, "publish"):
+            try:
+                service.publish(
+                    scope="scheduler",
+                    action_type="time_view",
+                    status="blocked",
+                    summary=summary,
+                    detail=str(detail or "").strip(),
+                    source_surface="net_schedule_tab",
+                )
+                return
+            except Exception as e:
+                log.debug("Net Schedule: failed publishing time toggle feedback: %s", e)
+        try:
+            status_bar = win.statusBar() if win is not None and hasattr(win, "statusBar") else None
+            if status_bar is not None:
+                status_bar.showMessage(summary, 6000)
+                return
+        except Exception:
+            pass
+        log.info("Net Schedule: time view change blocked; %s", detail)
 
 
     # --------- row widgets --------- #
@@ -928,6 +2037,23 @@ class NetScheduleTab(QWidget):
         sel_layout.addWidget(sel_chk)
         if row_data.get("_resource_id") is not None:
             sel_wrap.setProperty("resource_id", int(row_data.get("_resource_id")))
+        try:
+            sel_wrap.setProperty("source_row_id", int(row_data.get("source_row_id") or row_data.get("_source_row_id") or 0))
+        except Exception:
+            sel_wrap.setProperty("source_row_id", 0)
+        sel_wrap.setProperty("source_key", str(row_data.get("source_key") or row_data.get("_source_key") or "").strip())
+        sel_wrap.setProperty("source_table", str(row_data.get("source_table") or "net_schedule_tab"))
+        # Canonical directory subscription metadata is carried through the
+        # existing HF source-row save path; it never becomes a bare legacy ID.
+        for key in (
+            "net_session_key",
+            "frequency_resource_key",
+            "accepted_session_version_hash",
+            "accepted_resource_version_hash",
+            "accepted_snapshot_json",
+        ):
+            if row_data.get(key) not in (None, ""):
+                sel_wrap.setProperty(key, row_data.get(key))
         if row_data.get("_resource_set"):
             sel_wrap.setProperty("resource_set", str(row_data.get("_resource_set")))
         fld_mode = str(row_data.get("fldigi_mode") or "").strip()
@@ -1065,6 +2191,37 @@ class NetScheduleTab(QWidget):
         auto_layout.addWidget(auto_chk)
         self.table.setCellWidget(r, self.COL_AUTOTUNE, auto_wrap)
 
+        target_scope_combo = QComboBox()
+        target_scope_combo.setToolTip(self._target_scope_tooltip())
+        target_value_combo = QComboBox()
+        target_value_combo.setToolTip(self._target_scope_tooltip())
+        target_scope, target_device_profile_id, target_operating_profile_id = normalize_schedule_target(
+            row_data.get("target_scope"),
+            target_device_profile_id=row_data.get("target_device_profile_id"),
+            target_operating_profile_id=row_data.get("target_operating_profile_id"),
+        )
+        for label, value in SCHEDULE_TARGET_SCOPE_ITEMS:
+            target_scope_combo.addItem(label, value)
+        idx = target_scope_combo.findData(target_scope)
+        if idx >= 0:
+            target_scope_combo.setCurrentIndex(idx)
+        self._populate_target_value_combo(
+            target_value_combo,
+            target_scope,
+            target_device_profile_id=target_device_profile_id,
+            target_operating_profile_id=target_operating_profile_id,
+        )
+        target_scope_combo.currentIndexChanged.connect(
+            lambda _idx, scope_combo=target_scope_combo, value_combo=target_value_combo: self._populate_target_value_combo(
+                value_combo,
+                normalize_target_scope(scope_combo.currentData()),
+            )
+        )
+        target_scope_combo.currentTextChanged.connect(self._mark_dirty)
+        target_value_combo.currentTextChanged.connect(self._mark_dirty)
+        self.table.setCellWidget(r, self.COL_TARGET_SCOPE, target_scope_combo)
+        self.table.setCellWidget(r, self.COL_TARGET, target_value_combo)
+
         # Freq / times as QTableWidgetItem
         def set_item(col: int, value: str | None):
             item = QTableWidgetItem(str(value) if value is not None else "")
@@ -1101,6 +2258,7 @@ class NetScheduleTab(QWidget):
                 fldigi_offset_edit.setText(d_offset)
         self._update_delete_button_state()
         self._mark_dirty()
+        self._apply_schedule_table_height_hints()
 
     def _parse_month_weeks(self, txt: str) -> set[int]:
         out: set[int] = set()
@@ -1235,6 +2393,7 @@ class NetScheduleTab(QWidget):
         if selected:
             self._mark_dirty()
             self._schedule_net_sop_conflict_refresh(force=True)
+        self._apply_schedule_table_height_hints()
 
     # --------- Operating group helpers (cascading selections) --------- #
 
@@ -1570,6 +2729,18 @@ class NetScheduleTab(QWidget):
                 fo = select_widget.property("fldigi_offset")
                 if not fldigi_offset and fo not in (None, ""):
                     fldigi_offset = str(fo).strip()
+                subscription_values = {
+                    key: select_widget.property(key)
+                    for key in (
+                        "net_session_key",
+                        "frequency_resource_key",
+                        "accepted_session_version_hash",
+                        "accepted_resource_version_hash",
+                        "accepted_snapshot_json",
+                    )
+                }
+            else:
+                subscription_values = {}
 
             freq = text(self.COL_FREQ)
             start_txt = text(self.COL_START)
@@ -1668,28 +2839,42 @@ class NetScheduleTab(QWidget):
                 day, start_txt = self._convert_day_time(orig_day, start_txt, to_local=False)
                 _, end_txt = self._convert_day_time(orig_day, end_txt, to_local=False)
 
-            row = {
-                "day_utc": day,
-                "recurrence": recurrence,
-                "biweekly_offset_weeks": biweekly_offset,
-                "month_weeks": ",".join(str(w) for w in month_weeks) if month_weeks else "",
-                "group_name": group_name,
-                "band": band,
-                "mode": mode,
-                "vfo": "A",
-                "frequency": self._format_freq(freq_mhz),
-                "start_utc": start_txt,
-                "end_utc": end_txt,
-                "early_checkin": str(early_int),
-                "net_name": net_name,
-                "auto_tune": bool(auto_tune),
-                "fldigi_mode": fldigi_mode,
-                "fldigi_offset": fldigi_offset,
-            }
+            target_scope, target_device_profile_id, target_operating_profile_id = self._selected_schedule_target(r)
+            if target_scope == TARGET_SCOPE_DEVICE_PROFILE and target_device_profile_id is None:
+                raise ValueError(f"Row {r+1}: Device-targeted rows require a device profile.")
+            if target_scope == TARGET_SCOPE_OPERATING_PROFILE and target_operating_profile_id is None:
+                raise ValueError(f"Row {r+1}: Frequency Plan-targeted rows require a Frequency Plan.")
+
+            row = normalize_schedule_target_fields(
+                {
+                    "day_utc": day,
+                    "recurrence": recurrence,
+                    "biweekly_offset_weeks": biweekly_offset,
+                    "month_weeks": ",".join(str(w) for w in month_weeks) if month_weeks else "",
+                    "group_name": group_name,
+                    "band": band,
+                    "mode": mode,
+                    "vfo": "A",
+                    "frequency": self._format_freq(freq_mhz),
+                    "start_utc": start_txt,
+                    "end_utc": end_txt,
+                    "early_checkin": str(early_int),
+                    "net_name": net_name,
+                    "auto_tune": bool(auto_tune),
+                    "fldigi_mode": fldigi_mode,
+                    "fldigi_offset": fldigi_offset,
+                    "target_scope": target_scope,
+                    "target_device_profile_id": target_device_profile_id,
+                    "target_operating_profile_id": target_operating_profile_id,
+                }
+            )
             if resource_id is not None:
                 row["_resource_id"] = resource_id
             if resource_set:
                 row["_resource_set"] = resource_set
+            for key, value in subscription_values.items():
+                if value not in (None, ""):
+                    row[key] = value
             rows.append(row)
 
             if net_name:
@@ -1738,6 +2923,7 @@ class NetScheduleTab(QWidget):
                     cur = conn.execute(
                         """
                         SELECT
+                            id,
                             day_utc,
                             recurrence,
                             biweekly_offset_weeks,
@@ -1756,11 +2942,19 @@ class NetScheduleTab(QWidget):
                             group_name,
                             fldigi_mode,
                             fldigi_offset,
-                            resource_id
+                            resource_id,
+                            net_session_key,
+                            accepted_session_version_hash,
+                            accepted_resource_version_hash,
+                            accepted_snapshot_json,
+                            target_scope,
+                            target_device_profile_id,
+                            target_operating_profile_id
                         FROM net_schedule_tab
                         """
                     )
                     for (
+                        row_id,
                         day_utc,
                         recurrence,
                         biweekly_offset_weeks,
@@ -1780,29 +2974,48 @@ class NetScheduleTab(QWidget):
                         fldigi_mode,
                         fldigi_offset,
                         resource_id,
+                        net_session_key,
+                        accepted_session_version_hash,
+                        accepted_resource_version_hash,
+                        accepted_snapshot_json,
+                        target_scope,
+                        target_device_profile_id,
+                        target_operating_profile_id,
                     ) in cur.fetchall():
                         rows.append(
-                            {
-                                "day_utc": day_utc or "",
-                                "recurrence": "Periodic" if (recurrence or "Weekly") == "Monthly" else recurrence or "Weekly",
-                                "biweekly_offset_weeks": int(biweekly_offset_weeks or 0),
-                                "month_weeks": month_weeks or "",
-                                "band": band or "",
-                                "mode": mode or "",
-                                "vfo": (vfo or "A").strip().upper(),
-                                "frequency": str(freq or ""),
-                                "start_utc": start_utc or "",
-                                "end_utc": end_utc or "",
-                                "early_checkin": str(early if early is not None else 0),
-                                "auto_tune": bool(auto_tune),
-                                "primary_js8call_group": group or "",
-                                "comment": comment or "",
-                                "net_name": net_name or "",
-                                "group_name": group_name or "",
-                                "fldigi_mode": fldigi_mode or "",
-                                "fldigi_offset": fldigi_offset or "",
-                                "_resource_id": int(resource_id) if resource_id not in (None, "") else None,
-                            }
+                            normalize_schedule_target_fields(
+                                {
+                                    "day_utc": day_utc or "",
+                                    "recurrence": "Periodic" if (recurrence or "Weekly") == "Monthly" else recurrence or "Weekly",
+                                    "biweekly_offset_weeks": int(biweekly_offset_weeks or 0),
+                                    "month_weeks": month_weeks or "",
+                                    "band": band or "",
+                                    "mode": mode or "",
+                                    "vfo": (vfo or "A").strip().upper(),
+                                    "frequency": str(freq or ""),
+                                    "start_utc": start_utc or "",
+                                    "end_utc": end_utc or "",
+                                    "early_checkin": str(early if early is not None else 0),
+                                    "auto_tune": bool(auto_tune),
+                                    "primary_js8call_group": group or "",
+                                    "comment": comment or "",
+                                    "net_name": net_name or "",
+                                    "group_name": group_name or "",
+                                    "fldigi_mode": fldigi_mode or "",
+                                    "fldigi_offset": fldigi_offset or "",
+                                    "source_table": "net_schedule_tab",
+                                    "source_row_id": int(row_id or 0),
+                                    "source_key": f"NET:{int(row_id or 0)}" if int(row_id or 0) > 0 else "",
+                                    "_resource_id": int(resource_id) if resource_id not in (None, "") else None,
+                                    "net_session_key": net_session_key or "",
+                                    "accepted_session_version_hash": accepted_session_version_hash or "",
+                                    "accepted_resource_version_hash": accepted_resource_version_hash or "",
+                                    "accepted_snapshot_json": accepted_snapshot_json or "",
+                                    "target_scope": target_scope,
+                                    "target_device_profile_id": target_device_profile_id,
+                                    "target_operating_profile_id": target_operating_profile_id,
+                                }
+                            )
                         )
                     return rows
                 except Exception:
@@ -1882,26 +3095,28 @@ class NetScheduleTab(QWidget):
                             fldigi_mode = ""
                             fldigi_offset = ""
                         rows.append(
-                            {
-                                "day_utc": day_utc or "",
-                                "recurrence": "Weekly",
-                                "biweekly_offset_weeks": 0,
-                                "month_weeks": "",
-                                "band": band or "",
-                                "mode": mode or "",
-                                "vfo": (vfo or "A").strip().upper(),
-                                "frequency": str(freq or ""),
-                                "start_utc": start_utc or "",
-                                "end_utc": end_utc or "",
-                                "early_checkin": str(early if early is not None else 0),
-                                "auto_tune": False,
-                                "primary_js8call_group": group or "",
-                                "comment": comment or "",
-                                "net_name": net_name or "",
-                                "group_name": "",
-                                "fldigi_mode": fldigi_mode or "",
-                                "fldigi_offset": fldigi_offset or "",
-                            }
+                            normalize_schedule_target_fields(
+                                {
+                                    "day_utc": day_utc or "",
+                                    "recurrence": "Weekly",
+                                    "biweekly_offset_weeks": 0,
+                                    "month_weeks": "",
+                                    "band": band or "",
+                                    "mode": mode or "",
+                                    "vfo": (vfo or "A").strip().upper(),
+                                    "frequency": str(freq or ""),
+                                    "start_utc": start_utc or "",
+                                    "end_utc": end_utc or "",
+                                    "early_checkin": str(early if early is not None else 0),
+                                    "auto_tune": False,
+                                    "primary_js8call_group": group or "",
+                                    "comment": comment or "",
+                                    "net_name": net_name or "",
+                                    "group_name": "",
+                                    "fldigi_mode": fldigi_mode or "",
+                                    "fldigi_offset": fldigi_offset or "",
+                                }
+                            )
                         )
                     return rows
 
@@ -1926,7 +3141,10 @@ class NetScheduleTab(QWidget):
                             net_name,
                             group_name,
                             fldigi_mode,
-                            fldigi_offset
+                            fldigi_offset,
+                            target_scope,
+                            target_device_profile_id,
+                            target_operating_profile_id
                         FROM net_schedule
                         """
                     )
@@ -1948,28 +3166,36 @@ class NetScheduleTab(QWidget):
                         group_name,
                         fldigi_mode,
                         fldigi_offset,
+                        target_scope,
+                        target_device_profile_id,
+                        target_operating_profile_id,
                     ) in cur.fetchall():
                         rows.append(
-                            {
-                                "day_utc": day_utc or "",
-                                "recurrence": "Periodic" if (recurrence or "Weekly") == "Monthly" else recurrence or "Weekly",
-                                "biweekly_offset_weeks": int(biweekly_offset_weeks or 0),
-                                "month_weeks": month_weeks or "",
-                                "band": band or "",
-                                "mode": mode or "",
-                                "vfo": "A",
-                                "frequency": str(freq or ""),
-                                "start_utc": start_utc or "",
-                                "end_utc": end_utc or "",
-                                "early_checkin": str(early if early is not None else 0),
-                                "auto_tune": bool(auto_tune),
-                                "primary_js8call_group": group or "",
-                                "comment": comment or "",
-                                "net_name": net_name or "",
-                                "group_name": group_name or "",
-                                "fldigi_mode": fldigi_mode or "",
-                                "fldigi_offset": fldigi_offset or "",
-                            }
+                            normalize_schedule_target_fields(
+                                {
+                                    "day_utc": day_utc or "",
+                                    "recurrence": "Periodic" if (recurrence or "Weekly") == "Monthly" else recurrence or "Weekly",
+                                    "biweekly_offset_weeks": int(biweekly_offset_weeks or 0),
+                                    "month_weeks": month_weeks or "",
+                                    "band": band or "",
+                                    "mode": mode or "",
+                                    "vfo": "A",
+                                    "frequency": str(freq or ""),
+                                    "start_utc": start_utc or "",
+                                    "end_utc": end_utc or "",
+                                    "early_checkin": str(early if early is not None else 0),
+                                    "auto_tune": bool(auto_tune),
+                                    "primary_js8call_group": group or "",
+                                    "comment": comment or "",
+                                    "net_name": net_name or "",
+                                    "group_name": group_name or "",
+                                    "fldigi_mode": fldigi_mode or "",
+                                    "fldigi_offset": fldigi_offset or "",
+                                    "target_scope": target_scope,
+                                    "target_device_profile_id": target_device_profile_id,
+                                    "target_operating_profile_id": target_operating_profile_id,
+                                }
+                            )
                         )
                     return rows
                 except Exception:
@@ -2045,26 +3271,28 @@ class NetScheduleTab(QWidget):
                             fldigi_mode = ""
                             fldigi_offset = ""
                         rows.append(
-                            {
-                                "day_utc": day_utc or "",
-                                "recurrence": "Weekly",
-                                "biweekly_offset_weeks": 0,
-                                "month_weeks": "",
-                                "band": band or "",
-                                "mode": mode or "",
-                                "vfo": "A",
-                                "frequency": str(freq or ""),
-                                "start_utc": start_utc or "",
-                                "end_utc": end_utc or "",
-                                "early_checkin": str(early if early is not None else 0),
-                                "auto_tune": False,
-                                "primary_js8call_group": group or "",
-                                "comment": comment or "",
-                                "net_name": net_name or "",
-                                "group_name": "",
-                                "fldigi_mode": fldigi_mode or "",
-                                "fldigi_offset": fldigi_offset or "",
-                            }
+                            normalize_schedule_target_fields(
+                                {
+                                    "day_utc": day_utc or "",
+                                    "recurrence": "Weekly",
+                                    "biweekly_offset_weeks": 0,
+                                    "month_weeks": "",
+                                    "band": band or "",
+                                    "mode": mode or "",
+                                    "vfo": "A",
+                                    "frequency": str(freq or ""),
+                                    "start_utc": start_utc or "",
+                                    "end_utc": end_utc or "",
+                                    "early_checkin": str(early if early is not None else 0),
+                                    "auto_tune": False,
+                                    "primary_js8call_group": group or "",
+                                    "comment": comment or "",
+                                    "net_name": net_name or "",
+                                    "group_name": "",
+                                    "fldigi_mode": fldigi_mode or "",
+                                    "fldigi_offset": fldigi_offset or "",
+                                }
+                            )
                         )
                     return rows
             return rows
@@ -2091,6 +3319,7 @@ class NetScheduleTab(QWidget):
                 data = self.settings.get("net_schedule", [])
                 if not isinstance(data, list):
                     data = []
+                data = [normalize_schedule_target_fields(row) for row in data if isinstance(row, dict)]
             self._raw_rows = data
             for row in self._raw_rows:
                 self._add_row(self._to_view_row(row))
@@ -2146,8 +3375,7 @@ class NetScheduleTab(QWidget):
         except Exception:
             pass
 
-        self._saved_rows_signature = self._rows_signature(self._raw_rows)
-        self._set_dirty(False)
+        self._load()
         self._schedule_net_sop_conflict_refresh(force=True)
         QMessageBox.information(self, "Saved", "Net Schedule saved.")
 
@@ -2706,25 +3934,31 @@ class NetScheduleTab(QWidget):
                 "rows": [],
             }
             for r in rows:
+                normalized = normalize_schedule_target_fields(r)
                 payload["rows"].append(
                     {
-                        "day_utc": r.get("day_utc", ""),
-                        "recurrence": "Periodic" if r.get("recurrence", "Weekly") == "Monthly" else r.get("recurrence", "Weekly"),
-                        "biweekly_offset_weeks": int(r.get("biweekly_offset_weeks", 0) or 0),
-                        "month_weeks": r.get("month_weeks", ""),
-                        "group_name": r.get("group_name", ""),
-                        "band": r.get("band", ""),
-                        "mode": r.get("mode", ""),
-                        "frequency": r.get("frequency", ""),
-                        "start_utc": r.get("start_utc", ""),
-                        "end_utc": r.get("end_utc", ""),
-                        "early_checkin": r.get("early_checkin", 0),
+                        "day_utc": normalized.get("day_utc", ""),
+                        "recurrence": "Periodic"
+                        if normalized.get("recurrence", "Weekly") == "Monthly"
+                        else normalized.get("recurrence", "Weekly"),
+                        "biweekly_offset_weeks": int(normalized.get("biweekly_offset_weeks", 0) or 0),
+                        "month_weeks": normalized.get("month_weeks", ""),
+                        "group_name": normalized.get("group_name", ""),
+                        "band": normalized.get("band", ""),
+                        "mode": normalized.get("mode", ""),
+                        "frequency": normalized.get("frequency", ""),
+                        "start_utc": normalized.get("start_utc", ""),
+                        "end_utc": normalized.get("end_utc", ""),
+                        "early_checkin": normalized.get("early_checkin", 0),
                         "auto_tune": None,
-                        "primary_js8call_group": r.get("primary_js8call_group", ""),
-                        "comment": r.get("comment", ""),
-                        "net_name": r.get("net_name", ""),
-                        "fldigi_mode": r.get("fldigi_mode", ""),
-                        "fldigi_offset": r.get("fldigi_offset", ""),
+                        "primary_js8call_group": normalized.get("primary_js8call_group", ""),
+                        "comment": normalized.get("comment", ""),
+                        "net_name": normalized.get("net_name", ""),
+                        "fldigi_mode": normalized.get("fldigi_mode", ""),
+                        "fldigi_offset": normalized.get("fldigi_offset", ""),
+                        "target_scope": normalized.get("target_scope", TARGET_SCOPE_STATION),
+                        "target_device_profile_id": normalized.get("target_device_profile_id"),
+                        "target_operating_profile_id": normalized.get("target_operating_profile_id"),
                     }
                 )
             Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -2739,17 +3973,6 @@ class NetScheduleTab(QWidget):
 
     # --------- SQLite mirror --------- #
 
-    def _ensure_db_columns(self, conn: sqlite3.Connection, table: str, columns: Dict[str, str]):
-        """
-        Ensure each column in `columns` exists on `table`, adding with ALTER TABLE if missing.
-        """
-        existing = set()
-        for _, name, *_ in conn.execute(f"PRAGMA table_info({table})"):
-            existing.add(name if isinstance(name, str) else str(name))
-        for col, ddl in columns.items():
-            if col not in existing:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
-
     def _save_to_db(self, rows: List[Dict]):
         """
         Persist net schedule rows into SQLite tables in config/freqinout_nets.db.
@@ -2758,304 +3981,235 @@ class NetScheduleTab(QWidget):
         db_path = self._db_path()
         conn = sqlite3.connect(db_path)
         try:
-            self._create_tables(conn)
-            self._ensure_columns_with_recreate(conn)
+            linked_rows, created_resources, linked_resources = self._ensure_manual_schedule_resources(conn, rows)
             conn.execute("DELETE FROM net_schedule_tab")
             conn.execute("DELETE FROM net_schedule")
-            self._insert_rows(conn, rows)
+            self._insert_rows(conn, linked_rows)
+            finalize_legacy_resource_projection(conn)
             conn.commit()
+            if created_resources or linked_resources:
+                log.info(
+                    "NetSchedule: linked %d net schedule row(s) to resources; created %d manual resource(s).",
+                    linked_resources,
+                    created_resources,
+                )
             log.info("Net schedule mirrored to DB at %s (%d entries).", db_path, len(rows))
         finally:
             conn.close()
 
-    def _create_tables(self, conn: sqlite3.Connection) -> None:
-        """
-        Create the schedule tables with the expected schema.
-        """
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS net_schedule_tab (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                day_utc TEXT NOT NULL,
-                recurrence TEXT DEFAULT 'Weekly',
-                biweekly_offset_weeks INTEGER DEFAULT 0,
-                month_weeks TEXT,
-                band TEXT NOT NULL,
-                mode TEXT NOT NULL,
-                vfo TEXT,
-                frequency TEXT NOT NULL,
-                start_utc TEXT NOT NULL,
-                end_utc TEXT NOT NULL,
-                early_checkin INTEGER NOT NULL,
-                auto_tune INTEGER DEFAULT 0,
-                primary_js8call_group TEXT,
-                comment TEXT,
-                net_name TEXT,
-                group_name TEXT,
-                fldigi_mode TEXT,
-                fldigi_offset TEXT,
-                resource_id INTEGER
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS net_schedule (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                day_utc TEXT NOT NULL,
-                recurrence TEXT DEFAULT 'Weekly',
-                biweekly_offset_weeks INTEGER DEFAULT 0,
-                month_weeks TEXT,
-                band TEXT NOT NULL,
-                mode TEXT NOT NULL,
-                frequency TEXT NOT NULL,
-                start_utc TEXT NOT NULL,
-                end_utc TEXT NOT NULL,
-                early_checkin INTEGER NOT NULL,
-                auto_tune INTEGER DEFAULT 0,
-                primary_js8call_group TEXT,
-                comment TEXT,
-                net_name TEXT,
-                group_name TEXT,
-                fldigi_mode TEXT,
-                fldigi_offset TEXT
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS net_resources (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                resource_set TEXT NOT NULL,
-                source_type TEXT NOT NULL,
-                source_ref TEXT,
-                readonly INTEGER DEFAULT 1,
-                day_utc TEXT NOT NULL,
-                recurrence TEXT DEFAULT 'Weekly',
-                biweekly_offset_weeks INTEGER DEFAULT 0,
-                month_weeks TEXT,
-                group_name TEXT,
-                band TEXT NOT NULL,
-                mode TEXT NOT NULL,
-                frequency TEXT NOT NULL,
-                start_utc TEXT NOT NULL,
-                end_utc TEXT NOT NULL,
-                early_checkin INTEGER NOT NULL,
-                primary_js8call_group TEXT,
-                coverage TEXT,
-                comment TEXT,
-                net_name TEXT,
-                fldigi_mode TEXT,
-                fldigi_offset TEXT,
-                updated_utc TEXT
-            )
-            """
-        )
-
-    def _recreate_tables(self, conn: sqlite3.Connection) -> None:
-        """
-        Drop and recreate schedule tables when schema drift is detected.
-        """
-        conn.execute("DROP TABLE IF EXISTS net_schedule_tab")
-        conn.execute("DROP TABLE IF EXISTS net_schedule")
-        self._create_tables(conn)
-
-    def _ensure_columns_with_recreate(self, conn: sqlite3.Connection) -> None:
-        """
-        Ensure expected columns exist; recreate tables once if ALTER fails.
-        """
-        try:
-            self._ensure_db_columns(
-                conn,
-                "net_schedule_tab",
-                {
-                    "recurrence": "TEXT DEFAULT 'Weekly'",
-                    "biweekly_offset_weeks": "INTEGER DEFAULT 0",
-                    "month_weeks": "TEXT",
-                    "vfo": "TEXT",
-                    "group_name": "TEXT",
-                    "auto_tune": "INTEGER DEFAULT 0",
-                    "fldigi_mode": "TEXT",
-                    "fldigi_offset": "TEXT",
-                    "resource_id": "INTEGER",
-                },
-            )
-            self._ensure_db_columns(
-                conn,
-                "net_schedule",
-                {
-                    "recurrence": "TEXT DEFAULT 'Weekly'",
-                    "biweekly_offset_weeks": "INTEGER DEFAULT 0",
-                    "month_weeks": "TEXT",
-                    "group_name": "TEXT",
-                    "auto_tune": "INTEGER DEFAULT 0",
-                    "fldigi_mode": "TEXT",
-                    "fldigi_offset": "TEXT",
-                },
-            )
-            self._ensure_db_columns(
-                conn,
-                "net_resources",
-                {
-                    "resource_set": "TEXT",
-                    "source_type": "TEXT",
-                    "source_ref": "TEXT",
-                    "readonly": "INTEGER DEFAULT 1",
-                    "day_utc": "TEXT",
-                    "recurrence": "TEXT DEFAULT 'Weekly'",
-                    "biweekly_offset_weeks": "INTEGER DEFAULT 0",
-                    "month_weeks": "TEXT",
-                    "group_name": "TEXT",
-                    "band": "TEXT",
-                    "mode": "TEXT",
-                    "frequency": "TEXT",
-                    "start_utc": "TEXT",
-                    "end_utc": "TEXT",
-                    "early_checkin": "INTEGER DEFAULT 0",
-                    "primary_js8call_group": "TEXT",
-                    "coverage": "TEXT",
-                    "comment": "TEXT",
-                    "net_name": "TEXT",
-                    "fldigi_mode": "TEXT",
-                    "fldigi_offset": "TEXT",
-                    "updated_utc": "TEXT",
-                },
-            )
-        except sqlite3.OperationalError as e:
-            log.warning("Net schedule column update failed (%s); recreating tables.", e)
-            self._recreate_tables(conn)
-            self._ensure_db_columns(
-                conn,
-                "net_schedule_tab",
-                {
-                    "recurrence": "TEXT DEFAULT 'Weekly'",
-                    "biweekly_offset_weeks": "INTEGER DEFAULT 0",
-                    "month_weeks": "TEXT",
-                    "vfo": "TEXT",
-                    "group_name": "TEXT",
-                    "auto_tune": "INTEGER DEFAULT 0",
-                    "fldigi_mode": "TEXT",
-                    "fldigi_offset": "TEXT",
-                    "resource_id": "INTEGER",
-                },
-            )
-            self._ensure_db_columns(
-                conn,
-                "net_schedule",
-                {
-                    "recurrence": "TEXT DEFAULT 'Weekly'",
-                    "biweekly_offset_weeks": "INTEGER DEFAULT 0",
-                    "month_weeks": "TEXT",
-                    "group_name": "TEXT",
-                    "auto_tune": "INTEGER DEFAULT 0",
-                    "fldigi_mode": "TEXT",
-                    "fldigi_offset": "TEXT",
-                },
-            )
-            self._ensure_db_columns(
-                conn,
-                "net_resources",
-                {
-                    "resource_set": "TEXT",
-                    "source_type": "TEXT",
-                    "source_ref": "TEXT",
-                    "readonly": "INTEGER DEFAULT 1",
-                    "day_utc": "TEXT",
-                    "recurrence": "TEXT DEFAULT 'Weekly'",
-                    "biweekly_offset_weeks": "INTEGER DEFAULT 0",
-                    "month_weeks": "TEXT",
-                    "group_name": "TEXT",
-                    "band": "TEXT",
-                    "mode": "TEXT",
-                    "frequency": "TEXT",
-                    "start_utc": "TEXT",
-                    "end_utc": "TEXT",
-                    "early_checkin": "INTEGER DEFAULT 0",
-                    "primary_js8call_group": "TEXT",
-                    "coverage": "TEXT",
-                    "comment": "TEXT",
-                    "net_name": "TEXT",
-                    "fldigi_mode": "TEXT",
-                    "fldigi_offset": "TEXT",
-                    "updated_utc": "TEXT",
-                },
-            )
-
     def _insert_rows(self, conn: sqlite3.Connection, rows: List[Dict]) -> None:
-        """
-        Insert schedule rows, recreating tables once if schema drift is detected.
-        """
-        try:
-            self._insert_rows_inner(conn, rows)
-            return
-        except sqlite3.OperationalError as e:
-            msg = str(e).lower()
-            if "no column" not in msg and "has no column" not in msg:
-                raise
-            log.warning("Net schedule table schema drift detected (%s); recreating tables.", e)
-            self._recreate_tables(conn)
-            self._insert_rows_inner(conn, rows)
+        """Insert rows into startup-owned schedule tables."""
+        self._insert_rows_inner(conn, rows)
 
     def _insert_rows_inner(self, conn: sqlite3.Connection, rows: List[Dict]) -> None:
         for row in rows:
+            normalized = normalize_schedule_target_fields(row)
             conn.execute(
                 """
                 INSERT INTO net_schedule_tab
                   (day_utc, recurrence, biweekly_offset_weeks, month_weeks, band, mode, vfo, frequency, start_utc, end_utc,
-                   early_checkin, auto_tune, primary_js8call_group, comment, net_name, group_name, fldigi_mode, fldigi_offset, resource_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   early_checkin, auto_tune, primary_js8call_group, comment, net_name, group_name, fldigi_mode, fldigi_offset,
+                   resource_id, net_session_key, accepted_session_version_hash, accepted_resource_version_hash,
+                   accepted_snapshot_json, target_scope, target_device_profile_id, target_operating_profile_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    row.get("day_utc"),
-                    row.get("recurrence", "Weekly"),
-                    int(row.get("biweekly_offset_weeks", 0) or 0),
-                    row.get("month_weeks", ""),
-                    row.get("band"),
-                    row.get("mode"),
-                    row.get("vfo"),
-                    row.get("frequency"),
-                    row.get("start_utc"),
-                    row.get("end_utc"),
-                    int(row.get("early_checkin", "0") or 0),
-                    1 if row.get("auto_tune") else 0,
-                    row.get("primary_js8call_group"),
-                    row.get("comment"),
-                    row.get("net_name"),
-                    row.get("group_name"),
-                    row.get("fldigi_mode", ""),
-                    row.get("fldigi_offset", ""),
-                    row.get("_resource_id"),
+                    normalized.get("day_utc"),
+                    normalized.get("recurrence", "Weekly"),
+                    int(normalized.get("biweekly_offset_weeks", 0) or 0),
+                    normalized.get("month_weeks", ""),
+                    normalized.get("band"),
+                    normalized.get("mode"),
+                    normalized.get("vfo"),
+                    normalized.get("frequency"),
+                    normalized.get("start_utc"),
+                    normalized.get("end_utc"),
+                    int(normalized.get("early_checkin", "0") or 0),
+                    1 if normalized.get("auto_tune") else 0,
+                    normalized.get("primary_js8call_group"),
+                    normalized.get("comment"),
+                    normalized.get("net_name"),
+                    normalized.get("group_name"),
+                    normalized.get("fldigi_mode", ""),
+                    normalized.get("fldigi_offset", ""),
+                    normalized.get("_resource_id"),
+                    normalized.get("net_session_key"),
+                    normalized.get("accepted_session_version_hash"),
+                    normalized.get("accepted_resource_version_hash"),
+                    normalized.get("accepted_snapshot_json"),
+                    normalized.get("target_scope"),
+                    normalized.get("target_device_profile_id"),
+                    normalized.get("target_operating_profile_id"),
                 ),
             )
             conn.execute(
                 """
                 INSERT INTO net_schedule
                   (day_utc, recurrence, biweekly_offset_weeks, month_weeks, band, mode, frequency, start_utc, end_utc,
-                   early_checkin, auto_tune, primary_js8call_group, comment, net_name, group_name, fldigi_mode, fldigi_offset)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   early_checkin, auto_tune, primary_js8call_group, comment, net_name, group_name, fldigi_mode, fldigi_offset,
+                   net_session_key, accepted_session_version_hash, accepted_resource_version_hash,
+                   accepted_snapshot_json, target_scope, target_device_profile_id, target_operating_profile_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    row.get("day_utc"),
-                    row.get("recurrence", "Weekly"),
-                    int(row.get("biweekly_offset_weeks", 0) or 0),
-                    row.get("month_weeks", ""),
-                    row.get("band"),
-                    row.get("mode"),
-                    row.get("frequency"),
-                    row.get("start_utc"),
-                    row.get("end_utc"),
-                    int(row.get("early_checkin", "0") or 0),
-                    1 if row.get("auto_tune") else 0,
-                    row.get("primary_js8call_group"),
-                    row.get("comment"),
-                    row.get("net_name"),
-                    row.get("group_name"),
-                    row.get("fldigi_mode", ""),
-                    row.get("fldigi_offset", ""),
+                    normalized.get("day_utc"),
+                    normalized.get("recurrence", "Weekly"),
+                    int(normalized.get("biweekly_offset_weeks", 0) or 0),
+                    normalized.get("month_weeks", ""),
+                    normalized.get("band"),
+                    normalized.get("mode"),
+                    normalized.get("frequency"),
+                    normalized.get("start_utc"),
+                    normalized.get("end_utc"),
+                    int(normalized.get("early_checkin", "0") or 0),
+                    1 if normalized.get("auto_tune") else 0,
+                    normalized.get("primary_js8call_group"),
+                    normalized.get("comment"),
+                    normalized.get("net_name"),
+                    normalized.get("group_name"),
+                    normalized.get("fldigi_mode", ""),
+                    normalized.get("fldigi_offset", ""),
+                    normalized.get("net_session_key"),
+                    normalized.get("accepted_session_version_hash"),
+                    normalized.get("accepted_resource_version_hash"),
+                    normalized.get("accepted_snapshot_json"),
+                    normalized.get("target_scope"),
+                    normalized.get("target_device_profile_id"),
+                    normalized.get("target_operating_profile_id"),
                 ),
             )
 
     # --------- Net resources --------- #
+
+    def _find_resource_match_for_schedule_row(
+        self,
+        conn: sqlite3.Connection,
+        row: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        normalized = self._strip_internal_row(row)
+        recurrence = str(normalized.get("recurrence") or "Weekly").strip()
+        if recurrence == "Monthly":
+            recurrence = "Periodic"
+        if recurrence == "Bi-Weekly":
+            recurrence = "Weekly"
+        if recurrence not in ("Weekly", "Daily", "Periodic"):
+            recurrence = "Weekly"
+        month_weeks = self._format_month_weeks(str(normalized.get("month_weeks") or ""))
+        if recurrence != "Periodic":
+            month_weeks = ""
+        freq_key = self._normalize_freq_key(normalized.get("frequency"))
+        try:
+            freq_num = float(freq_key)
+        except Exception:
+            freq_num = None
+        found = conn.execute(
+            """
+            SELECT id, resource_set
+            FROM net_resources
+            WHERE TRIM(day_utc)=TRIM(?)
+              AND TRIM(COALESCE(recurrence,''))=TRIM(?)
+              AND TRIM(COALESCE(month_weeks,''))=TRIM(?)
+              AND UPPER(TRIM(COALESCE(group_name,'')))=UPPER(TRIM(?))
+              AND UPPER(TRIM(COALESCE(band,'')))=UPPER(TRIM(?))
+              AND UPPER(TRIM(COALESCE(mode,'')))=UPPER(TRIM(?))
+              AND TRIM(start_utc)=TRIM(?)
+              AND TRIM(end_utc)=TRIM(?)
+              AND UPPER(TRIM(COALESCE(net_name,'')))=UPPER(TRIM(?))
+              AND UPPER(TRIM(COALESCE(fldigi_mode,'')))=UPPER(TRIM(?))
+              AND TRIM(COALESCE(fldigi_offset,''))=TRIM(?)
+              AND (
+                    (CAST(? AS REAL) IS NOT NULL AND ABS(CAST(COALESCE(frequency,'0') AS REAL) - CAST(? AS REAL)) < 0.000001)
+                    OR TRIM(COALESCE(frequency,''))=TRIM(?)
+                  )
+            ORDER BY
+              CASE LOWER(TRIM(COALESCE(source_type,'')))
+                WHEN 'builtin' THEN 0
+                WHEN 'imported' THEN 1
+                WHEN 'manual' THEN 2
+                ELSE 3
+              END,
+              id ASC
+            LIMIT 1
+            """,
+            (
+                self._normalize_day(str(normalized.get("day_utc") or "")),
+                recurrence,
+                month_weeks,
+                str(normalized.get("group_name") or "").strip(),
+                str(normalized.get("band") or "").strip(),
+                str(normalized.get("mode") or "").strip(),
+                self._normalize_hhmm(str(normalized.get("start_utc") or "")),
+                self._normalize_hhmm(str(normalized.get("end_utc") or "")),
+                str(normalized.get("net_name") or "").strip(),
+                str(normalized.get("fldigi_mode") or "").strip(),
+                str(normalized.get("fldigi_offset") or "").strip(),
+                freq_num if freq_num is not None else None,
+                freq_num if freq_num is not None else None,
+                freq_key,
+            ),
+        ).fetchone()
+        if not found:
+            return None
+        try:
+            rid = int(found[0] or 0)
+        except Exception:
+            rid = 0
+        if rid <= 0:
+            return None
+        return {
+            "id": rid,
+            "resource_set": str(found[1] or "").strip() or "Custom",
+        }
+
+    def _ensure_manual_schedule_resources(
+        self,
+        conn: sqlite3.Connection,
+        rows: List[Dict[str, Any]],
+    ) -> Tuple[List[Dict[str, Any]], int, int]:
+        linked_rows: List[Dict[str, Any]] = []
+        created = 0
+        linked = 0
+        for row in rows:
+            normalized = normalize_schedule_target_fields(dict(row))
+            resource_id = normalized.get("_resource_id")
+            if resource_id not in (None, ""):
+                existing_resource = None
+                try:
+                    existing_resource = self._load_resource_row_by_id(conn, int(resource_id))
+                except Exception:
+                    existing_resource = None
+                if existing_resource and self._schedule_row_matches_resource_row(normalized, existing_resource):
+                    linked_rows.append(normalized)
+                    continue
+                normalized.pop("_resource_id", None)
+                normalized.pop("_resource_set", None)
+                if existing_resource:
+                    linked_rows.append(normalized)
+                    continue
+            match = self._find_resource_match_for_schedule_row(conn, normalized)
+            if match:
+                normalized["_resource_id"] = int(match["id"])
+                normalized["_resource_set"] = str(match.get("resource_set") or "Custom")
+                linked += 1
+                linked_rows.append(normalized)
+                continue
+            rid = self._upsert_resource_row(
+                conn,
+                normalized,
+                resource_set="Custom",
+                source_type="manual",
+                source_ref="auto_from_schedule",
+                readonly=1,
+                resource_id=None,
+                update_existing=False,
+            )
+            if rid:
+                normalized["_resource_id"] = int(rid)
+                normalized["_resource_set"] = "Custom"
+                created += 1
+                linked += 1
+            linked_rows.append(normalized)
+        return linked_rows, created, linked
 
     @staticmethod
     def _resource_source_label(source_type: str) -> str:
@@ -3116,7 +4270,8 @@ class NetScheduleTab(QWidget):
         fld_offset = (chosen.get("fldigi_offset") or "").strip()
         return fld_mode, fld_offset
 
-    def _schedule_dup_key(self, row: Dict[str, Any]) -> Tuple[str, str, str, str, str, str]:
+    def _schedule_dup_key(self, row: Dict[str, Any]) -> Tuple[str, str, str, str, str, str, str, str, str]:
+        target_scope, target_device_profile_id, target_operating_profile_id = schedule_target_identity_parts(row)
         return (
             self._normalize_day(str(row.get("day_utc") or "")),
             self._normalize_hhmm(str(row.get("start_utc") or "")),
@@ -3124,6 +4279,9 @@ class NetScheduleTab(QWidget):
             str(row.get("band") or "").strip().upper(),
             self._normalize_freq_key(row.get("frequency")),
             str(row.get("mode") or "").strip().upper(),
+            target_scope,
+            target_device_profile_id,
+            target_operating_profile_id,
         )
 
     @staticmethod
@@ -3250,260 +4408,24 @@ class NetScheduleTab(QWidget):
         resource_id: Optional[int] = None,
         update_existing: bool = True,
     ) -> int:
-        row = self._strip_internal_row(row)
-        key = self._schedule_dup_key(row)
-        recurrence_key = str(row.get("recurrence", "Weekly") or "Weekly").strip()
-        month_weeks_key = str(row.get("month_weeks", "") or "").strip()
-        group_key = str(row.get("group_name", "") or "").strip()
-        net_name_key = str(row.get("net_name", "") or "").strip()
-        freq_num: Optional[float] = None
-        try:
-            freq_num = float(key[4])
-        except Exception:
-            freq_num = None
-        if resource_id:
-            cur = conn.execute(
-                """
-                UPDATE net_resources
-                   SET resource_set=?,
-                       source_type=?,
-                       source_ref=?,
-                       readonly=?,
-                       day_utc=?,
-                       recurrence=?,
-                       biweekly_offset_weeks=?,
-                       month_weeks=?,
-                       group_name=?,
-                       band=?,
-                       mode=?,
-                       frequency=?,
-                       start_utc=?,
-                       end_utc=?,
-                       early_checkin=?,
-                       primary_js8call_group=?,
-                       coverage=?,
-                       comment=?,
-                       net_name=?,
-                       fldigi_mode=?,
-                       fldigi_offset=?,
-                       updated_utc=?
-                 WHERE id=?
-                """,
-                (
-                    resource_set,
-                    source_type,
-                    source_ref,
-                    int(readonly),
-                    row.get("day_utc", ""),
-                    row.get("recurrence", "Weekly"),
-                    int(row.get("biweekly_offset_weeks", 0) or 0),
-                    row.get("month_weeks", ""),
-                    row.get("group_name", ""),
-                    row.get("band", ""),
-                    row.get("mode", ""),
-                    self._normalize_freq_key(row.get("frequency")),
-                    row.get("start_utc", ""),
-                    row.get("end_utc", ""),
-                    int(row.get("early_checkin", 0) or 0),
-                    row.get("primary_js8call_group", ""),
-                    row.get("coverage", ""),
-                    row.get("comment", ""),
-                    row.get("net_name", ""),
-                    row.get("fldigi_mode", ""),
-                    row.get("fldigi_offset", ""),
-                    self._utc_now_iso(),
-                    int(resource_id),
-                ),
-            )
-            if int(cur.rowcount or 0) > 0:
-                return int(resource_id)
-
-        existing = conn.execute(
-            """
-            SELECT id
-              FROM net_resources
-             WHERE TRIM(resource_set)=TRIM(?)
-               AND TRIM(day_utc)=TRIM(?)
-               AND TRIM(recurrence)=TRIM(?)
-               AND TRIM(COALESCE(month_weeks,''))=TRIM(?)
-               AND UPPER(TRIM(COALESCE(group_name,'')))=UPPER(TRIM(?))
-               AND TRIM(start_utc)=TRIM(?)
-               AND TRIM(end_utc)=TRIM(?)
-               AND UPPER(TRIM(COALESCE(band,'')))=UPPER(TRIM(?))
-               AND UPPER(TRIM(COALESCE(mode,'')))=UPPER(TRIM(?))
-               AND (
-                     (CAST(? AS REAL) IS NOT NULL AND ABS(CAST(COALESCE(frequency,'0') AS REAL) - CAST(? AS REAL)) < 0.000001)
-                     OR TRIM(COALESCE(frequency,''))=TRIM(?)
-                   )
-               AND UPPER(TRIM(COALESCE(net_name,'')))=UPPER(TRIM(?))
-             LIMIT 1
-            """,
-            (
-                resource_set,
-                key[0],
-                recurrence_key,
-                month_weeks_key,
-                group_key,
-                key[1],
-                key[2],
-                key[3],
-                key[5],
-                freq_num if freq_num is not None else None,
-                freq_num if freq_num is not None else None,
-                key[4],
-                net_name_key,
-            ),
-        ).fetchone()
-        if existing:
-            rid = int(existing[0])
-            if not update_existing:
-                return rid
-            conn.execute(
-                """
-                UPDATE net_resources
-                   SET source_type=?,
-                       source_ref=?,
-                       readonly=?,
-                       recurrence=?,
-                       biweekly_offset_weeks=?,
-                       month_weeks=?,
-                       group_name=?,
-                       early_checkin=?,
-                       primary_js8call_group=?,
-                       coverage=?,
-                       comment=?,
-                       net_name=?,
-                       fldigi_mode=?,
-                       fldigi_offset=?,
-                       updated_utc=?
-                 WHERE id=?
-                """,
-                (
-                    source_type,
-                    source_ref,
-                    int(readonly),
-                    row.get("recurrence", "Weekly"),
-                    int(row.get("biweekly_offset_weeks", 0) or 0),
-                    row.get("month_weeks", ""),
-                    row.get("group_name", ""),
-                    int(row.get("early_checkin", 0) or 0),
-                    row.get("primary_js8call_group", ""),
-                    row.get("coverage", ""),
-                    row.get("comment", ""),
-                    row.get("net_name", ""),
-                    row.get("fldigi_mode", ""),
-                    row.get("fldigi_offset", ""),
-                    self._utc_now_iso(),
-                    rid,
-                ),
-            )
-            return rid
-
-        cur = conn.execute(
-            """
-            INSERT INTO net_resources
-              (resource_set, source_type, source_ref, readonly, day_utc, recurrence, biweekly_offset_weeks,
-               month_weeks, group_name, band, mode, frequency, start_utc, end_utc, early_checkin,
-               primary_js8call_group, coverage, comment, net_name, fldigi_mode, fldigi_offset, updated_utc)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                resource_set,
-                source_type,
-                source_ref,
-                int(readonly),
-                row.get("day_utc", ""),
-                row.get("recurrence", "Weekly"),
-                int(row.get("biweekly_offset_weeks", 0) or 0),
-                row.get("month_weeks", ""),
-                row.get("group_name", ""),
-                row.get("band", ""),
-                row.get("mode", ""),
-                self._normalize_freq_key(row.get("frequency")),
-                row.get("start_utc", ""),
-                row.get("end_utc", ""),
-                int(row.get("early_checkin", 0) or 0),
-                row.get("primary_js8call_group", ""),
-                row.get("coverage", ""),
-                row.get("comment", ""),
-                row.get("net_name", ""),
-                row.get("fldigi_mode", ""),
-                row.get("fldigi_offset", ""),
-                self._utc_now_iso(),
-            ),
+        """Write through the single legacy/canonical compatibility boundary."""
+        normalized = self._strip_internal_row(row)
+        normalized["frequency"] = self._normalize_freq_key(normalized.get("frequency"))
+        return upsert_legacy_resource(
+            conn,
+            normalized,
+            resource_set=resource_set,
+            source_type=source_type,
+            source_ref=source_ref,
+            readonly=readonly,
+            resource_id=resource_id,
+            update_existing=update_existing,
+            synchronize=False,
         )
-        return int(cur.lastrowid or 0)
 
     def _dedupe_net_resources(self, conn: sqlite3.Connection) -> int:
-        """
-        Collapse accidental duplicate resource rows by normalized identity key.
-        Keeps the most recently updated/newest row per key.
-        """
-        table_ok = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='net_resources'"
-        ).fetchone()
-        if not table_ok:
-            return 0
-        cur = conn.execute(
-            """
-            SELECT
-                id,
-                resource_set,
-                day_utc,
-                recurrence,
-                month_weeks,
-                group_name,
-                band,
-                mode,
-                frequency,
-                start_utc,
-                end_utc,
-                net_name,
-                updated_utc
-            FROM net_resources
-            ORDER BY COALESCE(updated_utc, '') DESC, id DESC
-            """
-        )
-        seen: set[Tuple[str, str, str, str, str, str, str, str, str, str, str]] = set()
-        delete_ids: List[int] = []
-        for (
-            rid,
-            resource_set,
-            day_utc,
-            recurrence,
-            month_weeks,
-            group_name,
-            band,
-            mode,
-            frequency,
-            start_utc,
-            end_utc,
-            net_name,
-            _updated_utc,
-        ) in cur.fetchall():
-            freq_norm = self._normalize_freq_key(frequency)
-            key = (
-                str(resource_set or "").strip().upper(),
-                self._normalize_day(str(day_utc or "")),
-                str(recurrence or "Weekly").strip().upper(),
-                str(month_weeks or "").strip().replace(" ", ""),
-                str(group_name or "").strip().upper(),
-                str(band or "").strip().upper(),
-                str(mode or "").strip().upper(),
-                freq_norm,
-                self._normalize_hhmm(str(start_utc or "")),
-                self._normalize_hhmm(str(end_utc or "")),
-                str(net_name or "").strip().upper(),
-            )
-            if key in seen:
-                delete_ids.append(int(rid))
-                continue
-            seen.add(key)
-        if not delete_ids:
-            return 0
-        marks = ",".join(["?"] * len(delete_ids))
-        conn.execute(f"DELETE FROM net_resources WHERE id IN ({marks})", delete_ids)
-        return len(delete_ids)
+        """Delegate dedupe to the single compatibility transaction owner."""
+        return dedupe_legacy_resources(conn, synchronize=False)
 
     def _sync_builtin_resource_sets(
         self,
@@ -3525,14 +4447,13 @@ class NetScheduleTab(QWidget):
             rows = self._parse_schedule_json(path)
             if not rows:
                 continue
-            conn.execute(
-                """
-                DELETE FROM net_resources
-                 WHERE LOWER(TRIM(COALESCE(source_type, ''))) = 'builtin'
-                   AND TRIM(COALESCE(resource_set, '')) = TRIM(?)
-                """,
+            existing_ids = conn.execute(
+                """SELECT id FROM net_resources
+                     WHERE LOWER(TRIM(COALESCE(source_type, ''))) = 'builtin'
+                       AND TRIM(COALESCE(resource_set, '')) = TRIM(?)""",
                 (resource_set,),
-            )
+            ).fetchall()
+            delete_legacy_resources(conn, (item[0] for item in existing_ids), synchronize=False)
             for row in rows:
                 self._upsert_resource_row(
                     conn,
@@ -3554,14 +4475,6 @@ class NetScheduleTab(QWidget):
         db_path = self._db_path()
         conn = sqlite3.connect(db_path)
         try:
-            self._create_tables(conn)
-            self._ensure_columns_with_recreate(conn)
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_net_resources_set_time
-                    ON net_resources(resource_set, day_utc, start_utc, end_utc)
-                """
-            )
             current_count = int(conn.execute("SELECT COUNT(*) FROM net_resources").fetchone()[0] or 0)
             updated_builtin_sets = self._sync_builtin_resource_sets(conn, force=(current_count == 0))
             if updated_builtin_sets:
@@ -3590,6 +4503,7 @@ class NetScheduleTab(QWidget):
             removed = self._dedupe_net_resources(conn)
             if removed:
                 log.info("NetSchedule: deduped %d net resource rows during bootstrap", removed)
+            finalize_legacy_resource_projection(conn)
             conn.commit()
         except Exception as e:
             log.error("NetSchedule: failed bootstrapping net resources: %s", e)
@@ -3759,17 +4673,25 @@ class NetScheduleTab(QWidget):
                 str(row.get("net_name") or ""),
                 str(row.get("coverage") or ""),
                 str(row.get("comment") or ""),
-                str(row.get("updated_utc") or ""),
+                self._format_age_label(row.get("updated_utc")),
             ]
             for c, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 if c == self.RES_COL_SOURCE:
                     item.setData(Qt.UserRole, int(row.get("id") or 0))
+                if c == self.RES_COL_UPDATED:
+                    raw_updated = str(row.get("updated_utc") or "").strip()
+                    item.setToolTip(raw_updated if raw_updated else "No saved timestamp available.")
                 self.resources_table.setItem(r, c, item)
         self.resources_table.setSortingEnabled(True)
+        if hasattr(self, "resources_count_label"):
+            total = len(getattr(self, "_resource_rows", []) or [])
+            shown = len(rows)
+            self.resources_count_label.setText(f"{shown} shown / {total} total" if total else "0 resources")
         self._update_resource_action_state()
         self._resize_table_columns()
+        self._apply_schedule_table_height_hints()
 
     def _update_resource_action_state(self) -> None:
         selected_rows = {idx.row() for idx in self.resources_table.selectionModel().selectedRows()} if self.resources_table.selectionModel() else set()
@@ -3782,6 +4704,15 @@ class NetScheduleTab(QWidget):
         self.add_selected_resource_action.setEnabled(has_selected)
         self.add_filtered_resource_action.setEnabled(has_filtered)
         self.add_to_schedule_default_action.setEnabled(has_selected or has_filtered)
+        self.add_to_schedule_default_action.setText("Add Selected Rows" if has_selected else "Add Filtered Rows")
+        self.add_selected_resource_action.setText("Add Selected Rows")
+        self.add_filtered_resource_action.setText("Add Filtered Rows")
+        self.add_to_schedule_btn.setText("Add Selected Rows" if has_selected else "Add Filtered Rows")
+        self.add_to_schedule_btn.setToolTip(
+            "Copy selected library rows into the HF Net schedule being edited. Library rows stay saved."
+            if has_selected
+            else "Copy all currently filtered library rows into the HF Net schedule being edited."
+        )
         self.manage_resources_btn.setEnabled(True)
         self.manage_resources_default_action.setEnabled(True)
         self.manage_import_json_action.setEnabled(True)
@@ -4050,8 +4981,6 @@ class NetScheduleTab(QWidget):
         db_path = self._db_path()
         conn = sqlite3.connect(db_path)
         try:
-            self._create_tables(conn)
-            self._ensure_columns_with_recreate(conn)
             self._upsert_resource_row(
                 conn,
                 edited,
@@ -4061,6 +4990,7 @@ class NetScheduleTab(QWidget):
                 readonly=1,
                 resource_id=int(original.get("id") or 0),
             )
+            finalize_legacy_resource_projection(conn)
             conn.commit()
         except Exception as e:
             try:
@@ -4099,8 +5029,7 @@ class NetScheduleTab(QWidget):
         db_path = self._db_path()
         conn = sqlite3.connect(db_path)
         try:
-            marks = ",".join(["?"] * len(ids))
-            conn.execute(f"DELETE FROM net_resources WHERE id IN ({marks})", ids)
+            delete_legacy_resources(conn, ids)
             conn.commit()
         except Exception as e:
             try:
@@ -4149,7 +5078,7 @@ class NetScheduleTab(QWidget):
         active_rows: List[Dict[str, Any]],
         candidates: List[Dict[str, Any]],
     ) -> List[str]:
-        active_map: Dict[Tuple[str, str, str, str, str, str], Dict[str, Any]] = {}
+        active_map: Dict[Tuple[str, str, str, str, str, str, str, str, str], Dict[str, Any]] = {}
         for row in active_rows:
             active_map[self._schedule_dup_key(row)] = row
         conflicts: List[str] = []
@@ -4167,7 +5096,8 @@ class NetScheduleTab(QWidget):
 
     def _add_resources_to_schedule(self, resources: List[Dict[str, Any]], *, origin: str) -> None:
         if not resources:
-            QMessageBox.information(self, "Net Resources", "No resources selected.")
+            if hasattr(self, "net_resources_hint"):
+                self.net_resources_hint.setText("Select library rows before adding them to the schedule.")
             return
         try:
             active_rows = self._collect_rows()
@@ -4187,16 +5117,6 @@ class NetScheduleTab(QWidget):
                 f"{details}",
             )
             return
-        self._highlight_resource_candidates(resources)
-        confirm = QMessageBox.question(
-            self,
-            "Add to Schedule",
-            f"Add Selected {len(candidates)} Nets for Automated Scheduling?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
-        )
-        if confirm != QMessageBox.Yes:
-            return
         prospective_rows = [self._strip_internal_row(r) for r in active_rows]
         prospective_rows.extend(self._strip_internal_row(r) for r in candidates)
         if not self._enforce_net_priority_for_conflicts(prospective_rows, operation_label="add"):
@@ -4207,7 +5127,8 @@ class NetScheduleTab(QWidget):
         self._raw_rows = self._collect_rows()
         self._update_delete_button_state()
         self._schedule_net_sop_conflict_refresh(force=True)
-        QMessageBox.information(self, "Net Resources", f"Added {len(candidates)} row(s) from {origin}.")
+        if hasattr(self, "net_resources_hint"):
+            self.net_resources_hint.setText(f"Added {len(candidates)} library row(s) from {origin}. Save Schedule when ready.")
 
     def _add_resources_default(self) -> None:
         selected = self._selected_resource_rows()
@@ -4266,6 +5187,49 @@ class NetScheduleTab(QWidget):
         end = end_item.text().strip() if end_item else ""
         net_name = net_edit.text().strip() if isinstance(net_edit, QLineEdit) else ""
         return not (day or band or freq or start or end or net_name)
+
+    def focus_source_segment(self, segment: Any) -> bool:
+        raw = getattr(segment, "raw", {}) if segment is not None else {}
+        try:
+            target_row_id = int(raw.get("source_row_id") or 0)
+        except Exception:
+            target_row_id = 0
+        target_key = str(raw.get("source_key") or "").strip()
+        target_resource_id = raw.get("resource_id")
+        try:
+            target_resource_id_int = int(target_resource_id or 0)
+        except Exception:
+            target_resource_id_int = 0
+        for r in range(self.table.rowCount()):
+            select_widget = self.table.cellWidget(r, self.COL_SELECT)
+            if isinstance(select_widget, QWidget):
+                try:
+                    row_id = int(select_widget.property("source_row_id") or 0)
+                except Exception:
+                    row_id = 0
+                row_key = str(select_widget.property("source_key") or "").strip()
+                try:
+                    resource_id = int(select_widget.property("resource_id") or 0)
+                except Exception:
+                    resource_id = 0
+                if (
+                    (target_row_id > 0 and row_id == target_row_id)
+                    or (target_key and row_key == target_key)
+                    or (target_resource_id_int > 0 and resource_id == target_resource_id_int)
+                ):
+                    self.table.selectRow(r)
+                    widget = self.table.cellWidget(r, self.COL_NETNAME)
+                    item = self.table.item(r, self.COL_FREQ)
+                    if item is not None:
+                        self.table.scrollToItem(item)
+                        self.table.setCurrentItem(item)
+                    if isinstance(widget, QLineEdit):
+                        widget.setFocus(Qt.TabFocusReason)
+                        widget.selectAll()
+                    else:
+                        self.table.setFocus(Qt.TabFocusReason)
+                    return True
+        return False
 
     def _collect_rows_by_ui_index(
         self,
@@ -4433,10 +5397,10 @@ class NetScheduleTab(QWidget):
             and str(schedule.get("fldigi_offset") or "").strip() == str(resource_row.get("fldigi_offset") or "").strip()
         )
 
-    def _move_selected_schedule_rows_to_resources(self) -> None:
+    def _save_selected_schedule_rows_as_resources(self) -> None:
         selected = self._checked_schedule_row_indexes()
         if not selected:
-            QMessageBox.information(self, "Move to Resources", "No Net Schedule rows selected.")
+            QMessageBox.information(self, "Save as Resources", "No Net Schedule rows selected.")
             return
         try:
             by_ui = self._collect_rows_by_ui_index()
@@ -4450,8 +5414,6 @@ class NetScheduleTab(QWidget):
         conn = sqlite3.connect(db_path)
         moved = 0
         try:
-            self._create_tables(conn)
-            self._ensure_columns_with_recreate(conn)
             for r in selected:
                 row = by_ui.get(r)
                 if not row:
@@ -4479,7 +5441,7 @@ class NetScheduleTab(QWidget):
                         existing_set = str(existing_resource.get("resource_set") or "").strip() or target_set
                 if existing_resource and existing_source_type == "builtin":
                     if self._schedule_row_matches_resource_row(row, existing_resource):
-                        # Unchanged built-in row: treat move as schedule delete only.
+                        # Unchanged built-in row is already available as a resource.
                         moved += 1
                         continue
                 self._upsert_resource_row(
@@ -4487,30 +5449,31 @@ class NetScheduleTab(QWidget):
                     row,
                     resource_set=existing_set or "Custom",
                     source_type="manual",
-                    source_ref="moved_from_schedule",
+                    source_ref="saved_from_schedule",
                     readonly=1,
                     resource_id=existing_id,
                 )
                 moved += 1
+            finalize_legacy_resource_projection(conn)
             conn.commit()
         except Exception as e:
             try:
                 conn.rollback()
             except Exception:
                 pass
-            QMessageBox.critical(self, "Move Failed", f"Could not move rows to resources:\n{e}")
+            QMessageBox.critical(self, "Save Failed", f"Could not save selected rows to the Net Row Library:\n{e}")
             return
         finally:
             conn.close()
-        for r in sorted(selected, reverse=True):
-            self.table.removeRow(r)
         self._load_resources_from_db()
         self._refresh_resource_set_combo()
         self._refresh_resources_table()
         self._update_delete_button_state()
-        if moved > 0:
-            self._mark_dirty()
-        QMessageBox.information(self, "Move to Resources", f"Moved {moved} row(s) to Net Resources.")
+        QMessageBox.information(
+            self,
+            "Saved to Net Row Library",
+            f"Saved {moved} selected row(s) as reusable library rows. The HF Net schedule was not changed.",
+        )
 
     def _resource_import_key(
         self, row: Dict[str, Any]
@@ -4549,130 +5512,31 @@ class NetScheduleTab(QWidget):
         source_ref: str,
         readonly: int = 1,
     ) -> Tuple[bool, int]:
-        """
-        Upsert import row using import join key:
-          day + recurrence + month_weeks + band + mode + frequency + start + end + fldigi_mode
-          (within selected resource_set)
-        Returns (inserted, id).
-        """
+        """Match the legacy import key, then write through the compatibility owner."""
         normalized = self._strip_internal_row(row)
-        (
-            day_key,
-            recurrence_key,
-            month_weeks_key,
-            band_key,
-            mode_key,
-            freq_key,
-            start_key,
-            end_key,
-            fld_mode_key,
-        ) = self._resource_import_key(normalized)
-        freq_num: Optional[float] = None
-        try:
-            freq_num = float(freq_key)
-        except Exception:
-            freq_num = None
+        (day_key, recurrence_key, month_weeks_key, band_key, mode_key, freq_key,
+         start_key, end_key, fld_mode_key) = self._resource_import_key(normalized)
         existing = conn.execute(
-            """
-            SELECT id
-              FROM net_resources
-             WHERE TRIM(resource_set)=TRIM(?)
-               AND TRIM(day_utc)=TRIM(?)
-               AND TRIM(COALESCE(recurrence,''))=TRIM(?)
-               AND TRIM(COALESCE(month_weeks,''))=TRIM(?)
-               AND UPPER(TRIM(COALESCE(band,'')))=UPPER(TRIM(?))
-               AND UPPER(TRIM(COALESCE(mode,'')))=UPPER(TRIM(?))
-               AND TRIM(start_utc)=TRIM(?)
-               AND TRIM(end_utc)=TRIM(?)
-               AND UPPER(TRIM(COALESCE(fldigi_mode,'')))=UPPER(TRIM(?))
-               AND (
-                     (CAST(? AS REAL) IS NOT NULL AND ABS(CAST(COALESCE(frequency,'0') AS REAL) - CAST(? AS REAL)) < 0.000001)
-                     OR TRIM(COALESCE(frequency,''))=TRIM(?)
-                   )
-             ORDER BY id DESC
-             LIMIT 1
-            """,
-            (
-                resource_set,
-                day_key,
-                recurrence_key,
-                month_weeks_key,
-                band_key,
-                mode_key,
-                start_key,
-                end_key,
-                fld_mode_key,
-                freq_num if freq_num is not None else None,
-                freq_num if freq_num is not None else None,
-                freq_key,
-            ),
+            """SELECT id FROM net_resources
+                 WHERE TRIM(resource_set)=TRIM(?)
+                   AND TRIM(day_utc)=TRIM(?)
+                   AND TRIM(COALESCE(recurrence,''))=TRIM(?)
+                   AND TRIM(COALESCE(month_weeks,''))=TRIM(?)
+                   AND UPPER(TRIM(COALESCE(band,'')))=UPPER(TRIM(?))
+                   AND UPPER(TRIM(COALESCE(mode,'')))=UPPER(TRIM(?))
+                   AND TRIM(start_utc)=TRIM(?) AND TRIM(end_utc)=TRIM(?)
+                   AND UPPER(TRIM(COALESCE(fldigi_mode,'')))=UPPER(TRIM(?))
+                   AND TRIM(COALESCE(frequency,''))=TRIM(?)
+                 ORDER BY id DESC LIMIT 1""",
+            (resource_set, day_key, recurrence_key, month_weeks_key, band_key, mode_key,
+             start_key, end_key, fld_mode_key, freq_key),
         ).fetchone()
-        if existing:
-            rid = int(existing[0])
-            conn.execute(
-                """
-                UPDATE net_resources
-                   SET resource_set=?,
-                       source_type=?,
-                       source_ref=?,
-                       readonly=?,
-                       day_utc=?,
-                       recurrence=?,
-                       biweekly_offset_weeks=?,
-                       month_weeks=?,
-                       group_name=?,
-                       band=?,
-                       mode=?,
-                       frequency=?,
-                       start_utc=?,
-                       end_utc=?,
-                       early_checkin=?,
-                       primary_js8call_group=?,
-                       coverage=?,
-                       comment=?,
-                       net_name=?,
-                       fldigi_mode=?,
-                       fldigi_offset=?,
-                       updated_utc=?
-                 WHERE id=?
-                """,
-                (
-                    resource_set,
-                    source_type,
-                    source_ref,
-                    int(readonly),
-                    normalized.get("day_utc", ""),
-                    normalized.get("recurrence", "Weekly"),
-                    int(normalized.get("biweekly_offset_weeks", 0) or 0),
-                    normalized.get("month_weeks", ""),
-                    normalized.get("group_name", ""),
-                    normalized.get("band", ""),
-                    normalized.get("mode", ""),
-                    self._normalize_freq_key(normalized.get("frequency")),
-                    normalized.get("start_utc", ""),
-                    normalized.get("end_utc", ""),
-                    int(normalized.get("early_checkin", 0) or 0),
-                    normalized.get("primary_js8call_group", ""),
-                    normalized.get("coverage", ""),
-                    normalized.get("comment", ""),
-                    normalized.get("net_name", ""),
-                    normalized.get("fldigi_mode", ""),
-                    normalized.get("fldigi_offset", ""),
-                    self._utc_now_iso(),
-                    rid,
-                ),
-            )
-            return False, rid
+        resource_id = int(existing[0]) if existing else None
         rid = self._upsert_resource_row(
-            conn,
-            normalized,
-            resource_set=resource_set,
-            source_type=source_type,
-            source_ref=source_ref,
-            readonly=readonly,
-            resource_id=None,
+            conn, normalized, resource_set=resource_set, source_type=source_type,
+            source_ref=source_ref, readonly=readonly, resource_id=resource_id,
         )
-        return True, rid
+        return existing is None, rid
 
     def _import_source_type(self, path: Path) -> str:
         name = path.name.lower()
@@ -4771,8 +5635,6 @@ class NetScheduleTab(QWidget):
         updated = 0
         removed = 0
         try:
-            self._create_tables(conn)
-            self._ensure_columns_with_recreate(conn)
             incoming_keys = {self._resource_import_key(r) for r in rows}
             if import_mode == "replace":
                 existing = conn.execute(
@@ -4820,9 +5682,7 @@ class NetScheduleTab(QWidget):
                     if key not in incoming_keys:
                         delete_ids.append(int(rid))
                 if delete_ids:
-                    marks = ",".join(["?"] * len(delete_ids))
-                    conn.execute(f"DELETE FROM net_resources WHERE id IN ({marks})", delete_ids)
-                    removed = len(delete_ids)
+                    removed = delete_legacy_resources(conn, delete_ids, synchronize=False)
 
             for row in rows:
                 was_insert, _ = self._upsert_resource_row_by_import_key(
@@ -4837,6 +5697,7 @@ class NetScheduleTab(QWidget):
                     inserted += 1
                 else:
                     updated += 1
+            finalize_legacy_resource_projection(conn)
             conn.commit()
         except Exception as e:
             try:

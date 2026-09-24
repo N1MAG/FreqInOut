@@ -1,0 +1,246 @@
+Area Assessment|F!505
+
+. Version: 05/28/2026 - @SITREP
+
+# Form published 01/19/2025. See SitRepNet.com for details and supporting docs for this form. KN4AM
+# Revised 03/07/2025, 10/20/2025, 05/28/2026
+
+! Area Assessment
+
+. 
+. 
+
+[GR] Maidenhead Grid Square (REQUIRED):
+[ST] State (2-letter code - optional):
+[CT] City or County (optional):
+
+. 
+. 
+
+? 1) Water, Public Utility - Distribution
+@X *Unknown or N/A
+@3 Water distributed to > 99% of the area
+@2 Water distributed to 50% - 99% of the area
+@1 Water distributed to < 50% of the area
+@0 Water distribution destroyed
+
+? 2) Water, Public Utility - Quality
+@X *Unknown or N/A
+@3 Tested/believed to be clean
+@2 Appears clean, no smell
+@1 Does not appear clean
+@0 Contaminated water
+
+? 3) Waste - Sewage System
+@X *Unknown or N/A
+@3 Sewage system works consistently
+@2 Sewage system runs inconsistently
+@1 No waste treatment observed
+@0 Sewage system destroyed
+
+? 4) Waste - Sewage Exposure
+@X *Unknown or N/A
+@3 No standing sewage seen/smelled
+@2 Sewage can be smelled
+@1 Sewage seen, system down
+@0 Sewage seen and smelled, system broken
+
+? 5) Waste - Trash Collection
+@X *Unknown or N/A
+@3 Trash collection reliable, on schedule
+@2 Trash collection limited
+@1 No formal trash collection; trash buildup
+@0 No trash collection; trash buildup
+
+? 6) Waste - Trash Disposal
+@X *Unknown or N/A
+@3 Trash put in proper area/no health issue
+@2 Unknown where trash is being dumped
+@1 Trash dumped, could cause health issues
+@0 Trash buildup causing health issues
+
+? 7) Power - System
+@X *Unknown or N/A
+@3 Power system works
+@2 Rolling brownouts
+@1 Power system unreliable/blackouts
+@0 Power system destroyed
+
+? 8) Power - Distribution
+@X *Unknown or N/A
+@3 > 99% of electric lines are up
+@2 50% -  99% of electric lines are up
+@1 < 50% of lines are up
+@0 Electric lines are down/inoperable/hot lines
+
+? 9) Power - Grid
+@X *Unknown or N/A
+@3 Power grid/station secure, controlled
+@2 Power grid/station unsecured
+@1 Power grid/station not working
+@0 Power grid/station destroyed
+
+? 10) Communications - Internet
+@X *Unknown or N/A
+@3 Internet service reliable
+@2 Internet service fairly reliable
+@1 Internet service unreliable, down
+@0 Internet service destroyed
+
+? 11) Communications - Landline
+@X *Unknown or N/A
+@3 Landline service reliable
+@2 Landline service fairly reliable
+@1 Landline service unreliable, down
+@0 Landline service destroyed
+
+? 12) Communications - Cell
+@X *Unknown or N/A
+@3 Cell service reliable
+@2 Cell service fairly reliable
+@1 Cell service unreliable, down
+@0 Cell service destroyed
+
+? 13) Communications - Mass media
+@X *Unknown or N/A
+@3 Mass media (radio, tv, newspaper) reporting
+@2 At least one form of media reporting
+@1 No media reporting
+@0 Mass media destroyed
+
+? 14) Communications - Postal
+@X *Unknown or N/A
+@3 Postal system reliable
+@2 Postal system fairly reliable
+@1 Postal system unreliable, down
+@0 Postal system destroyed
+
+? 15) Economy - Residential
+@X *Unknown or N/A
+@3 Residential areas are strong, secure
+@2 Residential areas are damaged
+@1 Residential areas should not be occupied
+@0 Residential areas destroyed
+
+? 16) Economy - Employment
+@X *Unknown or N/A
+@3 Unemployment < 5%
+@2 Unemployment 6% - 49% and rising
+@1 Unemployment > 50%
+@0 Virtually no one going to work
+
+? 17) Economy - Retail Commerce
+@X *Unknown or N/A
+@3 Normal commerce in established stores
+@2 Increasing reliance on local farmer's markets
+@1 Open black market with barter economy
+@0 Private barter exchanges only
+
+? 18) Economy - Means of Exchange
+@X *Unknown or N/A
+@3 Cash and credit cards readily accepted
+@2 Cash only with barter increasingly common
+@1 Cash losing value in favor of barter
+@0 Black market and barter economy
+
+? 19) Commercial Infrastructure
+@X *Unknown or N/A
+@3 > 95% of commercial buildings fully functioning
+@2 60% - 95% of commercial buildings functional
+@1 10% - 60% of commercial buildings functional
+@0 < 10% of commercial buildings functional
+
+? 20) Transportation - Roads
+@X *Unknown or N/A
+@3 Roads are navigable, serviceable
+@2 Road(s) partially damaged, affecting flow of traffic
+@1 Extensive damage to road(s), un-navigable to most
+@0 Road systems destroyed
+
+? 21) Transportation - Bridges
+@X *Unknown or N/A
+@3 Bridges are navigable, serviceable
+@2 Bridge(s) partially damaged, affecting flow of traffic
+@1 Extensive damage to bridge(s), un-navigable to most
+@0 Bridge(s) destroyed
+
+? 22) Transportation - Airports
+@X *Unknown or N/A
+@3 Airport is supporting traffic
+@2 Airport inconsistently supporting traffic
+@1 Airport damaged, closed
+@0 Airport destroyed
+
+? 23) Medical - Facilities
+@X *Unknown or N/A
+@3 Medical facilities are up and running
+@2 Medical facilities overcrowded, but running
+@1 Medical facilities not running
+@0 Medical facilities destroyed
+
+? 24) Medical - Supplies
+@X *Unknown or N/A
+@3 Medical facilities are well-supplied
+@2 Medical facilities under-supplied
+@1 Medical facilities unsupplied
+@0 Medical supply services destroyed
+
+? 25) Medical - Emergency
+@X *Unknown or N/A
+@3 Emergency services up and running
+@2 Emergency services understaffed but running
+@1 Emergency services not running
+@0 Emergency services destroyed
+
+? 26) Public Safety - Police
+@X *Unknown or N/A
+@3 Police working with access to 100% of area
+@2 Police working with access to 50% - 99% of areas
+@1 Police not working
+@0 Police destroyed
+
+? 27) Public Safety - Fire Dept.
+@X *Unknown or N/A
+@3 Fire dept. working with access to 100% of area
+@2 Fire dept. working with access to 50% - 99% of areas
+@1 Fire dept. not working
+@0 Fire dept. destroyed
+
+? 28) Public Safety - Crime
+@X *Unknown or N/A
+@3 Crime in area is not an issue
+@2 Crime occurs; majority of locals law-abiding
+@1 Crime rampant, wide-scale looting/theft/etc.
+@0 Crime a major problem; majority of locals not law-abiding
+
+? 29) Attitude - Leadership
+@X *Unknown or N/A
+@3 Community leaders involved, reliable
+@2 Community leaders involved but unreliable
+@1 Community leaders not involved in community
+@0 Community leadership destroyed
+
+? 30) Attitude - Ethnic, religious, social
+@X *Unknown or N/A
+@3 No apparent ethnic/religious/social tension
+@2 Increased ethnic/religious/social tension
+@1 Ethnic/religious/social tension causing sporadic violence
+@0 Ethnic/religious/social tension causing widespread violence, war
+
+? 31) Civil Disturbance
+@X *Unknown or N/A
+@3 Calm, normal commerce and social activities
+@2 Protests and demonstrations with moderate disruption
+@1 Wide-scale rioting, looting, arson with major disruption
+@0 Uncontrolled anarchy, almost all commerce and travel stopped
+
+? 32) Controlling Authority
+@X *Unknown or N/A
+@3 Elected civilian government
+@2 Heavy police presence
+@1 National Guard/Military, Martial Law
+@0 Gangs, local warlords, foreign military
+
+. ______________________________________________________________________
+. FORM COMMENT NOTE: Enter F! number(s) and/or "ALERT" if appropriate. Leave blank unless needed.
+. Designed for use with JS8Reporter for map display.

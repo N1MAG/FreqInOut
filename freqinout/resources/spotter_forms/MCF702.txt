@@ -1,0 +1,77 @@
+SEEN Operator Station & Equipment Details|F!702
+
+# Revision 02-22-2025 - SEEN
+
+! This is a SEEN JS8Spotter MCForms form.
+
+? Station activity level on JS8Call (attended or unattended):
+@1 Station attempts to operate 24/7
+@2 Station operates daily on a schedule
+@3 Station operates daily as available
+@4 Station operates weekly
+@5 Station operates only incidentially
+
+? Station max RF power capability:
+@1 QRP 0-5W
+@2 5-10W
+@3 10-50W
+@4 100W
+@5 300-500W amplified
+@6 Over 500W amplified
+@7 Legal limit amplified
+
+? Primary HF antenna (antenna with longest range and most reliable operation):
+@1 Operating portable at this time
+@2 Center-Fed Dipole
+@3 End Fed Half Wave
+@4 Loop
+@5 Beam - tower mount
+@9 Other
+
+? Additional antennas:
+@1 Yes, additional antennas 
+@2 No additional antennas 
+
+? Bands and modes actively operated at primary station:
+@1 All HF bands, all modes, including CW
+@2 All HF bands, all modes, no CW 
+
+? Digital modes configured (select the best match to your setup):
+@1 JS8Call, + all modes supported by FLDigi + Winlink, VARAC
+@2 JS8Call, + all modes supported by FLDigi + Winlink
+@3 JS8Call, + all modes supported by FLDigi
+@4 JS8Call, + Winlink, VARAC
+@5 JS8Call, + VARAC
+
+? Grid down capabilities:
+@1 Battery capacity for at least 24hrs of continuous low-duty-cycle operating time, solar charging available
+@2 Battery capacity for at least 48hrs of continuous low-duty-cycle operating time, solar charging available
+@3 Battery capacity for at least 72hrs of continuous low-duty-cycle operating time, solar charging available
+@4 Battery capacity for at least 24hrs of continuous low-duty-cycle operating time, no off-grid charging ability
+@5 Battery capacity for at least 48hrs of continuous low-duty-cycle operating time, no off-grid charging ability
+@6 Battery capacity for at least 72hrs of continuous low-duty-cycle operating time, no off-grid charging ability
+@7 Limited (0-23hrs) or no battery capacity
+@8 Whole house generator with battery backup and off-grid charging ability
+
+? Your most active band for JS8Call:
+@1 All SEEN and AmRRON frequencies 
+@2 160m / 1.842 MHz
+@3 80m / 3.578 MHz
+@4 40m / 7.078 MHz
+@5 30m / 10.130 MHz
+@6 20m / 14.078 MHz
+@8 17m / 18.104 MHz
+@9 15m / 21.078 MHz
+@0 12m / 24.922 MHz
+@A 10m / 28.078 MHz
+@B 6m / 50.318 MHz
+@C 2m / 144.178 MHz
+
+? Are you comfortable with allowing other stations to use your system for relays and message store?
+@1 Yes
+@2 No
+
+
+
+
+

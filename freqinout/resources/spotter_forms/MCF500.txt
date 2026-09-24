@@ -1,0 +1,124 @@
+Supply Survey|F!500
+
+. Version: 10/20/2025 - @SITREP
+
+# Form updated 01/15/2025. See SitRepNet.com for more info. KN4AM
+# Revised 03/05/2025, 10/20/2025
+
+! Local Supply Survey
+
+. Supply survey for your immediate area. 
+. Objective is to gauge both availability of supplies and level of consumer anxiety.
+. 
+[ST] State (2-letter code):
+[GR] Maidenhead Grid Square:
+[CT] City or County:
+. 
+. 
+
+? Mood & Conditions:
+@1 *Calm, nothing unusual noted
+@2 Longer lines than usual
+@3 Very crowded, worried mood
+@4 Panic buying - illogical buying, many shelves bare
+@5 Stores closed due to lack of inventory
+@6 Stores closed, being looted and trashed
+@7 Unknown
+. 
+
+! Groceries
+? Eggs:
+@1 *Normal supply and selection, full shelves
+@2 Generally available, but slow, sporadic restocking
+@3 Very limited availability, shelves stripped as soon as they are stocked
+@4 None available for a full day or longer
+@5 Unknown
+
+? Milk:
+@1 *Normal supply and selection, full shelves
+@2 Generally available, but slow, sporadic restocking
+@3 Very limited availability, shelves stripped as soon as they are stocked
+@4 None available for a full day or longer
+@5 Unknown
+
+? Bread:
+@1 *Normal supply and selection, full shelves
+@2 Generally available, but slow, sporadic restocking
+@3 Very limited availability, shelves stripped as soon as they are stocked
+@4 None available for a full day or longer
+@5 Unknown
+
+? Bottled water:
+@1 *Normal supply and selection, full shelves
+@2 Generally available, but slow, sporadic restocking
+@3 Very limited availability, shelves stripped as soon as they are stocked
+@4 None available for a full day or longer
+@5 Unknown
+
+
+! Fuel
+? Gasoline:
+@1 *Normal supply, no shortages noted
+@2 Some pumps closed due to lack of fuel
+@3 Some stations closed due to lack of fuel
+@4 Long lines at any open station
+@5 No fuel available in this immediate area
+@6 Unknown
+
+? Diesel:
+@1 *Normal supply, no shortages noted
+@2 Some pumps closed due to lack of fuel
+@3 Some stations closed due to lack of fuel
+@4 Long lines at any open station
+@5 No fuel available in this immediate area
+@6 Unknown
+
+? Propane (Portable tank refills):
+@1 *Normal supply, no shortages noted
+@2 Some refill stations closed due to lack of fuel
+@3 Long lines at any open refill station
+@4 No fuel available in this immediate area
+@5 Unknown
+
+! Hardware
+? Batteries, Common sizes (C, D, AA)
+@1 *Normal supply, full shelves
+@2 Generally available, but slow, sporadic restocking
+@3 Very limited availability, shelves stripped as soon as they are stocked
+@4 None available for a full day or longer
+@5 Unknown
+
+? Gasoline storage containers (empty)
+@1 *Normal supply, full shelves
+@2 Generally available, but slow, sporadic restocking
+@3 Very limited availability, shelves stripped as soon as they are stocked
+@4 None available for a full day or longer
+@5 Unknown
+
+? Ammunition, Common types (9mm, 5.56mm, .357, etc.)
+@1 *Normal supply and selection, full shelves
+@2 Generally available, but slow, sporadic restocking
+@3 Very limited availability, shelves stripped as soon as they are stocked
+@4 None available for a full day or longer
+@5 Unknown
+
+? Building Repair Materials (plywood, tarps, lumber)
+@1 *Normal supply and selection, full shelves
+@2 Generally available, but slow, sporadic restocking
+@3 Very limited availability, shelves stripped as soon as they are stocked
+@4 None available for a full day or longer
+@5 Unknown
+
+! Location and background context
+? Type of Area
+@1 Major metro urban area
+@2 Urban area
+@3 Suburban area
+@4 Medium sized city
+@5 Small town
+@6 Semi-rural area
+@7 Rural area
+@8 Other
+
+. ______________________________________________________________________
+. FORM COMMENT NOTE: Enter F! number(s) and/or "ALERT" if appropriate, or further info, or leave blank if nothing additional to report.

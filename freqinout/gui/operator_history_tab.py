@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
-from PySide6.QtCore import Qt, Signal, QTimer, QRect, QPoint
+from PySide6.QtCore import Qt, Signal, QTimer, QRect, QPoint, QDateTime, QEvent
 from PySide6.QtGui import QColor, QPainter, QCursor
 from PySide6.QtWidgets import (
     QWidget,
@@ -30,20 +30,50 @@ from PySide6.QtWidgets import (
     QComboBox,
     QWidgetAction,
     QHeaderView,
+    QAbstractItemView,
+    QApplication,
+    QScrollArea,
     QStyle,
+    QCompleter,
+    QDateTimeEdit,
+    QBoxLayout,
 )
 
 from freqinout.core.settings_manager import SettingsManager
-from freqinout.core.checkins_db import ensure_operator_checkins_schema
+from freqinout.core.checkins_db import ensure_operator_checkins_schema, upsert_operator_metadata
+from freqinout.core.operator_identity import (
+    CallsignConflictError,
+    OperatorIdentityError,
+    canonical_callsign,
+    change_operator_callsign,
+    list_callsign_history,
+)
+from freqinout.core.ingest_runtime_status import active_runtime_ingest_inventory
 from freqinout.core.logger import log
 from freqinout.core.operator_activity import format_utc_iso, load_operator_activity_summary
+from freqinout.core.operator_roster_import import (
+    RosterImportResult,
+    classify_roster_import_result,
+    format_roster_diagnostic_classification,
+    infer_parent_group_from_path,
+    parse_operator_roster_csv,
+)
 from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.sitrep_metadata import source_family_label, source_short_label, transport_label
 from freqinout.core.varac_callsign_tags import sync_varac_callsign_tags_from_db
-from freqinout.core.varac_ingest import ingest_varac
-from freqinout.gui.theme import resolve_theme, button_style
+from freqinout.core.varac_runtime_ingest import ingest_varac_for_runtime_sources
+from freqinout.gui.theme import (
+    resolve_theme,
+    button_style,
+    button_height_for_font,
+    contrast_text_for_background,
+    control_height_for_font,
+    horizontal_layout_breakpoint,
+    label_style,
+)
 
-ALLOWED_GROUP_ROLES = {"", "HUB", "HUB-ALT", "NCS", "ANCS", "PEER"}
+ALLOWED_GROUP_ROLES = {"", "HUB", "HUB-ALT", "ALT-HUB", "NCS", "ANCS", "PEER"}
+GROUP_ROLE_ALIASES = {"ALT-HUB": "HUB-ALT"}
 GROUP_ROLE_OPTIONS = ["", "HUB", "HUB-ALT", "NCS", "ANCS", "PEER"]
 
 
@@ -76,10 +106,11 @@ class OperatorHeaderWithCheckbox(QHeaderView):
         super().__init__(orientation, parent)
         self._checkbox_state = Qt.Unchecked
         self._checkbox_enabled = False
-        self._cb_bg = QColor("#ffffff")
-        self._cb_border = QColor("#777777")
-        self._cb_accent = QColor("#2d8cf0")
-        self._cb_mark = QColor("#ffffff")
+        palette = self.palette()
+        self._cb_bg = palette.base().color()
+        self._cb_border = palette.mid().color()
+        self._cb_accent = palette.highlight().color()
+        self._cb_mark = palette.highlightedText().color()
         self.setSectionsClickable(True)
 
     def set_checkbox_state(self, state: Qt.CheckState, enabled: Optional[bool] = None) -> None:
@@ -181,16 +212,16 @@ class OperatorHistoryTab(QWidget):
 
     COL_SELECT = 0
     COL_CALLSIGN = 1
-    COL_SITREP = 2
-    COL_NAME = 3
-    COL_STATE = 4
-    COL_GRID = 5
-    COL_GROUPS = 6
-    COL_G1 = 7
-    COL_G2 = 8
-    COL_G3 = 9
-    COL_ROLE = 10
-    COL_FIRST_SEEN = 11
+    COL_ROLE = 2
+    COL_TIER = 3
+    COL_SITREP = 4
+    COL_NAME = 5
+    COL_STATE = 6
+    COL_GRID = 7
+    COL_GROUPS = 8
+    COL_G1 = 9
+    COL_G2 = 10
+    COL_G3 = 11
     COL_LAST_SEEN = 12
     COL_TRUSTED = 13
     COL_COUNT = 14
@@ -218,10 +249,9 @@ class OperatorHistoryTab(QWidget):
         self._rows_fingerprint: Optional[Tuple] = None
         self._last_varac_ingest_ts: float = 0.0
         self._varac_ingest_interval_sec: float = 60.0
+        self._background_ingest_controller = None
         self._last_backfill_ts: float = 0.0
         self._backfill_interval_sec: float = 600.0
-        self._maintenance_inflight = False
-        self._activation_maintenance_pending = False
         self._update_timer = QTimer(self)
         self._update_timer.setSingleShot(True)
         self._update_timer.setInterval(300)
@@ -235,10 +265,10 @@ class OperatorHistoryTab(QWidget):
         layout = QVBoxLayout(self)
 
         header = QHBoxLayout()
-        header.addWidget(QLabel("<h3>Operator History</h3>"))
+        self.title_label = QLabel("Operator History")
+        header.addWidget(self.title_label)
         header.addSpacing(8)
         self.loading_label = QLabel("Brewing it fresh...")
-        self.loading_label.setStyleSheet("color: #888;")
         self.loading_label.setVisible(False)
         header.addWidget(self.loading_label)
         self._loading_progress = QProgressBar()
@@ -251,6 +281,7 @@ class OperatorHistoryTab(QWidget):
 
         # Search + actions row
         search_row = QHBoxLayout()
+        self.search_row = search_row
         search_row.addWidget(QLabel("Search:"))
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Any column...")
@@ -283,6 +314,8 @@ class OperatorHistoryTab(QWidget):
             [
                 "",
                 "Callsign",
+                "Role",
+                "Tier",
                 "SitRep",
                 "Name",
                 "State",
@@ -291,22 +324,26 @@ class OperatorHistoryTab(QWidget):
                 "Group 1",
                 "Group 2",
                 "Group 3",
-                "Group Role",
-                "First Seen",
                 "Last Seen",
                 "Trusted",
                 "Check-ins",
             ]
         )
         self.table.setSortingEnabled(True)
+        self.table.setWordWrap(False)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
         hv = OperatorHeaderWithCheckbox(Qt.Horizontal, self.table)
         self.table.setHorizontalHeader(hv)
-        hv.setSectionResizeMode(self.COL_SELECT, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_SITREP, QHeaderView.ResizeToContents)
+        hv.setStretchLastSection(False)
+        hv.setSectionResizeMode(self.COL_SELECT, QHeaderView.Fixed)
+        hv.setSectionResizeMode(self.COL_SITREP, QHeaderView.Fixed)
         hv.setMinimumSectionSize(50)
         hv.setDefaultSectionSize(100)
         for col in (
             self.COL_CALLSIGN,
+            self.COL_ROLE,
+            self.COL_TIER,
             self.COL_NAME,
             self.COL_STATE,
             self.COL_GRID,
@@ -315,18 +352,30 @@ class OperatorHistoryTab(QWidget):
             self.COL_G2,
             self.COL_G3,
             self.COL_ROLE,
-            self.COL_FIRST_SEEN,
             self.COL_LAST_SEEN,
             self.COL_TRUSTED,
             self.COL_COUNT,
         ):
-            hv.setSectionResizeMode(col, QHeaderView.Stretch)
+            hv.setSectionResizeMode(col, QHeaderView.Interactive)
+        self.table.setColumnWidth(self.COL_SELECT, 42)
+        self.table.setColumnWidth(self.COL_CALLSIGN, 96)
+        self.table.setColumnWidth(self.COL_ROLE, 92)
+        self.table.setColumnWidth(self.COL_TIER, 58)
         hv.resizeSection(self.COL_SITREP, 68)
+        self.table.setColumnWidth(self.COL_NAME, 150)
+        self.table.setColumnWidth(self.COL_STATE, 72)
+        self.table.setColumnWidth(self.COL_GRID, 86)
+        self.table.setColumnWidth(self.COL_GROUPS, 190)
+        self.table.setColumnWidth(self.COL_LAST_SEEN, 96)
+        self.table.setColumnWidth(self.COL_TRUSTED, 76)
+        self.table.setColumnWidth(self.COL_COUNT, 82)
         for col in (self.COL_G1, self.COL_G2, self.COL_G3):
             self.table.setColumnHidden(col, True)
         hv.checkboxToggled.connect(self._on_header_checkbox_toggled)
 
         layout.addWidget(self.table)
+
+        self._apply_responsive_layout()
 
         # Signals
         self.search_edit.textChanged.connect(self._apply_filter)
@@ -348,6 +397,7 @@ class OperatorHistoryTab(QWidget):
 
     def _normalize_group_role(self, value: Optional[str]) -> str:
         role = (value or "").strip().upper()
+        role = GROUP_ROLE_ALIASES.get(role, role)
         return role if role in ALLOWED_GROUP_ROLES else ""
 
     # ------------- DB LOAD ------------- #
@@ -480,11 +530,11 @@ class OperatorHistoryTab(QWidget):
         return datetime.datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
     @staticmethod
-    def _age_text_from_epoch(ts: float) -> str:
+    def _age_text_from_epoch(ts: float, *, now: float | None = None) -> str:
         if ts <= 0:
             return ""
-        now = datetime.datetime.now(datetime.timezone.utc).timestamp()
-        age = max(0, int(now - ts))
+        now_ts = datetime.datetime.now(datetime.timezone.utc).timestamp() if now is None else float(now)
+        age = max(0, int(now_ts - ts))
         if age < 60:
             return f"{age}s"
         mins, sec = divmod(age, 60)
@@ -493,8 +543,43 @@ class OperatorHistoryTab(QWidget):
         hrs, mins = divmod(mins, 60)
         if hrs < 24:
             return f"{hrs}h {mins}m"
-        days, hrs = divmod(hrs, 24)
-        return f"{days}d {hrs}h"
+        days = hrs // 24
+        return f"{days}d"
+
+    @staticmethod
+    def _timestamp_from_text(value: object) -> float:
+        text = str(value or "").strip()
+        if not text:
+            return 0.0
+        if len(text) == 8 and text.isdigit():
+            try:
+                return datetime.datetime.strptime(text, "%Y%m%d").replace(tzinfo=datetime.timezone.utc).timestamp()
+            except Exception:
+                return 0.0
+        normalized = text.replace("Z", "+00:00")
+        try:
+            dt = datetime.datetime.fromisoformat(normalized)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+            return dt.timestamp()
+        except Exception:
+            pass
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if len(digits) >= 14:
+            try:
+                return datetime.datetime.strptime(digits[:14], "%Y%m%d%H%M%S").replace(tzinfo=datetime.timezone.utc).timestamp()
+            except Exception:
+                return 0.0
+        if len(digits) >= 8:
+            try:
+                return datetime.datetime.strptime(digits[:8], "%Y%m%d").replace(tzinfo=datetime.timezone.utc).timestamp()
+            except Exception:
+                return 0.0
+        return 0.0
+
+    @classmethod
+    def _age_text_from_timestamp_text(cls, value: object) -> str:
+        return cls._age_text_from_epoch(cls._timestamp_from_text(value))
 
     def _sitrep_display_text(self, row: Dict) -> str:
         key = (row.get("sitrep_status_key") or "unknown").strip().lower()
@@ -703,44 +788,30 @@ class OperatorHistoryTab(QWidget):
         return "\n".join(lines)
 
     def _apply_sitrep_button_style(self, btn: QPushButton, status_key: str) -> None:
-        key = (status_key or "").strip().lower()
-        if key == "red":
-            bg = "#D32F2F"
-            fg = "#FFFFFF"
-            border = "#8E0000"
-        elif key == "yellow":
-            bg = "#FBC02D"
-            fg = "#111111"
-            border = "#8D6E00"
-        elif key == "green":
-            bg = "#43A047"
-            fg = "#FFFFFF"
-            border = "#1B5E20"
-        else:
-            bg = "#4FC3F7"
-            fg = "#111111"
-            border = "#1976D2"
-        btn.setStyleSheet(
-            f"QPushButton {{ background: {bg}; color: {fg}; border: 1px solid {border}; border-radius: 9px; padding: 1px 8px; font-weight: 700; }}"
-            f"QPushButton:hover {{ border: 1px solid {fg}; }}"
-        )
+        theme = resolve_theme(self.settings)
+        role = {
+            "red": "eligible_danger",
+            "yellow": "eligible_warning",
+            "green": "eligible_success",
+        }.get((status_key or "").strip().lower(), "eligible_info")
+        btn.setStyleSheet(button_style(role, theme))
+        btn.setMinimumHeight(button_height_for_font(btn, vertical_padding=8, floor=28))
 
-    def _apply_sitrep_item_style(self, item: QTableWidgetItem, status_key: str) -> None:
+    def _apply_sitrep_item_style(
+        self,
+        item: QTableWidgetItem,
+        status_key: str,
+        theme: Optional[Dict[str, str]] = None,
+    ) -> None:
+        theme = theme or resolve_theme(self.settings)
         key = (status_key or "").strip().lower()
-        if key == "red":
-            bg = QColor("#D32F2F")
-            fg = QColor("#FFFFFF")
-        elif key == "yellow":
-            bg = QColor("#FBC02D")
-            fg = QColor("#111111")
-        elif key == "green":
-            bg = QColor("#43A047")
-            fg = QColor("#FFFFFF")
-        else:
-            bg = QColor("#4FC3F7")
-            fg = QColor("#111111")
-        item.setBackground(bg)
-        item.setForeground(fg)
+        background = {
+            "red": theme["danger"],
+            "yellow": theme["warning"],
+            "green": theme["success"],
+        }.get(key, theme["info"])
+        item.setBackground(QColor(background))
+        item.setForeground(QColor(contrast_text_for_background(background, theme)))
 
     def _show_sitrep_status_menu(self, callsign: str, anchor_or_pos=None) -> None:
         cs = (callsign or "").strip().upper()
@@ -871,6 +942,7 @@ class OperatorHistoryTab(QWidget):
             if sitrep_item is None:
                 continue
             sitrep_item.setText(self._sitrep_display_text(row_data or {"sitrep_status_key": status_key}))
+            sitrep_item.setData(Qt.UserRole, status_key)
             self._apply_sitrep_item_style(sitrep_item, status_key)
             if row_data is not None:
                 sitrep_item.setToolTip(self._sitrep_tooltip(row_data))
@@ -908,44 +980,50 @@ class OperatorHistoryTab(QWidget):
         g3 = groups[2] if len(groups) > 2 else ""
         return groups, g1, g2, g3
 
-    def _maintenance_due(self, now: Optional[float] = None) -> bool:
-        ts = float(now if now is not None else time.time())
-        return (
-            (ts - float(self._last_varac_ingest_ts or 0.0) >= self._varac_ingest_interval_sec)
-            or (ts - float(self._last_backfill_ts or 0.0) >= self._backfill_interval_sec)
-        )
-
-    def _run_operator_maintenance(self, *, now: Optional[float] = None) -> bool:
-        if self._maintenance_inflight:
+    def _request_background_ingest(self, *kinds: str) -> bool:
+        parent = self.parent()
+        controller = getattr(parent, "background_ingest", None)
+        if controller is None:
             return False
-        ts = float(now if now is not None else time.time())
-        ran_any = False
-        self._maintenance_inflight = True
         try:
-            if ts - float(self._last_varac_ingest_ts or 0.0) >= self._varac_ingest_interval_sec:
-                try:
-                    ingest_varac(self.settings)
-                    self._last_varac_ingest_ts = ts
-                    ran_any = True
-                except Exception:
-                    pass
+            if hasattr(controller, "is_running") and not controller.is_running():
+                return False
+            self._connect_background_ingest_notifications(controller)
+            if hasattr(controller, "request_refresh"):
+                controller.request_refresh(*kinds)
+                return True
+        except Exception as exc:
+            log.debug("OperatorHistory: background ingest request failed: %s", exc)
+        return False
 
-            if ts - float(self._last_backfill_ts or 0.0) >= self._backfill_interval_sec:
-                self._backfill_first_seen_from_logs()
-                self._last_backfill_ts = ts
-                ran_any = True
-        finally:
-            self._maintenance_inflight = False
-        return ran_any
+    def _connect_background_ingest_notifications(self, controller: object) -> None:
+        if self._background_ingest_controller is controller:
+            return
+        signal = getattr(controller, "job_finished", None)
+        if signal is None:
+            return
+        try:
+            signal.connect(self._on_background_ingest_finished)
+            self._background_ingest_controller = controller
+        except Exception as exc:
+            log.debug("OperatorHistory: background ingest signal connect failed: %s", exc)
 
-    def _load_data(self, *, show_toast: bool = False, run_maintenance: bool = True):
+    def _on_background_ingest_finished(self, job_name: str) -> None:
+        if str(job_name or "").strip().lower() != "varac":
+            return
+        try:
+            self._load_data(show_toast=False)
+        except Exception as exc:
+            log.debug("OperatorHistory: background projection reload failed for VarAC: %s", exc)
+
+    def _load_data(self, *, show_toast: bool = False):
         """
         Load operator_checkins table into self._rows.
         """
         with perf_span(
             "operators.load_data",
             settings=self.settings,
-            meta={"show_toast": bool(show_toast), "run_maintenance": bool(run_maintenance)},
+            meta={"show_toast": bool(show_toast)},
             min_ms=5.0,
         ):
             if show_toast:
@@ -953,6 +1031,13 @@ class OperatorHistoryTab(QWidget):
             else:
                 self._set_loading(False)
             now = time.time()
+            if now - float(self._last_varac_ingest_ts) >= self._varac_ingest_interval_sec:
+                if not self._request_background_ingest("varac"):
+                    try:
+                        ingest_varac_for_runtime_sources(self.settings)
+                    except Exception:
+                        pass
+                self._last_varac_ingest_ts = now
             db_path = self._db_path()
             if not db_path or not db_path.exists():
                 self._rows = []
@@ -964,8 +1049,10 @@ class OperatorHistoryTab(QWidget):
                     self._set_loading(False)
                 return
 
-            if run_maintenance:
-                self._run_operator_maintenance(now=now)
+            # One-time backfill: hydrate first_seen_utc from DIRECTED/ALL logs if earlier than stored
+            if now - float(self._last_backfill_ts) >= self._backfill_interval_sec:
+                self._backfill_first_seen_from_logs()
+                self._last_backfill_ts = now
 
             rows: List[Dict] = []
             try:
@@ -990,7 +1077,11 @@ class OperatorHistoryTab(QWidget):
                         IFNULL(last_seen_utc,''),
                         IFNULL(checkin_count,0),
                         groups_json,
-                        COALESCE(trusted,0)
+                        COALESCE(trusted,0),
+                        IFNULL(timezone,''),
+                        IFNULL(tier,''),
+                        IFNULL(roster_parent_group,''),
+                        IFNULL(roster_region,'')
                     FROM operator_checkins
                     ORDER BY callsign COLLATE NOCASE
                     """
@@ -1009,6 +1100,10 @@ class OperatorHistoryTab(QWidget):
                     count,
                     gj,
                     trusted,
+                    timezone,
+                    tier,
+                    roster_parent_group,
+                    roster_region,
                 ) in cur.fetchall():
                     observed = activity_map.get((cs or "").strip().upper(), {})
                     observed_last_ts = float(observed.get("overall_last_seen_ts", 0.0) or 0.0)
@@ -1039,6 +1134,10 @@ class OperatorHistoryTab(QWidget):
                             "_stored_last_seen_utc": (last_seen or "").strip(),
                             "checkin_count": int(count or 0),
                             "trusted": 1 if int(trusted or 0) else 0,
+                            "timezone": (timezone or "").strip(),
+                            "tier": (tier or "").strip(),
+                            "roster_parent_group": (roster_parent_group or "").strip(),
+                            "roster_region": (roster_region or "").strip(),
                             "sitrep_status_key": sitrep_map.get((cs or "").strip().upper(), {}).get("key", "unknown"),
                             "sitrep_status_label": sitrep_map.get((cs or "").strip().upper(), {}).get("label", "Unknown"),
                             "sitrep_status_source": sitrep_map.get((cs or "").strip().upper(), {}).get("source", "UNKNOWN"),
@@ -1099,6 +1198,10 @@ class OperatorHistoryTab(QWidget):
                     _norm(row.get("name")),
                     _norm(row.get("state")),
                     _norm(row.get("grid")),
+                    _norm(row.get("tier")),
+                    _norm(row.get("timezone")),
+                    _norm(row.get("roster_parent_group")),
+                    _norm(row.get("roster_region")),
                     _norm(row.get("group1")),
                     _norm(row.get("group2")),
                     _norm(row.get("group3")),
@@ -1130,25 +1233,9 @@ class OperatorHistoryTab(QWidget):
 
     def _backfill_first_seen_from_logs(self):
         """
-        Parse DIRECTED.TXT / ALL.TXT (if configured) and backfill earlier
+        Parse JS8Call DIRECTED.TXT / ALL.TXT sources and backfill earlier
         first_seen_utc values for any callsign found in operator_checkins.
         """
-        directed_path = (self.settings.get("js8_directed_path", "") or "").strip()
-        if not directed_path:
-            return
-        directed = Path(directed_path)
-        all_txt = directed.parent / "ALL.TXT" if directed_path else None
-        if not directed.exists():
-            return
-        try:
-            directed_offset = int(self.settings.get("operator_backfill_directed_offset", 0) or 0)
-        except Exception:
-            directed_offset = 0
-        try:
-            all_offset = int(self.settings.get("operator_backfill_all_offset", 0) or 0)
-        except Exception:
-            all_offset = 0
-
         def parse_ts(line: str) -> Optional[str]:
             ts_str = line[:19]
             try:
@@ -1157,53 +1244,67 @@ class OperatorHistoryTab(QWidget):
             except Exception:
                 return None
 
-        earliest: Dict[str, str] = {}
-        try:
-            size_now = directed.stat().st_size
-            if directed_offset < 0 or directed_offset > size_now:
-                directed_offset = 0
-            with directed.open("r", encoding="utf-8", errors="ignore") as fh:
-                if directed_offset > 0:
-                    fh.seek(directed_offset)
-                last_pos = fh.tell()
-                while True:
-                    line = fh.readline()
-                    if not line:
-                        break
+        def note_pair(msg: str, ts: str, earliest: Dict[str, str]) -> None:
+            if ":" not in msg:
+                return
+            origin = msg.split(":", 1)[0].strip().upper()
+            if origin:
+                earliest[origin] = min(earliest.get(origin, ts), ts)
+            rest = msg.split(":", 1)[1]
+            tokens = rest.split()
+            if tokens:
+                dest = tokens[0].strip().upper()
+                if dest:
+                    earliest[dest] = min(earliest.get(dest, ts), ts)
+
+        def scan_directed(path: Path, offset_key: str, earliest: Dict[str, str]) -> None:
+            if not path.exists():
+                return
+            try:
+                offset = int(self.settings.get(offset_key, 0) or 0)
+            except Exception:
+                offset = 0
+            try:
+                size_now = path.stat().st_size
+                if offset < 0 or offset > size_now:
+                    offset = 0
+                with path.open("r", encoding="utf-8", errors="ignore") as fh:
+                    if offset > 0:
+                        fh.seek(offset)
                     last_pos = fh.tell()
-                    if "\t" not in line:
-                        continue
-                    ts = parse_ts(line)
-                    if not ts:
-                        continue
-                    parts = line.split("\t")
-                    msg = parts[4] if len(parts) > 4 else ""
-                    # crude extract: before the colon is origin, after is dest
-                    if ":" in msg:
-                        origin = msg.split(":", 1)[0].strip().upper()
-                        if origin:
-                            earliest[origin] = min(earliest.get(origin, ts), ts)
-                        rest = msg.split(":", 1)[1]
-                        tokens = rest.split()
-                        if tokens:
-                            dest = tokens[0].strip().upper()
-                            if dest:
-                                earliest[dest] = min(earliest.get(dest, ts), ts)
+                    while True:
+                        line = fh.readline()
+                        if not line:
+                            break
+                        last_pos = fh.tell()
+                        if "\t" not in line:
+                            continue
+                        ts = parse_ts(line)
+                        if not ts:
+                            continue
+                        parts = line.split("\t")
+                        note_pair(parts[4] if len(parts) > 4 else "", ts, earliest)
                 try:
-                    self.settings.set("operator_backfill_directed_offset", int(last_pos))
+                    self.settings.set(offset_key, int(last_pos))
                 except Exception:
                     pass
-        except Exception:
-            pass
+            except Exception:
+                pass
 
-        if all_txt and all_txt.exists():
+        def scan_all(path: Path, offset_key: str, earliest: Dict[str, str]) -> None:
+            if not path.exists():
+                return
             try:
-                size_now = all_txt.stat().st_size
-                if all_offset < 0 or all_offset > size_now:
-                    all_offset = 0
-                with all_txt.open("r", encoding="utf-8", errors="ignore") as fh:
-                    if all_offset > 0:
-                        fh.seek(all_offset)
+                offset = int(self.settings.get(offset_key, 0) or 0)
+            except Exception:
+                offset = 0
+            try:
+                size_now = path.stat().st_size
+                if offset < 0 or offset > size_now:
+                    offset = 0
+                with path.open("r", encoding="utf-8", errors="ignore") as fh:
+                    if offset > 0:
+                        fh.seek(offset)
                     last_pos = fh.tell()
                     while True:
                         line = fh.readline()
@@ -1219,23 +1320,37 @@ class OperatorHistoryTab(QWidget):
                             msg_part = line.split("JS8:", 1)[1]
                         except Exception:
                             continue
-                        msg = msg_part.strip()
-                        if ":" in msg:
-                            origin = msg.split(":", 1)[0].strip().upper()
-                            if origin:
-                                earliest[origin] = min(earliest.get(origin, ts), ts)
-                            rest = msg.split(":", 1)[1]
-                            tokens = rest.split()
-                            if tokens:
-                                dest = tokens[0].strip().upper()
-                                if dest:
-                                    earliest[dest] = min(earliest.get(dest, ts), ts)
-                    try:
-                        self.settings.set("operator_backfill_all_offset", int(last_pos))
-                    except Exception:
-                        pass
+                        note_pair(msg_part.strip(), ts, earliest)
+                try:
+                    self.settings.set(offset_key, int(last_pos))
+                except Exception:
+                    pass
             except Exception:
                 pass
+
+        earliest: Dict[str, str] = {}
+        runtime_sources = tuple(
+            source
+            for source in active_runtime_ingest_inventory().sources_for_family("js8call")
+            if source.source_type == "file"
+        )
+        if runtime_sources:
+            for source in runtime_sources:
+                role = str((source.metadata or {}).get("role", "") or "").strip().lower()
+                path = Path(str(source.path or "")).expanduser()
+                if role == "directed":
+                    scan_directed(path, f"operator_backfill_{source.source_id}_offset", earliest)
+                elif role == "all":
+                    scan_all(path, f"operator_backfill_{source.source_id}_offset", earliest)
+        else:
+            directed_path = (self.settings.get("js8_directed_path", "") or "").strip()
+            if not directed_path:
+                return
+            directed = Path(directed_path)
+            if not directed.exists():
+                return
+            scan_directed(directed, "operator_backfill_directed_offset", earliest)
+            scan_all(directed.parent / "ALL.TXT", "operator_backfill_all_offset", earliest)
 
         if not earliest:
             return
@@ -1405,6 +1520,10 @@ class OperatorHistoryTab(QWidget):
                     or term in r["name"].lower()
                     or term in r["state"].lower()
                     or term in r.get("grid", "").lower()
+                    or term in r.get("tier", "").lower()
+                    or term in r.get("timezone", "").lower()
+                    or term in r.get("roster_parent_group", "").lower()
+                    or term in r.get("roster_region", "").lower()
                     or term in r.get("group1", "").lower()
                     or term in r.get("group2", "").lower()
                     or term in r.get("group3", "").lower()
@@ -1466,13 +1585,16 @@ class OperatorHistoryTab(QWidget):
                 self.table.setRowCount(len(rows))
                 # rebuild group filter options
                 groups = set()
-                untrusted_color = QColor("#D55E00")
+                theme = resolve_theme(self.settings)
+                untrusted_color = QColor(theme["warning"])
                 for row_idx, r in enumerate(rows):
                     row_untrusted = not bool(r.get("trusted"))
 
-                    def set_item(col: int, text: str):
+                    def set_item(col: int, text: str, tooltip: str = ""):
                         item = QTableWidgetItem(text)
                         item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                        if tooltip:
+                            item.setToolTip(tooltip)
                         if row_untrusted:
                             item.setForeground(untrusted_color)
                         self.table.setItem(row_idx, col, item)
@@ -1484,11 +1606,14 @@ class OperatorHistoryTab(QWidget):
                         select_item.setForeground(untrusted_color)
                     self.table.setItem(row_idx, self.COL_SELECT, select_item)
                     set_item(self.COL_CALLSIGN, r["callsign"])
+                    set_item(self.COL_ROLE, r.get("group_role", ""))
+                    set_item(self.COL_TIER, str(r.get("tier", "") or ""))
                     sitrep_key = (r.get("sitrep_status_key") or "unknown").strip().lower()
                     sitrep_item = QTableWidgetItem(self._sitrep_display_text(r))
                     sitrep_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                     sitrep_item.setTextAlignment(Qt.AlignCenter)
                     sitrep_item.setToolTip(self._sitrep_tooltip(r))
+                    sitrep_item.setData(Qt.UserRole, sitrep_key)
                     self._apply_sitrep_item_style(sitrep_item, sitrep_key)
                     if row_untrusted:
                         sitrep_item.setForeground(untrusted_color)
@@ -1505,11 +1630,9 @@ class OperatorHistoryTab(QWidget):
                     set_item(self.COL_G1, r.get("group1", ""))
                     set_item(self.COL_G2, r.get("group2", ""))
                     set_item(self.COL_G3, r.get("group3", ""))
-                    set_item(self.COL_ROLE, r.get("group_role", ""))
-                    first_fmt = _normalize_date_only(r.get("first_seen_utc", "") or "") or ""
                     last_fmt = _normalize_date_only(r.get("last_seen_utc", "") or "") or ""
-                    set_item(self.COL_FIRST_SEEN, first_fmt)
-                    set_item(self.COL_LAST_SEEN, last_fmt)
+                    last_age = self._age_text_from_timestamp_text(r.get("last_seen_utc", ""))
+                    set_item(self.COL_LAST_SEEN, last_age or last_fmt, last_fmt)
                     set_item(self.COL_TRUSTED, "Yes" if r.get("trusted") else "No")
                     set_item(self.COL_COUNT, str(r["checkin_count"]))
                     gvals = [
@@ -1561,15 +1684,33 @@ class OperatorHistoryTab(QWidget):
 
     def apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
+        self.title_label.setStyleSheet(label_style("text", theme, weight=700))
         self._update_clear_filters_button_style()
         self._update_action_button_styles(theme)
         if self.loading_label:
-            bg = theme.get("surface_alt", theme.get("surface", "#f2f2f2"))
-            fg = theme.get("accent", theme.get("text", "#222"))
-            border = theme.get("border", "#ccc")
+            bg = theme["surface_alt"]
+            fg = theme["accent"]
+            border = theme["border"]
             self.loading_label.setStyleSheet(
                 f"padding: 2px 6px; border-radius: 4px; background: {bg}; color: {fg}; border: 1px solid {border};"
             )
+            self.loading_label.setMinimumHeight(control_height_for_font(self.loading_label, vertical_padding=6, floor=24))
+        for button in (
+            self.clear_filters_btn,
+            self.manage_btn,
+            self.export_group_btn,
+            self.import_btn,
+        ):
+            button.setMinimumHeight(button_height_for_font(button))
+        self.search_edit.setMinimumHeight(control_height_for_font(self.search_edit))
+        self.group_filter.setMinimumHeight(control_height_for_font(self.group_filter))
+        self.table.verticalHeader().setDefaultSectionSize(
+            max(1, self.table.fontMetrics().lineSpacing() + 10)
+        )
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, self.COL_SITREP)
+            if item is not None:
+                self._apply_sitrep_item_style(item, item.data(Qt.UserRole) or "unknown", theme)
         grid = theme["border"]
         table_style = (
             f"QTableWidget {{ gridline-color: {grid}; }}"
@@ -1587,18 +1728,41 @@ class OperatorHistoryTab(QWidget):
         header = self.table.horizontalHeader()
         if isinstance(header, OperatorHeaderWithCheckbox):
             accent = QColor(theme["accent"])
-            luminance = (
-                0.299 * accent.redF()
-                + 0.587 * accent.greenF()
-                + 0.114 * accent.blueF()
-            )
-            mark = QColor("#111111") if luminance >= 0.62 else QColor("#ffffff")
+            mark = QColor(contrast_text_for_background(theme["accent"], theme))
             header.set_checkbox_colors(
                 bg=QColor(theme.get("surface_alt", theme["surface"])),
                 border=QColor(theme.get("accent", theme["border"])),
                 accent=accent,
                 mark=mark,
             )
+        self._apply_responsive_layout()
+
+    def _apply_responsive_layout(self) -> None:
+        """Reflow the filter band without loading data or changing table selection."""
+        compact = self.width() > 0 and self.width() < horizontal_layout_breakpoint(
+            self.search_row,
+            reserve_controls=1,
+        )
+        self.search_row.setDirection(
+            QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight
+        )
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_responsive_layout()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange:
+            self.apply_theme()
+
+    def on_settings_saved(self) -> None:
+        """Refresh settings-backed presentation without rebuilding the data table."""
+        try:
+            self.settings.reload()
+        except Exception:
+            pass
+        self.apply_theme()
 
     def on_tab_activated(self) -> None:
         with perf_span("operators.on_tab_activated", settings=self.settings, min_ms=5.0):
@@ -1613,30 +1777,9 @@ class OperatorHistoryTab(QWidget):
 
     def _run_activation_refresh(self) -> None:
         try:
-            due = self._maintenance_due()
-            self._load_data(show_toast=True, run_maintenance=False)
-            if due:
-                self._schedule_activation_maintenance()
+            self._load_data(show_toast=True)
         finally:
             self._nav_refresh_inflight = False
-
-    def _schedule_activation_maintenance(self) -> None:
-        if self._activation_maintenance_pending:
-            return
-        self._activation_maintenance_pending = True
-        QTimer.singleShot(120, self._run_deferred_activation_maintenance)
-
-    def _run_deferred_activation_maintenance(self) -> None:
-        self._activation_maintenance_pending = False
-        if self._maintenance_inflight:
-            self._schedule_activation_maintenance()
-            return
-        self._set_loading(True, "Refreshing operator sources...")
-        try:
-            if self._run_operator_maintenance():
-                self._load_data(show_toast=False, run_maintenance=False)
-        finally:
-            self._set_loading(False)
 
     def show_loading_toast(self) -> None:
         self._set_loading(True)
@@ -1685,7 +1828,7 @@ class OperatorHistoryTab(QWidget):
                 QMessageBox.warning(
                     self,
                     "Sync to VarAC",
-                    "Configure VarAC Install Folder in Settings before syncing callsign tags.",
+                    "Configure VarAC Install Folder in Configuration before syncing callsign tags.",
                 )
             return False
         except Exception as exc:
@@ -1761,7 +1904,12 @@ class OperatorHistoryTab(QWidget):
         layout.addWidget(label)
         text = QTextEdit()
         text.setPlainText("\n".join(groups))
-        text.setMinimumHeight(220)
+        text.setMinimumHeight(
+            max(
+                control_height_for_font(text, vertical_padding=18, floor=48) * 2,
+                text.fontMetrics().lineSpacing() * max(3, min(len(groups), 8)) + 20,
+            )
+        )
         layout.addWidget(text)
         btn_row = QHBoxLayout()
         btn_row.addStretch()
@@ -1798,7 +1946,8 @@ class OperatorHistoryTab(QWidget):
                 """
                 SELECT name, state, grid, group1, group2, group3, group_role,
                        first_seen_utc, last_seen_utc, last_net, last_role,
-                       checkin_count, groups_json, trusted
+                       checkin_count, groups_json, trusted, timezone, tier,
+                       roster_parent_group, roster_region
                 FROM operator_checkins WHERE callsign=?
                 """,
                 (cs,),
@@ -1814,6 +1963,10 @@ class OperatorHistoryTab(QWidget):
             existing_name = ""
             existing_state = ""
             existing_grid = ""
+            existing_timezone = ""
+            existing_tier = ""
+            existing_roster_parent = ""
+            existing_roster_region = ""
             if existing:
                 (
                     existing_name,
@@ -1830,6 +1983,10 @@ class OperatorHistoryTab(QWidget):
                     existing_count,
                     existing_gjson,
                     existing_trusted,
+                    existing_timezone,
+                    existing_tier,
+                    existing_roster_parent,
+                    existing_roster_region,
                 ) = existing
                 try:
                     if existing_gjson:
@@ -1853,6 +2010,10 @@ class OperatorHistoryTab(QWidget):
             groups_source = existing_groups if merge_groups else []
             groups, g1, g2, g3 = self._normalize_groups_for_save(row, groups_source)
             role_val = self._normalize_group_role(row.get("group_role", existing_role or ""))
+            tier_val = (row.get("tier") or existing_tier or "").strip()
+            timezone_val = (row.get("timezone") or existing_timezone or "").strip()
+            roster_parent_val = (row.get("roster_parent_group") or existing_roster_parent or "").strip()
+            roster_region_val = (row.get("roster_region") or existing_roster_region or "").strip()
             trusted = row.get("trusted")
             if trusted is None:
                 trusted = 1 if int(existing_trusted or 0) == 1 else 0
@@ -1868,8 +2029,9 @@ class OperatorHistoryTab(QWidget):
                 INSERT OR REPLACE INTO operator_checkins
                     (callsign, name, state, grid, group1, group2, group3, group_role,
                      first_seen_utc, last_seen_utc, last_net, last_role,
-                     checkin_count, groups_json, trusted)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT checkin_count FROM operator_checkins WHERE callsign=?),0), ?, ?)
+                     checkin_count, groups_json, trusted, timezone, tier,
+                     roster_parent_group, roster_region)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT checkin_count FROM operator_checkins WHERE callsign=?),0), ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     cs,
@@ -1887,6 +2049,10 @@ class OperatorHistoryTab(QWidget):
                     cs,
                     json.dumps(groups) if groups else None,
                     1 if trusted else 0,
+                    timezone_val,
+                    tier_val,
+                    roster_parent_val,
+                    roster_region_val,
                 ),
             )
             conn.commit()
@@ -1904,10 +2070,254 @@ class OperatorHistoryTab(QWidget):
         menu.addAction("Export CSV...", self._export_csv)
         menu.exec(self.import_btn.mapToGlobal(self.import_btn.rect().bottomLeft()))
 
+    def _configured_import_group_options(self) -> List[str]:
+        groups: List[str] = []
+        try:
+            records = self.settings.get("operating_groups", []) or []
+        except Exception:
+            records = []
+        if isinstance(records, list):
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                value = (
+                    record.get("group")
+                    or record.get("group_name")
+                    or record.get("name")
+                    or ""
+                )
+                group = str(value or "").strip().upper()
+                if group and group not in groups:
+                    groups.append(group)
+        return groups
+
+    def _choose_import_parent_group(self, default_group: str) -> tuple[str, bool]:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Import Operators CSV")
+        form = QFormLayout(dlg)
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.NoInsert)
+        options = self._configured_import_group_options()
+        if default_group and default_group not in options:
+            options.insert(0, default_group)
+        combo.addItems(options)
+        combo.setCurrentText((default_group or (options[0] if options else "")).strip().upper())
+        combo.setMinimumWidth(320)
+        completer = QCompleter(options, combo)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        combo.setCompleter(completer)
+        form.addRow("Operating Group:", combo)
+        hint = QLabel("Choose a configured group or type a group name for this roster.")
+        hint.setStyleSheet(label_style("muted", resolve_theme(self.settings)))
+        form.addRow("", hint)
+
+        btn_row = QHBoxLayout()
+        import_btn = QPushButton("Import")
+        cancel_btn = QPushButton("Cancel")
+        btn_row.addStretch()
+        btn_row.addWidget(import_btn)
+        btn_row.addWidget(cancel_btn)
+        form.addRow(btn_row)
+        import_btn.clicked.connect(dlg.accept)
+        cancel_btn.clicked.connect(dlg.reject)
+        if dlg.exec() != QDialog.Accepted:
+            return "", False
+        return combo.currentText().strip().upper(), True
+
+    def _confirm_roster_import_preview(self, result: RosterImportResult) -> bool:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Review Operator Import")
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(12, 8, 12, 12)
+        layout.setSpacing(8)
+        review_scroll = QScrollArea(dlg)
+        review_scroll.setWidgetResizable(True)
+        review_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        review_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        review_body = QWidget(review_scroll)
+        review_layout = QVBoxLayout(review_body)
+        review_layout.setContentsMargins(18, 16, 18, 8)
+        review_layout.setSpacing(10)
+        review_scroll.setWidget(review_body)
+        layout.addWidget(review_scroll)
+        dlg.resize(
+            max(700, int(self.width() * 0.80)),
+            max(420, int(self.height() * 0.80)),
+        )
+
+        title = QLabel("Review detected operators before importing.")
+        title.setStyleSheet(label_style("text", resolve_theme(self.settings), weight=700))
+        review_layout.addWidget(title)
+
+        regions = ", ".join(result.child_groups[:10])
+        if len(result.child_groups) > 10:
+            regions += f", +{len(result.child_groups) - 10} more"
+        fields = ", ".join(
+            f"{canonical}: {source}"
+            for canonical, source in sorted(result.detected_headers.items())
+        )
+        mapped_headers = {source for source in result.detected_headers.values()}
+        unmapped_headers = [
+            header
+            for header in result.source_headers
+            if header and header not in mapped_headers
+        ]
+        unmapped = ", ".join(unmapped_headers[:8])
+        if len(unmapped_headers) > 8:
+            unmapped += f", +{len(unmapped_headers) - 8} more"
+        summary_lines = [
+            f"Parent group: {result.parent_group or 'Unassigned'}",
+            f"Operators to import: {result.imported}",
+            f"Existing operators to update: {result.updated}",
+            f"Blank rows ignored: {result.blank_ignored}",
+            f"Section/legend rows ignored: {result.legend_ignored}",
+            f"Invalid rows skipped: {result.invalid_skipped}",
+            f"Detected regions: {regions or 'None'}",
+            f"Detected fields: {fields or 'None'}",
+            f"Not imported: {unmapped or 'None'}",
+        ]
+        summary = QLabel("\n".join(summary_lines))
+        summary.setWordWrap(True)
+        review_layout.addWidget(summary)
+
+        sample_label = QLabel("Sample operators")
+        sample_label.setStyleSheet(label_style("text", resolve_theme(self.settings), weight=700))
+        review_layout.addWidget(sample_label)
+
+        sample_rows = result.entries[:8]
+        accepted_by_callsign = {
+            item.callsign_text.strip().upper(): item
+            for item in result.diagnostics
+            if item.classification in {"imported", "updated"}
+        }
+        table = QTableWidget(len(sample_rows), 9, dlg)
+        table.setHorizontalHeaderLabels(["Result", "CSV line", "Callsign", "Role", "Tier", "Name", "State", "Grid", "Groups"])
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setSelectionMode(QAbstractItemView.NoSelection)
+        sample_row_height = max(1, table.fontMetrics().lineSpacing() + 8)
+        sample_header_height = table.horizontalHeader().sizeHint().height()
+        table.setMinimumHeight(sample_header_height + sample_row_height * max(1, min(len(sample_rows), 3)))
+        table.setMaximumHeight(sample_header_height + sample_row_height * max(3, min(len(sample_rows), 8)))
+        for row_idx, entry in enumerate(sample_rows):
+            groups = entry.get("groups_json") or []
+            if not isinstance(groups, list):
+                groups = []
+            diagnostic = accepted_by_callsign.get(str(entry.get("callsign") or "").strip().upper())
+            values = [
+                format_roster_diagnostic_classification(diagnostic.classification) if diagnostic else "Imported",
+                diagnostic.line if diagnostic else "",
+                entry.get("callsign", ""),
+                entry.get("group_role", ""),
+                entry.get("tier", ""),
+                entry.get("name", ""),
+                entry.get("state", ""),
+                entry.get("grid", ""),
+                ", ".join(str(group) for group in groups),
+            ]
+            for col_idx, value in enumerate(values):
+                table.setItem(row_idx, col_idx, QTableWidgetItem(str(value or "")))
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setColumnWidth(0, 85)
+        table.setColumnWidth(1, 70)
+        table.setColumnWidth(2, 100)
+        table.setColumnWidth(3, 75)
+        table.setColumnWidth(4, 55)
+        table.setColumnWidth(5, 130)
+        table.setColumnWidth(6, 55)
+        table.setColumnWidth(7, 70)
+        review_layout.addWidget(table)
+
+        diagnostics = list(result.diagnostics[:80])
+        diagnostics_label = QLabel(
+            f"Row diagnostics — first {len(diagnostics)} of {len(result.diagnostics)}"
+            if len(diagnostics) < len(result.diagnostics) else "Row diagnostics"
+        )
+        diagnostics_label.setStyleSheet(label_style("text", resolve_theme(self.settings), weight=700))
+        diagnostics_label.setVisible(bool(diagnostics))
+        review_layout.addWidget(diagnostics_label)
+        diagnostics_table = QTableWidget(len(diagnostics), 5, dlg)
+        diagnostics_table.setObjectName("rosterImportDiagnostics")
+        diagnostics_table.setHorizontalHeaderLabels(["Line", "Result", "Callsign text", "Field", "Reason"])
+        diagnostics_table.verticalHeader().setVisible(False)
+        diagnostics_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        diagnostics_table.setSelectionMode(QAbstractItemView.NoSelection)
+        diagnostic_row_height = max(1, diagnostics_table.fontMetrics().lineSpacing() + 8)
+        diagnostic_header_height = diagnostics_table.horizontalHeader().sizeHint().height()
+        diagnostics_table.setMinimumHeight(
+            diagnostic_header_height + diagnostic_row_height * max(1, min(len(diagnostics), 3))
+        )
+        diagnostics_table.setMaximumHeight(
+            diagnostic_header_height + diagnostic_row_height * max(3, min(len(diagnostics), 8))
+        )
+        diagnostics_table.setVisible(bool(diagnostics))
+        for row_idx, item in enumerate(diagnostics):
+            for col_idx, value in enumerate((item.line, item.classification, item.callsign_text, item.field, item.reason)):
+                display_value = format_roster_diagnostic_classification(value) if col_idx == 1 else value
+                diagnostics_table.setItem(row_idx, col_idx, QTableWidgetItem(str(display_value or "")))
+        diagnostics_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        diagnostics_table.horizontalHeader().setStretchLastSection(True)
+        review_layout.addWidget(diagnostics_table)
+
+        if (result.imported + result.updated) == 0:
+            note = QLabel("No valid operators were detected. Nothing will be imported.")
+        else:
+            note = QLabel("Importing updates existing callsigns and adds new ones to HF Operators.")
+        note.setWordWrap(True)
+        note.setStyleSheet(label_style("muted", resolve_theme(self.settings)))
+        review_layout.addWidget(note)
+
+        btn_row = QHBoxLayout()
+        copy_diagnostics_btn = QPushButton("Copy Diagnostics")
+        export_diagnostics_btn = QPushButton("Export Diagnostics")
+        import_btn = QPushButton("Import Operators")
+        import_btn.setEnabled((result.imported + result.updated) > 0)
+        cancel_btn = QPushButton("Cancel")
+        copy_diagnostics_btn.clicked.connect(lambda: QApplication.clipboard().setText(result.diagnostics_text()))
+        export_diagnostics_btn.clicked.connect(lambda: self._export_roster_import_diagnostics(result))
+        btn_row.addWidget(copy_diagnostics_btn)
+        btn_row.addWidget(export_diagnostics_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(import_btn)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+        import_btn.clicked.connect(dlg.accept)
+        cancel_btn.clicked.connect(dlg.reject)
+
+        return dlg.exec() == QDialog.Accepted
+
+    def _export_roster_import_diagnostics(self, result: RosterImportResult) -> None:
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Roster Import Diagnostics",
+            "roster_import_diagnostics.csv",
+            "CSV Files (*.csv)",
+        )
+        if not filename:
+            return
+        try:
+            with open(filename, "w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["line", "result", "callsign_text", "field", "reason"])
+                for item in result.diagnostics:
+                    writer.writerow([
+                        item.line,
+                        format_roster_diagnostic_classification(item.classification),
+                        item.callsign_text,
+                        item.field,
+                        item.reason,
+                    ])
+        except Exception as exc:
+            QMessageBox.warning(self, "Roster Import", f"Could not export diagnostics:\n{exc}")
+
     def _show_manage_menu(self):
         menu = QMenu(self)
         menu.addAction("Add Operator...", self._add_operator_dialog)
         menu.addAction("Edit Selected...", self._edit_selected_dialog)
+        menu.addAction("Change Callsign...", self._change_selected_callsign)
+        menu.addAction("Callsign History...", self._show_selected_callsign_history)
         menu.addAction("Delete Selected...", self._delete_selected)
         menu.addSeparator()
         menu.addAction("Sync to VarAC", self._sync_to_varac_action)
@@ -1978,6 +2388,9 @@ class OperatorHistoryTab(QWidget):
                         "name",
                         "state",
                         "grid",
+                        "role",
+                        "tier",
+                        "timezone",
                         "groups",
                         "group1",
                         "group2",
@@ -2006,6 +2419,9 @@ class OperatorHistoryTab(QWidget):
                             "name": r.get("name", ""),
                             "state": r.get("state", ""),
                             "grid": r.get("grid", ""),
+                            "role": r.get("group_role", ""),
+                            "tier": r.get("tier", ""),
+                            "timezone": r.get("timezone", ""),
                             "groups": ",".join(row_groups),
                             "group1": export_g1,
                             "group2": export_g2,
@@ -2033,55 +2449,70 @@ class OperatorHistoryTab(QWidget):
         fn, _ = QFileDialog.getOpenFileName(self, "Import Operators CSV", "", "CSV Files (*.csv);;All Files (*)")
         if not fn:
             return
-        imported = 0
-        skipped = 0
-        role_cleared = 0
+        default_group = infer_parent_group_from_path(fn)
+        parent_group, ok = self._choose_import_parent_group(default_group)
+        if not ok:
+            return
         try:
             with open(fn, newline="", encoding="utf-8-sig") as f:
-                reader = csv.DictReader(f)
-                headers = [h.lower() for h in reader.fieldnames or []]
-                required = {"callsign"}
-                missing = required - set(headers)
-                if missing:
-                    QMessageBox.warning(
-                        self,
-                        "CSV Import",
-                        f"Missing required column(s): {', '.join(sorted(missing))}",
+                result = parse_operator_roster_csv(f, parent_group=parent_group, source_path=fn)
+            db_path = self._db_path()
+            if not db_path:
+                QMessageBox.warning(self, "CSV Import", "Database path not found.")
+                return
+            existing_callsigns: List[str] = []
+            try:
+                preview_uri = Path(db_path).resolve().as_uri() + "?mode=ro"
+                preview_conn = sqlite3.connect(preview_uri, uri=True)
+                try:
+                    try:
+                        existing_callsigns = [
+                            str(row[0] or "")
+                            for row in preview_conn.execute("SELECT callsign FROM operator_checkins")
+                        ]
+                    except sqlite3.OperationalError:
+                        # A profile may have current identities before roster metadata.
+                        existing_callsigns = []
+                    # Include current identities that do not yet have roster metadata.
+                    # Deliberately do not classify closed/former callsigns as updates:
+                    # callsign reuse is possible, and association changes belong to the
+                    # explicit Change Callsign workflow in Operator History.
+                    try:
+                        existing_callsigns.extend(
+                            str(row[0] or "")
+                            for row in preview_conn.execute("SELECT current_callsign FROM operator_identities")
+                        )
+                    except sqlite3.OperationalError:
+                        # Profiles predating stable identities still classify roster rows correctly.
+                        pass
+                finally:
+                    preview_conn.close()
+            except sqlite3.Error:
+                # A new profile has no operator table yet; every accepted row is new.
+                existing_callsigns = []
+            result = classify_roster_import_result(result, existing_callsigns=existing_callsigns)
+            if not self._confirm_roster_import_preview(result):
+                return
+            conn = sqlite3.connect(db_path)
+            try:
+                self._ensure_schema(conn)
+                try:
+                    written = upsert_operator_metadata(result.entries, conn=conn, raise_on_error=True)
+                except TypeError as exc:
+                    # Preserve older integration hooks that implement the legacy
+                    # two-argument callable, while production uses strict errors.
+                    if "raise_on_error" not in str(exc):
+                        raise
+                    written = upsert_operator_metadata(result.entries, conn=conn)
+                # Older integrations may return None; the current core returns a
+                # count so a swallowed or partial write cannot report success.
+                if written is not None and written != len(result.entries):
+                    raise RuntimeError(
+                        f"Only {written} of {len(result.entries)} roster operators were written."
                     )
-                    return
-                for row in reader:
-                    lower_row = {k.lower(): (v or "") for k, v in row.items()}
-                    cs = lower_row.get("callsign", "").strip().upper()
-                    if not cs:
-                        skipped += 1
-                        continue
-                    groups_raw = (lower_row.get("groups") or "").strip()
-                    groups_list = [g.strip().upper() for g in groups_raw.split(",") if g.strip()]
-                    date_val = (lower_row.get("date added") or lower_row.get("date_added") or "").strip()
-                    if not date_val:
-                        date_val = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d")
-                    raw_role = (lower_row.get("group role") or lower_row.get("group_role") or "").strip()
-                    normalized_role = self._normalize_group_role(raw_role)
-                    data = {
-                        "callsign": cs,
-                        "name": lower_row.get("name", "").strip(),
-                        "state": lower_row.get("state", "").strip().upper(),
-                        "grid": lower_row.get("grid", "").strip().upper(),
-                        "group1": lower_row.get("group1", "").strip().upper(),
-                        "group2": lower_row.get("group2", "").strip().upper(),
-                        "group3": lower_row.get("group3", "").strip().upper(),
-                        "groups": groups_list,
-                        "group_role": normalized_role,
-                        "first_seen_utc": date_val,
-                        "last_seen_utc": date_val,
-                        "trusted": 1,
-                    }
-                    if self._upsert_record(data):
-                        imported += 1
-                        if raw_role and normalized_role == "":
-                            role_cleared += 1
-                    else:
-                        skipped += 1
+                conn.commit()
+            finally:
+                conn.close()
         except Exception as e:
             QMessageBox.warning(self, "CSV Import", f"Failed to import:\n{e}")
             log.error("OperatorHistoryTab: CSV import failed: %s", e)
@@ -2089,11 +2520,20 @@ class OperatorHistoryTab(QWidget):
 
         self._load_data(show_toast=True)
         self._schedule_history_update()
-        if imported:
+        if result.imported + result.updated:
             self._sync_varac_callsign_tags()
-        msg = f"Imported {imported} record(s). Skipped {skipped}."
-        if role_cleared:
-            msg += f" Cleared {role_cleared} non-standard group role value(s)."
+        child_preview = ", ".join(result.child_groups[:8])
+        if len(result.child_groups) > 8:
+            child_preview += f", +{len(result.child_groups) - 8} more"
+        msg = (
+            f"Imported {result.imported} operator(s); updated {result.updated}.\n"
+            f"Blank ignored {result.blank_ignored}; section/legend ignored {result.legend_ignored}; "
+            f"invalid skipped {result.invalid_skipped}."
+        )
+        if result.parent_group:
+            msg += f"\nMapped parent group: {result.parent_group}."
+        if child_preview:
+            msg += f"\nDetected regions: {child_preview}."
         QMessageBox.information(self, "CSV Import", msg)
 
     # ------------- Add / Edit / Delete dialogs ------------- #
@@ -2105,6 +2545,9 @@ class OperatorHistoryTab(QWidget):
         form = QFormLayout(dlg)
 
         cs_edit = QLineEdit(defaults.get("callsign", ""))
+        if defaults.get("callsign"):
+            cs_edit.setReadOnly(True)
+            cs_edit.setToolTip("Use Manage Operators > Change Callsign to preserve operator history.")
         name_edit = QLineEdit(defaults.get("name", ""))
         state_edit = QLineEdit(defaults.get("state", ""))
         grid_edit = QLineEdit(defaults.get("grid", ""))
@@ -2115,7 +2558,7 @@ class OperatorHistoryTab(QWidget):
         for role in GROUP_ROLE_OPTIONS:
             role_combo.addItem(role)
         role_combo.setCurrentText(self._normalize_group_role(defaults.get("group_role", "")))
-        first_edit = QLineEdit(defaults.get("first_seen_utc", ""))
+        tier_edit = QLineEdit(str(defaults.get("tier", "") or ""))
         last_edit = QLineEdit(defaults.get("last_seen_utc", ""))
         date_edit = QLineEdit(defaults.get("date_added", ""))
         date_edit.setVisible(False)
@@ -2125,14 +2568,14 @@ class OperatorHistoryTab(QWidget):
         trusted_chk.setChecked(bool(defaults.get("trusted", 0)))
 
         form.addRow("Callsign*:", cs_edit)
+        form.addRow("Role:", role_combo)
+        form.addRow("Tier:", tier_edit)
         form.addRow("Name:", name_edit)
         form.addRow("State:", state_edit)
         form.addRow("Grid:", grid_edit)
         form.addRow("Group 1:", g1_edit)
         form.addRow("Group 2:", g2_edit)
         form.addRow("Group 3:", g3_edit)
-        form.addRow("Group Role:", role_combo)
-        form.addRow("First Seen (UTC):", first_edit)
         form.addRow("Last Seen (UTC):", last_edit)
         form.addRow(date_label, date_edit)
         form.addRow("Trusted:", trusted_chk)
@@ -2167,7 +2610,7 @@ class OperatorHistoryTab(QWidget):
             "group2": g2_edit.text().strip(),
             "group3": g3_edit.text().strip(),
             "group_role": self._normalize_group_role(role_combo.currentText()),
-            "first_seen_utc": first_edit.text().strip(),
+            "tier": tier_edit.text().strip(),
             "last_seen_utc": last_edit.text().strip(),
             "date_added": date_edit.text().strip(),
             "trusted": 1 if trusted_chk.isChecked() else 0,
@@ -2181,6 +2624,164 @@ class OperatorHistoryTab(QWidget):
             self._load_data(show_toast=True)
             self._schedule_history_update()
             self._sync_varac_callsign_tags()
+
+    def _show_selected_callsign_history(self) -> None:
+        calls = self._selected_callsigns()
+        if len(calls) != 1:
+            QMessageBox.information(
+                self,
+                "Callsign History",
+                "Select one operator using the checkbox.",
+            )
+            return
+        db_path = self._db_path()
+        if not db_path:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            try:
+                self._ensure_schema(conn)
+                entries = list_callsign_history(conn, calls[0])
+            finally:
+                conn.close()
+        except Exception as exc:
+            log.error("OperatorHistoryTab: callsign history failed: %s", exc)
+            QMessageBox.warning(self, "Callsign History", f"Could not load callsign history:\n{exc}")
+            return
+        lines = []
+        for entry in entries:
+            start = datetime.datetime.fromtimestamp(
+                entry.effective_from, tz=datetime.timezone.utc
+            ).strftime("%Y-%m-%d") if entry.effective_from > 0 else "unknown"
+            if entry.effective_to is None:
+                interval = f"Current · since {start}"
+            else:
+                end = datetime.datetime.fromtimestamp(
+                    entry.effective_to, tz=datetime.timezone.utc
+                ).strftime("%Y-%m-%d")
+                interval = f"Former · {start} through {end}"
+            note = f" · {entry.note}" if entry.note else ""
+            lines.append(f"{entry.callsign}   {interval}{note}")
+        QMessageBox.information(
+            self,
+            f"Callsign History · {calls[0]}",
+            "\n".join(lines) if lines else "No callsign history is available.",
+        )
+
+    def _change_selected_callsign(self) -> None:
+        calls = self._selected_callsigns()
+        if len(calls) != 1:
+            QMessageBox.information(
+                self,
+                "Change Callsign",
+                "Select one operator using the checkbox.",
+            )
+            return
+        old_callsign = calls[0]
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Change Callsign · {old_callsign}")
+        form = QFormLayout(dlg)
+        old_value = QLineEdit(old_callsign)
+        old_value.setReadOnly(True)
+        new_value = QLineEdit()
+        new_value.setPlaceholderText("New callsign")
+        effective_value = QDateTimeEdit(QDateTime.currentDateTimeUtc())
+        effective_value.setTimeSpec(Qt.UTC)
+        effective_value.setDisplayFormat("yyyy-MM-dd HH:mm 'UTC'")
+        effective_value.setCalendarPopup(True)
+        note_value = QLineEdit()
+        note_value.setPlaceholderText("Optional reason or note")
+        preservation = QLabel(
+            "Groups, role, trust, schedules, pins, and retained history stay "
+            "with this operator. Received records keep their original callsign."
+        )
+        preservation.setWordWrap(True)
+        form.addRow("Current callsign:", old_value)
+        form.addRow("New callsign:", new_value)
+        form.addRow("Effective:", effective_value)
+        form.addRow("Note:", note_value)
+        form.addRow(preservation)
+        actions = QHBoxLayout()
+        save_btn = QPushButton("Change Callsign")
+        cancel_btn = QPushButton("Cancel")
+        actions.addStretch()
+        actions.addWidget(save_btn)
+        actions.addWidget(cancel_btn)
+        form.addRow(actions)
+        save_btn.clicked.connect(dlg.accept)
+        cancel_btn.clicked.connect(dlg.reject)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        new_callsign = new_value.text().strip().upper()
+        if not new_callsign:
+            QMessageBox.warning(self, "Change Callsign", "Enter the new callsign.")
+            return
+        self._apply_callsign_change(
+            old_callsign,
+            new_callsign,
+            float(effective_value.dateTime().toUTC().toSecsSinceEpoch()),
+            note_value.text().strip(),
+        )
+
+    def _apply_callsign_change(
+        self,
+        old_callsign: str,
+        new_callsign: str,
+        effective_at: float,
+        note: str = "",
+    ) -> bool:
+        db_path = self._db_path()
+        if not db_path:
+            QMessageBox.warning(self, "Change Callsign", "Operator database path not found.")
+            return False
+        try:
+            conn = sqlite3.connect(db_path)
+            try:
+                self._ensure_schema(conn)
+                result = change_operator_callsign(
+                    conn,
+                    old_callsign,
+                    new_callsign,
+                    effective_at=effective_at,
+                    note=note,
+                    provenance="operator_history",
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except (CallsignConflictError, OperatorIdentityError) as exc:
+            QMessageBox.warning(self, "Change Callsign", str(exc))
+            return False
+        except Exception as exc:
+            log.error("OperatorHistoryTab: callsign change failed: %s", exc)
+            QMessageBox.warning(self, "Change Callsign", f"Could not change callsign:\n{exc}")
+            return False
+        try:
+            pins = self.settings.get("controlfreq_awareness_pins", ())
+            if isinstance(pins, (list, tuple)):
+                updated_pins = []
+                changed_pin = False
+                for raw_pin in pins:
+                    pin = dict(raw_pin) if isinstance(raw_pin, dict) else raw_pin
+                    if isinstance(pin, dict) and str(pin.get("type") or pin.get("pin_type") or "").lower() == "callsign":
+                        if canonical_callsign(pin.get("value")) == canonical_callsign(old_callsign):
+                            pin["value"] = result.current_callsign
+                            pin["label"] = result.current_callsign
+                            changed_pin = True
+                    updated_pins.append(pin)
+                if changed_pin:
+                    self.settings.set("controlfreq_awareness_pins", updated_pins)
+        except Exception as exc:
+            log.debug("OperatorHistoryTab: could not retarget awareness pins after callsign change: %s", exc)
+        self._load_data(show_toast=True)
+        self._schedule_history_update()
+        self._sync_varac_callsign_tags()
+        QMessageBox.information(
+            self,
+            "Callsign Changed",
+            f"{old_callsign} is now {result.current_callsign}. The former callsign remains in Operator History.",
+        )
+        return True
 
     def _edit_selected_dialog(self):
         calls = self._selected_callsigns()
@@ -2203,9 +2804,12 @@ class OperatorHistoryTab(QWidget):
             for role in GROUP_ROLE_OPTIONS:
                 if role:
                     role_combo.addItem(role, role)
+            tier_edit = QLineEdit()
+            tier_edit.setPlaceholderText("Leave blank for no change")
 
             form.addRow("Trusted:", trusted_combo)
-            form.addRow("Group Role:", role_combo)
+            form.addRow("Role:", role_combo)
+            form.addRow("Tier:", tier_edit)
 
             btn_row = QHBoxLayout()
             save_btn = QPushButton("Apply")
@@ -2223,9 +2827,11 @@ class OperatorHistoryTab(QWidget):
 
             trusted_choice = trusted_combo.currentData()
             role_choice = role_combo.currentData()
+            tier_choice = tier_edit.text().strip()
             trusted_update = trusted_choice != "no_change"
             role_update = role_choice != "__no_change__"
-            if not trusted_update and not role_update:
+            tier_update = bool(tier_choice)
+            if not trusted_update and not role_update and not tier_update:
                 QMessageBox.information(self, "Bulk Edit Operators", "No changes selected.")
                 return
 
@@ -2235,13 +2841,15 @@ class OperatorHistoryTab(QWidget):
             role_txt = "No Change"
             if role_update:
                 role_txt = "(Clear)" if str(role_choice) == "" else str(role_choice)
+            tier_txt = tier_choice if tier_update else "No Change"
             confirm = QMessageBox.question(
                 self,
                 "Confirm Bulk Update",
                 (
                     f"Apply bulk update to {len(calls)} selected operator(s)?\n\n"
                     f"Trusted: {trusted_txt}\n"
-                    f"Group Role: {role_txt}"
+                    f"Role: {role_txt}\n"
+                    f"Tier: {tier_txt}"
                 ),
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
@@ -2257,6 +2865,8 @@ class OperatorHistoryTab(QWidget):
                     payload["trusted"] = int(trusted_choice)
                 if role_update:
                     payload["group_role"] = self._normalize_group_role(str(role_choice))
+                if tier_update:
+                    payload["tier"] = tier_choice
                 if self._upsert_record(payload):
                     changed += 1
                 else:

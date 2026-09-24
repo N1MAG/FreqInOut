@@ -1,0 +1,61 @@
+MAGNET STAT-REP|F!701B
+
+. Date: 05-13-26
+
+!! STATUS REPORT
+
+? PRECEDENCE
+@1 Routine
+@2 Priority
+@3 Immediate
+@4 Flash
+
+? EVENT TYPE
+@1 Severe Weather
+@2 Flooding
+@3 Wildfire
+@4 Infrastructure Failure
+@5 Power Outage
+@6 Communications Outage
+@7 Civil Unrest
+@8 Medical / Public Health
+@9 Supply Chain Disruption/Fuel Shortage
+@0 Other
+
+? LOCAL STATUS
+@1 Green / Stable
+@2 Yellow / Limited Disruption
+@3 Red / Major Disruption
+
+? STATION TYPE
+@1 Base / Home
+@2 Mobile
+@3 Portable / Field
+
+? GRID POWER
+@1 Present
+@2 Outage / Lost
+@3 Unstable / Sporadic
+
+? COMMUNICATIONS/INTERNET
+@1 Normal
+@2 Limited / Unreliable
+@3 Down / Out
+
+? MOBILITY / TRANSPORT
+@1 Clear
+@2 Restricted
+@3 Blocked
+
+? RESOURCES / SUPPLIES
+@1 Adequate
+@2 Limited
+@3 Critical
+
+[RM] REMARKS
+Short operational observations
+
+
+--------------------------------------------------
+
+

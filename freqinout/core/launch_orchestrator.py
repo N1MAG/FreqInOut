@@ -7,14 +7,30 @@ import shutil
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.software_status_service import SoftwareStatusService
+from freqinout.core.dependency_status_service import (
+    LEGACY_PRIMARY_DEPENDENCY_SCOPE,
+    get_dependency_status_service,
+)
+from freqinout.core.launch_bundle_store import LaunchBundleStore, normalize_launch_items
+from freqinout.core.js8_storage import resolve_js8_storage, variant_family_from_version
+from freqinout.core.guided_launch_recipes import managed_instance_window_title
+from freqinout.core.multi_radio_store import MultiRadioStore
+from freqinout.core.managed_directory_contract import (
+    managed_directories_from_component,
+    materialize_managed_directories,
+)
+from freqinout.core.process_window_title import set_process_window_title
+from freqinout.core.station_launch_planner import LaunchPlan, StationLaunchPlanner
+from freqinout.core.varac_launch_recipe import legacy_varac_structured_launch
 
 
 LAUNCH_APP_ORDER: List[str] = [
@@ -28,6 +44,11 @@ LAUNCH_APP_ORDER: List[str] = [
     "CommStat",
 ]
 
+# Canonical companion components that belong in the radio bundle but are not
+# independent Launch Control rows.  They must survive catalog reconciliation;
+# their owning family controls whether they are launched and displayed.
+INTERNAL_LAUNCH_COMPONENT_NAMES = frozenset({"VARA", "SDR++"})
+
 JS8_DEPENDENT_APPS = {"JS8Spotter", "CommStat"}
 DEFAULT_VARAC_SETTLE_DELAY_SEC = 12.0
 DEFAULT_JS8CALL_DEPENDENT_DELAY_SEC = 4.0
@@ -35,6 +56,9 @@ DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC = 90
 LAUNCH_READINESS_INITIAL_POLL_MS = 2000
 LAUNCH_READINESS_RELAXED_POLL_MS = 5000
 LAUNCH_READINESS_RELAX_AFTER_SEC = 30.0
+LAUNCH_PROCESS_PREFLIGHT_TIMEOUT_SEC = 15.0
+LAUNCH_ENDPOINT_PREFLIGHT_TIMEOUT_SEC = 15.0
+LAUNCH_ENDPOINT_PREFLIGHT_POLL_MS = 250
 
 
 LAUNCH_APP_META: Dict[str, Dict[str, Any]] = {
@@ -72,8 +96,21 @@ LAUNCH_APP_META: Dict[str, Dict[str, Any]] = {
     "JS8Call": {
         "path_key": "path_js8call",
         "legacy_autostart_key": "autostart_js8call",
-        "fallback_cmds": ["js8call", "JS8Call"],
-        "folder_candidates": ["JS8Call.exe", "js8call.exe", "JS8Call", "js8call"],
+        "fallback_cmds": ["js8call", "JS8Call", "JS8Call-improved", "js8call-improved", "js8call-subspace", "subspace"],
+        "folder_candidates": [
+            "JS8Call.exe",
+            "js8call.exe",
+            "JS8Call-improved.exe",
+            "js8call-improved.exe",
+            "js8call-subspace.exe",
+            "subspace.exe",
+            "JS8Call",
+            "js8call",
+            "JS8Call-improved",
+            "js8call-improved",
+            "js8call-subspace",
+            "subspace",
+        ],
     },
     "JS8Spotter": {
         "path_key": "path_js8spotter",
@@ -87,6 +124,13 @@ LAUNCH_APP_META: Dict[str, Dict[str, Any]] = {
         "fallback_cmds": ["commstat", "CommStat"],
         "folder_candidates": ["commstat.exe", "CommStat.exe", "commstat.py", "commstat", "CommStat"],
     },
+    # Receiver-only setup uses a per-radio path/command override.  This entry
+    # intentionally stays out of ``LAUNCH_APP_ORDER`` so conventional radio
+    # launch configuration does not gain an unrelated SDR application.
+    "SDR++": {
+        "fallback_cmds": ["sdrpp", "SDR++"],
+        "folder_candidates": ["sdrpp.exe", "SDR++.exe", "sdrpp", "SDR++"],
+    },
 }
 
 
@@ -95,24 +139,57 @@ class LaunchOrchestrator(QObject):
     sequence_progress = Signal(object)
     sequence_finished = Signal(object)
 
-    def __init__(self, settings: SettingsManager, parent: QObject | None = None):
+    def __init__(
+        self,
+        settings: SettingsManager,
+        parent: QObject | None = None,
+        *,
+        bundle_store: LaunchBundleStore | None = None,
+        multi_radio_store: MultiRadioStore | None = None,
+    ):
         super().__init__(parent)
         self.settings = settings
         self.status = SoftwareStatusService(settings)
+        self.dependency_status = get_dependency_status_service(settings)
+        self.bundle_store = bundle_store or LaunchBundleStore(settings.db_path)
+        self.multi_radio_store = multi_radio_store or MultiRadioStore(settings.db_path)
+        self.planner = StationLaunchPlanner()
+        self._runtime_launch_enabled_override: Optional[bool] = None
+        self._runtime_launch_block_reason: str = ""
+        self._last_projection_warnings: Dict[int, str] = {}
+        self._sequence_projection_warnings: Dict[int, str] = {}
         self._active = False
         self._cancel_requested = False
         self._trigger = ""
-        self._queue: List[str] = []
+        self._queue: List[Any] = []
         self._index = 0
         self._results: List[Dict[str, Any]] = []
         self._current_name: Optional[str] = None
+        self._current_item: Any = None
         self._current_cmd: Optional[List[str]] = None
         self._current_started_monotonic = 0.0
+        self._current_phase = ""
+        self._endpoint_preflight_verified: set[str] = set()
+        self._endpoint_preflight_requested: set[str] = set()
+        self._endpoint_preflight_clear: set[str] = set()
+        self._sequence_claimed_identities: set[str] = set()
+        self._sequence_process_records: tuple[Mapping[str, object], ...] = ()
+        self._sequence_process_records_ready = False
+        self._sequence_preflight_started_wall = 0.0
+        self._process_preflight_pending = False
+        self._process_preflight_baseline_sequence = 0
+        self._process_preflight_reason = ""
+        self._process_preflight_generation = 0
         self._wait_timeout_sec = DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(LAUNCH_READINESS_INITIAL_POLL_MS)
         self._poll_timer.timeout.connect(self._poll_current_readiness)
-        self._migrate_if_needed()
+        try:
+            self.dependency_status.snapshot_changed.connect(
+                self._on_launch_preflight_snapshot_changed
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def is_truthy(val: Any) -> bool:
@@ -123,6 +200,23 @@ class LaunchOrchestrator(QObject):
         if isinstance(val, str):
             return val.strip().lower() in {"1", "true", "yes", "on"}
         return False
+
+    def set_runtime_launch_enabled(self, enabled: Optional[bool], *, reason: str = "") -> None:
+        self._runtime_launch_enabled_override = None if enabled is None else bool(enabled)
+        self._runtime_launch_block_reason = str(reason or "").strip()
+
+    def launch_allowed(self) -> bool:
+        override = self._runtime_launch_enabled_override
+        return True if override is None else bool(override)
+
+    def launch_block_reason(self) -> str:
+        return self._runtime_launch_block_reason
+
+    def projection_warning_detail(self, radio_profile_id: Optional[int] = None) -> str:
+        warnings = getattr(self, "_last_projection_warnings", {})
+        if radio_profile_id is not None:
+            return str(warnings.get(int(radio_profile_id), "") or "")
+        return "; ".join(str(value) for value in warnings.values() if str(value).strip())
 
     @staticmethod
     def normalize_custom_tools(raw_items: Any) -> List[Dict[str, str]]:
@@ -182,7 +276,7 @@ class LaunchOrchestrator(QObject):
         ordered_names: List[str] = []
         seen: set[str] = set()
         for name in existing_order:
-            if name not in catalog or name in seen:
+            if (name not in catalog and name not in INTERNAL_LAUNCH_COMPONENT_NAMES) or name in seen:
                 continue
             ordered_names.append(name)
             seen.add(name)
@@ -193,66 +287,605 @@ class LaunchOrchestrator(QObject):
             seen.add(name)
         out: List[Dict[str, Any]] = []
         for name in ordered_names:
-            prev = existing_map.get(name, {})
+            prev = existing_map.get(name)
+            if prev is not None:
+                # Catalog reconciliation is not a launch-recipe migration.  In
+                # particular, adding or reordering a custom tool must not erase
+                # the instance selector, arguments, working directory,
+                # dependencies, or readiness policy that make this row belong
+                # to one radio.  Keep the complete radio-owned row verbatim.
+                out.append(dict(prev))
+                continue
             default_startup = False
             legacy_key = LAUNCH_APP_META.get(name, {}).get("legacy_autostart_key")
             if legacy_key:
                 default_startup = self.is_truthy(self.settings.get(str(legacy_key), False))
-            out.append(
-                {
-                    "name": name,
-                    "enabled": bool(prev.get("enabled", True)),
-                    "startup": bool(prev.get("startup", default_startup)),
-                }
-            )
+            normalized_item = {
+                "name": name,
+                "instance_key": name,
+                "enabled": True,
+                "startup": bool(default_startup),
+                "monitor_health": True,
+            }
+            custom_command = self._custom_tool_command(name, custom_tools)
+            if custom_command:
+                # Snapshot the definition into the radio bundle.  Subsequent
+                # edits to a station catalog entry cannot silently retarget a
+                # different radio's saved custom-tool assignment.
+                normalized_item["launch_command_override"] = custom_command
+            out.append(normalized_item)
         return out
 
     def get_launch_items(self) -> List[Dict[str, Any]]:
-        self._migrate_if_needed()
         raw = self.settings.get("launch_control_items", [])
         if not isinstance(raw, list):
             raw = []
         normalized = self.build_default_items(raw, custom_tools=self.get_custom_tools())
         return normalized
 
-    def set_launch_items(self, items: List[Dict[str, Any]], launch_all_with_startup: bool) -> None:
-        normalized = self.build_default_items(items, custom_tools=self.get_custom_tools())
-        batch: Dict[str, Any] = {
-            "launch_control_items": normalized,
-            "launch_control_enabled": bool(launch_all_with_startup),
-            "launch_control_migrated_v1": True,
-            "launch_readiness_timeout_sec": int(self.settings.get("launch_readiness_timeout_sec", 30) or 30),
+    def _restore_canonical_launch_items(
+        self,
+        radio_profile_id: int,
+        items: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Restore recipe fields lost by an older Launch Control catalog edit.
+
+        The canonical GRS-13 identity is the authority for executable identity,
+        arguments, working directory, dependencies, and readiness.  Operator
+        choices (enabled/startup/monitor) remain owned by the radio launch row.
+        This is an in-memory projection: normal Settings Save persists it.
+        """
+
+        restored = [dict(item) for item in items if isinstance(item, dict)]
+        try:
+            generation = self.multi_radio_store.radio_software_identity_generation(
+                int(radio_profile_id)
+            )
+            if generation <= 0:
+                return self._restore_legacy_varac_launch_item(
+                    int(radio_profile_id), restored
+                )
+            records = self.multi_radio_store.list_radio_software_identity_records(
+                int(radio_profile_id)
+            )
+        except Exception:
+            return restored
+        if not records:
+            return self._restore_legacy_varac_launch_item(
+                int(radio_profile_id), restored
+            )
+        if not any(record.family_key == "varac" for record in records):
+            restored = self._restore_legacy_varac_launch_item(
+                int(radio_profile_id), restored
+            )
+
+        consumed: set[int] = set()
+        removed: set[int] = set()
+        component_names = {
+            "flrig": "FLRig",
+            "fldigi": "FLDigi",
+            "flmsg": "FLMsg",
+            "flamp": "FLAmp",
+            "js8call": "JS8Call",
+            "varac": "VarAC",
+            "vara": "VARA",
+            "external-js8spotter": "JS8Spotter",
+            "commstat": "CommStat",
+            "sdrpp": "SDR++",
         }
-        for item in normalized:
-            name = str(item.get("name", "")).strip()
-            startup = bool(item.get("startup", False))
-            legacy_key = LAUNCH_APP_META.get(name, {}).get("legacy_autostart_key")
-            if legacy_key:
-                batch[str(legacy_key)] = startup
-        if hasattr(self.settings, "set_many"):
-            self.settings.set_many(batch, save=True)  # type: ignore[attr-defined]
-        else:
-            for key, val in batch.items():
-                self.settings.set(key, val)
+
+        for record in records:
+            recipe_components: Dict[str, Mapping[str, Any]] = {}
+            try:
+                manifest = (
+                    self.multi_radio_store.get_software_instance_manifest(record.bundle_id)
+                    or {}
+                )
+                evidence = manifest.get("evidence", {})
+                evidence = evidence if isinstance(evidence, Mapping) else {}
+                recipe = evidence.get("launch_recipe", {})
+                recipe = recipe if isinstance(recipe, Mapping) else {}
+                for raw in recipe.get("components", ()) or ():
+                    if not isinstance(raw, Mapping):
+                        continue
+                    key = (
+                        str(raw.get("component_key", "") or "")
+                        .strip()
+                        .casefold()
+                        .replace("_", "-")
+                    )
+                    if key:
+                        recipe_components[key] = raw
+            except Exception:
+                recipe_components = {}
+
+            cross_family = record.launch.get("cross_family_dependencies", {})
+            cross_family = cross_family if isinstance(cross_family, Mapping) else {}
+            for component in record.components:
+                component_id = str(component.component_id or "").strip()
+                component_key = component_id.casefold().replace("_", "-")
+                component_kind = component_key.split(":", 1)[0]
+                app_name = component_names.get(component_kind)
+                argv = [str(value) for value in component.argv]
+                if not app_name or not argv or not argv[0].strip():
+                    continue
+                recipe_component = (
+                    recipe_components.get(component_key)
+                    or recipe_components.get(component_kind)
+                    or {}
+                )
+                component_scope = str(
+                    recipe_component.get("execution_scope", record.scope or "standard") or "standard"
+                ).strip().lower()
+                expected_key = (
+                    f"fast-light:station-shared:{component_key}"
+                    if record.family_key == "fast_light"
+                    and component_scope == "station_shared_utility"
+                    else f"{record.bundle_id}:{component_key}"
+                )
+                exact_matches = [
+                    index for index, row in enumerate(restored)
+                    if index not in consumed
+                    and str(row.get("instance_key", row.get("name", "")) or "")
+                    .strip()
+                    .casefold()
+                    == expected_key.casefold()
+                ]
+                name_matches = [
+                    index for index, row in enumerate(restored)
+                    if index not in consumed
+                    and str(row.get("name", "") or "").strip().casefold() == app_name.casefold()
+                ]
+                matches = exact_matches or name_matches
+                selected_index = matches[0] if matches else len(restored)
+                base = dict(restored[selected_index]) if matches else {}
+                if matches:
+                    consumed.add(selected_index)
+                    # Older damaged bundles can contain both a canonical row
+                    # and a name-only duplicate.  Collapse only duplicates for
+                    # this same built-in component.
+                    removed.update(index for index in name_matches if index != selected_index)
+
+                readiness = base.get("readiness_policy", {})
+                readiness = dict(readiness) if isinstance(readiness, Mapping) else {}
+                recipe_readiness = recipe_component.get("readiness", {})
+                if isinstance(recipe_readiness, Mapping):
+                    readiness.update(recipe_readiness)
+                readiness.update(dict(component.readiness))
+                readiness.update(
+                    {
+                        "launch_arguments": argv[1:],
+                        "working_directory": str(component.cwd or ""),
+                        "environment": {
+                            str(key): str(value) for key, value in component.env.items()
+                        },
+                    }
+                )
+                for key in (
+                    "effective_command",
+                    "effective_command_text",
+                    "profile_selector",
+                    "configuration_roots",
+                    "data_roots",
+                    "managed_directories",
+                    "endpoints",
+                    "evidence",
+                    "confidence",
+                    "execution_scope",
+                    "operator_starts",
+                    "structured_launch",
+                ):
+                    if key in recipe_component:
+                        value = recipe_component.get(key)
+                        readiness[key] = (
+                            dict(value)
+                            if isinstance(value, Mapping)
+                            else list(value)
+                            if isinstance(value, tuple)
+                            else value
+                        )
+                if "executable" in recipe_component or record.family_key == "varac":
+                    readiness["executable"] = argv[0]
+
+                dependencies = [str(value) for value in component.dependencies if str(value)]
+                cross_items = cross_family.get(component.component_id, ())
+                if isinstance(cross_items, (tuple, list)):
+                    dependencies.extend(
+                        str(value.get("family_key", "") or "").strip()
+                        for value in cross_items
+                        if isinstance(value, Mapping) and str(value.get("family_key", "") or "").strip()
+                    )
+                launch = component.launch if isinstance(component.launch, Mapping) else {}
+                canonical = {
+                    **base,
+                    "name": app_name,
+                    "instance_key": expected_key,
+                    "enabled": bool(base.get("enabled", True)),
+                    "startup": bool(base.get("startup", launch.get("at_startup", False))),
+                    "monitor_health": bool(
+                        base.get("monitor_health", launch.get("monitor_health", True))
+                    ),
+                    "launch_path_override": argv[0],
+                    "launch_command_override": "",
+                    "dependencies": list(dict.fromkeys(dependencies)),
+                    "readiness_policy": readiness,
+                    "execution_scope": str(
+                        readiness.get("execution_scope", record.scope or "standard")
+                        or "standard"
+                    ),
+                }
+                if matches:
+                    restored[selected_index] = canonical
+                else:
+                    restored.append(canonical)
+                    consumed.add(selected_index)
+
+        return [row for index, row in enumerate(restored) if index not in removed]
+
+    def _restore_legacy_varac_launch_item(
+        self,
+        radio_profile_id: int,
+        items: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Recover a legacy VarAC row without parsing its shell command.
+
+        Older radio bundles stored ``wine ... C:\\VarAC\\VarAC.ini`` as one
+        command string.  POSIX shell parsing consumes those backslashes.  The
+        linked VarAC node already owns the exact executable and INI identity,
+        so project it into the existing structured readiness seam while
+        retaining the operator's enabled/startup/monitor choices.
+        """
+
+        restored = [dict(item) for item in items if isinstance(item, dict)]
+        try:
+            profile = self.multi_radio_store.get_device_profile(int(radio_profile_id))
+            node_id = int((profile or {}).get("varac_node_id") or 0)
+            node = self.multi_radio_store.get_varac_node(node_id) if node_id > 0 else None
+            recipe = (
+                legacy_varac_structured_launch(
+                    node,
+                    platform_name=platform.system(),
+                )
+                if isinstance(node, Mapping)
+                else None
+            )
+        except Exception:
+            return restored
+        if not isinstance(recipe, Mapping):
+            return restored
+
+        matches = [
+            index
+            for index, row in enumerate(restored)
+            if str(row.get("name", "") or "").strip().casefold() == "varac"
+        ]
+        if not matches:
+            return restored
+        selected = matches[0]
+        base = dict(restored[selected])
+        readiness = base.get("readiness_policy", {})
+        readiness = dict(readiness) if isinstance(readiness, Mapping) else {}
+        readiness.update(
+            {
+                "structured_launch": True,
+                "executable": str(recipe.get("executable") or ""),
+                "launch_arguments": list(recipe.get("launch_arguments") or ()),
+                "working_directory": str(recipe.get("working_directory") or ""),
+                "environment": dict(recipe.get("environment") or {}),
+                "legacy_identity_recovered": True,
+            }
+        )
+        base.update(
+            {
+                "launch_path_override": str(recipe.get("executable") or ""),
+                "launch_command_override": "",
+                "readiness_policy": readiness,
+            }
+        )
+        restored[selected] = base
+        return restored
+
+    def get_radio_launch_bundle(self, radio_profile_id: int) -> Dict[str, Any]:
+        bundle = self.bundle_store.get_bundle(
+            int(radio_profile_id),
+            legacy_items=self.settings.get("launch_control_items", []),
+        )
+        raw_items = bundle.get("items", []) if isinstance(bundle, Mapping) else []
+        items = [dict(item) for item in raw_items if isinstance(item, dict)]
+        restored = self._restore_canonical_launch_items(int(radio_profile_id), items)
+        if restored != items:
+            bundle = dict(bundle)
+            bundle["items"] = restored
+            bundle["canonical_recovery"] = True
+        return bundle
+
+    def _restore_canonical_bundle_override(
+        self,
+        radio_profile_id: int,
+        bundle: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Apply canonical recipe recovery to an in-memory Launch Control draft.
+
+        Row-level Start and the unsaved Settings draft intentionally pass a
+        bundle override to the planner.  That override must receive the same
+        immutable recipe recovery as the saved bundle; otherwise a pre-update
+        FLAmp/FLMsg row can lose its radio selector and collapse back to
+        executable-only process matching.  Operator-owned checkboxes remain
+        untouched by :meth:`_restore_canonical_launch_items`.
+        """
+
+        restored_bundle = dict(bundle)
+        raw_items = restored_bundle.get("items", [])
+        items = [dict(item) for item in raw_items if isinstance(item, Mapping)]
+        original_names = {
+            str(item.get("name", "") or "").strip().casefold()
+            for item in items
+            if str(item.get("name", "") or "").strip()
+        }
+        restored = self._restore_canonical_launch_items(int(radio_profile_id), items)
+        # Recovery may append a canonical component that was absent from an
+        # older draft.  It is useful for review, but an in-memory row Start or
+        # startup preview must never infer that the absent component was
+        # selected.  Only rows represented in the operator's draft retain
+        # launch eligibility.
+        for item in restored:
+            name = str(item.get("name", "") or "").strip().casefold()
+            if name and name not in original_names:
+                item["enabled"] = False
+                item["startup"] = False
+        restored_bundle["items"] = restored
+        if restored != items:
+            restored_bundle["canonical_recovery"] = True
+        return restored_bundle
+
+    def set_radio_launch_bundle(
+        self,
+        radio_profile_id: int,
+        items: List[Dict[str, Any]],
+        launch_enabled: bool,
+    ) -> Dict[str, Any]:
+        return self.bundle_store.save_bundle(int(radio_profile_id), bool(launch_enabled), items)
+
+    def preview_startup_plan(
+        self,
+        *,
+        scope_radio_id: Optional[int] = None,
+        trigger: str = "startup",
+        bundle_override: Optional[Mapping[str, Any]] = None,
+    ) -> LaunchPlan:
+        # An explicit selected-radio start is allowed to prepare an inactive
+        # radio's applications without silently activating that radio.  Only
+        # unattended station startup is restricted to runtime-active radios.
+        manual_selected_radio = (
+            str(trigger or "").strip().lower() == "manual"
+            and scope_radio_id is not None
+        )
+        profiles = (
+            self.multi_radio_store.list_device_profiles()
+            if manual_selected_radio
+            else self.multi_radio_store.list_runtime_active_device_profiles()
+        )
+        if scope_radio_id is not None:
+            profiles = [
+                profile
+                for profile in profiles
+                if int(profile.get("id", 0) or 0) == int(scope_radio_id)
+            ]
+        projection_warnings: Dict[int, str] = {}
+        for profile in profiles:
+            radio_id = int(profile.get("id", 0) or 0)
+            repair_detector = getattr(
+                self.multi_radio_store,
+                "fast_light_message_component_repair_needed",
+                None,
+            )
+            if (
+                radio_id > 0
+                and callable(repair_detector)
+                and repair_detector(radio_id)
+            ):
+                try:
+                    repair = self.multi_radio_store.prepare_fast_light_message_component_repair(
+                        radio_id
+                    )
+                    self.multi_radio_store.apply_fast_light_message_component_repair(repair)
+                    log.info(
+                        "Automatically repaired legacy FLMsg/FLAmp launch identity for radio %s.",
+                        radio_id,
+                    )
+                except (KeyError, ValueError) as exc:
+                    # Ambiguous or incomplete evidence remains an operator
+                    # recovery task in Software Administration.  Launch
+                    # planning continues so its existing blocker/warning is
+                    # still precise and no unrelated app is suppressed.
+                    log.warning(
+                        "Automatic FLMsg/FLAmp repair deferred for radio %s: %s",
+                        radio_id,
+                        exc,
+                    )
+                except Exception:
+                    log.exception(
+                        "Automatic FLMsg/FLAmp repair failed for radio %s; existing launch review remains available.",
+                        radio_id,
+                    )
+            projection_issues = (
+                self.multi_radio_store.validate_radio_software_identity_projections(radio_id)
+                if radio_id > 0
+                and self.multi_radio_store.radio_software_identity_generation(radio_id) > 0
+                else {}
+            )
+            if projection_issues:
+                detail = "; ".join(
+                    f"{family}: {', '.join(issues)}"
+                    for family, issues in sorted(projection_issues.items())
+                )
+                projection_warnings[radio_id] = detail
+                log.warning(
+                    "Launch proceeding for radio %s with canonical software parity review warning: %s",
+                    radio_id,
+                    detail,
+                )
+        self._last_projection_warnings = projection_warnings
+        blockers = self.multi_radio_store.varac_native_launch_blockers()
+        if blockers:
+            blocked_targets = {
+                str(target or "").strip()
+                for blocker in blockers
+                for target in blocker.get("targets", ())
+                if str(target or "").strip()
+            }
+            affected = [
+                str(profile.get("name", profile.get("id", "VarAC")) or "VarAC")
+                for profile in profiles
+                if blocked_targets.intersection(
+                    {
+                        str(profile.get("varac_ini_path", "") or "").strip(),
+                        str(profile.get("varac_vara_ini_path", "") or "").strip(),
+                    }
+                )
+            ]
+            if affected:
+                raise ValueError(
+                    "VarAC launch is blocked pending native configuration recovery for: "
+                    + ", ".join(sorted(set(affected), key=str.casefold))
+                    + ". Open Station Health before retrying."
+                )
+        bundles = {
+            int(profile["id"]): self.get_radio_launch_bundle(int(profile["id"]))
+            for profile in profiles
+            if int(profile.get("id", 0) or 0) > 0
+        }
+        if scope_radio_id is not None and bundle_override is not None:
+            bundles[int(scope_radio_id)] = self._restore_canonical_bundle_override(
+                int(scope_radio_id),
+                bundle_override,
+            )
+        plan = self.planner.plan_startup(
+            profiles,
+            bundles,
+            scope_radio_id=scope_radio_id,
+            trigger=trigger,
+        )
+        return self._with_effective_launch_preview(plan)
+
+    def preview_manual_plan(
+        self,
+        radio_profile_id: int,
+        *,
+        bundle_override: Optional[Mapping[str, Any]] = None,
+    ) -> LaunchPlan:
+        """Preview the selected-radio plan through the startup planner path.
+
+        Manual station start changes only the requested radio scope; recipe,
+        startup inclusion, dependencies, and readiness stay identical.
+        """
+
+        return self.preview_startup_plan(
+            scope_radio_id=int(radio_profile_id),
+            trigger="manual",
+            bundle_override=bundle_override,
+        )
+
+    def preview_radio_recipe_plan(
+        self,
+        radio_profile_id: int,
+        *,
+        bundle_override: Optional[Mapping[str, Any]] = None,
+    ) -> LaunchPlan:
+        """Preview known recipes and explicit operator-start states for review."""
+
+        profiles = self.multi_radio_store.list_device_profiles()
+        bundles = {
+            int(profile["id"]): self.get_radio_launch_bundle(int(profile["id"]))
+            for profile in profiles
+            if int(profile.get("id", 0) or 0) > 0
+        }
+        if bundle_override is not None:
+            bundles[int(radio_profile_id)] = self._restore_canonical_bundle_override(
+                int(radio_profile_id),
+                bundle_override,
+            )
+        plan = self.planner.plan_review(
+            profiles,
+            bundles,
+            scope_radio_id=int(radio_profile_id),
+        )
+        return self._with_effective_launch_preview(plan)
+
+    def _with_effective_launch_preview(self, plan: LaunchPlan) -> LaunchPlan:
+        """Resolve executable selection separately from planner-owned launch arguments.
+
+        The resulting queue is safe to render in Launch Control and remains the
+        same command shape used at execution time, including ``open --args``
+        for macOS application bundles.
+        """
+        instances = []
+        for instance in plan.instances:
+            queue_item = instance.as_queue_item()
+            command, _description = (None, "operator start") if instance.operator_starts else self._resolve_launch_command(queue_item)
+            instances.append(replace(instance, effective_command=tuple(command or ())))
+        return LaunchPlan(trigger=plan.trigger, scope_radio_id=plan.scope_radio_id, instances=tuple(instances))
+
+    def set_launch_items(self, items: List[Dict[str, Any]], launch_all_with_startup: bool) -> None:
+        """Compatibility entry point; writes the runtime-primary radio bundle, never legacy KV."""
+        profile = self.multi_radio_store.get_runtime_primary_device_profile()
+        if not profile:
+            raise RuntimeError("Launch Control needs a selected radio before it can be saved.")
+        self.set_radio_launch_bundle(
+            int(profile["id"]),
+            self.build_default_items(items, custom_tools=self.get_custom_tools()),
+            bool(launch_all_with_startup),
+        )
 
     def start_startup_sequence(self) -> bool:
         if self._active:
             return False
-        launch_all = self.is_truthy(self.settings.get("launch_control_enabled", True))
-        if not launch_all:
+        if not self.launch_allowed():
             return False
-        items = self.get_launch_items()
-        queue = self._build_queue(items, startup_only=True)
+        plan = self.preview_startup_plan(trigger="startup")
+        queue = plan.queue()
         if not queue:
             return False
         return self._start_sequence("startup", queue)
 
+    def start_radio_startup_sequence(
+        self,
+        radio_profile_id: int,
+        *,
+        bundle_override: Optional[Mapping[str, Any]] = None,
+    ) -> bool:
+        # ``launch_allowed`` is the primary operating model's unattended
+        # startup gate.  This method represents an explicit operator action on
+        # one reviewed radio and must remain available independently.
+        if self._active:
+            log.warning(
+                "LaunchOrchestrator: selected-radio launch for radio %s blocked because another sequence is active",
+                radio_profile_id,
+            )
+            return False
+        plan = self.preview_manual_plan(
+            int(radio_profile_id),
+            bundle_override=bundle_override,
+        )
+        queue = plan.queue()
+        if not queue:
+            log.warning(
+                "LaunchOrchestrator: selected-radio launch for radio %s produced no launchable recipe",
+                radio_profile_id,
+            )
+            return False
+        return self._start_sequence("manual", queue)
+
     def start_manual_sequence(self, items: Optional[List[Dict[str, Any]]] = None) -> bool:
         if self._active:
             return False
-        base_items = (
-            self.build_default_items(items, custom_tools=self.get_custom_tools()) if items is not None else self.get_launch_items()
-        )
+        if not self.launch_allowed():
+            return False
+        # Explicit manual rows are already structured launch recipes.  Running
+        # them back through the legacy catalog builder discarded instance
+        # identity, monitoring, dependencies, working-directory/readiness, and
+        # execution-scope facts that distinguish two radios' app instances.
+        base_items = normalize_launch_items(items) if items is not None else self.get_launch_items()
         queue = self._build_queue(base_items, startup_only=False)
         if not queue:
             return False
@@ -262,6 +895,8 @@ class LaunchOrchestrator(QObject):
         if not self._active:
             return
         self._cancel_requested = True
+        self._poll_timer.stop()
+        self._finish_sequence(cancelled=True)
 
     def is_active(self) -> bool:
         return self._active
@@ -286,37 +921,8 @@ class LaunchOrchestrator(QObject):
                 return True
         return False
 
-    def _migrate_if_needed(self) -> None:
-        migrated = self.is_truthy(self.settings.get("launch_control_migrated_v1", False))
-        raw_items = self.settings.get("launch_control_items", None)
-        if migrated and isinstance(raw_items, list):
-            return
-        defaults = self.build_default_items(
-            raw_items if isinstance(raw_items, list) else None,
-            custom_tools=self.get_custom_tools(),
-        )
-        batch = {
-            "launch_control_items": defaults,
-            "launch_control_enabled": bool(self.settings.get("launch_control_enabled", True)),
-            "launch_control_migrated_v1": True,
-            "launch_readiness_timeout_sec": int(
-                self.settings.get("launch_readiness_timeout_sec", DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC)
-                or DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
-            ),
-        }
-        for item in defaults:
-            name = str(item.get("name", "")).strip()
-            legacy_key = LAUNCH_APP_META.get(name, {}).get("legacy_autostart_key")
-            if legacy_key:
-                batch[str(legacy_key)] = bool(item.get("startup", False))
-        if hasattr(self.settings, "set_many"):
-            self.settings.set_many(batch, save=True)  # type: ignore[attr-defined]
-        else:
-            for key, val in batch.items():
-                self.settings.set(key, val)
-
-    def _build_queue(self, items: List[Dict[str, Any]], startup_only: bool) -> List[str]:
-        queue: List[str] = []
+    def _build_queue(self, items: List[Dict[str, Any]], startup_only: bool) -> List[Any]:
+        queue: List[Any] = []
         catalog = set(self.launch_catalog_order())
         for item in items:
             if not isinstance(item, dict):
@@ -324,14 +930,54 @@ class LaunchOrchestrator(QObject):
             name = str(item.get("name", "")).strip()
             if name not in catalog:
                 continue
-            if not bool(item.get("enabled", False)):
+            if startup_only:
+                if not bool(item.get("startup", False)):
+                    continue
+            elif not bool(item.get("enabled", False)):
                 continue
-            if startup_only and not bool(item.get("startup", False)):
+            has_override = bool(
+                str(item.get("launch_path_override", "") or "").strip()
+                or str(item.get("launch_command_override", "") or "").strip()
+            )
+            if not has_override and not self.is_configured(name):
                 continue
-            if not self.is_configured(name):
-                continue
-            queue.append(name)
+            queue.append(dict(item) if has_override else name)
         return queue
+
+    @staticmethod
+    def _queue_item_name(item: Any) -> str:
+        if isinstance(item, Mapping):
+            return str(item.get("name", "") or "").strip()
+        return str(item or "").strip()
+
+    @staticmethod
+    def _result_for(item: Any, *, status: str, detail: str) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "name": LaunchOrchestrator._queue_item_name(item),
+            "status": status,
+            "detail": detail,
+        }
+        if isinstance(item, Mapping):
+            for key in (
+                "instance_key",
+                "instance_identity",
+                "radio_ids",
+                "radio_names",
+                "rig_name",
+                "rig_name_source",
+                "application_data_root",
+                "storage_mode",
+                "effective_command",
+                "working_directory",
+                "profile_selector",
+                "execution_scope",
+                "startup_included",
+                "bundle_enabled",
+                "operator_starts",
+            ):
+                if key in item:
+                    result[key] = item[key]
+        return result
 
     def _schedule_advance_queue(self, delay_ms: int = 0) -> None:
         QTimer.singleShot(max(0, int(delay_ms)), self._advance_queue)
@@ -348,22 +994,95 @@ class LaunchOrchestrator(QObject):
             return 120.0
         return float(val)
 
-    def _program_ready_for_sequence(self, name: str) -> bool:
-        if not self._program_running(name):
+    def _program_ready_for_sequence(self, item: Any) -> bool:
+        name = self._queue_item_name(item)
+        info = self._cached_status_for_item(item)
+        if not self._program_running(item):
             return False
         if name == "JS8Call":
-            try:
-                return bool(self.status.js8_api_reachable(allow_fallback=False))
-            except Exception:
-                return False
+            policy = item.get("readiness_policy", {}) if isinstance(item, Mapping) else {}
+            if isinstance(policy, Mapping) and not bool(policy.get("require_api", True)):
+                return True
+            return bool(info.get("reachable", False))
+        if name in {"FLRig", "FLDigi"} and isinstance(item, Mapping):
+            policy = item.get("readiness_policy", {})
+            if isinstance(policy, Mapping) and bool(policy.get("require_service", False)):
+                return bool(info.get("reachable", False))
         return True
+
+    @staticmethod
+    def _has_persisted_endpoint_identity(item: Any) -> bool:
+        """Return whether one launch item owns a concrete service endpoint.
+
+        A selected-radio launch plan contains only that radio's rows, so queue
+        cardinality cannot prove that another radio's same-named process is a
+        different instance.  The persisted identity plus endpoint is the
+        authoritative discriminator for the service-bearing applications.
+        """
+
+        if not isinstance(item, Mapping) or not str(item.get("instance_identity", "") or "").strip():
+            return False
+        name = LaunchOrchestrator._queue_item_name(item)
+        if name not in {"JS8Call", "FLRig", "FLDigi"}:
+            return False
+        policy = item.get("readiness_policy", {})
+        if not isinstance(policy, Mapping):
+            return False
+        host = str(policy.get("host", "") or "").strip()
+        try:
+            port = int(policy.get("port", 0) or 0)
+        except (TypeError, ValueError):
+            return False
+        return bool(host) and 0 < port <= 65535
+
+    def _cached_status_for_item(
+        self,
+        item: Any,
+        *,
+        force: bool = False,
+    ) -> Mapping[str, Any]:
+        name = self._queue_item_name(item)
+        policy = item.get("readiness_policy", {}) if isinstance(item, Mapping) else {}
+        kwargs: Dict[str, Any] = {
+            "force": bool(force),
+            # The sequence-level preflight already published one fresh process
+            # inventory.  A forced scoped request here means “probe this
+            # endpoint now,” not “walk every process again.”
+            "force_process_snapshot": False,
+        }
+        if name == "JS8Call" and isinstance(policy, Mapping):
+            kwargs["host_override"] = str(policy.get("host", "") or "") or None
+            try:
+                kwargs["port_override"] = int(policy.get("port")) if policy.get("port") is not None else None
+            except Exception:
+                kwargs["port_override"] = None
+        elif name == "FLRig" and isinstance(policy, Mapping):
+            kwargs["flrig_host_override"] = str(policy.get("host", "") or "") or None
+            try:
+                kwargs["flrig_port_override"] = int(policy.get("port")) if policy.get("port") is not None else None
+            except Exception:
+                kwargs["flrig_port_override"] = None
+        elif name == "FLDigi" and isinstance(policy, Mapping):
+            kwargs["fldigi_host_override"] = str(policy.get("host", "") or "") or None
+            try:
+                kwargs["fldigi_port_override"] = int(policy.get("port")) if policy.get("port") is not None else None
+            except Exception:
+                kwargs["fldigi_port_override"] = None
+        try:
+            snapshot = self.dependency_status.status_snapshot(**kwargs)
+        except Exception:
+            return {}
+        key = "JS8Call_API" if name == "JS8Call" else name
+        info = snapshot.get(key, {}) if isinstance(snapshot, Mapping) else {}
+        return info if isinstance(info, Mapping) else {}
 
     def _pending_queue_contains(self, names: set[str]) -> bool:
         if not names:
             return False
         if self._index >= len(self._queue):
             return False
-        for name in self._queue[self._index :]:
+        for item in self._queue[self._index :]:
+            name = self._queue_item_name(item)
             if name in names:
                 return True
         return False
@@ -379,7 +1098,7 @@ class LaunchOrchestrator(QObject):
             return self._coerce_delay_seconds(raw, DEFAULT_JS8CALL_DEPENDENT_DELAY_SEC)
         return 0.0
 
-    def _start_sequence(self, trigger: str, queue: List[str]) -> bool:
+    def _start_sequence(self, trigger: str, queue: List[Any]) -> bool:
         self._active = True
         self._cancel_requested = False
         self._trigger = trigger
@@ -387,8 +1106,31 @@ class LaunchOrchestrator(QObject):
         self._index = 0
         self._results = []
         self._current_name = None
+        self._current_item = None
         self._current_cmd = None
         self._current_started_monotonic = 0.0
+        self._current_phase = ""
+        self._endpoint_preflight_verified = set()
+        self._endpoint_preflight_requested = set()
+        self._endpoint_preflight_clear = set()
+        self._sequence_claimed_identities = set()
+        self._sequence_process_records = ()
+        self._sequence_process_records_ready = False
+        self._sequence_preflight_started_wall = time.time()
+        self._process_preflight_pending = True
+        self._process_preflight_generation += 1
+        preflight_generation = self._process_preflight_generation
+        self._process_preflight_reason = f"launch-preflight:{trigger}"
+        try:
+            latest = self.dependency_status.latest_snapshot()
+            self._process_preflight_baseline_sequence = int(
+                getattr(latest, "sequence", 0) or 0
+            )
+        except Exception:
+            self._process_preflight_baseline_sequence = 0
+        self._sequence_projection_warnings = dict(
+            getattr(self, "_last_projection_warnings", {})
+        )
         try:
             self._wait_timeout_sec = int(
                 self.settings.get("launch_readiness_timeout_sec", DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC)
@@ -396,12 +1138,158 @@ class LaunchOrchestrator(QObject):
             )
         except Exception:
             self._wait_timeout_sec = DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
-        self.sequence_started.emit({"trigger": trigger, "queue": list(queue)})
+        self.sequence_started.emit(
+            {
+                "trigger": trigger,
+                "queue": [dict(item) if isinstance(item, Mapping) else {"name": self._queue_item_name(item)} for item in queue],
+                "projection_warnings": dict(self._sequence_projection_warnings),
+            }
+        )
+        # A cold or stale process cache is unknown evidence, not proof that an
+        # application is absent.  Force one station-wide inventory and wait for
+        # its publication before any launch command can reach Popen.  Endpoint
+        # owners receive an additional configured-port preflight below.
+        try:
+            self.dependency_status.refresh_now(
+                reason=self._process_preflight_reason,
+                force=True,
+            )
+        except Exception as exc:
+            self._fail_launch_preflight(
+                f"could not start process inventory: {exc}"
+            )
+            return True
+        QTimer.singleShot(
+            int(LAUNCH_PROCESS_PREFLIGHT_TIMEOUT_SEC * 1000.0),
+            lambda generation=preflight_generation: self._on_launch_preflight_timeout(
+                generation
+            ),
+        )
+        # Test doubles and an already-completed refresh can publish before the
+        # queued signal is delivered.  Re-check the immutable snapshot without
+        # walking the process table on the GUI thread.
+        self._accept_completed_launch_preflight()
+        return True
+
+    def _accept_completed_launch_preflight(self) -> bool:
+        if not self._active or not self._process_preflight_pending:
+            return False
+        try:
+            snapshot = self.dependency_status.latest_snapshot()
+            sequence = int(getattr(snapshot, "sequence", 0) or 0)
+            scope = str(getattr(snapshot, "scope", "") or "")
+            reason = str(getattr(snapshot, "reason", "") or "")
+        except Exception:
+            return False
+        if scope != LEGACY_PRIMARY_DEPENDENCY_SCOPE:
+            return False
+        if reason != str(getattr(self, "_process_preflight_reason", "") or ""):
+            return False
+        if sequence <= int(self._process_preflight_baseline_sequence or 0):
+            return False
+        self._sequence_process_records = tuple(
+            dict(record)
+            for record in (getattr(snapshot, "process_records", ()) or ())
+            if isinstance(record, Mapping)
+        )
+        self._sequence_process_records_ready = True
+        self._process_preflight_pending = False
+        log.info(
+            "LaunchOrchestrator: process preflight complete for %s launch (sequence=%s)",
+            self._trigger or "unknown",
+            sequence,
+        )
         self._schedule_advance_queue(0)
         return True
 
+    def _on_launch_preflight_snapshot_changed(self, snapshot: object) -> None:
+        if not self._active or not self._process_preflight_pending:
+            return
+        if str(getattr(snapshot, "scope", "") or "") != LEGACY_PRIMARY_DEPENDENCY_SCOPE:
+            return
+        if str(getattr(snapshot, "reason", "") or "") != str(
+            getattr(self, "_process_preflight_reason", "") or ""
+        ):
+            return
+        self._accept_completed_launch_preflight()
+
+    def _on_launch_preflight_timeout(self, generation: int) -> None:
+        if generation != self._process_preflight_generation:
+            return
+        if not self._active or not self._process_preflight_pending:
+            return
+        self._fail_launch_preflight(
+            "fresh process inventory was not available before the safety deadline"
+        )
+
+    def _fail_launch_preflight(self, detail: str) -> None:
+        if not self._active:
+            return
+        self._process_preflight_pending = False
+        message = f"launch safety preflight failed; nothing was started: {detail}"
+        log.error("LaunchOrchestrator: %s", message)
+        for item in self._queue:
+            result = self._result_for(item, status="failed", detail=message)
+            self._results.append(result)
+            self.sequence_progress.emit(result)
+        self._finish_sequence(cancelled=False)
+
+    @staticmethod
+    def _sequence_identity_key(item: Any) -> str:
+        if not isinstance(item, Mapping):
+            return ""
+        identity = str(item.get("instance_identity", "") or "").strip()
+        return f"instance:{identity}" if identity else ""
+
+    @staticmethod
+    def _endpoint_preflight_key(item: Any) -> str:
+        if not LaunchOrchestrator._has_persisted_endpoint_identity(item):
+            return ""
+        policy = item.get("readiness_policy", {})
+        identity = str(item.get("instance_identity", "") or "").strip()
+        name = LaunchOrchestrator._queue_item_name(item)
+        host = str(policy.get("host", "") or "").strip().casefold()
+        try:
+            port = int(policy.get("port", 0) or 0)
+        except (TypeError, ValueError):
+            port = 0
+        return f"{identity}|{name}|{host}|{port}"
+
+    def _configured_endpoint_preflight_state(
+        self,
+        item: Any,
+        endpoint_key: str,
+    ) -> str:
+        self._endpoint_preflight_requested = getattr(
+            self,
+            "_endpoint_preflight_requested",
+            set(),
+        )
+        force = endpoint_key not in self._endpoint_preflight_requested
+        if force:
+            self._endpoint_preflight_requested.add(endpoint_key)
+        info = self._cached_status_for_item(item, force=force)
+        try:
+            checked_at = float(info.get("checked_at", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            checked_at = 0.0
+        source = str(info.get("source", "") or "").strip().lower()
+        # The endpoint result must belong to this launch attempt.  A prior
+        # cached failure must not authorize a spawn after an app was started
+        # outside FIO, and the cold process fallback is never endpoint proof.
+        evidence_complete = (
+            source == "endpoint"
+            and checked_at
+            >= float(getattr(self, "_sequence_preflight_started_wall", 0.0) or 0.0)
+        )
+        if not evidence_complete:
+            return "pending"
+        return "occupied" if bool(info.get("reachable", False)) else "clear"
+
     def _advance_queue(self) -> None:
         if not self._active:
+            return
+        if bool(getattr(self, "_process_preflight_pending", False)):
             return
         if self._cancel_requested:
             self._finish_sequence(cancelled=True)
@@ -409,56 +1297,577 @@ class LaunchOrchestrator(QObject):
         if self._index >= len(self._queue):
             self._finish_sequence(cancelled=False)
             return
-        name = self._queue[self._index]
+        queue_item = self._queue[self._index]
+        name = self._queue_item_name(queue_item)
         self._index += 1
-        if self._program_running(name):
-            if self._program_ready_for_sequence(name):
-                result = {"name": name, "status": "already_running", "detail": "already running"}
+        if not name:
+            self._schedule_advance_queue(0)
+            return
+        sequence_identity = self._sequence_identity_key(queue_item)
+        claimed_identities = getattr(self, "_sequence_claimed_identities", set())
+        if sequence_identity and sequence_identity in claimed_identities:
+            result = self._result_for(
+                queue_item,
+                status="already_running",
+                detail="already handled by this launch sequence",
+            )
+            self._results.append(result)
+            self.sequence_progress.emit(result)
+            self._schedule_advance_queue(0)
+            return
+        blocked_dependency = self._blocked_dependency_for(queue_item)
+        if blocked_dependency:
+            result = self._result_for(
+                queue_item,
+                status="blocked_dependency",
+                detail=f"dependency {blocked_dependency} was not ready",
+            )
+            self._results.append(result)
+            self.sequence_progress.emit(result)
+            self._schedule_advance_queue(0)
+            return
+        identity_blocker = self._instance_launch_identity_blocker(queue_item)
+        if identity_blocker:
+            result = self._result_for(
+                queue_item,
+                status="failed",
+                detail=identity_blocker,
+            )
+            self._results.append(result)
+            self.sequence_progress.emit(result)
+            log.warning(
+                "LaunchOrchestrator: blocked unsafe %s launch identity: %s",
+                name,
+                identity_blocker,
+            )
+            self._schedule_advance_queue(0)
+            return
+        exact_process_running = self._configured_instance_process_running(queue_item)
+        endpoint_key = self._endpoint_preflight_key(queue_item)
+        if (
+            endpoint_key
+            and endpoint_key not in getattr(self, "_endpoint_preflight_verified", set())
+        ):
+            endpoint_state = self._configured_endpoint_preflight_state(
+                queue_item,
+                endpoint_key,
+            )
+            if endpoint_state == "pending":
+                log.info(
+                    "LaunchOrchestrator: verifying configured endpoint before %s launch",
+                    name,
+                )
+                self._current_name = name
+                self._current_item = queue_item
+                self._current_cmd = None
+                self._current_phase = "endpoint_preflight"
+                self._current_started_monotonic = time.monotonic()
+                self._poll_timer.setInterval(LAUNCH_ENDPOINT_PREFLIGHT_POLL_MS)
+                self._poll_timer.start()
+                return
+            self._endpoint_preflight_verified = getattr(
+                self,
+                "_endpoint_preflight_verified",
+                set(),
+            )
+            self._endpoint_preflight_verified.add(endpoint_key)
+            if endpoint_state == "occupied":
+                log.info(
+                    "LaunchOrchestrator: skipped %s launch because its configured endpoint is active",
+                    name,
+                )
+                if name == "JS8Call":
+                    try:
+                        self._persist_ready_js8_identity(
+                            queue_item,
+                            self._cached_status_for_item(queue_item),
+                        )
+                    except Exception as storage_exc:
+                        log.warning(
+                            "LaunchOrchestrator: JS8 endpoint persistence failed: %s",
+                            storage_exc,
+                        )
+                result = self._result_for(
+                    queue_item,
+                    status="already_running",
+                    detail="configured endpoint is already active",
+                )
                 self._results.append(result)
+                if sequence_identity:
+                    self._sequence_claimed_identities = getattr(
+                        self,
+                        "_sequence_claimed_identities",
+                        set(),
+                    )
+                    self._sequence_claimed_identities.add(sequence_identity)
                 self.sequence_progress.emit(result)
                 self._schedule_advance_queue(0)
                 return
-            self._current_name = name
-            self._current_cmd = None
-            self._current_started_monotonic = time.monotonic()
-            self._poll_timer.setInterval(LAUNCH_READINESS_INITIAL_POLL_MS)
-            self._poll_timer.start()
+            self._endpoint_preflight_clear = getattr(
+                self,
+                "_endpoint_preflight_clear",
+                set(),
+            )
+            self._endpoint_preflight_clear.add(endpoint_key)
+            if exact_process_running is True:
+                log.warning(
+                    "LaunchOrchestrator: skipped duplicate %s launch; exact process is "
+                    "running but its configured endpoint is not ready",
+                    name,
+                )
+                result = self._result_for(
+                    queue_item,
+                    status="failed",
+                    detail=(
+                        "configured process is running but its endpoint is not ready; "
+                        "duplicate launch skipped"
+                    ),
+                )
+                self._results.append(result)
+                if sequence_identity:
+                    self._sequence_claimed_identities = getattr(
+                        self,
+                        "_sequence_claimed_identities",
+                        set(),
+                    )
+                    self._sequence_claimed_identities.add(sequence_identity)
+                self.sequence_progress.emit(result)
+                self._schedule_advance_queue(0)
+                return
+        # An exact executable + radio-selector match is terminal evidence that
+        # this specific process-only instance is already running.  Do not let
+        # the later family-level multi-instance branch reinterpret that match
+        # as permission to start another copy merely because the queue also
+        # contains a second radio's FLAmp, FLMsg, VarAC, or VARA row.
+        if exact_process_running is True:
+            log.info(
+                "LaunchOrchestrator: skipped %s launch because its exact configured process is active",
+                name,
+            )
+            result = self._result_for(
+                queue_item,
+                status="already_running",
+                detail="exact configured process is already active",
+            )
+            self._results.append(result)
+            if sequence_identity:
+                self._sequence_claimed_identities = getattr(
+                    self,
+                    "_sequence_claimed_identities",
+                    set(),
+                )
+                self._sequence_claimed_identities.add(sequence_identity)
+            self.sequence_progress.emit(result)
+            self._schedule_advance_queue(0)
             return
-        cmd, cmd_desc = self._resolve_launch_command(name)
+        unattributed_process = self._unattributed_process_blocker(
+            queue_item,
+            exact_process_running,
+            endpoint_clear=(
+                bool(endpoint_key)
+                and endpoint_key
+                in getattr(self, "_endpoint_preflight_clear", set())
+            ),
+        )
+        if unattributed_process:
+            log.warning(
+                "LaunchOrchestrator: skipped duplicate-risk %s launch: %s",
+                name,
+                unattributed_process,
+            )
+            result = self._result_for(
+                queue_item,
+                status="failed",
+                detail=unattributed_process,
+            )
+            self._results.append(result)
+            if sequence_identity:
+                self._sequence_claimed_identities = getattr(
+                    self,
+                    "_sequence_claimed_identities",
+                    set(),
+                )
+                self._sequence_claimed_identities.add(sequence_identity)
+            self.sequence_progress.emit(result)
+            self._schedule_advance_queue(0)
+            return
+        if self._program_running(queue_item):
+            same_name_identities = {
+                str(value.get("instance_identity", "") or "")
+                for value in self._queue
+                if isinstance(value, Mapping) and self._queue_item_name(value) == name
+            }
+            has_distinct_instances = len(same_name_identities - {""}) > 1
+            endpoint_scoped = name in {"JS8Call", "FLRig", "FLDigi"}
+            ready = self._program_ready_for_sequence(queue_item)
+            if ready and (not has_distinct_instances or endpoint_scoped):
+                if name == "JS8Call":
+                    try:
+                        self._persist_ready_js8_identity(queue_item, self._cached_status_for_item(queue_item))
+                    except Exception as storage_exc:
+                        log.warning("LaunchOrchestrator: JS8 ready-state persistence failed: %s", storage_exc)
+                result = self._result_for(queue_item, status="already_running", detail="already running")
+                self._results.append(result)
+                if sequence_identity:
+                    self._sequence_claimed_identities = getattr(
+                        self,
+                        "_sequence_claimed_identities",
+                        set(),
+                    )
+                    self._sequence_claimed_identities.add(sequence_identity)
+                self.sequence_progress.emit(result)
+                self._schedule_advance_queue(0)
+                return
+            # A selected-radio plan contains only that radio's rows.  A
+            # different radio's same-named process must therefore not make us
+            # wait forever on this radio's absent endpoint.  Only use this
+            # recovery when no exact configured process identity is running;
+            # an exact process may simply still be starting its service.
+            selected_endpoint_requires_launch = (
+                not has_distinct_instances
+                and not ready
+                and self._has_persisted_endpoint_identity(queue_item)
+                and exact_process_running is not True
+            )
+            should_launch_distinct = (
+                has_distinct_instances and (not ready or not endpoint_scoped)
+            ) or selected_endpoint_requires_launch
+            if not should_launch_distinct:
+                self._current_name = name
+                self._current_item = queue_item
+                self._current_cmd = None
+                self._current_phase = "readiness"
+                self._current_started_monotonic = time.monotonic()
+                self._poll_timer.setInterval(LAUNCH_READINESS_INITIAL_POLL_MS)
+                self._poll_timer.start()
+                return
+        cmd, cmd_desc = self._resolve_launch_command(queue_item)
         if not cmd:
-            result = {"name": name, "status": "failed", "detail": "no launch command"}
+            result = self._result_for(queue_item, status="failed", detail="no launch command")
             self._results.append(result)
             self.sequence_progress.emit(result)
             self._schedule_advance_queue(0)
             return
         if self._is_self_launch_command(cmd):
-            result = {"name": name, "status": "blocked_self", "detail": "blocked self-launch target"}
+            result = self._result_for(queue_item, status="blocked_self", detail="blocked self-launch target")
             self._results.append(result)
             self.sequence_progress.emit(result)
             log.warning("LaunchOrchestrator: blocked self-launch target for %s via %r", name, cmd)
             self._schedule_advance_queue(0)
             return
         try:
+            self._materialize_item_managed_directories(queue_item)
             creationflags = 0
             if platform.system() == "Windows":
                 creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-            cwd = self._infer_launch_cwd(name, cmd, cmd_desc)
-            subprocess.Popen(cmd, shell=False, creationflags=creationflags, cwd=cwd)
+            cwd = self._infer_launch_cwd(name, cmd, cmd_desc, queue_item)
+            raw_environment = queue_item.get("environment", {}) if isinstance(queue_item, Mapping) else {}
+            environment = None
+            if isinstance(raw_environment, Mapping) and raw_environment:
+                environment = os.environ.copy()
+                environment.update(
+                    {
+                        str(key): str(value)
+                        for key, value in raw_environment.items()
+                        if str(key).strip()
+                    }
+                )
+            process = subprocess.Popen(
+                cmd,
+                shell=False,
+                creationflags=creationflags,
+                cwd=cwd,
+                env=environment,
+            )
+            self._schedule_process_window_title(queue_item, process)
+            if sequence_identity:
+                self._sequence_claimed_identities = getattr(
+                    self,
+                    "_sequence_claimed_identities",
+                    set(),
+                )
+                self._sequence_claimed_identities.add(sequence_identity)
+            if name == "JS8Call":
+                try:
+                    self._persist_planned_js8_storage(queue_item)
+                except Exception as storage_exc:
+                    # Storage metadata is diagnostic/reconciliation state.  A
+                    # successful process start must not be reported as failed
+                    # because this auxiliary persistence step had a problem.
+                    log.warning("LaunchOrchestrator: JS8 storage-plan persistence failed: %s", storage_exc)
+            try:
+                self.dependency_status.refresh_now(reason=f"launch:{name}", force=True)
+            except Exception:
+                pass
             if cwd:
                 log.info("LaunchOrchestrator: launched %s via %s (cwd=%s)", name, cmd_desc, cwd)
             else:
                 log.info("LaunchOrchestrator: launched %s via %s", name, cmd_desc)
             self._current_name = name
+            self._current_item = queue_item
             self._current_cmd = cmd
+            self._current_phase = "readiness"
             self._current_started_monotonic = time.monotonic()
             self._poll_timer.setInterval(LAUNCH_READINESS_INITIAL_POLL_MS)
             self._poll_timer.start()
         except Exception as e:
             log.error("LaunchOrchestrator: failed launching %s via %s: %s", name, cmd_desc, e)
-            result = {"name": name, "status": "failed", "detail": str(e)}
+            result = self._result_for(queue_item, status="failed", detail=str(e))
             self._results.append(result)
             self.sequence_progress.emit(result)
             self._schedule_advance_queue(0)
+
+    @staticmethod
+    def _window_title_for_item(item: Any) -> str:
+        if not isinstance(item, Mapping):
+            return ""
+        readiness = item.get("readiness_policy", {})
+        if not isinstance(readiness, Mapping):
+            return ""
+        saved = str(readiness.get("window_title") or "").strip()
+        if saved:
+            return saved
+        if LaunchOrchestrator._queue_item_name(item) != "VarAC":
+            return ""
+        nested = readiness.get("launch_recipe")
+        recipe = nested if isinstance(nested, Mapping) else readiness
+        if not (
+            LaunchOrchestrator.is_truthy(readiness.get("structured_launch", False))
+            or "executable" in recipe
+            or "launch_executable" in recipe
+            or "launch_arguments" in recipe
+        ):
+            return ""
+        radio_names = item.get("radio_names", ())
+        if not isinstance(radio_names, (list, tuple)) or len(radio_names) != 1:
+            return ""
+        # Compatibility for already-saved structured VarAC rows: the stable
+        # selected-radio context is sufficient to derive presentation text,
+        # but never changes the executable/INI launch identity.
+        return managed_instance_window_title("VarAC", radio_names[0])
+
+    def _schedule_process_window_title(self, item: Any, process: Any) -> None:
+        """Apply a non-native title without delaying or blocking launch.
+
+        FLMsg and FLAmp consume their supported ``-title`` argument directly.
+        VarAC has no qualified title argument, so FIO retries a PID-scoped OS
+        title update while its first window is being created.  A compositor
+        may reject this presentation-only request; that never changes process
+        readiness or the launch result.
+        """
+
+        if self._queue_item_name(item) != "VarAC":
+            return
+        title = self._window_title_for_item(item)
+        try:
+            pid = int(getattr(process, "pid", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        if not title or pid <= 0:
+            return
+
+        def _attempt(remaining: int) -> None:
+            if set_process_window_title(pid, title):
+                log.info("LaunchOrchestrator: set VarAC window title to %s", title)
+                return
+            if remaining > 1:
+                QTimer.singleShot(750, lambda: _attempt(remaining - 1))
+                return
+            log.warning(
+                "LaunchOrchestrator: VarAC started, but the desktop did not permit "
+                "the requested radio title '%s'; launch remains valid.",
+                title,
+            )
+
+        QTimer.singleShot(250, lambda: _attempt(12))
+
+    @staticmethod
+    def _materialize_item_managed_directories(item: Any) -> tuple[Path, ...]:
+        """Repair only directory targets authorized by a managed recipe.
+
+        Final Save normally prepares these paths.  The launch preflight keeps
+        older canonical recipes recoverable and prevents an absent ``cwd``
+        from making an application exit without a useful FIO error.  VarAC and
+        shared/operator-start components deliberately authorize no generic
+        directories here.
+        """
+
+        if not isinstance(item, Mapping) or not item.get("instance_identity"):
+            return ()
+        policy = item.get("readiness_policy", {})
+        if not isinstance(policy, Mapping):
+            return ()
+        component_key = {
+            "FLRig": "flrig",
+            "FLDigi": "fldigi",
+            "FLMsg": "flmsg",
+            "FLAmp": "flamp",
+            "JS8Call": "js8call",
+        }.get(LaunchOrchestrator._queue_item_name(item), "")
+        if not component_key:
+            return ()
+        paths = managed_directories_from_component(policy, component_key=component_key)
+        return materialize_managed_directories(paths)
+
+    @staticmethod
+    def _instance_launch_identity_blocker(item: Any) -> str:
+        """Reject ambiguous multi-instance NBEMS launch identities.
+
+        FLMsg and FLAmp share installation binaries across radios.  A
+        radio-scoped row is launchable only when its native selector is part of
+        the exact argv.  Deliberately station-shared utilities and explicit
+        operator-start rows remain on their existing compatibility paths.
+        """
+
+        if not isinstance(item, Mapping):
+            return ""
+        name = LaunchOrchestrator._queue_item_name(item)
+        if name not in {"FLMsg", "FLAmp"}:
+            return ""
+        scope = str(item.get("execution_scope", "standard") or "standard").strip().lower()
+        if scope == "station_shared_utility" or bool(item.get("operator_starts", False)):
+            return ""
+        arguments = item.get("launch_arguments", ())
+        if not isinstance(arguments, (list, tuple)):
+            arguments = ()
+        values = tuple(str(value or "").strip() for value in arguments)
+
+        def _missing_value(flag: str) -> bool:
+            try:
+                index = values.index(flag)
+            except ValueError:
+                return True
+            return index + 1 >= len(values) or not values[index + 1]
+
+        required = (
+            ("--flmsg-dir",)
+            if name == "FLMsg"
+            else (
+                "--config-dir",
+                "--arq-server-address",
+                "--arq-server-port",
+                "--xmlrpc-server-address",
+                "--xmlrpc-server-port",
+            )
+        )
+        missing = tuple(flag for flag in required if _missing_value(flag))
+        if not missing:
+            return ""
+        readiness = item.get("readiness_policy", {})
+        readiness = readiness if isinstance(readiness, Mapping) else {}
+        evidence = readiness.get("evidence", {})
+        evidence = evidence if isinstance(evidence, Mapping) else {}
+        canonical_source = {
+            "FLMsg": "nbems_native_radio_root",
+            "FLAmp": "flamp_config_dir_and_endpoint_pair",
+        }[name]
+        profile_selector = str(item.get("profile_selector", "") or "").strip()
+        # An adopted, version-qualified launcher may use a different native
+        # argument grammar.  It remains safe only when it still supplies an
+        # explicit per-instance selector and a non-empty exact argv.  Canonical
+        # FIO recipes must always satisfy the current qualified grammar.
+        if (
+            values
+            and profile_selector
+            and str(evidence.get("source", "") or "").strip() != canonical_source
+        ):
+            return ""
+        return (
+            f"{name} radio-scoped launch identity is incomplete; missing "
+            + ", ".join(missing)
+            + ". Review or replace this software instance before launch."
+        )
+
+    def _persist_planned_js8_storage(self, item: Any) -> None:
+        """Persist launch identity without claiming runtime verification.
+
+        The later background reconciliation owns bounded message-file evidence
+        checks.  A previously verified, different root is never replaced here.
+        """
+
+        if not isinstance(item, Mapping):
+            return
+        root = str(item.get("application_data_root", "") or "").strip()
+        rig_name = str(item.get("rig_name", "") or "").strip()
+        if not root or not rig_name:
+            return
+        for raw_radio_id in item.get("radio_ids", ()):
+            try:
+                profile = self.multi_radio_store.get_device_profile(int(raw_radio_id)) or {}
+                instance_id = int(profile.get("js8_instance_id", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if instance_id <= 0:
+                continue
+            existing = self.multi_radio_store.get_js8_instance(instance_id) or {}
+            existing_root = str(existing.get("application_data_root", "") or "").strip()
+            existing_evidence = str(existing.get("storage_evidence", "") or "").strip()
+            if (
+                existing_root
+                and existing_root != root
+                and existing_evidence.startswith(("operator_confirmed", "runtime_verified"))
+            ):
+                log.warning(
+                    "LaunchOrchestrator: retained verified JS8 storage root for %s; planned root differs",
+                    profile.get("name", raw_radio_id),
+                )
+                self.multi_radio_store.save_js8_instance(
+                    {
+                        **dict(existing),
+                        "id": instance_id,
+                        "storage_mode": "unverified",
+                        "storage_evidence": "mismatch:launch_planned",
+                    }
+                )
+                continue
+            expected_mode = str(item.get("expected_storage_mode", "unverified") or "unverified")
+            updated = dict(existing)
+            updated.update(
+                {
+                    "id": instance_id,
+                    "rig_name": rig_name,
+                    "rig_name_source": str(item.get("rig_name_source", "") or "managed"),
+                    "application_data_root": root,
+                    "all_path": str(Path(root) / "ALL.TXT"),
+                    "directed_path": str(Path(root) / "DIRECTED.TXT"),
+                    "inbox_path": str(Path(root) / "inbox.db3"),
+                    "storage_mode": "shared" if expected_mode == "shared" else "unverified",
+                    "storage_verified_utc": "",
+                    "storage_evidence": "launch_planned",
+                }
+            )
+            self.multi_radio_store.save_js8_instance(updated)
+
+    def _blocked_dependency_for(self, item: Any) -> str:
+        if not isinstance(item, Mapping):
+            return ""
+        dependencies = item.get("dependencies", [])
+        if not isinstance(dependencies, list) or not dependencies:
+            return ""
+        radio_ids = {int(value) for value in item.get("radio_ids", []) if str(value).strip()}
+        success_states = {"launched", "already_running"}
+        queue_names = {self._queue_item_name(value) for value in self._queue}
+        for dependency in (str(value).strip() for value in dependencies):
+            if not dependency or dependency not in queue_names:
+                continue
+            matching: List[Mapping[str, Any]] = []
+            for result in self._results:
+                if str(result.get("name", "") or "") != dependency:
+                    continue
+                result_radios = {int(value) for value in result.get("radio_ids", []) if str(value).strip()}
+                if radio_ids and result_radios and radio_ids.isdisjoint(result_radios):
+                    continue
+                matching.append(result)
+            successful = [result for result in matching if str(result.get("status", "")) in success_states]
+            if not successful:
+                return dependency
+            if radio_ids:
+                covered_radios: set[int] = set()
+                for result in successful:
+                    covered_radios.update(int(value) for value in result.get("radio_ids", []) if str(value).strip())
+                if not radio_ids.issubset(covered_radios):
+                    return dependency
+        return ""
 
     def _poll_current_readiness(self) -> None:
         if not self._active:
@@ -474,6 +1883,114 @@ class LaunchOrchestrator(QObject):
             self._schedule_advance_queue(0)
             return
         elapsed = max(0.0, time.monotonic() - self._current_started_monotonic)
+        if self._current_phase == "endpoint_preflight":
+            item = self._current_item or name
+            endpoint_key = self._endpoint_preflight_key(item)
+            state = self._configured_endpoint_preflight_state(item, endpoint_key)
+            if state != "pending":
+                self._poll_timer.stop()
+                self._endpoint_preflight_verified = getattr(
+                    self,
+                    "_endpoint_preflight_verified",
+                    set(),
+                )
+                self._endpoint_preflight_verified.add(endpoint_key)
+                sequence_identity = self._sequence_identity_key(item)
+                if state == "occupied":
+                    log.info(
+                        "LaunchOrchestrator: skipped %s launch because its configured endpoint is active",
+                        name,
+                    )
+                    if name == "JS8Call":
+                        try:
+                            self._persist_ready_js8_identity(
+                                item,
+                                self._cached_status_for_item(item),
+                            )
+                        except Exception as storage_exc:
+                            log.warning(
+                                "LaunchOrchestrator: JS8 endpoint persistence failed: %s",
+                                storage_exc,
+                            )
+                    result = self._result_for(
+                        item,
+                        status="already_running",
+                        detail="configured endpoint is already active",
+                    )
+                    self._results.append(result)
+                    if sequence_identity:
+                        self._sequence_claimed_identities = getattr(
+                            self,
+                            "_sequence_claimed_identities",
+                            set(),
+                        )
+                        self._sequence_claimed_identities.add(sequence_identity)
+                    self.sequence_progress.emit(result)
+                else:
+                    self._endpoint_preflight_clear = getattr(
+                        self,
+                        "_endpoint_preflight_clear",
+                        set(),
+                    )
+                    self._endpoint_preflight_clear.add(endpoint_key)
+                    exact_process_running = self._configured_instance_process_running(item)
+                    if exact_process_running is True:
+                        log.warning(
+                            "LaunchOrchestrator: skipped duplicate %s launch; exact process is "
+                            "running but its configured endpoint is not ready",
+                            name,
+                        )
+                        result = self._result_for(
+                            item,
+                            status="failed",
+                            detail=(
+                                "configured process is running but its endpoint is not ready; "
+                                "duplicate launch skipped"
+                            ),
+                        )
+                        self._results.append(result)
+                        if sequence_identity:
+                            self._sequence_claimed_identities = getattr(
+                                self,
+                                "_sequence_claimed_identities",
+                                set(),
+                            )
+                            self._sequence_claimed_identities.add(sequence_identity)
+                        self.sequence_progress.emit(result)
+                    else:
+                        # _advance_queue already consumed this item.  Revisit it
+                        # once with fresh negative endpoint evidence so the normal
+                        # identity, dependency, and command safety checks still run.
+                        self._index = max(0, self._index - 1)
+                self._current_name = None
+                self._current_item = None
+                self._current_cmd = None
+                self._current_phase = ""
+                self._schedule_advance_queue(0)
+                return
+            if elapsed >= LAUNCH_ENDPOINT_PREFLIGHT_TIMEOUT_SEC:
+                self._poll_timer.stop()
+                log.warning(
+                    "LaunchOrchestrator: skipped %s launch because configured endpoint verification timed out",
+                    name,
+                )
+                result = self._result_for(
+                    item,
+                    status="failed",
+                    detail=(
+                        "configured endpoint could not be verified; launch was skipped "
+                        "to prevent a duplicate instance"
+                    ),
+                )
+                self._results.append(result)
+                self.sequence_progress.emit(result)
+                self._current_name = None
+                self._current_item = None
+                self._current_cmd = None
+                self._current_phase = ""
+                self._schedule_advance_queue(0)
+                return
+            return
         desired_interval = (
             LAUNCH_READINESS_RELAXED_POLL_MS
             if elapsed >= LAUNCH_READINESS_RELAX_AFTER_SEC
@@ -481,40 +1998,307 @@ class LaunchOrchestrator(QObject):
         )
         if self._poll_timer.interval() != desired_interval:
             self._poll_timer.setInterval(desired_interval)
-        if self._program_ready_for_sequence(name):
+        if self._program_ready_for_sequence(self._current_item or name):
             self._poll_timer.stop()
+            if name == "JS8Call":
+                try:
+                    ready_info = self._cached_status_for_item(self._current_item or name)
+                    self._persist_ready_js8_identity(self._current_item, ready_info)
+                except Exception as storage_exc:
+                    log.warning("LaunchOrchestrator: JS8 ready-state persistence failed: %s", storage_exc)
             delay_sec = self._post_ready_settle_delay_seconds(name)
             detail = f"ready in {elapsed:.1f}s"
             if delay_sec > 0:
                 detail += f"; waiting {delay_sec:.1f}s before next launch"
-            result = {"name": name, "status": "launched", "detail": detail}
+            result = self._result_for(self._current_item or name, status="launched", detail=detail)
             self._results.append(result)
             self.sequence_progress.emit(result)
             self._current_name = None
+            self._current_item = None
             self._current_cmd = None
+            self._current_phase = ""
             self._schedule_advance_queue(int(delay_sec * 1000.0))
             return
         if elapsed >= float(self._wait_timeout_sec):
             self._poll_timer.stop()
-            result = {"name": name, "status": "timeout", "detail": f"not ready after {self._wait_timeout_sec}s"}
+            result = self._result_for(
+                self._current_item or name,
+                status="timeout",
+                detail=f"not ready after {self._wait_timeout_sec}s",
+            )
             self._results.append(result)
             self.sequence_progress.emit(result)
             self._current_name = None
+            self._current_item = None
             self._current_cmd = None
+            self._current_phase = ""
             self._schedule_advance_queue(0)
 
-    def _program_running(self, name: str) -> bool:
-        try:
-            return bool(self.status.program_is_running(name))
-        except Exception:
-            return False
+    def _persist_ready_js8_identity(self, item: Any, status: Mapping[str, Any]) -> None:
+        """Record an API-observed variant; file verification remains background-owned."""
 
-    def _resolve_launch_command(self, name: str) -> Tuple[Optional[List[str]], str]:
+        if not isinstance(item, dict):
+            return
+        version = str(status.get("version", "") or "").strip()
+        variant_family = variant_family_from_version(version)
+        if variant_family == "unknown":
+            return
+        rig_name = str(item.get("rig_name", "") or "").strip()
+        resolution = resolve_js8_storage(
+            {
+                "variant_family": variant_family,
+                "variant_version": version,
+                "rig_name": rig_name,
+                "rig_name_source": str(item.get("rig_name_source", "") or "managed"),
+            },
+            probe_existing=False,
+        )
+        root = str(resolution.data_root or "").strip()
+        if not root:
+            return
+        item["application_data_root"] = root
+        item["storage_mode"] = resolution.storage_mode
+        item["expected_storage_mode"] = resolution.expected_mode
+        for raw_radio_id in item.get("radio_ids", ()):
+            try:
+                profile = self.multi_radio_store.get_device_profile(int(raw_radio_id)) or {}
+                instance_id = int(profile.get("js8_instance_id", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if instance_id <= 0:
+                continue
+            existing = self.multi_radio_store.get_js8_instance(instance_id) or {}
+            existing_root = str(existing.get("application_data_root", "") or "").strip()
+            existing_evidence = str(existing.get("storage_evidence", "") or "").strip()
+            if (
+                existing_root
+                and existing_root != root
+                and existing_evidence.startswith(("operator_confirmed", "runtime_verified"))
+            ):
+                log.warning(
+                    "LaunchOrchestrator: API-observed JS8 identity differs from the verified storage root for %s",
+                    profile.get("name", raw_radio_id),
+                )
+                self.multi_radio_store.save_js8_instance(
+                    {
+                        **dict(existing),
+                        "id": instance_id,
+                        "variant_family": variant_family,
+                        "variant_version": version,
+                        "storage_mode": "unverified",
+                        "storage_evidence": f"mismatch:api_observed:{version}",
+                    }
+                )
+                continue
+            updated = dict(existing)
+            updated.update(
+                {
+                    "id": instance_id,
+                    "variant_family": variant_family,
+                    "variant_version": version,
+                    "rig_name": rig_name,
+                    "rig_name_source": str(item.get("rig_name_source", "") or "managed"),
+                    "application_data_root": root,
+                    "all_path": str(Path(root) / "ALL.TXT"),
+                    "directed_path": str(Path(root) / "DIRECTED.TXT"),
+                    "inbox_path": str(Path(root) / "inbox.db3"),
+                    "storage_mode": "shared" if resolution.expected_mode == "shared" else "unverified",
+                    "storage_verified_utc": "",
+                    "storage_evidence": f"api_observed:{version}",
+                }
+            )
+            self.multi_radio_store.save_js8_instance(updated)
+
+    def _configured_instance_process_running(self, item: Any) -> Optional[bool]:
+        """Return exact process state, or ``None`` when it cannot be proven."""
+
+        name = self._queue_item_name(item)
+        if isinstance(item, Mapping) and item.get("instance_identity"):
+            target = str(
+                item.get("launch_command_override", "")
+                or item.get("launch_path_override", "")
+                or ""
+            ).strip()
+            if target:
+                try:
+                    arguments = item.get("launch_arguments", ())
+                    if not isinstance(arguments, (list, tuple)):
+                        arguments = ()
+                    arguments = self._process_identity_arguments(name, arguments)
+                    process_records = self._launch_process_records()
+                    inventory = (
+                        {}
+                        if process_records is None
+                        else {"process_records": process_records}
+                    )
+                    if not arguments:
+                        return bool(
+                            self.status.cached_program_instance_running(
+                                name,
+                                target,
+                                **inventory,
+                            )
+                        )
+                    return bool(
+                        self.status.cached_program_instance_running(
+                            name,
+                            target,
+                            arguments,
+                            **inventory,
+                        )
+                    )
+                except Exception:
+                    return None
+        return None
+
+    def _launch_process_records(
+        self,
+    ) -> tuple[Mapping[str, object], ...] | None:
+        """Return the one immutable inventory accepted for this sequence."""
+
+        if not bool(getattr(self, "_sequence_process_records_ready", False)):
+            return None
+        return tuple(getattr(self, "_sequence_process_records", ()) or ())
+
+    def _unattributed_process_blocker(
+        self,
+        item: Any,
+        exact_process_running: Optional[bool],
+        *,
+        endpoint_clear: bool = False,
+    ) -> str:
+        """Fail closed when family processes cannot be fully attributed.
+
+        A fresh launch-owned inventory can prove that no family process exists.
+        It cannot safely prove one requested instance absent when one or more
+        family processes were observed but their argv did not match every
+        configured row. This is especially important for Wine launchers, which
+        may replace the original wrapper argv after process creation.
+        """
+
+        if exact_process_running is True:
+            return ""
+        # FLRig, FLDigi, and JS8Call own persisted per-radio endpoints.  Once
+        # this launch sequence has freshly proved the requested endpoint clear,
+        # another same-family process belongs to a different endpoint and must
+        # not suppress the requested instance merely because a legacy/default
+        # process lacks radio-selecting argv.  The occupied-endpoint and exact
+        # configured-process checks run before this branch and remain terminal.
+        # Process-only applications (including FLMsg/FLAmp and Wine-hosted
+        # VarAC/VARA) deliberately retain the family-attribution fail-closed
+        # rule below.
+        if endpoint_clear and self._has_persisted_endpoint_identity(item):
+            return ""
+        name = self._queue_item_name(item)
+        status = getattr(self, "status", None)
+        counter = getattr(status, "cached_program_process_count", None)
+        if not callable(counter):
+            return ""
+        try:
+            process_records = self._launch_process_records()
+            process_count = int(
+                counter(name)
+                if process_records is None
+                else counter(name, process_records=process_records)
+            )
+        except Exception:
+            return (
+                "process attribution is unavailable after launch preflight; "
+                "duplicate launch skipped"
+            )
+        if process_count <= 0:
+            return ""
+
+        attributed: set[str] = set()
+        for candidate in getattr(self, "_queue", ()):
+            if self._queue_item_name(candidate) != name:
+                continue
+            try:
+                if self._configured_instance_process_running(candidate) is not True:
+                    continue
+            except Exception:
+                continue
+            if isinstance(candidate, Mapping):
+                identity = str(candidate.get("instance_identity", "") or "").strip()
+                target = str(
+                    candidate.get("launch_command_override", "")
+                    or candidate.get("launch_path_override", "")
+                    or ""
+                ).strip()
+                arguments = candidate.get("launch_arguments", ())
+                if not isinstance(arguments, (list, tuple)):
+                    arguments = ()
+                attributed.add(
+                    identity
+                    or repr((name, target, tuple(str(value) for value in arguments)))
+                )
+            else:
+                attributed.add(str(candidate))
+        if process_count <= len(attributed):
+            return ""
+        return (
+            f"{name} process evidence is present but could not be attributed "
+            "to every configured instance; duplicate launch skipped"
+        )
+
+    @staticmethod
+    def _process_identity_arguments(
+        name: str,
+        arguments: Sequence[object],
+    ) -> tuple[str, ...]:
+        """Return only arguments that identify one runnable app instance.
+
+        FLMsg and FLAmp accept ``-title`` as presentation metadata. Older
+        launch paths and desktop wrappers can preserve that title as one argv
+        value or split it into several values, so including it in an exact
+        process match can incorrectly authorize a duplicate. Their qualified
+        native selectors precede ``-title`` and remain mandatory; discard only
+        the trailing presentation segment when comparing process identity.
+        """
+
+        values = tuple(str(value or "").strip() for value in arguments)
+        if str(name or "").strip().casefold() not in {"flmsg", "flamp"}:
+            return values
+        for index, value in enumerate(values):
+            if value.casefold() in {"-title", "--title"}:
+                return values[:index]
+        return values
+
+    def _program_running(self, item: Any) -> bool:
+        exact = self._configured_instance_process_running(item)
+        if exact is not None:
+            return exact
+        return bool(self._cached_status_for_item(item).get("running", False))
+
+    def _resolve_launch_command(self, item_or_name: Any) -> Tuple[Optional[List[str]], str]:
+        name = self._queue_item_name(item_or_name)
+        item = item_or_name if isinstance(item_or_name, Mapping) else {}
+        structured = self._structured_launch_command(item, name)
+        if structured is not None:
+            # Managed VarAC recipes are already tokenized.  They may contain
+            # spaces, backslashes, Windows drive paths, or Wine-visible paths;
+            # feeding them through shlex would change the bytes.  shell=False
+            # below receives this vector unchanged.
+            return structured, "structured VarAC launch recipe"
+        launch_arguments = self._launch_arguments_for(item)
+        override_cmd = str(item.get("launch_command_override", "") or "").strip()
+        if override_cmd:
+            cmd = self._command_from_freeform(override_cmd)
+            if cmd:
+                return self._finalize_launch_command(name, cmd, launch_arguments), "radio launch command"
+        override_path = str(item.get("launch_path_override", "") or "").strip()
+        if override_path:
+            cmd = self._command_from_config_path(name, override_path)
+            if cmd:
+                return self._finalize_launch_command(name, cmd, launch_arguments), "radio configured path"
+            cmd = self._command_from_freeform(override_path)
+            if cmd:
+                return self._finalize_launch_command(name, cmd, launch_arguments), "radio configured command"
         custom_cmd = self._custom_tool_command(name)
         if custom_cmd:
             cmd = self._command_from_freeform(custom_cmd)
             if cmd:
-                return self._finalize_launch_command(name, cmd), "configured custom tool"
+                return self._finalize_launch_command(name, cmd, launch_arguments), "configured custom tool"
         meta = LAUNCH_APP_META.get(name, {})
         launch_cmd_key = str(meta.get("launch_cmd_key", "") or "")
         if launch_cmd_key:
@@ -522,25 +2306,69 @@ class LaunchOrchestrator(QObject):
             if raw_launch_cmd:
                 cmd = self._command_from_freeform(raw_launch_cmd)
                 if cmd:
-                    return self._finalize_launch_command(name, cmd), "configured launch command"
+                    return self._finalize_launch_command(name, cmd, launch_arguments), "configured launch command"
         path_key = str(meta.get("path_key", "") or "")
         raw = str(self.settings.get(path_key, "") or "").strip() if path_key else ""
         if raw:
             cmd = self._command_from_config_path(name, raw)
             if cmd:
-                return self._finalize_launch_command(name, cmd), "configured path"
+                return self._finalize_launch_command(name, cmd, launch_arguments), "configured path"
             cmd = self._command_from_freeform(raw)
             if cmd:
-                return self._finalize_launch_command(name, cmd), "configured command"
+                return self._finalize_launch_command(name, cmd, launch_arguments), "configured command"
         fallback = self._fallback_cmd(name)
         if fallback:
-            return self._finalize_launch_command(name, fallback), "fallback command"
+            return self._finalize_launch_command(name, fallback, launch_arguments), "fallback command"
         return None, "none"
 
-    def _finalize_launch_command(self, name: str, cmd: List[str]) -> List[str]:
+    @staticmethod
+    def _structured_launch_command(item: Mapping[str, Any], name: str) -> Optional[List[str]]:
+        """Resolve an additive structured VarAC recipe without shell parsing."""
+
+        if str(name or "").strip() != "VarAC":
+            return None
+        readiness = item.get("readiness_policy", {})
+        if not isinstance(readiness, Mapping):
+            return None
+        nested = readiness.get("launch_recipe")
+        recipe = nested if isinstance(nested, Mapping) else readiness
+        if not (
+            LaunchOrchestrator.is_truthy(readiness.get("structured_launch", False))
+            or "executable" in recipe
+            or "launch_executable" in recipe
+            or "launch_arguments" in recipe
+        ):
+            return None
+        executable = str(recipe.get("executable", recipe.get("launch_executable", "")) or "")
+        if not executable:
+            # A malformed structured recipe must not fall through to a stale
+            # launch_cmd/path override.  Report an empty structured command so
+            # the caller records a launch failure for operator repair.
+            return []
+        arguments = recipe.get("launch_arguments", recipe.get("arguments", item.get("launch_arguments", ())))
+        if not isinstance(arguments, (list, tuple)):
+            arguments = ()
+        return [executable, *(str(argument) for argument in arguments)]
+
+    @staticmethod
+    def _launch_arguments_for(item: Mapping[str, Any]) -> List[str]:
+        raw = item.get("launch_arguments", ())
+        if not isinstance(raw, (list, tuple)):
+            return []
+        return [str(argument) for argument in raw if str(argument or "")]
+
+    def _finalize_launch_command(self, name: str, cmd: List[str], launch_arguments: List[str] | None = None) -> List[str]:
         if str(name or "").strip() == "VarAC":
             return self._wrap_varac_wine_if_needed(cmd)
-        return cmd
+        arguments = list(launch_arguments or ())
+        if not arguments:
+            return cmd
+        # ``open`` forwards application arguments only after ``--args``.  The
+        # planner deliberately keeps these arguments separate from bundle/path
+        # selection so a direct executable and a macOS bundle stay equivalent.
+        if cmd and os.path.basename(str(cmd[0])).casefold() == "open" and "--args" not in cmd:
+            return [*cmd, "--args", *arguments]
+        return [*cmd, *arguments]
 
     def _command_from_config_path(self, name: str, raw: str) -> Optional[List[str]]:
         p = Path(raw)
@@ -686,14 +2514,28 @@ class LaunchOrchestrator(QObject):
         return False
 
     def _fallback_cmd(self, name: str) -> Optional[List[str]]:
-        for cand in LAUNCH_APP_META.get(name, {}).get("fallback_cmds", []):
+        fallback_candidates = LAUNCH_APP_META.get(name, {}).get("fallback_cmds", [])
+        first_candidate = None
+        for cand in fallback_candidates:
             cand_s = str(cand).strip()
             if not cand_s:
                 continue
-            return [cand_s]
+            if first_candidate is None:
+                first_candidate = cand_s
+            resolved = shutil.which(cand_s)
+            if resolved:
+                return [resolved]
+        if first_candidate:
+            return [first_candidate]
         return None
 
-    def _infer_launch_cwd(self, name: str, cmd: List[str], cmd_desc: str) -> Optional[str]:
+    def _infer_launch_cwd(
+        self,
+        name: str,
+        cmd: List[str],
+        cmd_desc: str,
+        item: Any = None,
+    ) -> Optional[str]:
         """
         For configured paths, launch from the app/script directory so relative
         resources resolve the same as direct desktop launch.
@@ -701,6 +2543,10 @@ class LaunchOrchestrator(QObject):
         if not cmd:
             return None
         try:
+            if isinstance(item, Mapping):
+                configured = str(item.get("working_directory", "") or "").strip()
+                if configured:
+                    return str(Path(configured).expanduser())
             if name == "VarAC" and cmd_desc == "configured launch command":
                 varac_root = str(self.settings.get("varac_path", "") or "").strip()
                 if varac_root:
@@ -742,21 +2588,31 @@ class LaunchOrchestrator(QObject):
         self._poll_timer.stop()
         if cancelled and self._current_name:
             self._results.append(
-                {
-                    "name": self._current_name,
-                    "status": "cancelled",
-                    "detail": "sequence cancelled before readiness check completed",
-                }
+                self._result_for(
+                    self._current_item or self._current_name,
+                    status="cancelled",
+                    detail="sequence cancelled before readiness check completed",
+                )
             )
         summary = self._build_summary(cancelled=cancelled)
         self._active = False
+        self._process_preflight_pending = False
+        self._process_preflight_generation += 1
         self._cancel_requested = False
         self._trigger = ""
         self._queue = []
         self._index = 0
         self._current_name = None
+        self._current_item = None
         self._current_cmd = None
         self._current_started_monotonic = 0.0
+        self._current_phase = ""
+        self._endpoint_preflight_verified = set()
+        self._endpoint_preflight_requested = set()
+        self._endpoint_preflight_clear = set()
+        self._sequence_claimed_identities = set()
+        self._sequence_preflight_started_wall = 0.0
+        self._process_preflight_reason = ""
         self.sequence_finished.emit(summary)
 
     def _build_summary(self, cancelled: bool) -> Dict[str, Any]:
@@ -765,6 +2621,7 @@ class LaunchOrchestrator(QObject):
         failed = sum(1 for r in self._results if r.get("status") == "failed")
         timeout = sum(1 for r in self._results if r.get("status") == "timeout")
         blocked_self = sum(1 for r in self._results if r.get("status") == "blocked_self")
+        blocked_dependency = sum(1 for r in self._results if r.get("status") == "blocked_dependency")
         cancelled_count = sum(1 for r in self._results if r.get("status") == "cancelled")
         return {
             "trigger": self._trigger,
@@ -774,6 +2631,10 @@ class LaunchOrchestrator(QObject):
             "failed": failed,
             "timeout": timeout,
             "blocked_self": blocked_self,
+            "blocked_dependency": blocked_dependency,
             "cancelled_count": cancelled_count,
             "results": list(self._results),
+            "projection_warnings": dict(
+                getattr(self, "_sequence_projection_warnings", {})
+            ),
         }

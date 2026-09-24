@@ -1,0 +1,48 @@
+Awareness/Alert Report|F!305
+
+. Version 10/08/2025
+# KN4AM - @SITREP - SitRepNet.com
+
+! Early Warning Awareness/Alert Report - @SITREP
+
+. Early Warning Awareness/Alert for an event in which net or group activation,
+. further communications, or additional preparedness actions may be called for.
+.
+[DS] Brief description of event or situation:
+.
+
+!!! Affected Area:
+[ST] State (2-letter code) or other description such as "USA", or SE Region, or East Coast, etc.:
+[GR] Maidenhead Grid Square, or leave blank if not applicable:
+.
+
+? Situation Time Frame:
+@0 General information, time frame unknown or not applicable
+@1 Anticipated within the next week/month
+@2 Imminent - hours to days
+@3 Currently happening 
+
+? Source Reliability:
+@A Reliable - No doubt
+@B Usually Reliable - Minor doubt
+@C Fairly Reliable - Some doubt of authenticity
+@D Not Usually Reliable - Significant doubt about authenticity
+@E Unreliable - Lacking in authenticity
+@F Cannot be Judged - No basis for evaluating reliability
+
+? Information Content:
+@1 Confirmed - Confirmed by other independent sources, logical, consistent
+@2 Probably True - Not confirmed, but logical and consistent
+@3 Possibly True - Not confirmed, reasonably logical, agrees with other info
+@4 Doubtfully True - Not confirmed, possible, not logical, no other info
+@5 Improbable - Not confirmed, not logical, contradicted by other info
+@6 Cannot be Judged - No basis for evaluating validity of information
+
+? Net or Group Activation, or individual preparedness:
+@0 Awareness/Alert notification only. Routine schedules apply.
+@1 Event-driven activation anticipated, but no plans available yet.
+@2 See Additional Information for Activation or schedule info
+.
+[AI] Additional Information:
+!!! Enter F! number(s) and/or "ALERT" if appropriate, or further info, or leave blank if nothing additional to report.
+

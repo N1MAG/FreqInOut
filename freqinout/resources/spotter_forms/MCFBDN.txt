@@ -1,0 +1,29 @@
+BDN Price Survey Report|F!BDN
+
+. Version 03/17/2026
+# KD8NOA
+
+! Local Price Survey
+
+. This is a test project of the Bulletin Distribution Net
+. Send to KD8NOA or @BDN
+.
+
+!!! Location:
+[GR] Maidenhead Grid Square:
+.
+!!! Prices:
+[ML] Milk, Whole, 1 gallon:
+[EG] Eggs, Extra-large, 1 dozen:
+[CF] Coffee, Folgers Classic Roast Ground, 25.9 oz.:
+[BF] Beef, ground, 80/20, 1 pound:
+[BR] Beer, Budweiser American Lagar, case, 12 oz cans:
+[BD] Bread, Wonderbread, 1 loaf:
+[GA] Gasoline, regular, 1 gallon:
+[DS] Diesel, 1 gallon:
+
+.
+!!! Power Reliability:
+? Power failure in last 7 days
+@Y Yes
+@N No

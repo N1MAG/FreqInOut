@@ -1,0 +1,60 @@
+Wildfire Status Report|F!307
+
+# Form updated 04/12/2025, David Sorensen KE7FST
+
+!! Wildfire Status Report
+
+[FN] Fire Name or Designator
+[GR] 4 Character Grid Location
+
+? When was this information last updated?
+@A Today
+@B 1 day ago
+@C 2 days ago
+@D 3 days ago
+@E More than 3 days or Unknown
+
+? Last Known Fire Size
+@1 Under 100 acres
+@2 100 to 1,000 acres
+@3 1,000 to 10,000 acres
+@4 Over 10,000 acres
+
+? Percent Contained
+@0 Fire is at 0% Containment
+@1 Fire is at 10% Containment
+@2 Fire is at 20% Containment
+@3 Fire is at 30% Containment
+@4 Fire is at 40% Containment
+@5 Fire is at 50% Containment
+@6 Fire is at 60% Containment
+@7 Fire is at 70% Containment
+@8 Fire is at 80% Containment
+@9 Fire is at 90% Containment
+@A Fire is at 100% Containment
+@U Containment status unknown
+
+? Closures
+@A Areas
+@R Roads
+@N None
+@U Unknown
+
+? Air Quality
+@1 Good
+@2 Moderate
+@3 Unhealthy for sensitive groups
+@4 Unhealthy
+@5 Very unhealthy
+@U Unknown
+
+? Evacuation
+@1 No evacuation orders at present
+@2 Be ready to evacuate
+@3 Evacuate now
+
+? Beaconed to APRS?
+@Y Yes
+@N No
+@U Unknown
+

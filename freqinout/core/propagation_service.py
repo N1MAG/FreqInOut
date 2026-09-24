@@ -324,7 +324,7 @@ class PropagationService:
         half_life_days: float,
         recent_window_days: float,
         history_cap_days: float,
-        row_limit: int = 4000,
+        row_limit: int = 1000,
     ) -> Dict[str, float]:
         if not self._outcome_table_exists():
             return {
@@ -357,9 +357,15 @@ class PropagationService:
         params: List[object]
         sql = (
             "SELECT ts_utc, outcome FROM prop_contact_events "
-            "WHERE origin_grid6=? AND target_type=? AND band=? "
+            "WHERE origin_grid6=? AND target_type=? AND band=? AND ts_utc>=? "
         )
-        params = [origin_grid6, target_type, band]
+        cutoff = now_utc - dt.timedelta(days=max(1.0, float(history_cap_days)))
+        params = [
+            origin_grid6,
+            target_type,
+            band,
+            cutoff.astimezone(dt.timezone.utc).strftime("%Y-%m-%d"),
+        ]
         if target_id is not None:
             sql += "AND target_id=? "
             params.append((target_id or "").strip().upper())
@@ -446,7 +452,11 @@ class PropagationService:
                 "pooled": False,
             }
 
-        minute_bucket = int(now_utc.timestamp() // 60)
+        # Historical evidence changes on ingest, not meaningfully between the
+        # morning/day/night model points rendered in one refresh. A UTC-day
+        # cache key avoids repeating the same bounded SQLite history scan for
+        # each display window.
+        day_bucket = int(now_utc.timestamp() // 86_400)
         sig = (
             round(cfg["alpha"], 3),
             round(cfg["beta"], 3),
@@ -457,7 +467,7 @@ class PropagationService:
             int(cfg["recent_window_days"]),
             int(cfg["history_cap_days"]),
         )
-        cache_key = ("blend", minute_bucket, origin, ttype, tid, bnd, sig)
+        cache_key = ("blend", day_bucket, origin, ttype, tid, bnd, sig)
         now_mono = time.monotonic()
         self._prune_empirical_cache(now_mono)
         cached = self._empirical_cache.get(cache_key)

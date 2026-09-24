@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QGridLayout,
     QLabel,
     QPushButton,
     QComboBox,
@@ -23,6 +24,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QLineEdit,
     QFormLayout,
+    QHeaderView,
+    QScrollArea,
 )
 
 from freqinout.core.checkins_db import upsert_operator_metadata
@@ -30,7 +33,7 @@ from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.help_registry import resolve_help_host
-from freqinout.gui.theme import resolve_theme, button_style
+from freqinout.gui.theme import active_app_theme, resolve_theme, button_style, label_style
 
 
 # Simple FEMA region mapping for filtering
@@ -330,7 +333,7 @@ class ManualPeerScheduleDialog(QDialog):
         layout.addLayout(form)
 
         self.callsign_edit = QLineEdit(initial.get("callsign", ""))
-        self.callsign_edit.setPlaceholderText("W1ABC")
+        self.callsign_edit.setPlaceholderText("Callsign")
         form.addRow("Callsign", self.callsign_edit)
 
         self.name_edit = QLineEdit(initial.get("name", ""))
@@ -379,7 +382,7 @@ class ManualPeerScheduleDialog(QDialog):
 
         self.error_label = QLabel("")
         self.error_label.setWordWrap(True)
-        self.error_label.setStyleSheet("color: #b22222;")
+        self.error_label.setStyleSheet(label_style("danger", active_app_theme(), weight=600))
         layout.addWidget(self.error_label)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
@@ -444,6 +447,8 @@ class PeerSchedTab(QWidget):
         self._my_schedule_by_mode: Dict[str, List[Dict]] = {}
         default_mode = (self.settings.get("display_time_mode", "LOCAL") or "LOCAL").upper()
         self._show_local_times = default_mode != "UTC"
+        self._responsive_layout_mode = "wide"
+        self._responsive_compact_width = 1200
         self._build_ui()
         self._load_operator_meta()
         self._load_data()
@@ -451,7 +456,19 @@ class PeerSchedTab(QWidget):
     # ---------- UI ----------
 
     def _build_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        self.peer_schedule_scroll_area = QScrollArea()
+        self.peer_schedule_scroll_area.setObjectName("peerScheduleScrollArea")
+        self.peer_schedule_scroll_area.setWidgetResizable(True)
+        self.peer_schedule_scroll_area.setFrameShape(QScrollArea.NoFrame)
+        self.peer_schedule_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        outer_layout.addWidget(self.peer_schedule_scroll_area)
+
+        content = QWidget()
+        content.setObjectName("peerScheduleScrollContent")
+        self.peer_schedule_scroll_area.setWidget(content)
+        layout = QVBoxLayout(content)
         layout.setSpacing(8)
 
         header = QHBoxLayout()
@@ -459,84 +476,74 @@ class PeerSchedTab(QWidget):
         header.addStretch()
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.setToolTip("Reload peer schedule data from the database.")
-        self.tz_toggle_btn = QPushButton("Showing: UTC")
+        self.tz_toggle_btn = QPushButton("Times: UTC")
         self.tz_toggle_btn.setToolTip("Switch the table between UTC and local time display.")
         self.help_btn = QPushButton("Help")
         self.help_btn.setToolTip("Open HF Peers help.")
-        header.addWidget(self.refresh_btn)
-        header.addWidget(self.tz_toggle_btn)
         header.addWidget(self.help_btn)
         layout.addLayout(header)
 
-        action_row = QHBoxLayout()
-        action_row.addWidget(QLabel("Schedule Source:"))
+        self.schedule_source_label = QLabel("Schedule Source:")
         self.add_btn = QPushButton("Add Manual Row...")
         self.add_btn.setToolTip("Type one explicit peer schedule row by hand.")
         self.import_btn = QPushButton("Import Schedule File...")
         self.import_btn.setToolTip("Import a peer schedule JSON file.")
-        action_row.addWidget(self.add_btn)
-        action_row.addWidget(self.import_btn)
-        action_row.addSpacing(20)
-        action_row.addWidget(QLabel("Selected Row:"))
-        self.edit_btn = QPushButton("Edit Selected Row")
-        self.edit_btn.setToolTip("Edit the selected explicit row.")
+        self.selected_row_label = QLabel("Selected Row:")
+        self.edit_btn = QPushButton("View/Edit Selected Row")
+        self.edit_btn.setToolTip("View or edit the selected explicit row.")
         self.delete_row_btn = QPushButton("Delete Selected Row")
         self.delete_row_btn.setToolTip("Delete the selected explicit row.")
-        action_row.addWidget(self.edit_btn)
-        action_row.addWidget(self.delete_row_btn)
-        action_row.addStretch()
-        layout.addLayout(action_row)
+        self._peer_action_layout = QGridLayout()
+        self._peer_action_layout.setContentsMargins(0, 0, 0, 0)
+        self._peer_action_layout.setSpacing(8)
+        layout.addLayout(self._peer_action_layout)
 
-        cleanup_row = QHBoxLayout()
-        cleanup_row.addWidget(QLabel("Cleanup:"))
-        cleanup_row.addWidget(QLabel("Remove schedule for callsign:"))
+        self.cleanup_label = QLabel("Cleanup:")
+        self.cleanup_callsign_label = QLabel("Remove schedule for callsign:")
         self.delete_callsign_combo = QComboBox()
         self.delete_callsign_combo.addItem("Select callsign", None)
         self.delete_callsign_combo.setMinimumWidth(150)
-        cleanup_row.addWidget(self.delete_callsign_combo)
         self.delete_btn = QPushButton("Delete Callsign Schedule...")
         self.delete_btn.setToolTip("Delete all explicit schedule rows for the selected callsign.")
-        cleanup_row.addWidget(self.delete_btn)
-        cleanup_row.addStretch()
-        layout.addLayout(cleanup_row)
+        self._peer_cleanup_layout = QGridLayout()
+        self._peer_cleanup_layout.setContentsMargins(0, 0, 0, 0)
+        self._peer_cleanup_layout.setSpacing(8)
+        layout.addLayout(self._peer_cleanup_layout)
 
         # Filters
-        filter_row = QHBoxLayout()
-        filter_row.addWidget(QLabel("Callsign:"))
+        self.callsign_filter_label = QLabel("Callsign:")
         self.callsign_filter = QComboBox()
         self.callsign_filter.addItem("All")
         self.callsign_filter.setMinimumWidth(150)
-        filter_row.addWidget(self.callsign_filter)
 
-        filter_row.addWidget(QLabel("Region:"))
+        self.region_filter_label = QLabel("Region:")
         self.region_filter = QComboBox()
         self.region_filter.addItem("All")
         for r in sorted(FEMA_REGIONS.keys()):
             self.region_filter.addItem(r)
         self.region_filter.setMinimumWidth(120)
-        filter_row.addWidget(self.region_filter)
 
-        filter_row.addWidget(QLabel("Group:"))
+        self.group_filter_label = QLabel("Group:")
         self.group_filter = QComboBox()
         self.group_filter.addItem("All")
         self.group_filter.setMinimumWidth(150)
-        filter_row.addWidget(self.group_filter)
 
-        filter_row.addWidget(QLabel("Search:"))
+        self.search_filter_label = QLabel("Search:")
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Filter by callsign/name/groups/band/mode/freq")
-        filter_row.addWidget(self.search_edit, stretch=1)
         self.clear_filters_btn = QPushButton("Clear Filters")
-        filter_row.addWidget(self.clear_filters_btn)
-        filter_row.addStretch()
-        layout.addLayout(filter_row)
+        self._peer_filter_layout = QGridLayout()
+        self._peer_filter_layout.setContentsMargins(0, 0, 0, 0)
+        self._peer_filter_layout.setSpacing(8)
+        layout.addLayout(self._peer_filter_layout)
+        self._arrange_peer_action_rows(compact=False)
 
         # Table
         self.table = QTableWidget(0, len(self.COLS))
         self._overlap_col = self.COLS.index("OVERLAP")
         self._set_time_headers()
         self.table.setSortingEnabled(True)
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setStretchLastSection(False)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         layout.addWidget(self.table)
@@ -558,10 +565,136 @@ class PeerSchedTab(QWidget):
         self.help_btn.clicked.connect(lambda: self._open_context_help("tab.hf-peers"))
         self.table.cellClicked.connect(self._on_table_cell_clicked)
         self.table.itemSelectionChanged.connect(self._update_row_action_state)
-        self.tz_toggle_btn.setText("Showing: Local" if self._show_local_times else "Showing: UTC")
+        self.tz_toggle_btn.setText("Times: Local" if self._show_local_times else "Times: UTC")
         self._apply_theme()
         self._update_delete_button_state()
         self._update_row_action_state()
+        self._update_peer_responsive_layout()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_peer_responsive_layout()
+
+    def _peer_responsive_mode_for_width(self, width: int) -> str:
+        try:
+            return "compact" if int(width) < int(self._responsive_compact_width) else "wide"
+        except Exception:
+            return "wide"
+
+    def _update_peer_responsive_layout(self) -> None:
+        if not hasattr(self, "_peer_filter_layout"):
+            return
+        mode = self._peer_responsive_mode_for_width(int(self.width() or 0))
+        if mode == self._responsive_layout_mode and self._peer_filter_layout.count() > 0:
+            return
+        self._responsive_layout_mode = mode
+        self._arrange_peer_action_rows(compact=(mode == "compact"))
+        self._apply_peer_table_sizing(compact=(mode == "compact"))
+
+    @staticmethod
+    def _clear_grid_layout(layout: QGridLayout) -> None:
+        while layout.count():
+            layout.takeAt(0)
+
+    @staticmethod
+    def _place_grid_widgets(layout: QGridLayout, placements: list[tuple]) -> None:
+        for col in range(12):
+            layout.setColumnStretch(col, 0)
+        for item in placements:
+            widget, row, col, *span = item
+            row_span, col_span = span if span else (1, 1)
+            layout.addWidget(widget, row, col, row_span, col_span)
+
+    def _arrange_peer_action_rows(self, *, compact: bool) -> None:
+        for grid in (self._peer_action_layout, self._peer_cleanup_layout, self._peer_filter_layout):
+            self._clear_grid_layout(grid)
+
+        if compact:
+            for combo in (
+                self.delete_callsign_combo,
+                self.callsign_filter,
+                self.region_filter,
+                self.group_filter,
+            ):
+                combo.setMinimumWidth(0)
+            action_placements = [
+                (self.schedule_source_label, 0, 0),
+                (self.add_btn, 0, 1),
+                (self.import_btn, 0, 2),
+                (self.refresh_btn, 0, 3),
+                (self.selected_row_label, 1, 0),
+                (self.edit_btn, 1, 1),
+                (self.delete_row_btn, 1, 2),
+            ]
+            cleanup_placements = [
+                (self.cleanup_label, 0, 0),
+                (self.cleanup_callsign_label, 0, 1),
+                (self.delete_callsign_combo, 0, 2),
+                (self.delete_btn, 0, 3),
+            ]
+            filter_placements = [
+                (self.callsign_filter_label, 0, 0),
+                (self.callsign_filter, 0, 1),
+                (self.region_filter_label, 0, 2),
+                (self.region_filter, 0, 3),
+                (self.group_filter_label, 0, 4),
+                (self.group_filter, 0, 5),
+                (self.search_filter_label, 1, 0),
+                (self.search_edit, 1, 1, 1, 4),
+                (self.clear_filters_btn, 1, 5),
+                (self.tz_toggle_btn, 1, 6),
+            ]
+        else:
+            self.delete_callsign_combo.setMinimumWidth(150)
+            self.callsign_filter.setMinimumWidth(150)
+            self.region_filter.setMinimumWidth(120)
+            self.group_filter.setMinimumWidth(150)
+            action_placements = [
+                (self.schedule_source_label, 0, 0),
+                (self.add_btn, 0, 1),
+                (self.import_btn, 0, 2),
+                (self.refresh_btn, 0, 3),
+                (self.selected_row_label, 0, 4),
+                (self.edit_btn, 0, 5),
+                (self.delete_row_btn, 0, 6),
+            ]
+            cleanup_placements = [
+                (self.cleanup_label, 0, 0),
+                (self.cleanup_callsign_label, 0, 1),
+                (self.delete_callsign_combo, 0, 2),
+                (self.delete_btn, 0, 3),
+            ]
+            filter_placements = [
+                (self.callsign_filter_label, 0, 0),
+                (self.callsign_filter, 0, 1),
+                (self.region_filter_label, 0, 2),
+                (self.region_filter, 0, 3),
+                (self.group_filter_label, 0, 4),
+                (self.group_filter, 0, 5),
+                (self.search_filter_label, 0, 6),
+                (self.search_edit, 0, 7),
+                (self.clear_filters_btn, 0, 8),
+                (self.tz_toggle_btn, 0, 9),
+            ]
+
+        self._place_grid_widgets(self._peer_action_layout, action_placements)
+        self._place_grid_widgets(self._peer_cleanup_layout, cleanup_placements)
+        self._place_grid_widgets(self._peer_filter_layout, filter_placements)
+        self._peer_action_layout.setColumnStretch(7 if not compact else 4, 1)
+        self._peer_cleanup_layout.setColumnStretch(4, 1)
+        self._peer_filter_layout.setColumnStretch(7 if not compact else 4, 1)
+
+    def _apply_peer_table_sizing(self, *, compact: bool) -> None:
+        if not hasattr(self, "table"):
+            return
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
+        stretch_columns = {0, 1, 3, self._overlap_col} if compact else {1, 3, self._overlap_col}
+        for col in range(self.table.columnCount()):
+            if col in stretch_columns:
+                header.setSectionResizeMode(col, QHeaderView.Stretch)
+            else:
+                header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
 
     # ---------- data ----------
 
@@ -1204,7 +1337,7 @@ class PeerSchedTab(QWidget):
 
     def _toggle_timezone_view(self) -> None:
         self._show_local_times = not self._show_local_times
-        self.tz_toggle_btn.setText("Showing: Local" if self._show_local_times else "Showing: UTC")
+        self.tz_toggle_btn.setText("Times: Local" if self._show_local_times else "Times: UTC")
         self._set_time_headers()
         self._update_timezone_button_style()
         self._apply_filters()

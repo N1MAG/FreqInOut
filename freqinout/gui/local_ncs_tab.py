@@ -11,34 +11,48 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
     QCompleter,
+    QGroupBox,
 )
 
 from freqinout.core.local_ops_store import (
     get_all_operators,
     get_operator,
     list_checkins,
+    record_local_report,
     record_checkin,
     update_checkin_entry,
 )
+from freqinout.core.message_intelligence import TOPIC_TAXONOMY
 from freqinout.core.logger import log
+from freqinout.core.ncs_session_contract import NcsSessionSnapshot, write_ncs_session_snapshot
 from freqinout.core.settings_manager import SettingsManager
-from freqinout.gui.theme import resolve_theme, button_style
+from freqinout.gui.theme import resolve_theme, button_style, font_derived_widget_height
 from freqinout.utils.timezones import get_timezone
 
 
 STATUS_OPTIONS = ["GREEN", "YELLOW", "RED"]
+REPORT_STATUS_OPTIONS = ["INFO", "WATCH", "PRIORITY", "EMERGENCY"]
+REPORT_CONFIRMATION_OPTIONS = [
+    ("Unconfirmed", "UNCONFIRMED"),
+    ("Confirmed", "CONFIRMED"),
+    ("Second Hand", "SECOND_HAND"),
+    ("Needs Follow-up", "NEEDS_FOLLOWUP"),
+]
 
 
 class LocalNCSTab(QWidget):
@@ -52,11 +66,10 @@ class LocalNCSTab(QWidget):
     COL_TIME = 0
     COL_CALLSIGN = 1
     COL_NAME = 2
-    COL_CITY = 3
-    COL_STATE = 4
-    COL_CATEGORY = 5
-    COL_STATUS = 6
-    COL_NOTES = 7
+    COL_LOCATION = 3
+    COL_CATEGORY = 4
+    COL_STATUS = 5
+    COL_NOTES = 6
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -73,9 +86,12 @@ class LocalNCSTab(QWidget):
         self._net_in_progress = False
         self._net_session_mode = ""
         self._net_start_utc: Optional[str] = None
+        self._net_end_utc: Optional[str] = None
         self._ignore_next_lookup_return = False
         self._clock_timer: Optional[QTimer] = None
         self._autosave_timer: Optional[QTimer] = None
+        self._report_topics: List[str] = []
+        self._report_topic_buttons: Dict[str, QPushButton] = {}
 
         self._build_ui()
         self._restore_context()
@@ -84,19 +100,84 @@ class LocalNCSTab(QWidget):
         self._setup_timers()
         self.apply_theme()
 
+    def _refresh_ncs_session_context(self) -> None:
+        if not hasattr(self, "ncs_session_summary_label"):
+            return
+        role = self.role_combo.currentText().strip() if hasattr(self, "role_combo") else "NCS"
+        net_name = self.net_name_edit.text().strip() if hasattr(self, "net_name_edit") else ""
+        channels = self.channels_edit.text().strip() if hasattr(self, "channels_edit") else ""
+        summary = f"Session: Local | VHF/UHF | {role}"
+        if net_name:
+            summary = f"{summary} | {net_name}"
+        if channels:
+            summary = f"{summary} | {channels}"
+        self.ncs_session_summary_label.setText(summary)
+        self.ncs_session_summary_label.setToolTip(summary)
+
+    def _current_ncs_session_snapshot(self, *, timing_state: Optional[str] = None) -> NcsSessionSnapshot:
+        state = timing_state or ("active" if self._net_in_progress else "idle")
+        return NcsSessionSnapshot(
+            protocol="Local",
+            source_id="local",
+            source_name="Local",
+            role=self.role_combo.currentText().strip() if hasattr(self, "role_combo") else "NCS",
+            net_name=self.net_name_edit.text().strip() if hasattr(self, "net_name_edit") else "",
+            timing_state=state,
+            started_utc=self._net_start_utc or "",
+            ended_utc=self._net_end_utc or "",
+            detail=self.channels_edit.text().strip() if hasattr(self, "channels_edit") else "",
+        )
+
+    def _persist_ncs_session_snapshot(self, *, timing_state: Optional[str] = None) -> None:
+        try:
+            write_ncs_session_snapshot(self.settings, self._current_ncs_session_snapshot(timing_state=timing_state))
+        except Exception as exc:
+            log.debug("Local NCS: failed to persist session snapshot: %s", exc)
+
     def _build_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        self.local_ncs_scroll_area = QScrollArea()
+        self.local_ncs_scroll_area.setObjectName("localNcsScrollArea")
+        self.local_ncs_scroll_area.setWidgetResizable(True)
+        self.local_ncs_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.local_ncs_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.local_ncs_content = QWidget()
+        self.local_ncs_content.setObjectName("localNcsContent")
+        self.local_ncs_content.setMinimumWidth(0)
+        layout = QVBoxLayout(self.local_ncs_content)
+        outer_layout.addWidget(self.local_ncs_scroll_area)
 
         header = QHBoxLayout()
         header.addWidget(QLabel("<h3>Local NCS</h3>"))
         header.addStretch()
         self.utc_label = QLabel()
         self.local_label = QLabel()
+        self.utc_label.setVisible(False)
+        self.local_label.setVisible(False)
         header.addWidget(self.utc_label)
         header.addWidget(self.local_label)
         layout.addLayout(header)
 
+        session_group = QGroupBox("NCS Session")
+        session_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        session_layout = QVBoxLayout()
+        session_layout.setContentsMargins(12, 10, 12, 10)
+        session_layout.setSpacing(8)
+        source_row = QHBoxLayout()
+        source_row.setSpacing(8)
+        source_row.addWidget(QLabel("Source:"))
+        self.local_ncs_source_chip = QPushButton("Local")
+        self.local_ncs_source_chip.setFocusPolicy(Qt.NoFocus)
+        self.local_ncs_source_chip.setToolTip("Local NCS workspace for VHF/UHF, voice, GMRS, or in-room check-ins.")
+        source_row.addWidget(self.local_ncs_source_chip)
+        source_row.addStretch()
+        self.ncs_session_summary_label = QLabel("Session: Local | VHF/UHF | NCS")
+        self.ncs_session_summary_label.setWordWrap(True)
+        session_layout.addLayout(source_row)
+        session_layout.addWidget(self.ncs_session_summary_label)
+
         info_row = QHBoxLayout()
+        self._local_ncs_info_row = info_row
         info_row.addWidget(QLabel("Role:"))
         self.role_combo = QComboBox()
         self.role_combo.addItems(["NCS"])
@@ -112,9 +193,10 @@ class LocalNCSTab(QWidget):
         self.channels_edit = QLineEdit()
         self.channels_edit.setPlaceholderText("Example: 146.520 simplex; GMRS RPT 462.650")
         info_row.addWidget(self.channels_edit, stretch=1)
-        layout.addLayout(info_row)
+        session_layout.addLayout(info_row)
 
         session_row = QHBoxLayout()
+        self._local_ncs_session_row = session_row
         self.start_net_btn = QPushButton("Start Net")
         self.join_net_btn = QPushButton("Join Net")
         self.end_net_btn = QPushButton("End Net")
@@ -124,9 +206,12 @@ class LocalNCSTab(QWidget):
         session_row.addWidget(self.end_net_btn)
         session_row.addSpacing(10)
         session_row.addWidget(self.session_status_label, stretch=1)
-        layout.addLayout(session_row)
+        session_layout.addLayout(session_row)
+        session_group.setLayout(session_layout)
+        layout.addWidget(session_group)
 
         lookup_row = QHBoxLayout()
+        self._local_ncs_lookup_row = lookup_row
         lookup_row.addWidget(QLabel("Operator Lookup/Add:"))
         self.lookup_edit = QLineEdit()
         self.lookup_edit.setPlaceholderText("CALL / Name / State (or callsign only)")
@@ -141,6 +226,7 @@ class LocalNCSTab(QWidget):
         layout.addLayout(lookup_row)
 
         filter_row = QHBoxLayout()
+        self._local_ncs_filter_row = filter_row
         filter_row.addWidget(QLabel("Search:"))
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Callsign, name, city, state, category, notes")
@@ -151,20 +237,30 @@ class LocalNCSTab(QWidget):
         filter_row.addWidget(self.status_filter_combo)
         layout.addLayout(filter_row)
 
-        self.table = QTableWidget(0, 8)
+        self.empty_table_label = QLabel(
+            "No local check-ins yet. Use Operator Lookup/Add to add a station when the net starts."
+        )
+        self.empty_table_label.setObjectName("localNcsEmptyState")
+        self.empty_table_label.setWordWrap(True)
+        self.empty_table_label.setVisible(False)
+        layout.addWidget(self.empty_table_label)
+
+        self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(
-            ["Check-in UTC", "Callsign", "Name", "City", "State", "Category", "SitRep", "Notes"]
+            ["Check-in UTC", "Callsign", "Name", "Location", "Category", "SitRep", "Notes"]
         )
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
+        self.table.setMinimumHeight(180)
+        self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         header_view = self.table.horizontalHeader()
         header_view.setSectionResizeMode(self.COL_TIME, QHeaderView.ResizeToContents)
         header_view.setSectionResizeMode(self.COL_CALLSIGN, QHeaderView.ResizeToContents)
         header_view.setSectionResizeMode(self.COL_NAME, QHeaderView.ResizeToContents)
-        header_view.setSectionResizeMode(self.COL_CITY, QHeaderView.ResizeToContents)
-        header_view.setSectionResizeMode(self.COL_STATE, QHeaderView.ResizeToContents)
+        header_view.setSectionResizeMode(self.COL_LOCATION, QHeaderView.ResizeToContents)
         header_view.setSectionResizeMode(self.COL_CATEGORY, QHeaderView.ResizeToContents)
         header_view.setSectionResizeMode(self.COL_STATUS, QHeaderView.ResizeToContents)
         header_view.setSectionResizeMode(self.COL_NOTES, QHeaderView.Stretch)
@@ -175,6 +271,7 @@ class LocalNCSTab(QWidget):
         editor_row.addWidget(self.editor_target_label)
 
         editor_top = QHBoxLayout()
+        self._local_ncs_editor_row = editor_top
         editor_top.addWidget(QLabel("SitRep:"))
         self.status_combo = QComboBox()
         self.status_combo.addItems(STATUS_OPTIONS)
@@ -191,14 +288,85 @@ class LocalNCSTab(QWidget):
         self.notes_edit.setPlaceholderText(
             "Persistent notes for this check-in. Update as new local information arrives."
         )
-        self.notes_edit.setMinimumHeight(90)
+        notes_floor = font_derived_widget_height(self.notes_edit, vertical_padding=12, floor=72)
+        self.notes_edit.setMinimumHeight(notes_floor)
+        self.notes_edit.setMaximumHeight(max(notes_floor, self.notes_edit.fontMetrics().lineSpacing() * 5 + 20))
         editor_row.addWidget(self.notes_edit)
         layout.addLayout(editor_row)
+
+        report_panel = QVBoxLayout()
+        self.report_target_label = QLabel("Log Report: select a check-in")
+        report_panel.addWidget(self.report_target_label)
+
+        report_grid = QGridLayout()
+        report_grid.addWidget(QLabel("Source:"), 0, 0)
+        self.report_source_combo = QComboBox()
+        self.report_source_combo.setEditable(True)
+        self.report_source_combo.addItems(
+            ["Voice", "VHF", "UHF", "GMRS", "Simplex", "Repeater", "Mesh", "Reticulum", "Other"]
+        )
+        report_grid.addWidget(self.report_source_combo, 0, 1)
+        report_grid.addWidget(QLabel("Status:"), 0, 2)
+        self.report_status_combo = QComboBox()
+        self.report_status_combo.addItems(REPORT_STATUS_OPTIONS)
+        self.report_status_combo.setToolTip("Use WATCH/PRIORITY/EMERGENCY when the report needs operator attention.")
+        report_grid.addWidget(self.report_status_combo, 0, 3)
+        report_grid.addWidget(QLabel("Confidence:"), 0, 4)
+        self.report_confirmed_combo = QComboBox()
+        for label, value in REPORT_CONFIRMATION_OPTIONS:
+            self.report_confirmed_combo.addItem(label, value)
+        report_grid.addWidget(self.report_confirmed_combo, 0, 5)
+
+        report_grid.addWidget(QLabel("Topics:"), 1, 0)
+        self.report_topics_label = QLabel("none")
+        self.report_topics_label.setWordWrap(True)
+        report_grid.addWidget(self.report_topics_label, 1, 1, 1, 5)
+
+        topic_grid = QGridLayout()
+        self._local_ncs_topic_grid = topic_grid
+        topic_columns = 3
+        for idx, topic in enumerate(TOPIC_TAXONOMY):
+            btn = QPushButton(str(topic))
+            btn.setCheckable(True)
+            btn.setToolTip(f"Toggle {topic} for this local report.")
+            btn.setMinimumWidth(0)
+            btn.clicked.connect(lambda checked=False, value=str(topic): self._toggle_report_topic(value, checked))
+            self._report_topic_buttons[str(topic)] = btn
+            topic_grid.addWidget(btn, idx // topic_columns, idx % topic_columns)
+        report_grid.addLayout(topic_grid, 2, 0, 1, 6)
+
+        report_grid.addWidget(QLabel("Subject:"), 3, 0)
+        self.report_subject_edit = QLineEdit()
+        self.report_subject_edit.setPlaceholderText("Short report title, e.g. Repeater outage or wildfire update")
+        report_grid.addWidget(self.report_subject_edit, 3, 1, 1, 5)
+        report_panel.addLayout(report_grid)
+
+        self.report_body_edit = QTextEdit()
+        self.report_body_edit.setPlaceholderText(
+            "Capture the field report in plain language. FIO will classify useful terms for message intelligence."
+        )
+        report_floor = font_derived_widget_height(self.report_body_edit, vertical_padding=12, floor=72)
+        self.report_body_edit.setMinimumHeight(report_floor)
+        self.report_body_edit.setMaximumHeight(max(report_floor, self.report_body_edit.fontMetrics().lineSpacing() * 6 + 20))
+        report_panel.addWidget(self.report_body_edit)
+
+        report_actions = QHBoxLayout()
+        self._local_ncs_report_actions = report_actions
+        self.save_report_btn = QPushButton("Save Report")
+        self.clear_report_btn = QPushButton("Clear Report")
+        self.report_save_label = QLabel("")
+        report_actions.addWidget(self.save_report_btn)
+        report_actions.addWidget(self.clear_report_btn)
+        report_actions.addWidget(self.report_save_label, stretch=1)
+        report_panel.addLayout(report_actions)
+        layout.addLayout(report_panel)
 
         self.net_name_edit.textChanged.connect(self._persist_context)
         self.channels_edit.textChanged.connect(self._persist_context)
         self.net_name_edit.textChanged.connect(self._update_net_session_ui)
         self.channels_edit.textChanged.connect(self._update_net_session_ui)
+        self.net_name_edit.textChanged.connect(lambda _text: self._refresh_ncs_session_context())
+        self.channels_edit.textChanged.connect(lambda _text: self._refresh_ncs_session_context())
         self.start_net_btn.clicked.connect(self._start_local_net)
         self.join_net_btn.clicked.connect(self._join_local_net)
         self.end_net_btn.clicked.connect(self._end_local_net)
@@ -213,10 +381,14 @@ class LocalNCSTab(QWidget):
         self.status_combo.currentTextChanged.connect(self._mark_current_dirty)
         self.notes_edit.textChanged.connect(self._mark_current_dirty)
         self.save_entry_btn.clicked.connect(lambda: self._save_current_entry(show_feedback=True))
+        self.clear_report_btn.clicked.connect(lambda: self._clear_report_editor(clear_status=True))
+        self.save_report_btn.clicked.connect(self._save_local_report)
         self.lookup_edit.installEventFilter(self)
         self.add_checkin_btn.installEventFilter(self)
         self.setTabOrder(self.lookup_edit, self.add_checkin_btn)
+        self.local_ncs_scroll_area.setWidget(self.local_ncs_content)
         self._update_net_session_ui()
+        self._refresh_ncs_session_context()
 
     def _setup_timers(self) -> None:
         self._clock_timer = QTimer(self)
@@ -244,6 +416,7 @@ class LocalNCSTab(QWidget):
         try:
             self.settings.set("local_ncs_net_name", self.net_name_edit.text().strip())
             self.settings.set("local_ncs_channels", self.channels_edit.text().strip())
+            self._persist_ncs_session_snapshot()
         except Exception:
             pass
 
@@ -272,6 +445,8 @@ class LocalNCSTab(QWidget):
 
     def apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
+        if hasattr(self, "local_ncs_source_chip"):
+            self.local_ncs_source_chip.setStyleSheet(button_style("success", theme))
         self.start_net_btn.setStyleSheet(button_style("muted", theme))
         self.join_net_btn.setStyleSheet(button_style("muted", theme))
         self.end_net_btn.setStyleSheet(button_style("muted", theme))
@@ -279,6 +454,9 @@ class LocalNCSTab(QWidget):
         self.refresh_btn.setStyleSheet(button_style("primary", theme))
         self.export_btn.setStyleSheet(button_style("muted", theme))
         self.save_entry_btn.setStyleSheet(button_style("muted", theme))
+        self.clear_report_btn.setStyleSheet(button_style("muted", theme))
+        self.save_report_btn.setStyleSheet(button_style("eligible_info" if self._editing_entry_id else "muted", theme))
+        self._refresh_report_topic_button_styles(theme)
         self._update_action_button_styles(theme)
         self._refresh_status_cell_colors()
 
@@ -300,6 +478,8 @@ class LocalNCSTab(QWidget):
             self.end_net_btn.setStyleSheet(button_style("muted", theme))
             self.add_checkin_btn.setStyleSheet(button_style("muted", theme))
         self.save_entry_btn.setStyleSheet(button_style("eligible_info" if dirty_entry else "muted", theme))
+        if hasattr(self, "save_report_btn"):
+            self.save_report_btn.setStyleSheet(button_style("eligible_info" if self._editing_entry_id else "muted", theme))
 
     def on_settings_saved(self) -> None:
         try:
@@ -308,6 +488,49 @@ class LocalNCSTab(QWidget):
             pass
         self.apply_theme()
         self._update_clock_labels()
+        QTimer.singleShot(0, self._reflow_local_ncs_layouts)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._reflow_local_ncs_layouts()
+
+    def _reflow_local_ncs_layouts(self) -> None:
+        """Stack existing compact controls without changing Local NCS data/state."""
+        layouts = tuple(
+            layout
+            for name in (
+                "_local_ncs_info_row", "_local_ncs_session_row", "_local_ncs_lookup_row",
+                "_local_ncs_filter_row", "_local_ncs_editor_row", "_local_ncs_report_actions",
+            )
+            if (layout := getattr(self, name, None)) is not None
+        )
+
+        def required_width(layout) -> int:
+            widths = []
+            for index in range(layout.count()):
+                item = layout.itemAt(index)
+                widget = item.widget() if item is not None else None
+                if widget is not None:
+                    widths.append(max(widget.minimumWidth(), widget.minimumSizeHint().width()))
+            return sum(widths) + max(0, len(widths) - 1) * max(0, layout.spacing())
+
+        viewport = self.local_ncs_scroll_area.viewport()
+        available = max(1, int(viewport.width() or self.width()))
+        compact = available < max((required_width(layout) for layout in layouts), default=available)
+        direction = QHBoxLayout.TopToBottom if compact else QHBoxLayout.LeftToRight
+        for layout in layouts:
+            layout.setDirection(direction)
+        grid = getattr(self, "_local_ncs_topic_grid", None)
+        if grid is not None:
+            buttons = [grid.itemAt(index).widget() for index in range(grid.count())]
+            buttons = [button for button in buttons if button is not None]
+            while grid.count():
+                grid.takeAt(0)
+            columns = 2 if compact else 3
+            for index, button in enumerate(buttons):
+                grid.addWidget(button, index // columns, index % columns)
+            for column in range(columns):
+                grid.setColumnStretch(column, 1)
 
     def set_tab_active(self, active: bool) -> None:
         if active:
@@ -404,6 +627,14 @@ class LocalNCSTab(QWidget):
         last_name = str(row.get("last_name", "")).strip()
         return str(row.get("name", "")).strip() or " ".join([p for p in (first_name, last_name) if p]).strip()
 
+    @staticmethod
+    def _location_text(row: Dict[str, Any]) -> str:
+        city = str(row.get("city", "")).strip()
+        state = str(row.get("state", "")).strip().upper()
+        if city and state:
+            return f"{city}, {state}"
+        return city or state
+
     def _formatted_lookup_entry(self, row: Dict[str, Any]) -> str:
         return self._format_entry(
             str(row.get("callsign", "")).strip().upper(),
@@ -483,10 +714,13 @@ class LocalNCSTab(QWidget):
         self._net_in_progress = True
         self._net_session_mode = "JOINED" if joined else "STARTED"
         self._net_start_utc = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
+        self._net_end_utc = None
         self._reset_session_table()
         self.lookup_edit.setFocus()
+        self._persist_ncs_session_snapshot(timing_state="active")
         self.net_status_changed.emit("LOCAL", True)
         self._update_net_session_ui()
+        self._refresh_ncs_session_context()
 
     def _end_local_net(self) -> None:
         if not self._net_in_progress:
@@ -504,10 +738,13 @@ class LocalNCSTab(QWidget):
         self._autosave_dirty()
         self._net_in_progress = False
         self._net_session_mode = ""
+        self._net_end_utc = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
         self._net_start_utc = None
         self._reset_session_table()
+        self._persist_ncs_session_snapshot(timing_state="ended")
         self.net_status_changed.emit("LOCAL", False)
         self._update_net_session_ui()
+        self._refresh_ncs_session_context()
 
     def _update_net_session_ui(self) -> None:
         active = bool(self._net_in_progress)
@@ -735,8 +972,7 @@ class LocalNCSTab(QWidget):
                             ]
                         ).strip()
                     ),
-                    str(row.get("city", "")),
-                    str(row.get("state", "")).upper(),
+                    self._location_text(row),
                     str(row.get("category", "")),
                     str(row.get("sitrep_status", "GREEN")).upper(),
                     notes_preview,
@@ -754,7 +990,9 @@ class LocalNCSTab(QWidget):
                 self._set_editor_enabled(False)
                 self._editing_entry_id = None
                 self.editor_target_label.setText("Selected Check-in: none")
+                self._update_empty_table_state(rows)
                 return
+            self._update_empty_table_state(rows)
 
             row_to_select = 0
             if target_id:
@@ -767,6 +1005,24 @@ class LocalNCSTab(QWidget):
         finally:
             self._binding_selection = False
         self._on_table_selection_changed()
+
+    def _update_empty_table_state(self, rows: List[Dict[str, Any]]) -> None:
+        if not hasattr(self, "empty_table_label") or not hasattr(self, "table"):
+            return
+        has_rows = bool(rows)
+        has_any_checkins = bool(getattr(self, "_rows", []))
+        query = self.search_edit.text().strip() if hasattr(self, "search_edit") else ""
+        status_filter = self.status_filter_combo.currentText().strip() if hasattr(self, "status_filter_combo") else "All"
+        if has_any_checkins and not has_rows:
+            self.empty_table_label.setText(
+                f"No local check-ins match the current filters ({status_filter}, {query or 'no search text'})."
+            )
+        else:
+            self.empty_table_label.setText(
+                "No local check-ins yet. Use Operator Lookup/Add to add a station when the net starts."
+            )
+        self.empty_table_label.setVisible(not has_rows)
+        self.table.setVisible(has_rows)
 
     def _selected_entry_id(self) -> Optional[int]:
         rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
@@ -783,6 +1039,20 @@ class LocalNCSTab(QWidget):
         self.status_combo.setEnabled(enabled)
         self.notes_edit.setEnabled(enabled)
         self.save_entry_btn.setEnabled(enabled)
+        for widget_name in (
+            "report_source_combo",
+            "report_status_combo",
+            "report_confirmed_combo",
+            "report_subject_edit",
+            "report_body_edit",
+            "save_report_btn",
+            "clear_report_btn",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setEnabled(enabled)
+        for btn in getattr(self, "_report_topic_buttons", {}).values():
+            btn.setEnabled(enabled)
 
     def _on_table_selection_changed(self) -> None:
         if self._binding_selection:
@@ -794,12 +1064,15 @@ class LocalNCSTab(QWidget):
             self._editing_entry_id = None
             self._set_editor_enabled(False)
             self.editor_target_label.setText("Selected Check-in: none")
+            self.report_target_label.setText("Log Report: select a check-in")
             self._set_autosave_label()
+            self._update_action_button_styles()
             return
 
         row = self._rows_by_id.get(entry_id)
         if not row:
             return
+        previous_id = self._editing_entry_id
         self._editing_entry_id = entry_id
         self._binding_editor = True
         try:
@@ -811,7 +1084,108 @@ class LocalNCSTab(QWidget):
         self.editor_target_label.setText(
             f"Selected Check-in: {row.get('callsign', '').upper()} @ {row.get('checkin_utc', '')}"
         )
+        self.report_target_label.setText(f"Log Report From: {row.get('callsign', '').upper()}")
+        if previous_id != entry_id:
+            self._clear_report_editor(clear_status=False)
         self._set_autosave_label()
+        self._update_action_button_styles()
+
+    def _selected_checkin_row(self) -> Dict[str, Any]:
+        if not self._editing_entry_id:
+            return {}
+        return self._rows_by_id.get(int(self._editing_entry_id), {}) or {}
+
+    def _toggle_report_topic(self, topic: str, checked: bool) -> None:
+        topic = str(topic or "").strip()
+        if not topic:
+            return
+        if checked and topic not in self._report_topics:
+            self._report_topics.append(topic)
+        elif not checked and topic in self._report_topics:
+            self._report_topics.remove(topic)
+        self._refresh_report_topics_label()
+        self._refresh_report_topic_button_styles()
+
+    def _refresh_report_topics_label(self) -> None:
+        text = ", ".join(self._report_topics) if self._report_topics else "none"
+        self.report_topics_label.setText(text)
+        self._sync_report_topic_button_checks()
+
+    def _sync_report_topic_button_checks(self) -> None:
+        selected = set(self._report_topics)
+        for topic, btn in getattr(self, "_report_topic_buttons", {}).items():
+            if btn.isChecked() == (topic in selected):
+                continue
+            btn.blockSignals(True)
+            try:
+                btn.setChecked(topic in selected)
+            finally:
+                btn.blockSignals(False)
+
+    def _refresh_report_topic_button_styles(self, theme: Optional[Dict[str, str]] = None) -> None:
+        if not isinstance(theme, dict):
+            theme = resolve_theme(self.settings)
+        selected = set(self._report_topics)
+        for topic, btn in getattr(self, "_report_topic_buttons", {}).items():
+            role = "eligible_info" if topic in selected else "muted"
+            btn.setStyleSheet(button_style(role, theme))
+
+    def _clear_report_editor(self, *, clear_status: bool = True) -> None:
+        self._report_topics = []
+        self._refresh_report_topics_label()
+        self.report_subject_edit.clear()
+        self.report_body_edit.clear()
+        self.report_save_label.clear()
+        if clear_status:
+            self.report_source_combo.setCurrentText("Voice")
+            self.report_status_combo.setCurrentText("INFO")
+            self.report_confirmed_combo.setCurrentIndex(0)
+
+    def _save_local_report(self) -> None:
+        row = self._selected_checkin_row()
+        if not row:
+            QMessageBox.information(self, "Save Report", "Select a check-in before saving a report.")
+            return
+        subject = self.report_subject_edit.text().strip()
+        body = self.report_body_edit.toPlainText().strip()
+        if not subject and not body:
+            QMessageBox.information(self, "Save Report", "Enter a subject or report details before saving.")
+            return
+        source_kind = self.report_source_combo.currentText().strip() or "Voice"
+        report_id = record_local_report(
+            callsign=str(row.get("callsign", "")).strip().upper(),
+            source_kind=source_kind,
+            source_channel=self.channels_edit.text().strip(),
+            net_session_id=self._net_start_utc or self.net_name_edit.text().strip(),
+            from_name=(
+                str(row.get("name", "")).strip()
+                or " ".join(
+                    [
+                        p
+                        for p in (
+                            str(row.get("first_name", "")).strip(),
+                            str(row.get("last_name", "")).strip(),
+                        )
+                        if p
+                    ]
+                ).strip()
+            ),
+            city=str(row.get("city", "")).strip(),
+            state=str(row.get("state", "")).strip().upper(),
+            status=self.report_status_combo.currentText().strip().upper(),
+            topics=list(self._report_topics),
+            subject=subject,
+            body=body,
+            confirmed_state=str(self.report_confirmed_combo.currentData() or "UNCONFIRMED"),
+            source_app="Local NCS",
+            raw_reference=f"local_ncs_checkins:{self._editing_entry_id}",
+        )
+        if not report_id:
+            QMessageBox.warning(self, "Save Report", "Unable to save the local report.")
+            return
+        self._clear_report_editor(clear_status=True)
+        self.report_save_label.setText(f"Saved report #{report_id}")
+        self.local_data_updated.emit()
 
     def _mark_current_dirty(self) -> None:
         if self._binding_editor:

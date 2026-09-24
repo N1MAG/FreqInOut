@@ -1,28 +1,45 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import socket
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 import psutil
 
 from freqinout.core.dependency_health import get_dependency_health_registry
 from freqinout.core.logger import log
+from freqinout.radio_interface.js8_api_client import JS8ApiClient, JS8ApiEndpoint
 
 
 PROGRAM_TOKENS: Dict[str, Sequence[str]] = {
     "FLRig": ("flrig", "flrig.exe"),
+    "RigCtlD": ("rigctld", "rigctld.exe"),
     "FLDigi": ("fldigi", "fldigi.exe"),
     "FLMsg": ("flmsg", "flmsg.exe"),
     "FLAmp": ("flamp", "flamp.exe"),
     "VarAC": ("varac", "varac.exe"),
-    "JS8Call": ("js8call", "js8call.exe"),
+    "JS8Call": (
+        "js8call",
+        "js8call.exe",
+        "JS8Call",
+        "JS8Call.exe",
+        "js8call-improved",
+        "js8call-improved.exe",
+        "js8call-subspace",
+        "js8call-subspace.exe",
+        "subspace",
+        "subspace.exe",
+    ),
     "JS8Spotter": ("js8spotter", "js8spotter.exe", "js8spotter.py"),
     "CommStat": ("commstat", "commstat.exe", "commstat.py"),
+    # SDR++ is only added to a receiver-scoped launch bundle.  It has no
+    # global settings path because a station can host multiple receiver apps.
+    "SDR++": ("sdrpp", "sdrpp.exe", "sdr++.exe"),
 }
 
 PROGRAM_PATH_KEYS: Dict[str, str] = {
@@ -35,9 +52,28 @@ PROGRAM_PATH_KEYS: Dict[str, str] = {
     "CommStat": "path_commstat",
 }
 
+# Process names that commonly host a configured script/application rather than
+# exposing the application name as the process name. Only these processes need
+# the more expensive command-line inspection during a routine inventory pass.
+PROCESS_WRAPPER_TOKENS = {
+    "python",
+    "python3",
+    "pythonw",
+    "python.exe",
+    "python3.exe",
+    "wine",
+    "wine64",
+    "mono",
+    "bash",
+    "sh",
+    "zsh",
+    "env",
+}
+
 STATUS_KEYS: Sequence[str] = (
     "JS8Call_API",
     "FLRig",
+    "RigCtlD",
     "FLDigi",
     "FLMsg",
     "FLAmp",
@@ -50,6 +86,8 @@ JS8_DEFAULT_HOST = "127.0.0.1"
 JS8_DEFAULT_PORT = 2442
 FLRIG_DEFAULT_HOST = "127.0.0.1"
 FLRIG_DEFAULT_PORT = 12345
+RIGCTLD_DEFAULT_HOST = "127.0.0.1"
+RIGCTLD_DEFAULT_PORT = 4532
 FLDIGI_DEFAULT_HOST = "127.0.0.1"
 FLDIGI_DEFAULT_PORT = 7362
 
@@ -68,6 +106,8 @@ class SoftwareStatusService:
     _shared_proc_snapshot_ts: float = 0.0
     _shared_proc_lock = threading.Lock()
     _shared_js8_api_cache: Dict[tuple[str, int, bool], tuple[float, bool]] = {}
+    _shared_js8_capability_cache: Dict[tuple[str, int], tuple[float, Dict[str, object]]] = {}
+    _shared_js8_shadow_cache: Dict[tuple[str, int], tuple[float, Dict[str, object]]] = {}
     _shared_service_probe_cache: Dict[tuple[str, ...], tuple[float, bool]] = {}
 
     def __init__(self, settings: Any) -> None:
@@ -75,12 +115,20 @@ class SoftwareStatusService:
         self._proc_snapshot: List[str] = []
         self._proc_records: List[Dict[str, object]] = []
         self._proc_snapshot_ts: float = 0.0
-        self._snapshot_ttl_sec: float = 5.0
+        # Process inventory is station-wide and comparatively expensive on
+        # some Linux /proc implementations. Endpoint reachability still has
+        # its own shorter cache, while launch/manual refreshes explicitly force
+        # a new inventory. A longer passive TTL prevents two-radio health
+        # projections from continuously walking the same process table.
+        self._snapshot_ttl_sec: float = 30.0
         self._js8_api_cache_key: tuple[str, int, bool] | None = None
         self._js8_api_cache_ok: bool = False
         self._js8_api_cache_ts: float = 0.0
         self._api_success_ttl_sec: float = 15.0
         self._api_failure_ttl_sec: float = 30.0
+        self._js8_capability_success_ttl_sec: float = 60.0
+        self._js8_capability_failure_ttl_sec: float = 120.0
+        self._js8_shadow_cache_ttl_sec: float = 60.0
         self._service_probe_success_ttl_sec: float = 15.0
         self._service_probe_failure_ttl_sec: float = 30.0
         self._health = get_dependency_health_registry()
@@ -180,7 +228,37 @@ class SoftwareStatusService:
         except Exception:
             return ""
 
-    def _refresh_process_snapshot(self, *, force: bool = False) -> None:
+    @staticmethod
+    def _matches_target_process_name(name: str, targets: set[str]) -> bool:
+        """Recognize direct and version-qualified native process names.
+
+        Linux reports the executable's native name, which may differ from the
+        configured symlink used in argv (for example ``flamp-2.2.14`` launched
+        through ``/usr/local/bin/flamp``).  Inspect only an exact target or a
+        delimiter-qualified version/variant so unrelated processes still avoid
+        the comparatively expensive exe/cmdline reads.
+        """
+
+        normalized_name = str(name or "").strip().casefold()
+        if not normalized_name:
+            return False
+        name_stem = normalized_name[:-4] if normalized_name.endswith(".exe") else normalized_name
+        for raw_target in targets:
+            target = str(raw_target or "").strip().casefold()
+            target_stem = target[:-4] if target.endswith(".exe") else target
+            if name_stem == target_stem:
+                return True
+            if name_stem.startswith(target_stem) and len(name_stem) > len(target_stem):
+                if name_stem[len(target_stem)] in {"-", "_", "."}:
+                    return True
+        return False
+
+    def _refresh_process_snapshot(
+        self,
+        *,
+        force: bool = False,
+        inspect_all: bool = False,
+    ) -> None:
         cls = type(self)
         with cls._shared_proc_lock:
             now = time.monotonic()
@@ -192,17 +270,50 @@ class SoftwareStatusService:
             started = time.perf_counter()
             snap: List[str] = []
             records: List[Dict[str, object]] = []
-            for proc in psutil.process_iter(attrs=["name", "exe", "cmdline"]):
+            target_tokens = {
+                token
+                for program_name in PROGRAM_TOKENS
+                for token in self._target_tokens(program_name)
+                if token
+            }
+            # Reading exe/cmdline for every process is disproportionately slow on
+            # some Linux systems (and can block on inaccessible/FUSE-backed proc
+            # entries). Start with the cheap name inventory and inspect details
+            # only for a direct match or a known wrapper process.
+            for proc in psutil.process_iter(attrs=["name"]):
                 try:
                     name = (proc.info.get("name") or "").strip().lower()
-                    exe_path = (proc.info.get("exe") or "").strip()
-                    exe = self._basename_token(exe_path)
-                    cmdline = proc.info.get("cmdline") or []
+                    exe_path = ""
+                    exe = ""
+                    cmdline: Sequence[object] = ()
+                    direct_match = self._matches_target_process_name(name, target_tokens)
+                    # Multi-instance applications commonly share one binary
+                    # and differ only by launch arguments (profile/config
+                    # roots, rig name, or VarAC INI).  Inspect command lines
+                    # for the small set of known direct matches as well as
+                    # wrappers so status can attribute a process to one radio.
+                    inspect_command = (
+                        bool(inspect_all)
+                        or direct_match
+                        or name in PROCESS_WRAPPER_TOKENS
+                        or not name
+                    )
+                    if direct_match:
+                        try:
+                            exe_path = str(proc.exe() or "").strip()
+                        except Exception:
+                            exe_path = ""
+                        exe = self._basename_token(exe_path)
+                    if inspect_command:
+                        try:
+                            cmdline = proc.cmdline() or ()
+                        except Exception:
+                            cmdline = ()
                     cmd_paths: List[str] = []
                     cmd_tokens: List[str] = []
-                    for arg in cmdline[:6]:
+                    normalized_cmdline = tuple(str(arg or "").strip() for arg in cmdline[:16])
+                    for path in normalized_cmdline:
                         try:
-                            path = str(arg or "").strip()
                             token = self._basename_token(path)
                         except Exception:
                             path = ""
@@ -220,6 +331,7 @@ class SoftwareStatusService:
                             "exe_path": exe_path,
                             "cmd_tokens": tuple(cmd_tokens),
                             "cmd_paths": tuple(cmd_paths),
+                            "cmdline": normalized_cmdline,
                         }
                     )
                 except Exception:
@@ -298,6 +410,171 @@ class SoftwareStatusService:
             except Exception:
                 continue
         return None
+
+    def cached_program_is_running(self, program_name: str) -> bool:
+        """Read the shared process snapshot without ever starting an inventory walk."""
+        cls = type(self)
+        self._proc_snapshot = cls._shared_proc_snapshot
+        self._proc_records = cls._shared_proc_records
+        self._proc_snapshot_ts = cls._shared_proc_snapshot_ts
+        if not self._proc_snapshot and not self._proc_records:
+            return False
+        targets = set(self._target_tokens(program_name))
+        if not targets:
+            normalized = program_name.strip().lower()
+            targets = {normalized, f"{normalized}.exe"}
+        return any(token in targets for token in self._proc_snapshot)
+
+    def cached_program_process_count(
+        self,
+        program_name: str,
+        process_records: Sequence[Mapping[str, object]] | None = None,
+    ) -> int:
+        """Count cached process records carrying this program's family token."""
+
+        cls = type(self)
+        records = cls._shared_proc_records if process_records is None else process_records
+        if process_records is None:
+            self._proc_snapshot = cls._shared_proc_snapshot
+            self._proc_records = cls._shared_proc_records
+            self._proc_snapshot_ts = cls._shared_proc_snapshot_ts
+        targets = set(self._target_tokens(program_name))
+        if not targets:
+            normalized = str(program_name or "").strip().casefold()
+            targets = {normalized, f"{normalized}.exe"}
+        count = 0
+        for record in records:
+            record_tokens = {
+                str(record.get("name") or "").casefold(),
+                str(record.get("exe") or "").casefold(),
+                *(
+                    str(value or "").casefold()
+                    for value in record.get("cmd_tokens", ())
+                ),
+            }
+            if any(
+                self._matches_target_process_name(token, targets)
+                for token in record_tokens
+                if token
+            ):
+                count += 1
+        return count
+
+    @staticmethod
+    def _normalized_process_argument(value: object) -> str:
+        text = str(value or "").strip().strip('"').strip("'")
+        if not text:
+            return ""
+        expanded = os.path.expanduser(os.path.expandvars(text))
+        if re.match(r"^[a-zA-Z]:[\\/]", expanded):
+            return expanded.replace("\\", "/").casefold()
+        if expanded.startswith("/"):
+            return str(Path(expanded).resolve(strict=False)).casefold()
+        return expanded.casefold()
+
+    @classmethod
+    def _process_arguments_match(
+        cls,
+        actual: Sequence[object],
+        expected: Sequence[object],
+    ) -> bool:
+        wanted = tuple(
+            value
+            for value in (cls._normalized_process_argument(item) for item in expected)
+            if value
+        )
+        if not wanted:
+            return True
+        observed = tuple(cls._normalized_process_argument(item) for item in actual)
+        if len(observed) < len(wanted):
+            return False
+        return any(
+            observed[index : index + len(wanted)] == wanted
+            for index in range(len(observed) - len(wanted) + 1)
+        )
+
+    def cached_program_instance_running(
+        self,
+        program_name: str,
+        configured_target: str,
+        expected_arguments: Sequence[object] = (),
+        process_records: Sequence[Mapping[str, object]] | None = None,
+    ) -> bool:
+        """Match one configured process identity from shared cached records.
+
+        Executable-only matching remains available for genuinely distinct
+        binaries.  When canonical launch arguments are supplied, the same
+        executable running for another radio is not accepted.
+        """
+        target_text = str(configured_target or "").strip()
+        if not target_text and not expected_arguments:
+            return self.cached_program_is_running(program_name)
+        try:
+            parts = shlex.split(target_text, posix=os.name != "nt")
+        except Exception:
+            parts = [target_text]
+        path_parts = [
+            Path(os.path.expanduser(os.path.expandvars(value)))
+            for value in parts[:4]
+            if value and not value.startswith("-")
+        ]
+        target_paths = {str(path.resolve(strict=False)).casefold() for path in path_parts if path.is_absolute() or "/" in str(path) or "\\" in str(path)}
+        if not target_paths and not expected_arguments:
+            # A launch recipe may intentionally use a PATH-resolved command
+            # (``sdrpp``) or a platform launcher (``open -a SDR++``).  In that
+            # case there is no durable filesystem target to compare, so use
+            # the cached, program-specific token set rather than forcing a
+            # readiness timeout after a successful launch.
+            return self.cached_program_is_running(program_name)
+        targets = set(self._target_tokens(program_name))
+        if not targets:
+            normalized = program_name.strip().lower()
+            targets = {normalized, f"{normalized}.exe"}
+        cls = type(self)
+        records = cls._shared_proc_records if process_records is None else process_records
+        for record in records:
+            record_tokens = {
+                str(record.get("name") or ""),
+                str(record.get("exe") or ""),
+                *(str(value or "") for value in record.get("cmd_tokens", ())),
+            }
+            if not record_tokens.intersection(targets):
+                continue
+            candidates = [str(record.get("exe_path") or "")]
+            candidates.extend(str(value or "") for value in record.get("cmd_paths", ()))
+            target_matches = not target_paths
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                resolved = str(Path(candidate).resolve(strict=False)).casefold()
+                for target in target_paths:
+                    if resolved == target or resolved.startswith(target.rstrip("/\\") + os.sep.casefold()):
+                        target_matches = True
+                        break
+                if target_matches:
+                    break
+            if not target_matches:
+                continue
+            if not self._process_arguments_match(
+                record.get("cmdline", ()),
+                expected_arguments,
+            ):
+                continue
+            return True
+        return False
+
+    def program_instance_running(
+        self,
+        program_name: str,
+        configured_target: str,
+        expected_arguments: Sequence[object] = (),
+    ) -> bool:
+        self._refresh_process_snapshot()
+        return self.cached_program_instance_running(
+            program_name,
+            configured_target,
+            expected_arguments,
+        )
 
     def js8_api_reachable(
         self,
@@ -383,6 +660,453 @@ class SoftwareStatusService:
             )
         return bool(reachable)
 
+    def js8_api_capability_status(
+        self,
+        *,
+        port_override: Optional[int] = None,
+        host_override: Optional[str] = None,
+        process_running: Optional[bool] = None,
+        force: bool = False,
+    ) -> Dict[str, object]:
+        host = (host_override or "").strip() or self._settings_text("js8_host", JS8_DEFAULT_HOST) or JS8_DEFAULT_HOST
+        port = int(port_override) if port_override is not None else self._settings_int("js8_port", JS8_DEFAULT_PORT)
+        endpoint = JS8ApiEndpoint(host, port).normalized()
+        cache_key = endpoint.key
+        health_key = self._health_key(("JS8CALL", endpoint.host.lower(), int(endpoint.port), "capability"))
+        running = bool(process_running) if process_running is not None else self.program_is_running("JS8Call")
+        now = time.monotonic()
+        cached = type(self)._shared_js8_capability_cache.get(cache_key)
+        if not running and self._is_loopback_host(endpoint.host):
+            status = self._js8_capability_offline_status(
+                endpoint,
+                last_error="JS8Call is not running",
+            )
+            type(self)._shared_js8_capability_cache.pop(cache_key, None)
+            return status
+        if not force and cached:
+            cached_ts, cached_status = cached
+            connected = bool(cached_status.get("connected"))
+            ttl = self._js8_capability_success_ttl_sec if connected else self._js8_capability_failure_ttl_sec
+            if (now - float(cached_ts or 0.0)) < ttl:
+                return dict(cached_status)
+        allowed, _health = self._health.may_run(health_key, owner="SoftwareStatusService", force=force)
+        if not allowed and cached:
+            return dict(cached[1])
+        if not allowed:
+            return self._js8_capability_offline_status(
+                endpoint,
+                last_error="JS8Call API capability check is waiting for cooldown",
+            )
+        status, elapsed_ms = self._probe_js8_capability(endpoint, timeout_s=0.4)
+        metadata = {
+            "capability_mode": status.get("mode", "offline"),
+            "version": status.get("version", ""),
+            "endpoint": status.get("endpoint", ""),
+            "action": self._js8_capability_action(status, running=running),
+        }
+        if bool(status.get("connected")):
+            self._health.record_success(
+                health_key,
+                owner="SoftwareStatusService",
+                duration_ms=elapsed_ms,
+                metadata=metadata,
+            )
+        elif running:
+            self._health.record_failure(
+                health_key,
+                owner="SoftwareStatusService",
+                error=str(status.get("last_error") or "JS8Call TCP API not reachable"),
+                duration_ms=elapsed_ms,
+                metadata=metadata,
+            )
+        type(self)._shared_js8_capability_cache[cache_key] = (time.monotonic(), dict(status))
+        return status
+
+    def _probe_js8_capability(
+        self,
+        endpoint: JS8ApiEndpoint,
+        *,
+        timeout_s: float = 0.4,
+        client: Optional[JS8ApiClient] = None,
+        stop_client: bool = True,
+    ) -> tuple[Dict[str, object], float]:
+        started = time.monotonic()
+        status = self._js8_capability_offline_status(endpoint)
+        probe_client = client or JS8ApiClient(endpoint, timeout_s=float(timeout_s), auto_reconnect=False)
+        try:
+            if probe_client.start():
+                snapshot = probe_client.probe_capabilities(timeout_s=float(timeout_s))
+                status.update(
+                    {
+                        "connected": bool(snapshot.connected),
+                        "mode": str(snapshot.mode or "offline"),
+                        "version": str(snapshot.version or ""),
+                        "supported": dict(snapshot.supported),
+                        "errors": dict(snapshot.errors),
+                        "last_error": probe_client.last_error,
+                    }
+                )
+            else:
+                status["last_error"] = probe_client.last_error or "JS8Call TCP API not reachable"
+        except Exception as exc:
+            status["last_error"] = str(exc or "JS8Call capability probe failed")
+        finally:
+            if client is None or stop_client:
+                try:
+                    probe_client.stop()
+                except Exception:
+                    pass
+        return status, (time.monotonic() - started) * 1000.0
+
+    def _js8_shadow_busy_state(self, ptt_active: Optional[bool], queue_depth: Optional[int]) -> Optional[bool]:
+        if ptt_active is True:
+            return True
+        if isinstance(queue_depth, int) and queue_depth > 0:
+            return True
+        if ptt_active is False and queue_depth == 0:
+            return False
+        if ptt_active is None and queue_depth is None:
+            return None
+        return None
+
+    @staticmethod
+    def _js8_shadow_to_int(value: object) -> Optional[int]:
+        if value in (None, ""):
+            return None
+        try:
+            return int(value)
+        except Exception:
+            try:
+                return int(str(value).strip())
+            except Exception:
+                return None
+
+    @staticmethod
+    def _js8_shadow_to_bool(value: object) -> Optional[bool]:
+        if isinstance(value, bool):
+            return value
+        if value in (None, ""):
+            return None
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "on", "active", "ptt"}:
+            return True
+        if text in {"0", "false", "no", "off", "inactive", "idle"}:
+            return False
+        return None
+
+    @staticmethod
+    def _js8_shadow_error_text(value: object, *, limit: int = 512) -> str:
+        try:
+            return str(value or "")[: max(0, int(limit))]
+        except Exception:
+            return ""
+
+    def _js8_shadow_native_status(
+        self,
+        *,
+        port_override: Optional[int] = None,
+        host_override: Optional[str] = None,
+        force: bool = False,
+        timeout_s: float = 0.4,
+    ) -> Dict[str, object]:
+        host = (host_override or "").strip() or self._settings_text("js8_host", JS8_DEFAULT_HOST) or JS8_DEFAULT_HOST
+        port = int(port_override) if port_override is not None else self._settings_int("js8_port", JS8_DEFAULT_PORT)
+        endpoint = JS8ApiEndpoint(host, port).normalized()
+        cache_key = endpoint.key
+        if self._is_loopback_host(endpoint.host) and not self.program_is_running("JS8Call"):
+            type(self)._shared_js8_shadow_cache.pop(cache_key, None)
+            offline = self._js8_capability_offline_status(endpoint, last_error="JS8Call is not running")
+            offline.update(
+                {
+                    "busy": None,
+                    "frequency_hz": None,
+                    "offset_hz": None,
+                    "ptt_active": None,
+                    "queue_depth": None,
+                    "checked_ts": time.time(),
+                    "elapsed_ms": 0.0,
+                }
+            )
+            return offline
+
+        now = time.monotonic()
+        cached = type(self)._shared_js8_shadow_cache.get(cache_key)
+        if not force and cached:
+            cached_ts, cached_status = cached
+            if (now - float(cached_ts or 0.0)) < self._js8_shadow_cache_ttl_sec:
+                return dict(cached_status)
+
+        started_at = time.monotonic()
+        capability_cache = type(self)._shared_js8_capability_cache.get(cache_key)
+        capability: Dict[str, object] | None = None
+        client: Optional[JS8ApiClient] = None
+        if not force and capability_cache:
+            capability_ts, capability_status = capability_cache
+            connected = bool(capability_status.get("connected"))
+            ttl = self._js8_capability_success_ttl_sec if connected else self._js8_capability_failure_ttl_sec
+            if (now - float(capability_ts or 0.0)) < ttl:
+                capability = dict(capability_status)
+        if capability is None:
+            health_key = self._health_key(("JS8CALL", endpoint.host.lower(), int(endpoint.port), "capability"))
+            allowed, _health = self._health.may_run(health_key, owner="SoftwareStatusService", force=force)
+            if not allowed and capability_cache:
+                capability = dict(capability_cache[1])
+            elif not allowed:
+                capability = self._js8_capability_offline_status(
+                    endpoint,
+                    last_error="JS8Call API capability check is waiting for cooldown",
+                )
+            else:
+                client = JS8ApiClient(endpoint, timeout_s=float(timeout_s), auto_reconnect=False)
+                capability, capability_elapsed_ms = self._probe_js8_capability(
+                    endpoint,
+                    timeout_s=timeout_s,
+                    client=client,
+                    stop_client=False,
+                )
+                metadata = {
+                    "capability_mode": capability.get("mode", "offline"),
+                    "version": capability.get("version", ""),
+                    "endpoint": capability.get("endpoint", ""),
+                    "action": self._js8_capability_action(capability, running=True),
+                }
+                if bool(capability.get("connected")):
+                    self._health.record_success(
+                        health_key,
+                        owner="SoftwareStatusService",
+                        duration_ms=capability_elapsed_ms,
+                        metadata=metadata,
+                    )
+                else:
+                    self._health.record_failure(
+                        health_key,
+                        owner="SoftwareStatusService",
+                        error=str(capability.get("last_error") or "JS8Call TCP API not reachable"),
+                        duration_ms=capability_elapsed_ms,
+                        metadata=metadata,
+                    )
+                type(self)._shared_js8_capability_cache[cache_key] = (time.monotonic(), dict(capability))
+        supported = dict(capability.get("supported") or {})
+        errors: Dict[str, str] = dict(capability.get("errors") or {})
+        native: Dict[str, object] = {
+            "connected": bool(capability.get("connected")),
+            "mode": str(capability.get("mode") or "offline"),
+            "version": str(capability.get("version") or ""),
+            "endpoint": self._format_endpoint(endpoint.host, endpoint.port),
+            "supported": supported,
+            "errors": errors,
+            "last_error": str(capability.get("last_error") or ""),
+            "frequency_hz": None,
+            "offset_hz": None,
+            "ptt_active": None,
+            "queue_depth": None,
+            "busy": None,
+            "checked_ts": time.time(),
+            "elapsed_ms": 0.0,
+        }
+
+        if native["connected"]:
+            try:
+                if client is None:
+                    client = JS8ApiClient(endpoint, timeout_s=float(timeout_s), auto_reconnect=False)
+                    client_started = client.start()
+                else:
+                    client_started = True
+                if client_started:
+                    if client is None:
+                        raise RuntimeError("JS8 diagnostic client unavailable")
+                    if supported.get("RIG.GET_FREQ"):
+                        try:
+                            response = client.request("RIG.GET_FREQ", expect_types=("RIG.FREQ", "STATION.STATUS"), timeout_s=timeout_s)
+                            freq_value = response.params.get("DIAL")
+                            if freq_value in (None, ""):
+                                freq_value = response.params.get("FREQ")
+                            offset_value = response.params.get("OFFSET")
+                            if offset_value in (None, ""):
+                                offset_value = response.params.get("OFFSET_HZ")
+                            native["frequency_hz"] = self._js8_shadow_to_int(freq_value)
+                            native["offset_hz"] = self._js8_shadow_to_int(offset_value)
+                        except Exception as exc:
+                            errors["RIG.GET_FREQ"] = self._js8_shadow_error_text(exc, limit=512)
+                    if supported.get("RIG.GET_PTT"):
+                        try:
+                            response = client.request("RIG.GET_PTT", expect_types=("RIG.PTT_STATUS",), timeout_s=timeout_s)
+                            ptt_value = response.params.get("PTT")
+                            if ptt_value in (None, ""):
+                                ptt_value = response.params.get("PTT_ACTIVE")
+                            if ptt_value in (None, ""):
+                                ptt_value = response.value
+                            native["ptt_active"] = self._js8_shadow_to_bool(ptt_value)
+                        except Exception as exc:
+                            errors["RIG.GET_PTT"] = self._js8_shadow_error_text(exc, limit=512)
+                    if supported.get("TX.GET_QUEUE_DEPTH"):
+                        try:
+                            response = client.request("TX.GET_QUEUE_DEPTH", expect_types=("TX.QUEUE_DEPTH",), timeout_s=timeout_s)
+                            depth_value = response.params.get("DEPTH")
+                            if depth_value in (None, ""):
+                                depth_value = response.params.get("QUEUE_DEPTH")
+                            if depth_value in (None, ""):
+                                depth_value = response.value
+                            native["queue_depth"] = self._js8_shadow_to_int(depth_value)
+                        except Exception as exc:
+                            errors["TX.GET_QUEUE_DEPTH"] = self._js8_shadow_error_text(exc, limit=512)
+            finally:
+                if client is not None:
+                    client.stop()
+
+        native["busy"] = self._js8_shadow_busy_state(native.get("ptt_active"), native.get("queue_depth"))
+        native["elapsed_ms"] = round((time.monotonic() - started_at) * 1000.0, 1)
+        if not (self._is_loopback_host(endpoint.host) and not bool(native.get("connected"))):
+            type(self)._shared_js8_shadow_cache[cache_key] = (now, dict(native))
+        return native
+
+    def js8_shadow_comparison_status(
+        self,
+        *,
+        legacy_readings: Optional[Mapping[str, object]] = None,
+        port_override: Optional[int] = None,
+        host_override: Optional[str] = None,
+        force: bool = False,
+        timeout_s: float = 0.4,
+    ) -> Dict[str, object]:
+        native = self._js8_shadow_native_status(
+            port_override=port_override,
+            host_override=host_override,
+            force=force,
+            timeout_s=timeout_s,
+        )
+
+        def _coerce_int(value: object) -> Optional[int]:
+            return self._js8_shadow_to_int(value)
+
+        def _coerce_bool(value: object) -> Optional[bool]:
+            return self._js8_shadow_to_bool(value)
+
+        legacy: Dict[str, object] = {
+            "busy": None,
+            "frequency_hz": None,
+            "offset_hz": None,
+        }
+        if isinstance(legacy_readings, Mapping):
+            legacy["busy"] = _coerce_bool(legacy_readings.get("busy"))
+            legacy["frequency_hz"] = _coerce_int(legacy_readings.get("frequency_hz"))
+            legacy["offset_hz"] = _coerce_int(legacy_readings.get("offset_hz"))
+
+        comparisons: Dict[str, Dict[str, object]] = {}
+        differences: Dict[str, Dict[str, object]] = {}
+
+        legacy_busy = legacy.get("busy")
+        native_busy = native.get("busy")
+        if legacy_busy is not None or native_busy is not None:
+            match = None
+            if legacy_busy is not None and native_busy is not None:
+                match = bool(bool(legacy_busy) == bool(native_busy))
+            comparisons["busy"] = {"legacy": legacy_busy, "native": native_busy, "match": match}
+            if legacy_busy is not None and native_busy is not None and bool(legacy_busy) != bool(native_busy):
+                differences["busy"] = {"legacy": legacy_busy, "native": native_busy}
+
+        legacy_freq = legacy.get("frequency_hz")
+        native_freq = native.get("frequency_hz")
+        if legacy_freq is not None or native_freq is not None:
+            match = None
+            if legacy_freq is not None and native_freq is not None:
+                match = bool(int(legacy_freq) == int(native_freq))
+            comparisons["frequency_hz"] = {"legacy": legacy_freq, "native": native_freq, "match": match}
+            if legacy_freq is not None and native_freq is not None and int(legacy_freq) != int(native_freq):
+                differences["frequency_hz"] = {"legacy": legacy_freq, "native": native_freq}
+
+        legacy_offset = legacy.get("offset_hz")
+        native_offset = native.get("offset_hz")
+        if legacy_offset is not None or native_offset is not None:
+            match = None
+            if legacy_offset is not None and native_offset is not None:
+                match = bool(int(legacy_offset) == int(native_offset))
+            comparisons["offset_hz"] = {"legacy": legacy_offset, "native": native_offset, "match": match}
+            if legacy_offset is not None and native_offset is not None and int(legacy_offset) != int(native_offset):
+                differences["offset_hz"] = {"legacy": legacy_offset, "native": native_offset}
+
+        result: Dict[str, object] = {
+            "connected": bool(native.get("connected")),
+            "mode": str(native.get("mode", "offline") or "offline"),
+            "version": str(native.get("version", "") or ""),
+            "endpoint": str(native.get("endpoint") or self._format_endpoint(host_override or self._settings_text("js8_host", JS8_DEFAULT_HOST) or JS8_DEFAULT_HOST, int(port_override) if port_override is not None else self._settings_int("js8_port", JS8_DEFAULT_PORT))),
+            "legacy": legacy,
+            "native": native,
+            "comparisons": comparisons,
+            "differences": differences,
+            "errors": dict(native.get("errors") or {}),
+            "last_error": str(native.get("last_error") or ""),
+            "checked_ts": float(native.get("checked_ts") or time.time()),
+            "elapsed_ms": float(native.get("elapsed_ms") or 0.0),
+        }
+
+        if differences:
+            log.info(
+                "JS8_SHADOW|endpoint=%s|mode=%s|version=%s|legacy_busy=%s|native_busy=%s|legacy_freq=%s|native_freq=%s|legacy_offset=%s|native_offset=%s|native_ptt=%s|native_queue_depth=%s|diffs=%s",
+                result["endpoint"],
+                result["mode"],
+                result["version"],
+                legacy.get("busy"),
+                native.get("busy"),
+                legacy.get("frequency_hz"),
+                native.get("frequency_hz"),
+                legacy.get("offset_hz"),
+                native.get("offset_hz"),
+                native.get("ptt_active"),
+                native.get("queue_depth"),
+                ",".join(f"{key}:{value['legacy']}->{value['native']}" for key, value in differences.items()),
+            )
+        else:
+            log.debug(
+                "JS8_SHADOW|endpoint=%s|mode=%s|version=%s|legacy_busy=%s|native_busy=%s|legacy_freq=%s|native_freq=%s|legacy_offset=%s|native_offset=%s|native_ptt=%s|native_queue_depth=%s|elapsed_ms=%.1f",
+                result["endpoint"],
+                result["mode"],
+                result["version"],
+                legacy.get("busy"),
+                native.get("busy"),
+                legacy.get("frequency_hz"),
+                native.get("frequency_hz"),
+                legacy.get("offset_hz"),
+                native.get("offset_hz"),
+                native.get("ptt_active"),
+                native.get("queue_depth"),
+                float(result["elapsed_ms"]),
+            )
+        return result
+
+    def _js8_capability_offline_status(
+        self,
+        endpoint: JS8ApiEndpoint,
+        *,
+        last_error: str = "",
+    ) -> Dict[str, object]:
+        normalized = endpoint.normalized()
+        return {
+            "connected": False,
+            "mode": "offline",
+            "version": "",
+            "endpoint": self._format_endpoint(normalized.host, normalized.port),
+            "supported": {},
+            "errors": {},
+            "last_error": str(last_error or ""),
+        }
+
+    @staticmethod
+    def _js8_capability_action(status: Dict[str, object], *, running: bool) -> str:
+        endpoint = str(status.get("endpoint", "") or "").strip()
+        version = str(status.get("version", "") or "").strip()
+        mode = str(status.get("mode", "offline") or "offline").strip()
+        version_part = f" Version: {version}." if version else ""
+        if mode == "api_full":
+            return f"JS8Call API is ready for native FIO diagnostics at {endpoint}.{version_part}"
+        if mode == "api_basic":
+            return f"JS8Call API is reachable at {endpoint}; FIO will use basic API features and keep fallbacks available.{version_part}"
+        if mode == "file_fallback":
+            return f"JS8Call is reachable at {endpoint}, but native API support is limited; FIO will keep using log/database fallbacks.{version_part}"
+        if running:
+            return f"JS8Call appears to be running, but FIO could not verify the TCP API at {endpoint}."
+        return "JS8Call is not running; no JS8 API check is needed right now."
+
     def flrig_api_reachable(
         self,
         *,
@@ -438,6 +1162,45 @@ class SoftwareStatusService:
                 timeout=0.35,
             )
             return bool(client.is_fldigi_available())
+
+        return self._cached_service_probe(cache_key, force=force, probe=_probe)
+
+    def rigctld_api_reachable(
+        self,
+        *,
+        port_override: Optional[int] = None,
+        host_override: Optional[str] = None,
+        force: bool = False,
+    ) -> bool:
+        host = (host_override or "").strip() or self._settings_text("rig_host", RIGCTLD_DEFAULT_HOST) or RIGCTLD_DEFAULT_HOST
+        port = int(port_override) if port_override is not None else self._settings_int("rig_port", RIGCTLD_DEFAULT_PORT)
+        cache_key = ("RIGCTLD", host.strip().lower(), str(int(port)))
+
+        def _probe() -> bool:
+            from freqinout.radio_interface.rigctl_client import RigctldClient
+
+            client = RigctldClient(host=host, port=port, timeout=0.35)
+            return bool(client.is_available())
+
+        return self._cached_service_probe(cache_key, force=force, probe=_probe)
+
+    def tcp_endpoint_reachable(
+        self,
+        *,
+        service_name: str,
+        host: str,
+        port: int,
+        force: bool = False,
+    ) -> bool:
+        host_value = str(host or "").strip()
+        port_value = int(port or 0)
+        if not host_value or port_value <= 0:
+            return False
+        cache_key = (str(service_name or "TCP").strip().upper() or "TCP", host_value.lower(), str(port_value))
+
+        def _probe() -> bool:
+            with socket.create_connection((host_value, port_value), timeout=0.35):
+                return True
 
         return self._cached_service_probe(cache_key, force=force, probe=_probe)
 
@@ -503,17 +1266,77 @@ class SoftwareStatusService:
             "health": health or {},
         }
 
+    def generic_endpoint_status(
+        self,
+        *,
+        service_name: str,
+        endpoint_label: str,
+        host: str,
+        port: int,
+        force: bool = False,
+    ) -> Dict[str, object]:
+        host_value = str(host or "").strip()
+        port_value = int(port or 0)
+        if not host_value or port_value <= 0:
+            return {
+                "state": "idle",
+                "tooltip": f"{endpoint_label} not configured",
+                "running": False,
+                "reachable": False,
+                "endpoint": "",
+            }
+        reachable = self.tcp_endpoint_reachable(
+            service_name=service_name,
+            host=host_value,
+            port=port_value,
+            force=force,
+        )
+        return self._endpoint_status(
+            endpoint_label=endpoint_label,
+            host=host_value,
+            port=port_value,
+            reachable=reachable,
+            process_running=False,
+            health=self._health_snapshot_for(
+                (str(service_name or "TCP").strip().upper() or "TCP", host_value.lower(), str(port_value))
+            ),
+        )
+
     def status_snapshot(
         self,
         *,
+        force: bool = False,
+        force_process_snapshot: bool = True,
         port_override: Optional[int] = None,
         host_override: Optional[str] = None,
         flrig_port_override: Optional[int] = None,
         flrig_host_override: Optional[str] = None,
+        rigctld_port_override: Optional[int] = None,
+        rigctld_host_override: Optional[str] = None,
         fldigi_port_override: Optional[int] = None,
         fldigi_host_override: Optional[str] = None,
+        instance_identities: Optional[Mapping[str, Mapping[str, object]]] = None,
     ) -> Dict[str, Dict[str, object]]:
-        running_js8 = self.program_is_running("JS8Call")
+        identities = instance_identities if isinstance(instance_identities, Mapping) else {}
+
+        def _running(program_name: str) -> bool:
+            identity = identities.get(program_name, {})
+            if isinstance(identity, Mapping):
+                target = str(identity.get("target") or "").strip()
+                arguments = identity.get("arguments", ())
+                if not isinstance(arguments, (list, tuple)):
+                    arguments = ()
+                if target or arguments:
+                    return self.program_instance_running(
+                        program_name,
+                        target,
+                        arguments,
+                    )
+            return self.program_is_running(program_name)
+
+        if force and force_process_snapshot:
+            self._refresh_process_snapshot(force=True)
+        running_js8 = _running("JS8Call")
         js8_host = (host_override or "").strip() or self._settings_text("js8_host", JS8_DEFAULT_HOST) or JS8_DEFAULT_HOST
         js8_port = int(port_override) if port_override is not None else self._settings_int("js8_port", JS8_DEFAULT_PORT)
         js8_cache_host = str(js8_host or "").strip().lower()
@@ -524,8 +1347,9 @@ class SoftwareStatusService:
             port_override=port_override,
             host_override=host_override,
             allow_fallback=False,
+            force=force,
         )
-        running_flrig = self.program_is_running("FLRig")
+        running_flrig = _running("FLRig")
         flrig_host = (flrig_host_override or "").strip() or self._settings_text("flrig_host", FLRIG_DEFAULT_HOST) or FLRIG_DEFAULT_HOST
         flrig_port = (
             int(flrig_port_override)
@@ -536,8 +1360,32 @@ class SoftwareStatusService:
         flrig_api_ok = self.flrig_api_reachable(
             port_override=flrig_port_override,
             host_override=flrig_host_override,
+            force=force,
         )
-        running_fldigi = self.program_is_running("FLDigi")
+        active_control_via = self._settings_text("control_via", "FLRig").strip().upper()
+        rigctld_active = active_control_via == "RIGCTLD" or rigctld_host_override is not None or rigctld_port_override is not None
+        running_rigctld = _running("RigCtlD") if rigctld_active else False
+        rigctld_host = (
+            (rigctld_host_override or "").strip()
+            or self._settings_text("rig_host", RIGCTLD_DEFAULT_HOST)
+            or RIGCTLD_DEFAULT_HOST
+        )
+        rigctld_port = (
+            int(rigctld_port_override)
+            if rigctld_port_override is not None
+            else self._settings_int("rig_port", RIGCTLD_DEFAULT_PORT)
+        )
+        rigctld_key = ("RIGCTLD", rigctld_host.strip().lower(), str(int(rigctld_port)))
+        rigctld_api_ok = (
+            self.rigctld_api_reachable(
+                port_override=rigctld_port_override,
+                host_override=rigctld_host_override,
+                force=force,
+            )
+            if rigctld_active
+            else False
+        )
+        running_fldigi = _running("FLDigi")
         fldigi_host = self._resolved_fldigi_host(fldigi_host_override)
         fldigi_port = (
             int(fldigi_port_override)
@@ -556,6 +1404,7 @@ class SoftwareStatusService:
             host_override=fldigi_host_override,
             flrig_port_override=flrig_port_override,
             flrig_host_override=flrig_host_override,
+            force=force,
         )
 
         out: Dict[str, Dict[str, object]] = {}
@@ -581,6 +1430,24 @@ class SoftwareStatusService:
                     health=self._health_snapshot_for(flrig_key),
                 )
                 continue
+            if key == "RigCtlD":
+                if not rigctld_active:
+                    out[key] = {
+                        "state": "idle",
+                        "tooltip": "Inactive backend",
+                        "running": False,
+                        "reachable": False,
+                    }
+                else:
+                    out[key] = self._endpoint_status(
+                        endpoint_label="TCP",
+                        host=rigctld_host,
+                        port=rigctld_port,
+                        reachable=rigctld_api_ok,
+                        process_running=running_rigctld,
+                        health=self._health_snapshot_for(rigctld_key),
+                    )
+                continue
             if key == "FLDigi":
                 out[key] = self._endpoint_status(
                     endpoint_label="XML-RPC",
@@ -591,7 +1458,7 @@ class SoftwareStatusService:
                     health=self._health_snapshot_for(fldigi_key),
                 )
                 continue
-            running = self.program_is_running(key)
+            running = _running(key)
             tooltip = "Running" if running else "Not running"
             if key == "VarAC" and running:
                 exe = self.find_process_exe("VarAC")

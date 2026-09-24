@@ -2,13 +2,20 @@
 set -eEuo pipefail
 
 MIN_PYTHON_MAJOR=3
-MIN_PYTHON_MINOR=9
+MIN_PYTHON_MINOR=10
 MAX_PYTHON_MAJOR=3
 MAX_PYTHON_MINOR=13
 
-REPO_URL="${REPO_URL:-https://github.com/N1MAG/FreqInOut.git}"
+DEFAULT_REPO_URL="https://github.com/N1MAG/FreqInOut.git"
+DEFAULT_BRANCH="main"
+REPO_EXPLICIT=0
+if [[ -n "${REPO_URL:-}" ]]; then
+  REPO_EXPLICIT=1
+fi
+REPO_URL="${REPO_URL:-$DEFAULT_REPO_URL}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/FreqInOut}"
 LOG_FILE="${LOG_FILE:-$HOME/freqinout-install.log}"
+CONFIG_ROOT_OVERRIDE="${FREQINOUT_CONFIG_DIR:-}"
 
 ASSUME_YES=0
 DRY_RUN=0
@@ -38,6 +45,7 @@ ROLLBACK_LAUNCHER_BACKUP=""
 ROLLBACK_DESKTOP_BACKUP=""
 ROLLBACK_ICON_BACKUP_DIR=""
 ROLLBACK_VENV_BACKUP=""
+ROLLBACK_ORIGIN_URL=""
 CREATED_INSTALL_DIR=0
 REPLACED_NON_GIT_BACKUP=""
 ROLLBACK_IN_PROGRESS=0
@@ -66,9 +74,10 @@ Usage:
 
 Options:
   -d, --dir <path>      Install location (default: ~/FreqInOut)
-  -r, --repo <url>      Git repository URL
-  -c, --channel <name>  Update channel: stable or beta (default: stable)
+  -r, --repo <url>      Git repository URL (default: public FreqInOut repo)
+  -c, --channel <name>  Update channel: stable or beta (default: stable/main)
   -b, --branch <name>   Git branch override (takes priority over --channel)
+      --config-root <p> Dedicated FIO profile root (sets FREQINOUT_CONFIG_DIR)
       --repair          Rebuild venv + launcher + icon without recloning
       --dry-run         Show what would be done without changing anything
       --offline         Skip network checks/downloads and use local files only
@@ -114,11 +123,11 @@ run_step() {
   log "STEP START: $step_name"
   if "$@"; then
     end_ts="$(date +%s)"
-    log "STEP SUCCESS: $step_name (${end_ts-start_ts}s)"
+    log "STEP SUCCESS: $step_name ($((end_ts - start_ts))s)"
     return 0
   fi
   end_ts="$(date +%s)"
-  warn "STEP FAILED: $step_name (${end_ts-start_ts}s)"
+  warn "STEP FAILED: $step_name ($((end_ts - start_ts))s)"
   return 1
 }
 
@@ -199,6 +208,11 @@ restore_rollback_state() {
     warn "Rollback: restored prior icon theme files."
   fi
 
+  if [[ -n "$ROLLBACK_ORIGIN_URL" ]] && is_git_checkout; then
+    git -C "$INSTALL_DIR" remote set-url origin "$ROLLBACK_ORIGIN_URL"
+    warn "Rollback: restored previous git origin."
+  fi
+
   if [[ $CREATED_INSTALL_DIR -eq 1 && -d "$INSTALL_DIR" ]]; then
     rm -rf "$INSTALL_DIR"
     warn "Rollback: removed partially created install directory."
@@ -225,7 +239,11 @@ on_error() {
   fi
   warn "Recovery tips:"
   warn "1) Open the log at: $LOG_FILE"
-  warn "2) Retry with: bash install_FreqInOut_linux.sh --repair --dir \"$INSTALL_DIR\""
+  if [[ -n "$CONFIG_ROOT_OVERRIDE" ]]; then
+    warn "2) Retry with: bash install_FreqInOut_linux.sh --repair --dir \"$INSTALL_DIR\" --config-root \"$CONFIG_ROOT_OVERRIDE\""
+  else
+    warn "2) Retry with: bash install_FreqInOut_linux.sh --repair --dir \"$INSTALL_DIR\""
+  fi
   warn "3) If package install failed, run again with sudo access."
 }
 trap 'on_error $LINENO "$BASH_COMMAND"' ERR
@@ -281,6 +299,7 @@ parse_args() {
       -r|--repo)
         [[ $# -ge 2 ]] || die "Missing value for $1"
         REPO_URL="$2"
+        REPO_EXPLICIT=1
         shift 2
         ;;
       -c|--channel)
@@ -291,6 +310,11 @@ parse_args() {
       -b|--branch)
         [[ $# -ge 2 ]] || die "Missing value for $1"
         BRANCH="$2"
+        shift 2
+        ;;
+      --config-root)
+        [[ $# -ge 2 ]] || die "Missing value for $1"
+        CONFIG_ROOT_OVERRIDE="$2"
         shift 2
         ;;
       --repair)
@@ -667,7 +691,7 @@ manual_install_hint() {
     yum) echo "sudo yum install git python3 python3-pip python3-virtualenv" ;;
     pacman) echo "sudo pacman -Sy git python python-pip" ;;
     zypper) echo "sudo zypper install git python3 python3-pip python3-virtualenv" ;;
-    *) echo "Install git + Python 3.9 through 3.13 (3.14 is not yet supported) + pip + venv with your distro package manager." ;;
+    *) echo "Install git + Python 3.10-3.13 + pip + venv with your distro package manager." ;;
   esac
 }
 
@@ -766,6 +790,10 @@ ensure_python_and_tools() {
   if [[ $need_packages -eq 1 ]]; then
     warn "Missing required tools (git/python3/venv)."
     warn "Manual install command: $(manual_install_hint)"
+    if [[ $DRY_RUN -eq 1 ]]; then
+      warn "Dry-run mode: continuing preview without installing system packages."
+      return 0
+    fi
     if prompt_yes_no "Install missing packages automatically now?"; then
       install_required_system_packages
     else
@@ -783,7 +811,7 @@ resolve_channel_branch() {
   case "${CHANNEL,,}" in
     stable)
       if [[ -z "$BRANCH" ]]; then
-        BRANCH=""
+        BRANCH="$DEFAULT_BRANCH"
       fi
       ;;
     beta)
@@ -850,13 +878,21 @@ EOF
 backup_user_data() {
   local candidates=(
     "$INSTALL_DIR/config"
+    "$INSTALL_DIR/runtime"
+    "$HOME/.freqinout"
+    "$HOME/.freqinout/config"
+    "$HOME/.freqinout/runtime/single-rig/config"
+    "$HOME/.freqinout/runtime/multi-rig/config"
     "$HOME/.config/FreqInOut"
     "$HOME/.local/share/FreqInOut"
   )
+  if [[ -n "$CONFIG_ROOT_OVERRIDE" ]]; then
+    candidates=("$CONFIG_ROOT_OVERRIDE" "${candidates[@]}")
+  fi
   local existing=()
   local item
   for item in "${candidates[@]}"; do
-    if [[ -e "$item" ]]; then
+    if [[ -e "$item" ]] && ! path_covered_by_existing_backup "$item" "${existing[@]}"; then
       existing+=("$item")
     fi
   done
@@ -875,12 +911,29 @@ backup_user_data() {
   log "Backed up user data to $BACKUP_ARCHIVE"
 }
 
+path_covered_by_existing_backup() {
+  local candidate="$1"
+  shift || true
+  local parent
+  for parent in "$@"; do
+    if [[ "$candidate" == "$parent" || "$candidate" == "$parent/"* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 git_current_branch() {
   git -C "$INSTALL_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true
 }
 
+is_git_checkout() {
+  [[ -e "$INSTALL_DIR" ]] || return 1
+  git -C "$INSTALL_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1
+}
+
 git_worktree_is_dirty() {
-  [[ -d "$INSTALL_DIR/.git" ]] || return 1
+  is_git_checkout || return 1
   [[ -n "$(git -C "$INSTALL_DIR" status --porcelain 2>/dev/null)" ]]
 }
 
@@ -927,19 +980,101 @@ handle_dirty_worktree() {
 }
 
 is_freqinout_running() {
-  if command_exists pgrep; then
-    if pgrep -f "freqinout.main|freqinout" >/dev/null 2>&1; then
-      return 0
-    fi
-    return 1
-  fi
+  command_exists python3 || return 1
+  FIO_INSTALL_DIR="$INSTALL_DIR" python3 - <<'PY'
+import os
+from pathlib import Path
 
-  if command_exists ps; then
-    if ps aux 2>/dev/null | grep -E "freqinout\.main|freqinout" | grep -v grep >/dev/null 2>&1; then
-      return 0
-    fi
-  fi
-  return 1
+SELF = os.getpid()
+PARENT = os.getppid()
+INSTALLER_NAMES = {"install_FreqInOut_linux.sh", "uninstall_FreqInOut_linux.sh"}
+APP_NAMES = {"freqinout", "freqinout.exe", "freqinout.appimage"}
+INSTALL_DIR = Path(os.environ.get("FIO_INSTALL_DIR", "") or "").expanduser()
+
+
+def _linux_cmdlines():
+    proc = Path("/proc")
+    if not proc.exists():
+        return
+    for item in proc.iterdir():
+        if not item.name.isdigit():
+            continue
+        pid = int(item.name)
+        if pid in {SELF, PARENT}:
+            continue
+        try:
+            raw = (item / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if not raw:
+            continue
+        args = [part.decode("utf-8", "ignore") for part in raw.split(b"\0") if part]
+        if args:
+            yield pid, args
+
+
+def _is_installer(args):
+    text = "\0".join(args)
+    if any(Path(arg).name in INSTALLER_NAMES for arg in args):
+        return True
+    lowered = text.lower()
+    return any(token in lowered for token in ("pytest", "release_preflight.py", "compileall", "codex"))
+
+
+def _path_is_inside_install(path_text):
+    if not path_text or not str(INSTALL_DIR):
+        return False
+    try:
+        path = Path(path_text).expanduser().resolve()
+        root = INSTALL_DIR.resolve()
+        return path == root or root in path.parents
+    except Exception:
+        return False
+
+
+def _proc_cwd(pid):
+    try:
+        return str(Path(f"/proc/{pid}/cwd").resolve())
+    except Exception:
+        return ""
+
+
+def _is_freqinout_app(pid, args):
+    if _is_installer(args):
+        return False
+    text = "\0".join(args).lower()
+    if "install_freqinout_linux.sh" in text or "uninstall_freqinout_linux.sh" in text:
+        return False
+    for idx, arg in enumerate(args):
+        if arg == "-m" and idx + 1 < len(args) and args[idx + 1] == "freqinout.main":
+            return True
+    first = Path(args[0]).name.lower() if args else ""
+    if first in APP_NAMES:
+        exe_path = args[0] if args else ""
+        if _path_is_inside_install(exe_path) or _path_is_inside_install(_proc_cwd(pid)):
+            return True
+        # Packaged/AppImage launches may not live under INSTALL_DIR.
+        if first in {"freqinout.exe", "freqinout.appimage"}:
+            return True
+        return False
+    for arg in args:
+        name = Path(arg).name.lower()
+        if name in APP_NAMES and _path_is_inside_install(arg):
+            return True
+    return False
+
+
+matches = []
+for pid, cmdline in _linux_cmdlines() or ():
+    if _is_freqinout_app(pid, cmdline):
+        matches.append((pid, cmdline))
+
+if matches:
+    for pid, cmdline in matches[:5]:
+        print(f"{pid}: {' '.join(cmdline)}")
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
 }
 
 ensure_app_not_running_for_update() {
@@ -949,6 +1084,8 @@ ensure_app_not_running_for_update() {
   fi
 
   warn "FreqInOut appears to be running."
+  warn "Matched process(es):"
+  is_freqinout_running >&2 || true
   if [[ "$policy" == "prompt" && $ASSUME_YES -eq 1 ]]; then
     policy="skip"
   fi
@@ -996,7 +1133,7 @@ clone_repository_into_install_dir() {
 }
 
 configure_runtime_sparse_checkout() {
-  [[ -d "$INSTALL_DIR/.git" ]] || return 0
+  is_git_checkout || return 0
   if [[ $DRY_RUN -eq 1 ]]; then
     log "DRY RUN: would configure runtime sparse checkout for $INSTALL_DIR"
     return 0
@@ -1015,9 +1152,13 @@ configure_runtime_sparse_checkout() {
     freqinout \
     third_party \
     requirements.txt \
+    pyproject.toml \
     README.md \
     CHANGELOG.md \
     LICENSE.md \
+    CREDITS.md \
+    SECURITY.md \
+    start-multi-rig.sh \
     install_FreqInOut_linux.sh \
     uninstall_FreqInOut_linux.sh
 }
@@ -1034,6 +1175,7 @@ handle_non_git_install_dir() {
 
   case "$policy" in
     replace)
+      backup_user_data
       stamp="$(date +%Y%m%d-%H%M%S)"
       backup_path="$HOME/.local/state/freqinout/backups/non-git-install-$stamp"
       run_cmd mkdir -p "$(dirname "$backup_path")"
@@ -1054,6 +1196,7 @@ handle_non_git_install_dir() {
   esac
 
   if prompt_yes_no "Replace this folder with a fresh git clone (recommended for updates)?"; then
+    backup_user_data
     stamp="$(date +%Y%m%d-%H%M%S)"
     backup_path="$HOME/.local/state/freqinout/backups/non-git-install-$stamp"
     run_cmd mkdir -p "$(dirname "$backup_path")"
@@ -1074,7 +1217,7 @@ handle_non_git_install_dir() {
 
 clone_fresh() {
   mkdir -p "$(dirname "$INSTALL_DIR")"
-  if [[ -e "$INSTALL_DIR" && ! -d "$INSTALL_DIR/.git" ]]; then
+  if [[ -e "$INSTALL_DIR" ]] && ! is_git_checkout; then
     handle_non_git_install_dir
     if [[ $SKIP_UPDATE_WORK -eq 1 ]]; then
       return 0
@@ -1082,7 +1225,7 @@ clone_fresh() {
     return 0
   fi
 
-  if [[ -d "$INSTALL_DIR/.git" ]]; then
+  if is_git_checkout; then
     log "Existing git checkout found; updating it."
     update_existing_install
     return
@@ -1098,7 +1241,7 @@ update_existing_install() {
     log "Skipping update because app is running."
     return 0
   fi
-  if [[ ! -d "$INSTALL_DIR/.git" ]]; then
+  if ! is_git_checkout; then
     handle_non_git_install_dir
     if [[ $SKIP_UPDATE_WORK -eq 1 ]]; then
       log "Skipping update due to non-git install path."
@@ -1114,6 +1257,16 @@ update_existing_install() {
 
   backup_user_data
   log "Updating install at $INSTALL_DIR"
+  if [[ $REPO_EXPLICIT -eq 1 ]]; then
+    local current_origin=""
+    current_origin="$(git -C "$INSTALL_DIR" remote get-url origin 2>/dev/null || true)"
+    [[ -n "$current_origin" ]] || die "Existing checkout has no origin remote."
+    if [[ "$current_origin" != "$REPO_URL" ]]; then
+      ROLLBACK_ORIGIN_URL="$current_origin"
+      log "Changing git origin from $current_origin to $REPO_URL"
+      run_cmd git -C "$INSTALL_DIR" remote set-url origin "$REPO_URL"
+    fi
+  fi
   if [[ -n "$BRANCH" ]]; then
     local current_branch=""
     local target_branch="$BRANCH"
@@ -1128,8 +1281,12 @@ update_existing_install() {
       fi
     fi
 
-    run_cmd git -C "$INSTALL_DIR" fetch origin "$target_branch"
-    run_cmd git -C "$INSTALL_DIR" checkout "$target_branch"
+    run_cmd git -C "$INSTALL_DIR" fetch origin "$target_branch:refs/remotes/origin/$target_branch"
+    if git -C "$INSTALL_DIR" show-ref --verify --quiet "refs/heads/$target_branch"; then
+      run_cmd git -C "$INSTALL_DIR" checkout "$target_branch"
+    else
+      run_cmd git -C "$INSTALL_DIR" checkout -b "$target_branch" --track "origin/$target_branch"
+    fi
     run_cmd git -C "$INSTALL_DIR" pull --ff-only origin "$target_branch"
   else
     run_cmd git -C "$INSTALL_DIR" pull --ff-only
@@ -1138,6 +1295,10 @@ update_existing_install() {
 }
 
 create_venv_and_install_python_deps() {
+  if [[ $DRY_RUN -eq 1 && ! -f "$INSTALL_DIR/requirements.txt" ]]; then
+    log "DRY RUN: would install Python dependencies from $INSTALL_DIR/requirements.txt after source checkout."
+    return 0
+  fi
   [[ -f "$INSTALL_DIR/requirements.txt" ]] || die "requirements.txt not found in $INSTALL_DIR"
 
   if [[ -d "$VENV_DIR" && -z "$ROLLBACK_VENV_BACKUP" ]]; then
@@ -1163,7 +1324,7 @@ create_venv_and_install_python_deps() {
   log "Installing Python dependencies..."
   run_cmd "$VENV_DIR/bin/python" -m ensurepip --upgrade
   run_cmd "$VENV_DIR/bin/python" -m pip install --upgrade pip
-  run_cmd "$VENV_DIR/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
+  run_cmd "$VENV_DIR/bin/python" -m pip install -r "$INSTALL_DIR/requirements.txt"
 }
 
 cleanup_deprecated_files() {
@@ -1208,6 +1369,10 @@ cleanup_deprecated_files() {
 }
 
 create_launcher() {
+  if [[ $DRY_RUN -eq 1 && ! -d "$INSTALL_DIR" ]]; then
+    log "DRY RUN: would write launcher to $LAUNCHER_PATH after source checkout."
+    return 0
+  fi
   [[ -d "$INSTALL_DIR" ]] || die "Install folder not found: $INSTALL_DIR"
   log "Preparing launcher at $LAUNCHER_PATH"
   if [[ -z "$ROLLBACK_LAUNCHER_BACKUP" ]]; then
@@ -1220,11 +1385,15 @@ create_launcher() {
     log "DRY RUN: would write launcher to $LAUNCHER_PATH"
     return 0
   fi
-  cat >"$LAUNCHER_PATH" <<EOF
-#!/usr/bin/env bash
-cd "$INSTALL_DIR"
-exec "$VENV_DIR/bin/python" -m freqinout.main "\$@"
-EOF
+  {
+    echo '#!/usr/bin/env bash'
+    echo 'set -euo pipefail'
+    if [[ -n "$CONFIG_ROOT_OVERRIDE" ]]; then
+      printf 'export FREQINOUT_CONFIG_DIR=%q\n' "$CONFIG_ROOT_OVERRIDE"
+    fi
+    printf 'cd %q\n' "$INSTALL_DIR"
+    printf 'exec %q -m freqinout.main "$@"\n' "$VENV_DIR/bin/python"
+  } >"$LAUNCHER_PATH"
   chmod +x "$LAUNCHER_PATH"
   log "Launcher written: $LAUNCHER_PATH"
 }
@@ -1318,7 +1487,7 @@ refresh_icon_asset() {
     log "Offline mode enabled; skipping icon refresh."
     return 0
   fi
-  if [[ -d "$INSTALL_DIR/.git" ]]; then
+  if is_git_checkout; then
     branch="$(git_current_branch)"
     if [[ -z "$branch" ]]; then
       warn "Could not determine current git branch; skipping icon refresh."
@@ -1369,6 +1538,10 @@ install_pixmaps_icon() {
 }
 
 create_desktop_icon() {
+  if [[ $DRY_RUN -eq 1 && ! -d "$INSTALL_DIR" ]]; then
+    log "DRY RUN: would write desktop entry to $DESKTOP_ENTRY_PATH after source checkout."
+    return 0
+  fi
   [[ -d "$INSTALL_DIR" ]] || die "Install folder not found: $INSTALL_DIR"
 
   local icon_value="applications-utilities"
@@ -1412,6 +1585,7 @@ Name=FreqInOut
 Comment=HF Radio Frequency and Net Control Utility
 Exec=$LAUNCHER_PATH
 Icon=$icon_value
+StartupWMClass=FreqInOut
 Terminal=false
 Categories=Utility;HamRadio;
 StartupNotify=true
@@ -1457,8 +1631,18 @@ run_self_test() {
   log "Running post-install self-test..."
   if "$VENV_DIR/bin/python" - <<'PY'
 import importlib
+import os
+import tempfile
+from pathlib import Path
+
+temp_root = Path(tempfile.mkdtemp(prefix="freqinout-installer-selftest-"))
+os.environ["FREQINOUT_CONFIG_DIR"] = str(temp_root)
 importlib.import_module("freqinout.main")
-print("Self-test passed: freqinout.main import OK")
+from freqinout.core.settings_manager import SettingsManager
+
+SettingsManager()
+assert (temp_root / "config" / "freqinout.db").exists()
+print("Self-test passed: freqinout.main import and settings DB check OK")
 PY
   then
     log "Self-test passed."
@@ -1494,13 +1678,18 @@ Installed to:
   - Desktop:    $DESKTOP_ENTRY_PATH
   - Log file:   $LOG_FILE
 EOF
+  if [[ -n "$CONFIG_ROOT_OVERRIDE" ]]; then
+    echo "  - Profile root: $CONFIG_ROOT_OVERRIDE (isolated via FREQINOUT_CONFIG_DIR)"
+  else
+    echo "  - Profile root: default (~/.freqinout)"
+  fi
   if [[ -n "$BACKUP_ARCHIVE" ]]; then
     echo "  - Backup:     $BACKUP_ARCHIVE"
   fi
   cat <<'EOF'
 
 Helpful commands:
-  - Repair install: bash install_FreqInOut_linux.sh --repair --dir "$HOME/FreqInOut"
+  - Repair install: rerun this installer with --repair and the same --dir/--config-root values
   - Dry run:        bash install_FreqInOut_linux.sh --dry-run
   - Uninstall:      bash uninstall_FreqInOut_linux.sh --dir "$HOME/FreqInOut"
 EOF
@@ -1511,6 +1700,10 @@ main() {
   prompt_startup_options
   acquire_lock
   LOG_FILE="$(expand_path "$LOG_FILE")"
+  if [[ -n "$CONFIG_ROOT_OVERRIDE" ]]; then
+    CONFIG_ROOT_OVERRIDE="$(expand_path "$CONFIG_ROOT_OVERRIDE")"
+    export FREQINOUT_CONFIG_DIR="$CONFIG_ROOT_OVERRIDE"
+  fi
   setup_logging
   prompt_existing_install_mode
 
@@ -1527,6 +1720,11 @@ main() {
   log "Starting installer."
   log "Install folder: $INSTALL_DIR"
   log "Repository: $REPO_URL"
+  if [[ -n "$CONFIG_ROOT_OVERRIDE" ]]; then
+    log "Profile root: $CONFIG_ROOT_OVERRIDE (isolated)"
+  else
+    log "Profile root: default (~/.freqinout)"
+  fi
   log "Desktop icon zoom percent: $ICON_ZOOM_PERCENT"
   log "Policies: on-dirty=$ON_DIRTY_POLICY, on-running=$ON_RUNNING_POLICY, on-non-git=$ON_NON_GIT_POLICY"
   if [[ $OFFLINE_MODE -eq 1 ]]; then
@@ -1558,6 +1756,7 @@ main() {
       run_step "Update existing install from git" update_existing_install
       if [[ $SKIP_UPDATE_WORK -eq 0 ]]; then
         run_step "Create virtual environment and install dependencies" create_venv_and_install_python_deps
+        log "Configuration migration will be reviewed in FIO on first launch."
         run_step "Run post-install self-test" run_self_test
       else
         log "Skipping dependency refresh and self-test because app update was skipped."
@@ -1580,6 +1779,7 @@ main() {
     run_step "Create virtual environment and install dependencies" create_venv_and_install_python_deps
     run_step "Create launcher script" create_launcher
     run_step "Create desktop icon and menu entry" create_desktop_icon
+    log "Configuration migration will be reviewed in FIO on first launch."
     run_step "Run post-install self-test" run_self_test
   else
     log "Skipping install/update actions after clone step due to user choice."

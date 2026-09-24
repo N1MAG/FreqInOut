@@ -1,0 +1,112 @@
+Group Situation Report|F!300
+# Form updated 1/29/2026. This is a default JS8Spotter MCForms form. See kf7mix.com for details.
+
+! Group Situation Report
+!! Complete information to report unit member and property status and needs to group leaders
+
+!!! Reporting Party & Leadership Info
+? Who is reporting?
+@1 Operator is self-reporting from QTH
+@2 Operator is reporting on behalf of own QTH unit leader, from QTH
+@3 Operator is reporting on behalf of own QTH unit leader, from QTH region
+@4 Operator is reporting on behalf of own QTH unit leader, from outside QTH region
+@5 Operator is reporting on behalf of regional leader, from QTH
+@6 Operator is reporting on behalf of regional leader, from QTH region
+@7 Operator is reporting on behalf of regional leader, from outside QTH region
+@A Specified below
+
+[WH] Specific Person Reporting (optional, use only if not listed above, OTHERWISE PLEASE LEAVE BLANK!)
+.
+
+? How may the managing leader be reached?
+@1 Store a JS8Call MSG on originating operator's station
+@2 Contact via Winlink using originating operator's callsign
+@3 Contact via phone, SMS, email, or other pre-arranged and pre-communicated method
+@D Specified below
+
+[CM] Specific Contact Method (optional, use only if not listed above, OTHERWISE PLEASE LEAVE BLANK!)
+.
+
+? Is the originating operator on Winlink?
+@1 Yes, you may Winlink email the originating operator as needed
+@2 No, the originating operator is not equipped with a functional Winlink setup
+.
+
+!!! Situation Info
+? Type of situation:
+@1 Tornado EF0-2
+@2 Tornado EF3-5
+@3 Earthquake 0-3
+@4 Earthquake 4-6
+@5 Earthquake >6
+@6 Hurricane 1-3
+@7 Hurricane >3
+@8 Wildfire
+@9 Landslide
+@0 Winter Weather
+@A Tsunami
+@B Volcano
+@C Flood
+@D Specified below
+
+[ET] Event Type (optional, use only if not listed above, OTHERWISE PLEASE LEAVE BLANK!)
+.
+
+? Magnitutde/Severity of situation (1/minor through 6/catastrophic):
+@1 1 (limited impact/damage, no injury, no deaths)
+@2 2 (some impact/damage, some injury, no deaths)
+@3 3 (significant impact/damage, significant injuries, 0-3 deaths)
+@4 4 (major impact/damage, major injuries, 0-5 death)
+@5 5 (heavy impact/damage, heavy injuries, probable or confirmed deaths)
+@6 6 (catastrophic impact/damage, many heavy injuries, confirmed deaths)
+
+? Affected Area where is this occuring? Choose the most precise answer that is accurate:
+@1 In operator's QTH direct local area
+@2 In operator's QTH region
+@3 In operator's QTH state
+@4 In operator's QTH area
+@5 Outside operators QTH area
+@6 Specified below
+
+[AA] Specific Affected Area (optional, use only if not listed above, OTHERWISE PLEASE LEAVE BLANK!)
+.
+
+!!! Group Member & Property Status Info
+[IM] Number of unit members or representatives injured, missing, or dead:
+
+? Report on damage to unit member homes in Affected Area:
+@1 No known damage to member homes to report
+@2 1-5 member homes damaged, but safe
+@3 6-10 member homes damaged, but safe
+@4 >10 member homes damaged, but safe
+@5 1-5 member homes damaged, UNSAFE to use
+@6 6-10 member homes damaged, UNSAFE to use
+@7 >10 member homes damaged, UNSAFE to use
+
+? Report on damage to unit property in Affected Area:
+@1 No known damage to unit property to report
+@2 1-5 unit properties damaged, but safe
+@3 6-10 unit properties damaged, but safe
+@4 >10 unit properties damaged, but safe
+@5 1-5 unit properties damaged, UNSAFE to use
+@6 6-10 unit properties damaged, UNSAFE to use
+@7 >10 unit properties damaged, UNSAFE to use
+
+? Report on damage to surrounding infrastructure in Affected Area:
+@1 No known damage to surrounding infrastructure to report
+@2 At least 1 impacted: Electricity, Water, Gas, Roads, Phones, Emergency Services
+@3 At least 2 impacted: Electricity, Water, Gas, Roads, Phones, Emergency Services
+@4 All services impacted: Electricity, Water, Gas, Roads, Phones, Emergency Services
+
+!!! Action & Response Info
+? Actions being taken to help those in distress:
+@1 Local leaders are in communication, ERC is established, comms are in place
+@2 Local leaders are in communication, ERC is being organized, no comms
+@3 Local leaders are not yet organized, but response has started
+@4 Response has not started
+@5 Response is not necessary, local leaders are managing the situation
+
+? Needed assistance that is unavailable locally:
+@1 No external assistance is needed at this time
+@2 Specific needs, retrieve with "E? F!300G"
+

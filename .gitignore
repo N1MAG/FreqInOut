@@ -56,24 +56,24 @@ htmlcov/
 .hypothesis/
 .tox/
 .nox/
+uv.lock
 
 # Local planning/docs artifacts (Codex workflow)
-AGENTS.md
 SPEC*.md
+!SPEC.md
 
 # Local runtime/user artifacts
 VarAC.ini
 js8spotter.db
-FIO_BBS_Vault/
 tmp_gpg_guidance.txt
 freqinout-review.zip
 
-# Local development/test workspace artifacts
-tests/
-tools/
+# Internal-testing branches may track tests. Public origin/main release
+# hygiene should exclude tests during the public sync/commit step instead.
 
 # Local benchmark/smoke artifacts
 .benchmarks/
 
 # Local README screenshot staging (use GitHub release assets instead)
 docs/internal/ScreenShots/
+docs/rendered-single-rig-upgrade/

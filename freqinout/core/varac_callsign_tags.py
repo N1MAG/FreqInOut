@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import sqlite3
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Iterable, Mapping, Optional
 
 from freqinout.core.logger import log
@@ -56,6 +56,11 @@ def resolve_varac_callsign_tags_path(settings) -> Optional[Path]:
     raw_install = str(settings.get("varac_path", "") or "").strip()
     if not raw_install:
         return None
+    if "\\" in raw_install or (len(raw_install) >= 2 and raw_install[1] == ":"):
+        win_path = PureWindowsPath(raw_install)
+        is_executable_like = win_path.suffix.lower() in {".exe", ".bat", ".cmd", ".ps1"}
+        folder = win_path.parent if is_executable_like else win_path
+        return Path(str(folder)) / "VarAC_callsign_tags.conf"
     install_path = Path(raw_install).expanduser()
     is_executable_like = install_path.suffix.lower() in {".exe", ".bat", ".cmd", ".ps1"}
     if install_path.exists():

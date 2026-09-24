@@ -12,6 +12,7 @@ from freqinout.core.config_paths import get_config_dir
 from freqinout.core.local_ops_store import get_all_operators
 from freqinout.core.logger import log
 from freqinout.core.propagation_outcome_ingest import STATE_TO_FEMA_REGION
+from freqinout.core.schedule_targeting import normalize_schedule_target_fields
 from freqinout.core.settings_manager import SettingsManager
 
 
@@ -333,19 +334,24 @@ class SOPManager:
 
     @classmethod
     def _net_row_signature(cls, row: Dict[str, Any]) -> str:
-        day = cls._normalize_day_utc(row.get("day_utc"))
-        recurrence = cls._normalize_recurrence(row.get("recurrence"))
-        biweekly = int(row.get("biweekly_offset_weeks") or 0)
-        weeks = cls._normalize_month_weeks(row.get("month_weeks"))
-        band = str(row.get("band") or "").strip().upper()
-        freq = cls._normalize_frequency(row.get("frequency"))
-        start = cls._normalize_hhmm(row.get("start_utc") or "00:00")
-        end = cls._normalize_hhmm(row.get("end_utc") or "23:59")
-        group_name = str(row.get("group_name") or "").strip().upper()
-        net_name = str(row.get("name") or row.get("net_name") or "").strip().upper()
+        data = normalize_schedule_target_fields(row)
+        day = cls._normalize_day_utc(data.get("day_utc"))
+        recurrence = cls._normalize_recurrence(data.get("recurrence"))
+        biweekly = int(data.get("biweekly_offset_weeks") or 0)
+        weeks = cls._normalize_month_weeks(data.get("month_weeks"))
+        band = str(data.get("band") or "").strip().upper()
+        freq = cls._normalize_frequency(data.get("frequency"))
+        start = cls._normalize_hhmm(data.get("start_utc") or "00:00")
+        end = cls._normalize_hhmm(data.get("end_utc") or "23:59")
+        group_name = str(data.get("group_name") or "").strip().upper()
+        net_name = str(data.get("name") or data.get("net_name") or "").strip().upper()
+        target_scope = str(data.get("target_scope") or "station").strip().lower() or "station"
+        target_device_profile_id = int(data.get("target_device_profile_id") or 0)
+        target_operating_profile_id = int(data.get("target_operating_profile_id") or 0)
         return (
             f"NET|{group_name}|{band}|{freq}|{day}|{recurrence}|{biweekly}|"
-            f"{weeks}|{start}|{end}|{net_name}"
+            f"{weeks}|{start}|{end}|{net_name}|{target_scope}|"
+            f"{target_device_profile_id}|{target_operating_profile_id}"
         )
 
     @classmethod
@@ -2665,7 +2671,7 @@ class SOPManager:
     @staticmethod
     def _parse_net_row_signature(signature: str) -> Dict[str, str]:
         parts = str(signature or "").split("|")
-        if len(parts) < 11:
+        if len(parts) < 14:
             return {}
         return {
             "group_name": str(parts[1] or "").strip().upper(),
@@ -2676,6 +2682,9 @@ class SOPManager:
             "start_utc": str(parts[8] or "").strip(),
             "end_utc": str(parts[9] or "").strip(),
             "name": str(parts[10] or "").strip(),
+            "target_scope": str(parts[11] or "").strip().lower(),
+            "target_device_profile_id": str(parts[12] or "").strip(),
+            "target_operating_profile_id": str(parts[13] or "").strip(),
         }
 
     @staticmethod

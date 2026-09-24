@@ -1,0 +1,56 @@
+Individual Situation Report|F!304
+
+# Form updated 01/20/2026. This is a default JS8Spotter MCForms form. See kf7mix.com for details.
+
+? Phone landline functioning?
+@1 Yes, fully functional
+@2 Partially functional
+@3 No
+@4 Unknown
+
+? Cell phone functioning?
+@1 Yes, calls and texts fully functional
+@2 Partially functional, calls only
+@3 Partially functional, texts only
+@4 No
+@5 Unknown
+
+? Local AM/FM/TV stations broadcasting?
+@1 Yes, fully functional
+@2 Partially functional
+@3 No
+@4 Unknown
+
+? Internet functioning?
+@1 Yes, fully functional
+@2 Partially functional
+@3 No
+@4 Unknown
+
+? Public water works functioning?
+@1 Yes, fully functional
+@2 Partially functional
+@3 No
+@4 Unknown
+
+? Commercial or backup power functioning?
+@1 Yes, fully functional
+@2 Partially functional, commercial only
+@3 Partially functional, commercial and backup available
+@4 Partially functional, backup only
+@5 No
+@6 Unknown
+
+? Natural gas or propane functioning?
+@1 Yes, fully functional
+@2 Partially functional, municipal natural gas
+@3 Partially functional, individual propane
+@4 No
+@5 Unknown
+
+? NOAA Weather Radio broadcasting?
+@1 Yes, fully functional
+@2 Partially functional
+@3 No
+@4 Unknown
+

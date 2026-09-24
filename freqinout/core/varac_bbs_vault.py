@@ -19,6 +19,22 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from freqinout.core.dependency_health import get_dependency_health_registry
 from freqinout.core.logger import log
 from freqinout.core.nbems_compose import safe_varac_bbs_filename
+from freqinout.core.sqlite_utils import (
+    connect_sqlite,
+    connect_sqlite_readonly,
+    connect_sqlite_runtime_write,
+    table_exists,
+)
+from freqinout.core.varac_bbs_library_store import (
+    bbs_location_catalog_source_dir,
+    bbs_library_db_path_from_settings,  # compatibility export; runtime paths are explicit below
+    ensure_bbs_library_schema,
+    list_bbs_locations,
+    list_bbs_location_manifest_rows,
+    location_has_bbs_catalog,
+    log_bbs_library_sync_failure,
+    sync_bbs_locations_from_folders,
+)
 from freqinout.core.varac_log_parser import parse_varac_event_timestamp_to_epoch
 from freqinout.core.varac_bbs_config import normalize_callsign, parse_callsign_list
 from freqinout.core.varac_guard import resolve_varac_traffic_log_paths
@@ -41,9 +57,16 @@ DEFAULT_FLAMP_QUEUE_HELPER_NAME = "BBS_QUEUE_LIST.txt"
 DEFAULT_FLAMP_BLOCK_PREFIX = "BBS_BLOCK_LIST"
 DEFAULT_FLAMP_FILE_PREFIX = "BBS"
 DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS = 14
+MAX_FLAMP_RECEIVE_FILES_PER_SCAN = 5000
+MAX_FLAMP_RELAY_FILES_PER_SCAN = 5000
+FLAMP_TRANSFER_PARSER_VERSION = 2
 DEFAULT_BBS_REFRESH_PAUSE_SECONDS = 10
+# Kept as a compatibility constant for callers that imported the old setting.
+# Visitor-facing helper text must not promise a fixed delay; asynchronous state
+# uses ASYNC_REFRESH_NOTICE instead.
+ASYNC_REFRESH_NOTICE = "Request sent—refresh when the updated listing is ready"
 VAULT_ALIAS_HEALTH_KEY = "varac-bbs-vault-aliases"
-VAULT_ALIAS_HEALTH_OWNER = "VarAC Managed BBS Vault"
+VAULT_ALIAS_HEALTH_OWNER = "VarAC Managed BBS Library"
 
 EVENT_TS_RE = re.compile(r"^(?P<stamp>\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2})\s+-\s+(?P<body>.*)$")
 EVENT_TS_SCAN_RE = re.compile(r"(?P<stamp>\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2})\s+-\s+")
@@ -76,6 +99,10 @@ LIST_Q_RE = re.compile(r"^LIST\s+Q\s*$", re.IGNORECASE)
 LIST_BLOCKS_RE = re.compile(r"^(?:LIST\s+(?:BLKS|BLOCKS)\s+|LIST\s+)([A-F0-9]{4})\s*$", re.IGNORECASE)
 BLOCK_REQUEST_RE = re.compile(r"^(?:REQ\s+)?(?:BLK|BLKS|BLOCK|BLOCKS)\s+([0-9][0-9,\s]*?)\s*([A-F0-9]{4})\s*$", re.IGNORECASE)
 INVALID_BLOCK_REQUEST_RE = re.compile(r"^(?:REQ\s+)?(?:BLK|BLKS|BLOCK|BLOCKS)\s+([A-F0-9]{4})\s*$", re.IGNORECASE)
+# JS8Spotter operators commonly omit the space between the Q token and the
+# four-character FLAMP identifier.  Keep the command otherwise exact so a
+# conversational mention cannot trigger unattended transmission.
+DYNAMIC_FLAMP_QUERY_RE = re.compile(r"^\s*E\?\s+Q\s*([0-9A-F]{4})\s*$", re.IGNORECASE)
 ALIAS_RE = re.compile(r"^[A-Z0-9][A-Z0-9_.:/+\-]{0,31}$")
 
 
@@ -96,6 +123,8 @@ class VaultLocation:
     list_in_root_menu: bool = True
     visibility_rule: str = "Public"
     open_rule: str = "Public"
+    retention_policy: str = "Use global BBS archive policy"
+    retention_days: int = 0
 
 
 @dataclass(frozen=True)
@@ -129,6 +158,7 @@ class VaultPublishManifestEntry:
     size: int
     mtime_ns: int
     sha256: str = ""
+    source_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -139,6 +169,15 @@ class VaultPublishResult:
     unmanaged_live_files: Tuple[str, ...]
     manifest_path: str
     ignored_directories: int = 0
+
+
+@dataclass(frozen=True)
+class BbsFileActionResult:
+    success: bool
+    action: str
+    source_path: str
+    target_path: str = ""
+    detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -207,6 +246,25 @@ class VaracBbsVaultRunResult:
 class _VirtualFile:
     name: str
     content: str
+
+
+@dataclass(frozen=True)
+class DynamicFlampQuery:
+    q_id: str
+    confidence: float = 1.0
+
+
+def parse_dynamic_flamp_query(value: object) -> Optional[DynamicFlampQuery]:
+    """Parse only the exact dynamic FLAMP query form.
+
+    Destination/source framing is deliberately handled by the JS8 ingest
+    adapters.  This helper accepts only the payload itself and therefore cannot
+    accidentally turn a relayed or partial message into a query.
+    """
+    match = DYNAMIC_FLAMP_QUERY_RE.fullmatch(str(value or ""))
+    if not match:
+        return None
+    return DynamicFlampQuery(q_id=match.group(1).upper(), confidence=1.0)
 
 
 def _normalize_callsign(value: object) -> str:
@@ -663,6 +721,16 @@ def load_vault_locations(value: object) -> List[VaultLocation]:
     for row in parsed:
         if not isinstance(row, dict):
             continue
+        try:
+            access_code_iterations = int(
+                row.get("access_code_iterations", DEFAULT_ACCESS_CODE_ITERATIONS) or DEFAULT_ACCESS_CODE_ITERATIONS
+            )
+        except Exception:
+            access_code_iterations = DEFAULT_ACCESS_CODE_ITERATIONS
+        try:
+            retention_days = max(0, int(row.get("retention_days", 0) or 0))
+        except Exception:
+            retention_days = 0
         name = _clean_location_name(row.get("name", ""))
         if not name:
             continue
@@ -678,13 +746,19 @@ def load_vault_locations(value: object) -> List[VaultLocation]:
                 allowed_callsigns=tuple(parse_callsign_list(row.get("allowed_callsigns", []))),
                 access_code_hash=str(row.get("access_code_hash", "") or "").strip(),
                 access_code_salt=str(row.get("access_code_salt", "") or "").strip(),
-                access_code_iterations=int(row.get("access_code_iterations", DEFAULT_ACCESS_CODE_ITERATIONS) or DEFAULT_ACCESS_CODE_ITERATIONS),
+                access_code_iterations=access_code_iterations,
                 access_code_plaintext=str(row.get("access_code_plaintext", "") or "").strip(),
                 alias=normalize_location_alias(row.get("alias", ""), name),
                 description=str(row.get("description", "") or "").strip(),
                 list_in_root_menu=bool(row.get("list_in_root_menu", True)),
                 visibility_rule=str(row.get("visibility_rule", "Public") or "Public").strip() or "Public",
                 open_rule=str(row.get("open_rule", "Public") or "Public").strip() or "Public",
+                retention_policy=str(
+                    row.get("retention_policy", "Use global BBS archive policy")
+                    or "Use global BBS archive policy"
+                ).strip()
+                or "Use global BBS archive policy",
+                retention_days=retention_days,
             )
         )
     return locations
@@ -710,6 +784,8 @@ def vault_locations_to_data(locations: Sequence[VaultLocation]) -> List[Dict[str
                 "list_in_root_menu": bool(location.list_in_root_menu),
                 "visibility_rule": location.visibility_rule,
                 "open_rule": location.open_rule,
+                "retention_policy": location.retention_policy,
+                "retention_days": int(location.retention_days or 0),
             }
         )
     return out
@@ -896,9 +972,137 @@ def import_live_bbs_to_default_location(live_bbs_dir: object, default_location_d
     return imported
 
 
-def _manifest_path_for(managed_root: object) -> Path:
+def _safe_relative_file_path(src: Path, source_root: Optional[Path]) -> Path:
+    if source_root is None:
+        return Path(src.name)
+    try:
+        rel = src.relative_to(source_root)
+    except Exception:
+        rel = Path(src.name)
+    if any(part in {"", ".", ".."} for part in rel.parts):
+        return Path(src.name)
+    return rel
+
+
+def unique_bbs_archive_destination(
+    src: object,
+    *,
+    archive_dir: object,
+    source_root: object = None,
+    archive_context: object = "live",
+) -> Path:
+    src_path = _resolve_path(src)
+    archive_root = _resolve_path(archive_dir)
+    if src_path is None:
+        raise ValueError("Source file is required")
+    if archive_root is None:
+        raise ValueError("Archive directory is required")
+    context = re.sub(r"[^A-Za-z0-9_.:/+\-]+", "_", str(archive_context or "live").strip()) or "live"
+    root_path = _resolve_path(source_root) if source_root is not None else None
+    rel = _safe_relative_file_path(src_path, root_path)
+    dst = archive_root / context / rel
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if not dst.exists():
+        return dst
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d_%H%M%S")
+    dst = dst.parent / f"{src_path.stem}_{stamp}{src_path.suffix}"
+    attempt = 2
+    while dst.exists():
+        dst = dst.parent / f"{src_path.stem}_{stamp}_{attempt}{src_path.suffix}"
+        attempt += 1
+    return dst
+
+
+def archive_bbs_file(
+    file_path: object,
+    *,
+    archive_dir: object,
+    source_root: object = None,
+    archive_context: object = "live",
+) -> BbsFileActionResult:
+    src = _resolve_path(file_path)
+    if src is None:
+        return BbsFileActionResult(False, "archive", "", detail="Source file is required")
+    if not src.exists():
+        return BbsFileActionResult(False, "archive", str(src), detail="Source file does not exist")
+    if not src.is_file():
+        return BbsFileActionResult(False, "archive", str(src), detail="Source path is not a file")
+    try:
+        dst = unique_bbs_archive_destination(
+            src,
+            archive_dir=archive_dir,
+            source_root=source_root,
+            archive_context=archive_context,
+        )
+        shutil.move(str(src), str(dst))
+        return BbsFileActionResult(True, "archive", str(src), str(dst), "Archived BBS file")
+    except Exception as exc:
+        return BbsFileActionResult(False, "archive", str(src), detail=str(exc))
+
+
+def delete_bbs_file(file_path: object) -> BbsFileActionResult:
+    src = _resolve_path(file_path)
+    if src is None:
+        return BbsFileActionResult(False, "delete", "", detail="Source file is required")
+    if not src.exists():
+        return BbsFileActionResult(False, "delete", str(src), detail="Source file does not exist")
+    if not src.is_file():
+        return BbsFileActionResult(False, "delete", str(src), detail="Source path is not a file")
+    try:
+        src.unlink()
+        return BbsFileActionResult(True, "delete", str(src), detail="Deleted BBS file")
+    except Exception as exc:
+        return BbsFileActionResult(False, "delete", str(src), detail=str(exc))
+
+
+def bbs_file_management_roots(settings) -> List[Dict[str, str]]:
+    if settings is None:
+        return []
+    rows: List[Dict[str, str]] = []
+
+    def _setting(key: str, default: object = "") -> object:
+        try:
+            return settings.get(key, default)
+        except Exception:
+            return default
+
+    def _add(kind: str, label: str, path_value: object, archive_context: str) -> None:
+        path_txt = str(path_value or "").strip()
+        if not path_txt:
+            return
+        rows.append(
+            {
+                "kind": kind,
+                "label": label,
+                "path": path_txt,
+                "archive_context": archive_context,
+            }
+        )
+
+    message_paths = _setting("message_paths", {})
+    if not isinstance(message_paths, Mapping):
+        message_paths = {}
+    _add("incoming", "VarAC Incoming", message_paths.get("varac", ""), "incoming")
+    _add("outgoing", "VarAC Outgoing", _setting("varac_outbox_dir", ""), "outgoing")
+    _add("live_bbs", "Live BBS", _setting("varac_bbs_dir", ""), "live")
+    for location in load_vault_locations(_setting("varac_bbs_vault_locations_v1", [])):
+        if not location.enabled:
+            continue
+        if not str(location.source_dir or "").strip():
+            continue
+        context_id = re.sub(r"[^A-Za-z0-9_.:/+\-]+", "_", str(location.id or location.name or "location"))
+        _add("managed_location", f"Managed Location: {location.name}", location.source_dir, f"locations/{context_id}")
+    _add("archive", "BBS Archive", _setting("varac_bbs_archive_dir", ""), "archive")
+    return rows
+
+
+def _manifest_path_for(managed_root: object, live_bbs_dir: object = "") -> Path:
     paths = _managed_root_paths(managed_root)
-    return paths["manifests"] / "current_publish_manifest.json"
+    live_path = _resolve_path(live_bbs_dir)
+    if live_path is None:
+        return paths["manifests"] / "current_publish_manifest.json"
+    identity = hashlib.sha1(str(live_path).encode("utf-8")).hexdigest()[:12]
+    return paths["manifests"] / f"current_publish_manifest-{identity}.json"
 
 
 def _audit_log_path_for(managed_root: object) -> Path:
@@ -939,6 +1143,7 @@ def read_publish_manifest(path: object) -> List[VaultPublishManifestEntry]:
                 size=size,
                 mtime_ns=mtime_ns,
                 sha256=str(item.get("sha256", "") or "").strip(),
+                source_path=str(item.get("source_path", "") or "").strip(),
             )
         )
     return entries
@@ -1126,17 +1331,29 @@ def _entry_map(entries: Sequence[VaultPublishManifestEntry]) -> Dict[str, VaultP
 
 def _is_fio_bbs_generated_listing(name: object) -> bool:
     clean = Path(str(name or "").strip()).name.upper()
-    if clean.startswith("BBS MSG - ") and clean.endswith(".TXT"):
+    if clean.startswith((
+        "BBS MSG - ",
+        "00 HOW TO USE -",
+        "00 READ FIRST -",
+        "00 NOTICE -",
+        "01 COMMANDS -",
+    )):
         return True
-    if clean.startswith(("00 READ FIRST -", "00 NOTICE -", "01 COMMANDS -")) and clean.endswith(".TXT"):
-        return True
-    if re.match(r"^\d{2} TYPE .+\.TXT$", clean):
+    if re.match(r"^\d{2} TYPE .+(?:\.TXT)?$", clean):
         return True
     return clean.startswith((DEFAULT_FLAMP_QUEUE_HELPER_NAME.upper(), f"{DEFAULT_FLAMP_BLOCK_PREFIX}_"))
 
 
+def _source_path_for_entry(entry: VaultPublishManifestEntry, src_root: Optional[Path]) -> Optional[Path]:
+    if str(entry.source_path or "").strip():
+        return _resolve_path(entry.source_path)
+    if src_root is None:
+        return None
+    return src_root / entry.source_name
+
+
 def _entries_equal(a: VaultPublishManifestEntry, b: VaultPublishManifestEntry, *, src_root: Optional[Path] = None, dst_root: Optional[Path] = None) -> bool:
-    if a.size != b.size or a.mtime_ns != b.mtime_ns or a.source_name != b.source_name:
+    if a.size != b.size or a.mtime_ns != b.mtime_ns or a.source_name != b.source_name or a.source_path != b.source_path:
         return False
     if a.sha256 and b.sha256:
         return a.sha256 == b.sha256
@@ -1145,11 +1362,88 @@ def _entries_equal(a: VaultPublishManifestEntry, b: VaultPublishManifestEntry, *
     if src_root is None or dst_root is None:
         return True
     try:
-        src_hash = _hash_file(src_root / a.source_name)
+        source_path = _source_path_for_entry(a, src_root)
+        if source_path is None:
+            return False
+        src_hash = _hash_file(source_path)
         dst_hash = _hash_file(dst_root / a.live_name)
     except Exception:
         return False
     return src_hash == dst_hash
+
+
+def _db_backed_manifest_entries(
+    location: VaultLocation,
+    *,
+    manifest_db_path: object = "",
+    virtual_files: Sequence[_VirtualFile] = (),
+) -> Optional[List[VaultPublishManifestEntry]]:
+    # A caller that has a catalog identity must pass it explicitly.  Empty
+    # paths intentionally select the legacy filesystem manifest, rather than
+    # silently borrowing the process-wide FIO database.
+    if not str(manifest_db_path or "").strip():
+        return None
+    db_path = _resolve_path(manifest_db_path)
+    if db_path is None or not db_path.exists():
+        return None
+    try:
+        with connect_sqlite(db_path) as conn:
+            ensure_bbs_library_schema(conn)
+            if not location_has_bbs_catalog(conn, location.id):
+                return None
+            configured_source = str(_effective_location_source_dir(location, "") or "").strip()
+            catalog_source = bbs_location_catalog_source_dir(conn, location.id)
+            if configured_source and catalog_source and str(Path(catalog_source).expanduser()) != str(Path(configured_source).expanduser()):
+                return None
+            rows = list_bbs_location_manifest_rows(conn, location.id)
+    except Exception as exc:
+        log_bbs_library_sync_failure(exc)
+        return None
+
+    entries: List[VaultPublishManifestEntry] = []
+    used_names: set[str] = set()
+
+    def _unique_name(raw_name: str) -> str:
+        safe_name = safe_varac_bbs_filename(raw_name, max_len=MAX_MANIFEST_FILENAME_LENGTH)
+        if safe_name not in used_names:
+            used_names.add(safe_name)
+            return safe_name
+        stem = Path(safe_name).stem
+        suffix = Path(safe_name).suffix
+        counter = 2
+        candidate = f"{stem}-{counter}{suffix}"
+        while candidate in used_names:
+            counter += 1
+            candidate = f"{stem}-{counter}{suffix}"
+        used_names.add(candidate)
+        return candidate
+
+    for row in rows:
+        source_path = _resolve_path(row.source_path)
+        if source_path is None or not source_path.exists() or not source_path.is_file():
+            continue
+        entries.append(
+            VaultPublishManifestEntry(
+                source_name=f"@artifact/{row.artifact_id}",
+                live_name=_unique_name(row.live_name or row.display_name or source_path.name),
+                size=int(row.size or 0),
+                mtime_ns=int(row.mtime_ns or 0),
+                sha256=str(row.content_hash or ""),
+                source_path=str(source_path),
+            )
+        )
+    for virtual in virtual_files:
+        content = str(virtual.content or "")
+        entries.append(
+            VaultPublishManifestEntry(
+                source_name=f"@virtual/{virtual.name}",
+                live_name=_unique_name(virtual.name),
+                size=len(content.encode("utf-8")),
+                mtime_ns=0,
+                sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            )
+        )
+    return entries
 
 
 def _publish_manifest_entries(
@@ -1165,7 +1459,7 @@ def _publish_manifest_entries(
         raise ValueError("Live BBS directory is required")
     live_dir.mkdir(parents=True, exist_ok=True)
     src_root = _resolve_path(source_dir)
-    manifest_path = _manifest_path_for(managed_root)
+    manifest_path = _manifest_path_for(managed_root, live_bbs_dir)
     previous_manifest = read_publish_manifest(manifest_path)
     previous_map = _entry_map(previous_manifest)
     next_map = _entry_map(entries)
@@ -1185,9 +1479,10 @@ def _publish_manifest_entries(
                 continue
             tmp_path.write_text(str(virtual.content or ""), encoding="utf-8")
         else:
-            if src_root is None:
+            source_path = _source_path_for_entry(entry, src_root)
+            if source_path is None:
                 raise ValueError("Location source directory is required")
-            shutil.copy2(src_root / entry.source_name, tmp_path)
+            shutil.copy2(source_path, tmp_path)
         os.replace(tmp_path, dst)
         published += 1
 
@@ -1224,6 +1519,11 @@ def _publish_manifest_entries(
     if not manifest_path.exists() or existing_manifest_text != next_manifest_text:
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(next_manifest_text, encoding="utf-8")
+        # Keep the historical path as a diagnostics-only pointer to the most
+        # recently materialized instance. Runtime reconciliation always uses
+        # the radio-specific manifest above.
+        compatibility_manifest = _manifest_path_for(managed_root)
+        compatibility_manifest.write_text(next_manifest_text, encoding="utf-8")
     else:
         log.debug("VARAC_VAULT_MANIFEST|unchanged|entries=%s|write_skipped=true", len(entries))
 
@@ -1248,9 +1548,20 @@ def _publish_manifest_entries(
     )
 
 
-def publish_location(location: VaultLocation, *, live_bbs_dir: object, managed_root: object) -> VaultPublishResult:
+def publish_location(
+    location: VaultLocation,
+    *,
+    live_bbs_dir: object,
+    managed_root: object,
+    manifest_db_path: object = "",
+) -> VaultPublishResult:
     source_dir = _effective_location_source_dir(location, managed_root)
-    entries, ignored_dirs = build_publish_manifest(source_dir)
+    db_entries = _db_backed_manifest_entries(location, manifest_db_path=manifest_db_path)
+    if db_entries is not None:
+        entries = db_entries
+        ignored_dirs = 0
+    else:
+        entries, ignored_dirs = build_publish_manifest(source_dir)
     result = _publish_manifest_entries(
         entries,
         source_dir=source_dir,
@@ -1439,12 +1750,25 @@ def _extract_alias_request(text: str, alias_map: Mapping[str, str]) -> Tuple[str
     return "", ""
 
 
+def _logical_helper_label(value: object) -> str:
+    """Return a visitor-facing helper label without its compatibility suffix."""
+
+    text = " ".join(str(value or "").strip().split())
+    if text.lower().endswith(".txt"):
+        return text[:-4].rstrip()
+    return text
+
+
 def _menu_instruction_entry(text: str) -> _VirtualFile:
-    return _VirtualFile(name=f"{text}.txt", content=text + "\n")
+    # New VarAC menu instruction files intentionally omit ``.txt``. Historical
+    # files remain recognized above so reconciliation can remove them when the
+    # extensionless projection supersedes them.
+    logical_label = _logical_helper_label(text)
+    return _VirtualFile(name=logical_label, content=logical_label + "\n")
 
 
 def _read_first_entry() -> _VirtualFile:
-    text = f"00 READ FIRST - type command, wait {DEFAULT_BBS_REFRESH_PAUSE_SECONDS} sec, refresh BBS"
+    text = "00 HOW TO USE - Type command then refresh BBS"
     return _menu_instruction_entry(text)
 
 
@@ -1479,7 +1803,7 @@ def _quick_refresh_notice_entry(command_text: object) -> _VirtualFile:
     command = str(command_text or "").strip().upper()
     if not command:
         command = "Command"
-    return _notice_entry(f"{command} received; wait {DEFAULT_BBS_REFRESH_PAUSE_SECONDS} sec, refresh again")
+    return _notice_entry(f"{command} received. {ASYNC_REFRESH_NOTICE}")
 
 
 def root_location_helper_filename_preview(location: VaultLocation, *, default_location_id: str, global_code_policy: str, order: int = 20) -> str:
@@ -1500,7 +1824,8 @@ def root_location_helper_filename_preview(location: VaultLocation, *, default_lo
         description = f"open {name}"
     if custom:
         description = f"{description} - {custom}"
-    return f"{max(0, min(99, int(order))):02d} type {command} - {description}.txt"
+    # This is a logical visitor label, not the on-disk compatibility filename.
+    return f"{max(0, min(99, int(order))):02d} type {command} - {description}"
 
 
 def _root_location_helper_entry(location: VaultLocation, *, default_location_id: str, global_code_policy: str, order: int) -> _VirtualFile:
@@ -1510,8 +1835,7 @@ def _root_location_helper_entry(location: VaultLocation, *, default_location_id:
         global_code_policy=global_code_policy,
         order=order,
     )
-    stem = text[:-4] if text.upper().endswith(".TXT") else text
-    return _menu_instruction_entry(stem)
+    return _menu_instruction_entry(text)
 
 
 def _root_virtual_files(
@@ -1639,6 +1963,7 @@ def publish_location_access_prompt_view(
     live_bbs_dir: object,
     managed_root: object,
     reason: str = "code_required",
+    manifest_db_path: object = "",
 ) -> VaultPublishResult:
     virtual_files = _location_access_prompt_virtual_files(location, reason=reason)
     manifest, ignored_dirs = build_publish_manifest("", virtual_files=virtual_files)
@@ -1671,10 +1996,11 @@ def publish_root_view(
     managed_root: object,
     flamp_enabled: bool = False,
     include_enabled_fallback: bool = False,
+    manifest_db_path: object = "",
 ) -> VaultPublishResult:
     default_location = _location_by_id(locations, default_location_id)
     if default_location is None:
-        raise ValueError("Managed Vault default location is missing")
+        raise ValueError("Managed BBS Library default location is missing")
     virtual_files = _root_virtual_files(
         sender=sender,
         locations=locations,
@@ -1691,10 +2017,16 @@ def publish_root_view(
         # _root_virtual_files; raw folders left on disk must not resurrect a
         # location after it is deleted from FIO Settings.
         virtual_files = []
-    manifest, ignored_dirs = build_publish_manifest(default_location.source_dir, virtual_files=virtual_files)
+    source_dir = _effective_location_source_dir(default_location, managed_root)
+    db_entries = _db_backed_manifest_entries(default_location, manifest_db_path=manifest_db_path, virtual_files=virtual_files)
+    if db_entries is not None:
+        manifest = db_entries
+        ignored_dirs = 0
+    else:
+        manifest, ignored_dirs = build_publish_manifest(source_dir, virtual_files=virtual_files)
     result = _publish_manifest_entries(
         manifest,
-        source_dir=default_location.source_dir,
+        source_dir=source_dir,
         live_bbs_dir=live_bbs_dir,
         managed_root=managed_root,
         virtual_files=virtual_files,
@@ -1714,10 +2046,16 @@ def publish_location_view(
     *,
     live_bbs_dir: object,
     managed_root: object,
+    manifest_db_path: object = "",
 ) -> VaultPublishResult:
     virtual_files = _location_virtual_files(include_root=True)
     source_dir = _effective_location_source_dir(location, managed_root)
-    manifest, ignored_dirs = build_publish_manifest(source_dir, virtual_files=virtual_files)
+    db_entries = _db_backed_manifest_entries(location, manifest_db_path=manifest_db_path, virtual_files=virtual_files)
+    if db_entries is not None:
+        manifest = db_entries
+        ignored_dirs = 0
+    else:
+        manifest, ignored_dirs = build_publish_manifest(source_dir, virtual_files=virtual_files)
     result = _publish_manifest_entries(
         manifest,
         source_dir=source_dir,
@@ -1737,6 +2075,10 @@ def publish_location_view(
 
 class FlampRelayStore:
     PROG_RE = re.compile(r"<PROG.*?\{([A-F0-9]+)\}", re.IGNORECASE)
+    FILE_RE = re.compile(
+        r"<FILE\s+[^>]*>\{([A-F0-9]+)\}([^:\r\n]*):([^\r\n]+)$",
+        re.IGNORECASE,
+    )
     SIZE_RE = re.compile(r"<SIZE\s+[^>]*>\{([A-F0-9]+)\}(\d+)\s+(\d+)\s+(\d+)", re.IGNORECASE)
     BLOCK_RE = re.compile(r"\{([A-F0-9]+):(\d+)\}", re.IGNORECASE)
     VALID_Q_RE = re.compile(r"^[A-F0-9]{4}$", re.IGNORECASE)
@@ -1746,12 +2088,29 @@ class FlampRelayStore:
 
     def relay_files(self) -> List[Path]:
         relay_dir = self.relay_dir
-        if relay_dir is None or not relay_dir.exists():
+        if relay_dir is None or not relay_dir.exists() or not relay_dir.is_dir() or relay_dir.is_symlink():
             return []
         files: List[Path] = []
-        for pattern in ("*.b2s", "*.k2s", "*.relay", "*.txt", "*.dat"):
-            files.extend(relay_dir.glob(pattern))
-        return [path for path in files if path.is_file()]
+        allowed_suffixes = {".b2s", ".k2s", ".relay", ".txt", ".dat"}
+        try:
+            entries = os.scandir(relay_dir)
+        except OSError:
+            return []
+        with entries:
+            for entry in entries:
+                if len(files) >= MAX_FLAMP_RELAY_FILES_PER_SCAN:
+                    break
+                try:
+                    if (
+                        entry.is_symlink()
+                        or not entry.is_file(follow_symlinks=False)
+                        or Path(entry.name).suffix.lower() not in allowed_suffixes
+                    ):
+                        continue
+                except OSError:
+                    continue
+                files.append(Path(entry.path))
+        return files
 
     def queue_index(self, *, max_age_days: Optional[int] = None) -> Dict[str, Path]:
         index: Dict[str, Path] = {}
@@ -1792,10 +2151,15 @@ class FlampRelayStore:
 
     def parse_file(self, file_path: Path) -> Optional[Dict[str, object]]:
         file_id = None
+        transfer_file_id = ""
+        size_file_id = ""
+        transfer_filename = ""
+        transfer_timestamp = ""
         total_blocks = None
         file_size = None
         block_len = None
         blocks: Dict[int, str] = {}
+        block_file_ids: Dict[int, str] = {}
         header_lines: List[str] = []
         try:
             with file_path.open("r", encoding="utf-8", errors="ignore") as handle:
@@ -1808,8 +2172,15 @@ class FlampRelayStore:
                     match_prog = self.PROG_RE.search(line)
                     if match_prog and not file_id:
                         file_id = match_prog.group(1).upper()
+                    match_file = self.FILE_RE.search(line)
+                    if match_file:
+                        transfer_file_id = match_file.group(1).upper()
+                        file_id = file_id or match_file.group(1).upper()
+                        transfer_timestamp = match_file.group(2).strip()
+                        transfer_filename = PureWindowsPath(match_file.group(3).strip()).name
                     match_size = self.SIZE_RE.search(line)
                     if match_size:
+                        size_file_id = match_size.group(1).upper()
                         file_id = file_id or match_size.group(1).upper()
                         file_size = int(match_size.group(2))
                         total_blocks = int(match_size.group(3))
@@ -1820,7 +2191,9 @@ class FlampRelayStore:
                         fid = fid.upper()
                         if not file_id:
                             file_id = fid
-                        blocks[int(block_num)] = line
+                        number = int(block_num)
+                        blocks[number] = line
+                        block_file_ids[number] = fid
         except Exception:
             return None
         if not blocks:
@@ -1829,10 +2202,15 @@ class FlampRelayStore:
             "path": str(file_path),
             "name": file_path.name,
             "file_id": (file_id or file_path.name[:4]).upper(),
+            "transfer_filename": transfer_filename,
+            "transfer_timestamp": transfer_timestamp,
+            "transfer_file_id": transfer_file_id,
+            "size_file_id": size_file_id,
             "total_blocks": total_blocks,
             "file_size": file_size,
             "block_len": block_len,
             "blocks": blocks,
+            "block_file_ids": block_file_ids,
             "header": header_lines,
         }
 
@@ -1841,6 +2219,598 @@ class FlampRelayStore:
         total = int(relay_info.get("total_blocks") or (blocks[-1] if blocks else 0))
         missing = [num for num in range(1, total + 1) if num not in blocks]
         return blocks, missing
+
+    def authoritative_transfer(self, queue_id: object) -> Optional[Dict[str, object]]:
+        """Return validated transfer facts suitable for a dynamic Q reply.
+
+        This path intentionally does not use ``available_blocks_text``: that
+        compatibility helper has a highest-seen-block fallback which is useful
+        for old BBS views but is not proof of a FLAMP transfer total.
+        """
+        q_id = str(queue_id or "").strip().upper()
+        if not self.VALID_Q_RE.fullmatch(q_id):
+            return None
+        relay_info = self.parse_queue(q_id)
+        if not relay_info:
+            return None
+        return self._authoritative_transfer_from_info(q_id, relay_info)
+
+    def authoritative_file(self, file_path: Path, queue_id: object) -> Optional[Dict[str, object]]:
+        """Parse one already-resolved relay file without rebuilding the directory index."""
+
+        q_id = str(queue_id or "").strip().upper()
+        if not self.VALID_Q_RE.fullmatch(q_id):
+            return None
+        relay_info = self.parse_file(file_path)
+        if not relay_info:
+            return None
+        return self._authoritative_transfer_from_info(q_id, relay_info)
+
+    def _authoritative_transfer_from_info(
+        self, q_id: str, relay_info: Mapping[str, object]
+    ) -> Dict[str, object]:
+        file_id = str(relay_info.get("file_id") or "").strip().upper()
+        total_raw = relay_info.get("total_blocks")
+        try:
+            total = int(total_raw) if total_raw is not None else 0
+        except Exception:
+            total = 0
+        transfer_file_id = str(relay_info.get("transfer_file_id") or q_id).strip().upper()
+        size_file_id = str(relay_info.get("size_file_id") or q_id).strip().upper()
+        if file_id != q_id or transfer_file_id != q_id or size_file_id != q_id or total <= 0:
+            return {
+                "q_id": q_id,
+                "path": str(relay_info.get("path") or ""),
+                "total_blocks": None,
+                "available_blocks": [],
+                "missing_blocks": [],
+                "state": "unavailable",
+                "parser_confidence": 0.0,
+            }
+        blocks = relay_info.get("blocks") if isinstance(relay_info.get("blocks"), Mapping) else {}
+        file_ids = relay_info.get("block_file_ids") if isinstance(relay_info.get("block_file_ids"), Mapping) else {}
+        available = sorted({int(number) for number in blocks.keys() if 1 <= int(number) <= total})
+        invalid_numbers = [int(number) for number in blocks.keys() if int(number) < 1 or int(number) > total]
+        mismatched_ids = [number for number in available if str(file_ids.get(number) or q_id).upper() != q_id]
+        if invalid_numbers or mismatched_ids:
+            state = "unavailable"
+            confidence = 0.0
+            missing: List[int] = []
+        else:
+            missing = [number for number in range(1, total + 1) if number not in available]
+            state = "complete" if not missing else "partial"
+            confidence = 1.0
+        return {
+            "q_id": q_id,
+            "path": str(relay_info.get("path") or ""),
+            "total_blocks": total,
+            "available_blocks": available,
+            "missing_blocks": missing,
+            "state": state,
+            "parser_confidence": confidence,
+            "transfer_filename": str(relay_info.get("transfer_filename") or ""),
+            "transfer_timestamp": str(relay_info.get("transfer_timestamp") or ""),
+            "expected_file_size": relay_info.get("file_size"),
+        }
+
+    @staticmethod
+    def completed_receive_index(
+        receive_dir: object, *, max_files: int = MAX_FLAMP_RECEIVE_FILES_PER_SCAN
+    ) -> Dict[str, Tuple[Path, int]]:
+        """Index regular FLAMP outputs at the root and one date-folder level.
+
+        FLAMP auto-save uses one date directory below ``FLAMP/rx``.  Keeping the
+        walk to that documented shape prevents an accidentally broad recursive
+        scan when a user configures the wrong directory.
+        """
+
+        root = _resolve_path(receive_dir)
+        if root is None or not root.exists() or not root.is_dir() or root.is_symlink():
+            return {}
+        bounded = max(1, min(MAX_FLAMP_RECEIVE_FILES_PER_SCAN, int(max_files or 1)))
+        indexed: Dict[str, Tuple[Path, int]] = {}
+        examined = 0
+        child_directories: List[Path] = []
+
+        def scan_directory(directory: Path, *, collect_children: bool = False) -> None:
+            nonlocal examined
+            try:
+                entries = os.scandir(directory)
+            except OSError:
+                return
+            with entries:
+                for entry in entries:
+                    if examined >= bounded:
+                        return
+                    examined += 1
+                    try:
+                        if entry.is_symlink():
+                            continue
+                        if entry.is_file(follow_symlinks=False):
+                            stat = entry.stat(follow_symlinks=False)
+                            candidate = Path(entry.path)
+                            previous = indexed.get(entry.name)
+                            if previous is None or int(stat.st_mtime_ns) > previous[1]:
+                                indexed[entry.name] = (candidate, int(stat.st_mtime_ns))
+                        elif collect_children and entry.is_dir(follow_symlinks=False):
+                            child_directories.append(Path(entry.path))
+                    except OSError:
+                        continue
+
+        scan_directory(root, collect_children=True)
+        for child in child_directories:
+            if examined >= bounded:
+                break
+            scan_directory(child)
+        return indexed
+
+
+def index_flamp_transfer_state(
+    relay_dir: object,
+    *,
+    db_path: Path,
+    source_radio_id: object = "",
+    source_js8_instance_id: object = "",
+    receive_dir: object = "",
+    observed_ts: Optional[float] = None,
+) -> int:
+    """Persist validated, source-scoped FLAMP transfer state.
+
+    This is an additive projection.  A missing source file becomes
+    ``unavailable`` instead of raising or repeatedly attempting to parse it.
+    """
+    path = Path(db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    radio_id = str(source_radio_id or "").strip()
+    js8_id = str(source_js8_instance_id or "").strip()
+    now = float(observed_ts if observed_ts is not None else time.time())
+    store = FlampRelayStore(relay_dir)
+    conn = connect_sqlite_runtime_write(path)
+    try:
+        relay_root = store.relay_dir
+        if (
+            relay_root is None
+            or not relay_root.exists()
+            or not relay_root.is_dir()
+            or relay_root.is_symlink()
+        ):
+            conn.execute(
+                """
+                INSERT INTO flamp_transfer_state_scans
+                    (source_radio_id, source_js8_instance_id, relay_dir, receive_dir,
+                     scan_success, file_count, error_text, scanned_ts)
+                VALUES (?, ?, ?, ?, 0, 0, ?, ?)
+                ON CONFLICT(source_radio_id, source_js8_instance_id) DO UPDATE SET
+                    relay_dir=excluded.relay_dir,
+                    receive_dir=excluded.receive_dir,
+                    scan_success=excluded.scan_success,
+                    file_count=excluded.file_count,
+                    error_text=excluded.error_text,
+                    scanned_ts=excluded.scanned_ts
+                """,
+                (
+                    radio_id,
+                    js8_id,
+                    str(relay_dir or ""),
+                    str(receive_dir or ""),
+                    "FLAMP relay folder is unavailable.",
+                    now,
+                ),
+            )
+            conn.commit()
+            return 0
+        receive_root = _resolve_path(receive_dir)
+        if str(receive_dir or "").strip() and (
+            receive_root is None
+            or not receive_root.exists()
+            or not receive_root.is_dir()
+            or receive_root.is_symlink()
+        ):
+            raise FileNotFoundError("FLAMP completed receive folder is unavailable.")
+        receive_index = store.completed_receive_index(receive_dir)
+        existing_rows = conn.execute(
+            """
+            SELECT q_id, source_path, source_mtime_ns, source_size_bytes,
+                   source_sha256, transfer_filename, expected_file_size,
+                   completion_path, evidence_kind, parser_version,
+                   total_blocks, available_blocks_json, missing_blocks_json,
+                   state, parser_confidence, observed_ts
+            FROM flamp_transfer_state
+            WHERE source_radio_id=? AND source_js8_instance_id=?
+            """,
+            (radio_id, js8_id),
+        ).fetchall()
+        existing = {
+            str(row[0] or "").upper(): {
+                "source_path": str(row[1] or ""),
+                "source_mtime_ns": int(row[2] or 0),
+                "source_size_bytes": int(row[3] or 0),
+                "source_sha256": str(row[4] or ""),
+                "transfer_filename": str(row[5] or ""),
+                "expected_file_size": int(row[6]) if row[6] is not None else None,
+                "completion_path": str(row[7] or ""),
+                "evidence_kind": str(row[8] or "relay_snapshot"),
+                "parser_version": int(row[9] or 0),
+                "total_blocks": int(row[10]) if row[10] is not None else None,
+                "available_blocks_json": str(row[11] or "[]"),
+                "missing_blocks_json": str(row[12] or "[]"),
+                "state": str(row[13] or "unavailable"),
+                "parser_confidence": float(row[14] or 0.0),
+                "observed_ts": float(row[15] or 0.0),
+            }
+            for row in existing_rows
+        }
+        seen: set[str] = set()
+        count = 0
+        for q_id, relay_path in store.queue_index().items():
+            seen.add(q_id)
+            try:
+                stat = relay_path.stat()
+                source_mtime_ns = int(stat.st_mtime_ns)
+                source_size_bytes = int(stat.st_size)
+                source_mtime_ts = float(stat.st_mtime)
+            except OSError:
+                source_mtime_ns = 0
+                source_size_bytes = 0
+                source_mtime_ts = 0.0
+            prior = existing.get(q_id)
+            unchanged = bool(
+                prior
+                and source_mtime_ns > 0
+                and int(prior.get("source_mtime_ns") or 0) == source_mtime_ns
+                and int(prior.get("source_size_bytes") or 0) == source_size_bytes
+                and str(prior.get("source_path") or "") == str(relay_path)
+                and str(prior.get("source_sha256") or "")
+                and int(prior.get("parser_version") or 0) >= FLAMP_TRANSFER_PARSER_VERSION
+            )
+            transfer_filename = str((prior or {}).get("transfer_filename") or "")
+            completion = receive_index.get(transfer_filename) if transfer_filename else None
+            completion_is_current = bool(
+                completion and source_mtime_ns > 0 and int(completion[1]) >= source_mtime_ns
+            )
+            must_parse = not unchanged or bool(
+                prior
+                and str(prior.get("evidence_kind") or "") == "completed_receive"
+                and not completion_is_current
+            )
+            if must_parse:
+                facts = store.authoritative_file(relay_path, q_id) or {
+                    "q_id": q_id,
+                    "path": str(relay_path),
+                    "transfer_filename": "",
+                    "expected_file_size": None,
+                    "total_blocks": None,
+                    "available_blocks": [],
+                    "missing_blocks": [],
+                    "state": "unavailable",
+                    "parser_confidence": 0.0,
+                }
+                transfer_filename = str(facts.get("transfer_filename") or "")
+                completion = receive_index.get(transfer_filename) if transfer_filename else None
+                completion_is_current = bool(
+                    completion and source_mtime_ns > 0 and int(completion[1]) >= source_mtime_ns
+                )
+                try:
+                    source_sha256 = hashlib.sha256(relay_path.read_bytes()).hexdigest()
+                except OSError:
+                    source_sha256 = ""
+                fact_observed_ts = source_mtime_ts
+            else:
+                try:
+                    available = [int(item) for item in json.loads(str(prior.get("available_blocks_json") or "[]"))]
+                except Exception:
+                    available = []
+                try:
+                    missing = [int(item) for item in json.loads(str(prior.get("missing_blocks_json") or "[]"))]
+                except Exception:
+                    missing = []
+                facts = {
+                    "q_id": q_id,
+                    "path": str(relay_path),
+                    "transfer_filename": transfer_filename,
+                    "expected_file_size": prior.get("expected_file_size"),
+                    "total_blocks": prior.get("total_blocks"),
+                    "available_blocks": available,
+                    "missing_blocks": missing,
+                    "state": prior.get("state") or "unavailable",
+                    "parser_confidence": prior.get("parser_confidence") or 0.0,
+                }
+                source_sha256 = str(prior.get("source_sha256") or "")
+                fact_observed_ts = float(prior.get("observed_ts") or 0.0)
+
+            completion_path = ""
+            evidence_kind = "relay_snapshot"
+            total_blocks = facts.get("total_blocks")
+            if (
+                completion_is_current
+                and total_blocks is not None
+                and int(total_blocks or 0) > 0
+                and float(facts.get("parser_confidence") or 0.0) >= 1.0
+            ):
+                completion_path = str(completion[0])
+                evidence_kind = "completed_receive"
+                facts = dict(facts)
+                facts["available_blocks"] = list(range(1, int(total_blocks) + 1))
+                facts["missing_blocks"] = []
+                facts["state"] = "complete"
+                facts["parser_confidence"] = 1.0
+                if str((prior or {}).get("evidence_kind") or "") != "completed_receive":
+                    log.info(
+                        "FLAMP transfer projection: q=%s source=%s/%s completed receive reconciled path=%s",
+                        q_id,
+                        radio_id,
+                        js8_id,
+                        completion_path,
+                    )
+            elif str((prior or {}).get("evidence_kind") or "") == "completed_receive":
+                log.warning(
+                    "FLAMP transfer projection: q=%s source=%s/%s completed receive evidence removed; relay snapshot restored",
+                    q_id,
+                    radio_id,
+                    js8_id,
+                )
+            conn.execute(
+                """
+                INSERT INTO flamp_transfer_state
+                    (q_id, source_radio_id, source_js8_instance_id, source_path,
+                     source_mtime_ns, source_size_bytes, source_sha256,
+                     transfer_filename, expected_file_size, completion_path,
+                     evidence_kind, parser_version, total_blocks,
+                     available_blocks_json, missing_blocks_json, state,
+                     parser_confidence, observed_ts, validated_scan_ts, updated_ts)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(q_id, source_radio_id, source_js8_instance_id) DO UPDATE SET
+                    source_path=excluded.source_path,
+                    source_mtime_ns=excluded.source_mtime_ns,
+                    source_size_bytes=excluded.source_size_bytes,
+                    source_sha256=excluded.source_sha256,
+                    transfer_filename=excluded.transfer_filename,
+                    expected_file_size=excluded.expected_file_size,
+                    completion_path=excluded.completion_path,
+                    evidence_kind=excluded.evidence_kind,
+                    parser_version=excluded.parser_version,
+                    total_blocks=excluded.total_blocks,
+                    available_blocks_json=excluded.available_blocks_json,
+                    missing_blocks_json=excluded.missing_blocks_json,
+                    state=excluded.state,
+                    parser_confidence=excluded.parser_confidence,
+                    observed_ts=excluded.observed_ts,
+                    validated_scan_ts=excluded.validated_scan_ts,
+                    updated_ts=excluded.updated_ts
+                """,
+                (
+                    q_id,
+                    radio_id,
+                    js8_id,
+                    str(facts.get("path") or relay_path),
+                    source_mtime_ns,
+                    source_size_bytes,
+                    source_sha256,
+                    transfer_filename,
+                    facts.get("expected_file_size"),
+                    completion_path,
+                    evidence_kind,
+                    FLAMP_TRANSFER_PARSER_VERSION,
+                    facts.get("total_blocks"),
+                    json.dumps(list(facts.get("available_blocks") or []), separators=(",", ":")),
+                    json.dumps(list(facts.get("missing_blocks") or []), separators=(",", ":")),
+                    str(facts.get("state") or "unavailable"),
+                    float(facts.get("parser_confidence") or 0.0),
+                    fact_observed_ts,
+                    now,
+                    now,
+                ),
+            )
+            count += 1
+        # Do not leave a deleted/rotated source looking current.
+        rows = conn.execute(
+            "SELECT id, q_id FROM flamp_transfer_state WHERE source_radio_id=? AND source_js8_instance_id=?",
+            (radio_id, js8_id),
+        ).fetchall()
+        for row in rows:
+            if str(row[1] or "").upper() in seen:
+                continue
+            conn.execute(
+                """
+                UPDATE flamp_transfer_state
+                SET state='unavailable', parser_confidence=0, available_blocks_json='[]',
+                    missing_blocks_json='[]', total_blocks=NULL, source_mtime_ns=0,
+                    source_size_bytes=0, source_sha256='', completion_path='',
+                    evidence_kind='relay_snapshot', validated_scan_ts=?, updated_ts=?
+                WHERE id=?
+                """,
+                (now, now, int(row[0])),
+            )
+        conn.execute(
+            """
+            INSERT INTO flamp_transfer_state_scans
+                (source_radio_id, source_js8_instance_id, relay_dir, receive_dir,
+                 scan_success, file_count, error_text, scanned_ts)
+            VALUES (?, ?, ?, ?, 1, ?, '', ?)
+            ON CONFLICT(source_radio_id, source_js8_instance_id) DO UPDATE SET
+                relay_dir=excluded.relay_dir,
+                receive_dir=excluded.receive_dir,
+                scan_success=excluded.scan_success,
+                file_count=excluded.file_count,
+                error_text=excluded.error_text,
+                scanned_ts=excluded.scanned_ts
+            """,
+            (radio_id, js8_id, str(relay_root), str(receive_dir or ""), count, now),
+        )
+        conn.commit()
+        return count
+    except Exception as exc:
+        conn.rollback()
+        try:
+            conn.execute(
+                """
+                INSERT INTO flamp_transfer_state_scans
+                    (source_radio_id, source_js8_instance_id, relay_dir, receive_dir,
+                     scan_success, file_count, error_text, scanned_ts)
+                VALUES (?, ?, ?, ?, 0, 0, ?, ?)
+                ON CONFLICT(source_radio_id, source_js8_instance_id) DO UPDATE SET
+                    relay_dir=excluded.relay_dir,
+                    receive_dir=excluded.receive_dir,
+                    scan_success=excluded.scan_success,
+                    file_count=excluded.file_count,
+                    error_text=excluded.error_text,
+                    scanned_ts=excluded.scanned_ts
+                """,
+                (
+                    radio_id,
+                    js8_id,
+                    str(relay_dir or ""),
+                    str(receive_dir or ""),
+                    str(exc)[:500],
+                    now,
+                ),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def flamp_transfer_index_status(
+    *,
+    db_path: Path,
+    source_radio_id: object = "",
+    source_js8_instance_id: object = "",
+) -> Optional[Dict[str, object]]:
+    """Return the last source-scoped background projection result."""
+
+    path = Path(db_path)
+    if not path.exists():
+        return None
+    conn = connect_sqlite_readonly(path)
+    try:
+        if not table_exists(conn, "flamp_transfer_state_scans"):
+            return None
+        row = conn.execute(
+            """
+            SELECT relay_dir, receive_dir, scan_success, file_count, error_text, scanned_ts
+            FROM flamp_transfer_state_scans
+            WHERE source_radio_id=? AND source_js8_instance_id=?
+            LIMIT 1
+            """,
+            (
+                str(source_radio_id or "").strip(),
+                str(source_js8_instance_id or "").strip(),
+            ),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    return {
+        "relay_dir": str(row[0] or ""),
+        "receive_dir": str(row[1] or ""),
+        "scan_success": bool(row[2]),
+        "file_count": int(row[3] or 0),
+        "error_text": str(row[4] or ""),
+        "scanned_ts": float(row[5] or 0.0),
+    }
+
+
+def list_flamp_transfer_index_statuses(
+    *, db_path: Path, limit: int = 100
+) -> List[Dict[str, object]]:
+    """Bounded status rows for FIO Spotter administration."""
+
+    path = Path(db_path)
+    if not path.exists():
+        return []
+    conn = connect_sqlite_readonly(path)
+    try:
+        if not table_exists(conn, "flamp_transfer_state_scans"):
+            return []
+        rows = conn.execute(
+            """
+            SELECT source_radio_id, source_js8_instance_id, relay_dir, receive_dir,
+                   scan_success, file_count, error_text, scanned_ts
+            FROM flamp_transfer_state_scans
+            ORDER BY scanned_ts DESC, source_radio_id, source_js8_instance_id
+            LIMIT ?
+            """,
+            (max(1, min(500, int(limit or 100))),),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        {
+            "source_radio_id": str(row[0] or ""),
+            "source_js8_instance_id": str(row[1] or ""),
+            "relay_dir": str(row[2] or ""),
+            "receive_dir": str(row[3] or ""),
+            "scan_success": bool(row[4]),
+            "file_count": int(row[5] or 0),
+            "error_text": str(row[6] or ""),
+            "scanned_ts": float(row[7] or 0.0),
+        }
+        for row in rows
+    ]
+
+
+def lookup_flamp_transfer_state(
+    q_id: object,
+    *,
+    db_path: Path,
+    source_radio_id: object = "",
+    source_js8_instance_id: object = "",
+) -> Optional[Dict[str, object]]:
+    canonical = str(q_id or "").strip().upper()
+    if not FlampRelayStore.VALID_Q_RE.fullmatch(canonical):
+        return None
+    conn = connect_sqlite_readonly(Path(db_path))
+    try:
+        if not table_exists(conn, "flamp_transfer_state"):
+            return None
+        row = conn.execute(
+            """
+            SELECT q_id, source_path, source_mtime_ns, source_size_bytes,
+                   source_sha256, transfer_filename, expected_file_size,
+                   completion_path, evidence_kind, total_blocks,
+                   available_blocks_json, missing_blocks_json, state, parser_confidence,
+                   observed_ts, validated_scan_ts, updated_ts
+            FROM flamp_transfer_state
+            WHERE q_id=? AND source_radio_id=? AND source_js8_instance_id=?
+            LIMIT 1
+            """,
+            (canonical, str(source_radio_id or "").strip(), str(source_js8_instance_id or "").strip()),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    try:
+        available = [int(item) for item in json.loads(str(row[10] or "[]"))]
+    except Exception:
+        available = []
+    try:
+        missing = [int(item) for item in json.loads(str(row[11] or "[]"))]
+    except Exception:
+        missing = []
+    return {
+        "q_id": str(row[0] or "").upper(),
+        "source_path": str(row[1] or ""),
+        "source_mtime_ns": int(row[2] or 0),
+        "source_size_bytes": int(row[3] or 0),
+        "source_sha256": str(row[4] or ""),
+        "transfer_filename": str(row[5] or ""),
+        "expected_file_size": int(row[6]) if row[6] is not None else None,
+        "completion_path": str(row[7] or ""),
+        "evidence_kind": str(row[8] or "relay_snapshot"),
+        "total_blocks": int(row[9]) if row[9] is not None else None,
+        "available_blocks": available,
+        "missing_blocks": missing,
+        "state": str(row[12] or "unavailable"),
+        "parser_confidence": float(row[13] or 0.0),
+        "observed_ts": float(row[14] or 0.0),
+        "validated_scan_ts": float(row[15] or 0.0),
+        "updated_ts": float(row[16] or 0.0),
+    }
 
 
 def _flamp_queue_files(store: FlampRelayStore) -> List[_VirtualFile]:
@@ -2405,6 +3375,7 @@ def _publish_root_action(
     now_ts: float,
     flamp_enabled: bool,
     reason: str,
+    manifest_db_path: object = "",
 ) -> VaultActionResult:
     publish_result = publish_root_view(
         sender=sender,
@@ -2417,8 +3388,9 @@ def _publish_root_action(
         managed_root=managed_root,
         flamp_enabled=flamp_enabled,
         include_enabled_fallback=True,
+        manifest_db_path=manifest_db_path,
     )
-    summary = f"Managed Vault published root menu for {sender or 'public'}."
+    summary = f"Managed BBS Library published root menu for {sender or 'public'}."
     next_state = _update_state(
         runtime_state,
         current_location_id=default_location_id,
@@ -2497,7 +3469,7 @@ def _publish_flamp_refresh_action(
                 managed_root=managed_root,
             )
             label = "FLAMP commands"
-            action_text = f"Managed Vault refreshed FLAMP command help for {sender or 'public'}."
+            action_text = f"Managed BBS Library refreshed FLAMP command help for {sender or 'public'}."
         elif mode in {"flamp-list", "flamp-queue"}:
             publish_result = publish_flamp_queue_list_view(
                 store,
@@ -2507,7 +3479,7 @@ def _publish_flamp_refresh_action(
                 max_age_days=flamp_listing_max_age_days,
             )
             label = "FLAMP queue"
-            action_text = f"Managed Vault refreshed FLAMP queue list for {sender or 'public'}."
+            action_text = f"Managed BBS Library refreshed FLAMP queue list for {sender or 'public'}."
         elif mode in {"flamp-block-list", "flamp-blocks"}:
             queue_id = _flamp_queue_from_view_label(state.current_view_label)
             if not queue_id:
@@ -2520,7 +3492,7 @@ def _publish_flamp_refresh_action(
                 managed_root=managed_root,
             )
             label = f"FLAMP {queue_id} blocks"
-            action_text = f"Managed Vault refreshed FLAMP block list {queue_id} for {sender or 'public'}."
+            action_text = f"Managed BBS Library refreshed FLAMP block list {queue_id} for {sender or 'public'}."
         elif mode == "flamp-block-overlay":
             queue_id, block_numbers = _flamp_overlay_request_from_state(state)
             if not queue_id or not block_numbers:
@@ -2533,7 +3505,7 @@ def _publish_flamp_refresh_action(
                 managed_root=managed_root,
             )
             label = f"FLAMP {queue_id}"
-            action_text = f"Managed Vault refreshed FLAMP overlay {overlay_file} for {sender or 'public'}."
+            action_text = f"Managed BBS Library refreshed FLAMP overlay {overlay_file} for {sender or 'public'}."
         else:
             return None
     except Exception as exc:
@@ -2551,7 +3523,7 @@ def _publish_flamp_refresh_action(
             current_view_label="FLAMP notice",
             last_publish_manifest_path=notice_result.manifest_path,
             last_publish_ts=now_ts,
-            last_action=f"Managed Vault refreshed FLAMP notice for {sender or 'public'}: {exc}",
+            last_action=f"Managed BBS Library refreshed FLAMP notice for {sender or 'public'}: {exc}",
             last_request_ts=now_ts,
             last_error=str(exc),
             unmanaged_live_files=list(notice_result.unmanaged_live_files),
@@ -2590,6 +3562,7 @@ def _publish_refresh_action(
     now_ts: float,
     flamp_enabled: bool,
     reason: str,
+    manifest_db_path: object = "",
 ) -> VaultActionResult:
     state = load_vault_runtime_state(vault_runtime_state_to_data(runtime_state))
     sender_norm = _normalize_callsign(sender)
@@ -2614,6 +3587,7 @@ def _publish_refresh_action(
             now_ts=now_ts,
             flamp_enabled=flamp_enabled,
             reason=reason,
+            manifest_db_path=manifest_db_path,
         )
     current_location = _location_by_id(locations, state.current_location_id)
     if current_location is None or not current_location.enabled:
@@ -2631,6 +3605,7 @@ def _publish_refresh_action(
             now_ts=now_ts,
             flamp_enabled=flamp_enabled,
             reason=reason,
+            manifest_db_path=manifest_db_path,
         )
     if state.current_view_mode == "access-prompt":
         prompt_reason = "code_required"
@@ -2645,8 +3620,9 @@ def _publish_refresh_action(
             live_bbs_dir=live_bbs_dir,
             managed_root=managed_root,
             reason=prompt_reason,
+            manifest_db_path=manifest_db_path,
         )
-        summary = f"Managed Vault refreshed access prompt for {current_location.name}."
+        summary = f"Managed BBS Library refreshed access prompt for {current_location.name}."
         next_state = _update_state(
             state,
             current_location_id=current_location.id,
@@ -2673,8 +3649,13 @@ def _publish_refresh_action(
             },
         )
         return VaultActionResult("refresh_access_prompt", True, summary, next_state, publish_result=publish_result)
-    publish_result = publish_location_view(current_location, live_bbs_dir=live_bbs_dir, managed_root=managed_root)
-    summary = f"Managed Vault refreshed {current_location.name} for {sender_norm or 'public'}."
+    publish_result = publish_location_view(
+        current_location,
+        live_bbs_dir=live_bbs_dir,
+        managed_root=managed_root,
+        manifest_db_path=manifest_db_path,
+    )
+    summary = f"Managed BBS Library refreshed {current_location.name} for {sender_norm or 'public'}."
     next_state = _update_state(
         state,
         current_location_id=current_location.id,
@@ -2718,6 +3699,7 @@ def apply_unlock_request(
     failed_attempt_limit: int = DEFAULT_FAILED_ATTEMPT_LIMIT,
     failed_attempt_window_seconds: int = DEFAULT_FAILED_ATTEMPT_WINDOW_SECONDS,
     cooldown_seconds: int = DEFAULT_COOLDOWN_SECONDS,
+    manifest_db_path: object = "",
 ) -> VaultActionResult:
     return _apply_open_request(
         sender=sender,
@@ -2738,6 +3720,7 @@ def apply_unlock_request(
         cooldown_seconds=cooldown_seconds,
         global_code_policy=DEFAULT_GLOBAL_CODE_POLICY,
         action_reason="legacy_code_open",
+        manifest_db_path=manifest_db_path,
     )
 
 
@@ -2756,12 +3739,14 @@ def _access_prompt_result(
     reason: str,
     cooldowns: Mapping[str, Mapping[str, float]],
     failed_attempts: Mapping[str, Sequence[float]],
+    manifest_db_path: object = "",
 ) -> VaultActionResult:
     publish_result = publish_location_access_prompt_view(
         location,
         live_bbs_dir=live_bbs_dir,
         managed_root=managed_root,
         reason=reason,
+        manifest_db_path=manifest_db_path,
     )
     next_state = _update_state(
         state,
@@ -2815,17 +3800,18 @@ def _apply_open_request(
     cooldown_seconds: int,
     global_code_policy: str,
     action_reason: str,
+    manifest_db_path: object = "",
 ) -> VaultActionResult:
     now_ts = float(now_ts if now_ts is not None else time.time())
     sender = _normalize_callsign(sender)
     code_text = _normalize_access_code_text(code_text)
     state = load_vault_runtime_state(vault_runtime_state_to_data(runtime_state))
     if not sender:
-        summary = "Managed Vault ignored request with no identifiable callsign."
+        summary = "Managed BBS Library ignored request with no identifiable callsign."
         return VaultActionResult("ignored_no_sender", False, summary, state)
 
     if state.current_session_qso_guid and qso_guid and state.current_session_qso_guid != qso_guid and state.current_session_callsign:
-        summary = f"Managed Vault session is locked to {state.current_session_callsign}."
+        summary = f"Managed BBS Library session is locked to {state.current_session_callsign}."
         return VaultActionResult("session_locked", False, summary, _update_state(state, last_action=summary, last_error="session_locked"))
 
     cooldowns = {str(key): dict(value) for key, value in state.cooldowns.items()}
@@ -2833,7 +3819,7 @@ def _apply_open_request(
     until_ts = float(current_cooldown.get("until_ts", 0.0) or 0.0)
     if until_ts > now_ts:
         remaining = int(max(1.0, until_ts - now_ts))
-        summary = f"Managed Vault cooldown active for {sender} ({remaining}s remaining)."
+        summary = f"Managed BBS Library cooldown active for {sender} ({remaining}s remaining)."
         if requested_location is not None:
             return _access_prompt_result(
                 state=state,
@@ -2849,6 +3835,7 @@ def _apply_open_request(
                 reason="cooldown",
                 cooldowns=cooldowns,
                 failed_attempts={str(key): list(value) for key, value in state.failed_attempts.items()},
+                manifest_db_path=manifest_db_path,
             )
         return VaultActionResult("cooldown_active", False, summary, _update_state(state, last_action=summary, last_error="cooldown_active"))
 
@@ -2881,14 +3868,14 @@ def _apply_open_request(
         sender_attempts.append(now_ts)
         failed_attempts[sender] = sender_attempts
         action = "invalid_code"
-        summary = f"Managed Vault rejected access request from {sender}."
+        summary = f"Managed BBS Library rejected access request from {sender}."
         if len(sender_attempts) >= max(1, int(failed_attempt_limit)):
             cooldowns[sender] = {
                 "until_ts": now_ts + max(1, int(cooldown_seconds)),
                 "reason": "failed_attempt_limit",
             }
             action = "cooldown_applied"
-            summary = f"Managed Vault rejected access request from {sender}; cooldown applied."
+            summary = f"Managed BBS Library rejected access request from {sender}; cooldown applied."
         next_state = _update_state(
             state,
             cooldowns=cooldowns,
@@ -2914,7 +3901,7 @@ def _apply_open_request(
         global_allowed_callsigns=global_allowed_callsigns,
         limit_access_enabled=limit_access_enabled,
     ):
-        summary = f"Managed Vault rejected {sender}; callsign is not allowed for {matched_location.name}."
+        summary = f"Managed BBS Library rejected {sender}; callsign is not allowed for {matched_location.name}."
         return _access_prompt_result(
             state=state,
             location=matched_location,
@@ -2929,6 +3916,7 @@ def _apply_open_request(
             reason="callsign_restricted",
             cooldowns=cooldowns,
             failed_attempts=failed_attempts,
+            manifest_db_path=manifest_db_path,
         )
 
     if (
@@ -2943,7 +3931,7 @@ def _apply_open_request(
         ):
             sender_attempts.append(now_ts)
             failed_attempts[sender] = sender_attempts
-            summary = f"Managed Vault rejected access code for {matched_location.name} from {sender}."
+            summary = f"Managed BBS Library rejected access code for {matched_location.name} from {sender}."
             action = "invalid_code" if code_text else "missing_code"
             if len(sender_attempts) >= max(1, int(failed_attempt_limit)):
                 cooldowns[sender] = {
@@ -2951,7 +3939,7 @@ def _apply_open_request(
                     "reason": "failed_attempt_limit",
                 }
                 action = "cooldown_applied"
-                summary = f"Managed Vault rejected access code for {matched_location.name} from {sender}; cooldown applied."
+                summary = f"Managed BBS Library rejected access code for {matched_location.name} from {sender}; cooldown applied."
             return _access_prompt_result(
                 state=state,
                 location=matched_location,
@@ -2970,12 +3958,18 @@ def _apply_open_request(
                 ),
                 cooldowns=cooldowns,
                 failed_attempts=failed_attempts,
+                manifest_db_path=manifest_db_path,
             )
 
-    publish_result = publish_location_view(matched_location, live_bbs_dir=live_bbs_dir, managed_root=managed_root)
+    publish_result = publish_location_view(
+        matched_location,
+        live_bbs_dir=live_bbs_dir,
+        managed_root=managed_root,
+        manifest_db_path=manifest_db_path,
+    )
     failed_attempts.pop(sender, None)
     cooldowns.pop(sender, None)
-    summary = f"Managed Vault published {matched_location.name} for {sender}."
+    summary = f"Managed BBS Library published {matched_location.name} for {sender}."
     next_state = _update_state(
         state,
         current_location_id=matched_location.id,
@@ -3020,6 +4014,7 @@ def reset_to_default_location(
     flamp_enabled: bool = False,
     reason: str = "manual_reset",
     now_ts: Optional[float] = None,
+    manifest_db_path: object = "",
 ) -> VaultActionResult:
     now_ts = float(now_ts if now_ts is not None else time.time())
     state = load_vault_runtime_state(vault_runtime_state_to_data(runtime_state))
@@ -3034,8 +4029,9 @@ def reset_to_default_location(
         managed_root=managed_root,
         flamp_enabled=flamp_enabled,
         include_enabled_fallback=True,
+        manifest_db_path=manifest_db_path,
     )
-    summary = f"Managed Vault returned to {DEFAULT_LOCATION_NAME}."
+    summary = f"Managed BBS Library returned to {DEFAULT_LOCATION_NAME}."
     next_state = _update_state(
         state,
         current_location_id=default_location_id,
@@ -3076,6 +4072,7 @@ def _restore_previous_view(
     flamp_enabled: bool,
     now_ts: Optional[float] = None,
     reason: str = "overlay_restore",
+    manifest_db_path: object = "",
 ) -> VaultActionResult:
     now_ts = float(now_ts if now_ts is not None else time.time())
     if runtime_state.previous_view_mode == "location":
@@ -3093,9 +4090,15 @@ def _restore_previous_view(
                 flamp_enabled=flamp_enabled,
                 reason=reason,
                 now_ts=now_ts,
+                manifest_db_path=manifest_db_path,
             )
-        publish_result = publish_location_view(location, live_bbs_dir=live_bbs_dir, managed_root=managed_root)
-        summary = f"Managed Vault restored {location.name} after FLAMP overlay."
+        publish_result = publish_location_view(
+            location,
+            live_bbs_dir=live_bbs_dir,
+            managed_root=managed_root,
+            manifest_db_path=manifest_db_path,
+        )
+        summary = f"Managed BBS Library restored {location.name} after FLAMP overlay."
         next_state = _update_state(
             runtime_state,
             current_location_id=location.id,
@@ -3127,6 +4130,7 @@ def _restore_previous_view(
         now_ts=now_ts,
         flamp_enabled=flamp_enabled,
         reason=reason,
+        manifest_db_path=manifest_db_path,
     )
 
 
@@ -3142,13 +4146,19 @@ def _reconcile_current_location(
     limit_access_enabled: bool,
     global_code_policy: str,
     flamp_enabled: bool,
+    manifest_db_path: object = "",
 ) -> Tuple[VaultRuntimeState, bool]:
     try:
         if runtime_state.current_view_mode == "location":
             current_location = _location_by_id(locations, runtime_state.current_location_id)
             if current_location is None or not current_location.enabled:
                 return runtime_state, False
-            publish_result = publish_location_view(current_location, live_bbs_dir=live_bbs_dir, managed_root=managed_root)
+            publish_result = publish_location_view(
+                current_location,
+                live_bbs_dir=live_bbs_dir,
+                managed_root=managed_root,
+                manifest_db_path=manifest_db_path,
+            )
         elif runtime_state.current_view_mode == "access-prompt":
             current_location = _location_by_id(locations, runtime_state.current_location_id)
             if current_location is None or not current_location.enabled:
@@ -3165,6 +4175,7 @@ def _reconcile_current_location(
                 live_bbs_dir=live_bbs_dir,
                 managed_root=managed_root,
                 reason=prompt_reason,
+                manifest_db_path=manifest_db_path,
             )
         elif runtime_state.current_view_mode == "flamp-block-overlay":
             overlay_name = str(runtime_state.current_overlay_file or "").strip()
@@ -3191,14 +4202,14 @@ def _reconcile_current_location(
                             current_overlay_file=refreshed_overlay,
                             last_publish_manifest_path=publish_result.manifest_path,
                             last_publish_ts=time.time(),
-                            last_action=f"Managed Vault restored FLAMP overlay {refreshed_overlay}.",
+                            last_action=f"Managed BBS Library restored FLAMP overlay {refreshed_overlay}.",
                             last_error="",
                             unmanaged_live_files=list(publish_result.unmanaged_live_files),
                         )
                         return next_state, bool(publish_result.changed)
                     next_state = _update_state(
                         runtime_state,
-                        last_action=f"Managed Vault is keeping FLAMP overlay {overlay_name} active, but it could not be recreated.",
+                        last_action=f"Managed BBS Library is keeping FLAMP overlay {overlay_name} active, but it could not be recreated.",
                         last_error="FLAMP overlay source unavailable",
                     )
                     return next_state, False
@@ -3217,9 +4228,10 @@ def _reconcile_current_location(
                 managed_root=managed_root,
                 flamp_enabled=flamp_enabled,
                 include_enabled_fallback=True,
+                manifest_db_path=manifest_db_path,
             )
     except Exception as exc:
-        summary = f"Managed Vault degraded: {exc}"
+        summary = f"Managed BBS Library degraded: {exc}"
         next_state = _update_state(runtime_state, last_action=summary, last_error=str(exc))
         return next_state, False
     next_state = _update_state(
@@ -3232,7 +4244,7 @@ def _reconcile_current_location(
 
 
 def _summary_text(runtime_state: VaultRuntimeState) -> str:
-    summary = f"Managed Vault {runtime_state.current_view_label or DEFAULT_LOCATION_NAME}"
+    summary = f"Managed BBS Library {runtime_state.current_view_label or DEFAULT_LOCATION_NAME}"
     if runtime_state.current_session_callsign:
         summary += f" | Session {runtime_state.current_session_callsign}"
     if runtime_state.current_view_mode == "flamp-block-overlay":
@@ -3248,51 +4260,151 @@ def _summary_text(runtime_state: VaultRuntimeState) -> str:
     return summary
 
 
+def _station_catalog_vault_configuration(
+    db_path: object,
+    fallback_locations: Sequence[VaultLocation],
+) -> tuple[List[VaultLocation], Dict[str, str]]:
+    """Load station-owned location policy without scanning source folders."""
+
+    resolved = _resolve_path(db_path)
+    if resolved is None:
+        return list(fallback_locations), {}
+    try:
+        with connect_sqlite(resolved) as conn:
+            ensure_bbs_library_schema(conn)
+            records = list_bbs_locations(conn, include_disabled=True)
+            meta_rows = conn.execute(
+                "SELECT key, value FROM bbs_library_meta WHERE key LIKE 'station_%' OR key='global_retention_days'"
+            ).fetchall()
+    except Exception as exc:
+        log_bbs_library_sync_failure(exc)
+        return list(fallback_locations), {}
+    if not records:
+        return list(fallback_locations), {str(key or ""): str(value or "") for key, value in meta_rows}
+    location_data: List[Dict[str, object]] = []
+    for record in records:
+        payload = dict(record.metadata or {})
+        payload.update(
+            {
+                "id": record.location_id,
+                "name": record.name,
+                "source_dir": record.source_dir,
+                "enabled": record.enabled,
+                "open_rule": record.access_rule,
+                "visibility_rule": payload.get("visibility_rule", "Public"),
+                "retention_policy": {
+                    "manual": "Keep until manually removed",
+                    "expire_after_days": "Archive this location by age",
+                }.get(record.retention_mode, "Use global BBS archive policy"),
+                "retention_days": record.retention_days,
+            }
+        )
+        location_data.append(payload)
+    return load_vault_locations(location_data), {
+        str(key or ""): str(value or "") for key, value in meta_rows
+    }
+
+
+def _explicit_catalog_db_path(settings: object) -> object:
+    """Return only a database identity carried by this runtime settings object."""
+
+    current = settings
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        for attr in ("db_path", "_config_path"):
+            value = getattr(current, attr, None)
+            if value:
+                return value
+        current = getattr(current, "fallback_settings", None)
+    return ""
+
+
 def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
     enabled = bool(settings.get("varac_bbs_vault_enabled", False) if settings is not None else False)
     if not enabled:
-        return VaracBbsVaultRunResult(False, 0, 0, False, DEFAULT_LOCATION_ID, "", "Managed Vault disabled")
+        return VaracBbsVaultRunResult(False, 0, 0, False, DEFAULT_LOCATION_ID, "", "Managed BBS Library disabled")
 
     live_bbs_dir = str(settings.get("varac_bbs_dir", "") or "").strip() if settings is not None else ""
     managed_root = compute_default_managed_root(live_bbs_dir)
-    default_location_id = str(settings.get("varac_bbs_vault_default_location_id", DEFAULT_LOCATION_ID) or DEFAULT_LOCATION_ID).strip() or DEFAULT_LOCATION_ID
     trigger_mode = DEFAULT_TRIGGER_MODE
     return_mode = DEFAULT_RETURN_MODE
     failed_attempt_limit = int(settings.get("varac_bbs_vault_failed_attempt_limit", DEFAULT_FAILED_ATTEMPT_LIMIT) or DEFAULT_FAILED_ATTEMPT_LIMIT)
     failed_attempt_window_seconds = int(settings.get("varac_bbs_vault_failed_attempt_window_seconds", DEFAULT_FAILED_ATTEMPT_WINDOW_SECONDS) or DEFAULT_FAILED_ATTEMPT_WINDOW_SECONDS)
     cooldown_seconds = int(settings.get("varac_bbs_vault_cooldown_seconds", DEFAULT_COOLDOWN_SECONDS) or DEFAULT_COOLDOWN_SECONDS)
-    global_code_policy = DEFAULT_GLOBAL_CODE_POLICY
     flamp_enabled = bool(settings.get("varac_bbs_vault_flamp_enabled", False) if settings is not None else False)
     flamp_relay_dir = str(settings.get("varac_bbs_vault_flamp_relay_dir", "") or "").strip() if settings is not None else ""
     flamp_listing_max_age_days = int(
         settings.get("varac_bbs_vault_flamp_listing_max_age_days", DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS)
         or DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS
     )
-    locations = load_vault_locations(settings.get("varac_bbs_vault_locations_v1", []))
+    legacy_locations = load_vault_locations(settings.get("varac_bbs_vault_locations_v1", []))
+    # Lightweight/legacy callers without an explicit catalog identity remain
+    # on the folder-backed contract.  They must never borrow the operator's
+    # process-global station database by accident.
+    manifest_db_path = _explicit_catalog_db_path(settings)
+    locations, station_meta = _station_catalog_vault_configuration(manifest_db_path, legacy_locations)
+    default_location_id = str(
+        station_meta.get("station_default_location_id")
+        or settings.get("varac_bbs_vault_default_location_id", DEFAULT_LOCATION_ID)
+        or DEFAULT_LOCATION_ID
+    ).strip() or DEFAULT_LOCATION_ID
+    global_code_policy = str(
+        station_meta.get("station_global_code_policy") or DEFAULT_GLOBAL_CODE_POLICY
+    ).strip() or DEFAULT_GLOBAL_CODE_POLICY
     runtime_state = load_vault_runtime_state(settings.get("varac_bbs_vault_runtime_state_v1", {}))
     initial_state_data = vault_runtime_state_to_data(runtime_state)
     initial_unmanaged_live_files = tuple(runtime_state.unmanaged_live_files)
-    global_allowed = parse_callsign_list(settings.get("varac_bbs_allowed_callsigns", "") if settings is not None else "")
-    limit_access_enabled = bool(settings.get("varac_bbs_limit_access_enabled", False) if settings is not None else False)
+    global_allowed = parse_callsign_list(
+        station_meta.get("station_allowed_callsigns")
+        or (settings.get("varac_bbs_allowed_callsigns", "") if settings is not None else "")
+    )
+    if "station_limit_access_enabled" in station_meta:
+        limit_access_enabled = station_meta.get("station_limit_access_enabled") == "1"
+    else:
+        limit_access_enabled = bool(
+            settings.get("varac_bbs_limit_access_enabled", False) if settings is not None else False
+        )
 
     if not live_bbs_dir or not managed_root or not locations:
-        summary = "Managed Vault needs setup before it can run."
+        summary = "Managed BBS Library needs setup before it can run."
         _persist_runtime_state(settings, runtime_state, summary)
         return VaracBbsVaultRunResult(True, 0, 0, False, runtime_state.current_location_id, runtime_state.current_session_callsign, summary)
 
     try:
         initialize_managed_root(managed_root)
     except Exception as exc:
-        summary = f"Managed Vault initialization failed: {exc}"
+        summary = f"Managed BBS Library initialization failed: {exc}"
         error_state = _update_state(runtime_state, last_action=summary, last_error=str(exc))
         _persist_runtime_state(settings, error_state, summary)
         return VaracBbsVaultRunResult(True, 0, 0, False, error_state.current_location_id, error_state.current_session_callsign, summary)
+
+    try:
+        sync_bbs_locations_from_folders(
+            manifest_db_path,
+            [
+                {
+                    "id": location.id,
+                    "name": location.name,
+                    "source_dir": _effective_location_source_dir(location, managed_root),
+                    "enabled": location.enabled,
+                    "alias": location.alias,
+                    "visibility_rule": location.visibility_rule,
+                    "open_rule": location.open_rule,
+                    "retention_policy": location.retention_policy,
+                    "retention_days": location.retention_days,
+                }
+                for location in locations
+            ],
+        )
+    except Exception as exc:
+        log_bbs_library_sync_failure(exc)
 
     alias_map, alias_collisions = _build_alias_map(locations, default_location_id=default_location_id)
     _record_alias_health(alias_collisions)
     if alias_collisions:
         collision_text = ", ".join(sorted(set(alias_collisions)))
-        summary = f"Managed Vault alias collision ignored for: {collision_text}"
+        summary = f"Managed BBS Library alias collision ignored for: {collision_text}"
         log.warning("varac_bbs_vault: %s", summary)
         runtime_state = _update_state(runtime_state, last_action=summary, last_error="alias_collision")
     varac_db_path = _resolve_varac_db_path(settings)
@@ -3302,7 +4414,10 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
     now_ts = time.time()
 
     if not runtime_state.last_publish_manifest_path:
-        runtime_state = _update_state(runtime_state, last_publish_manifest_path=str(_manifest_path_for(managed_root)))
+        runtime_state = _update_state(
+            runtime_state,
+            last_publish_manifest_path=str(_manifest_path_for(managed_root, live_bbs_dir)),
+        )
 
     configured_local_calls = [
         settings.get("operator_callsign", "") if settings is not None else "",
@@ -3355,6 +4470,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         flamp_enabled=flamp_enabled,
                         reason="disconnect",
                         now_ts=event.timestamp_utc or now_ts,
+                        manifest_db_path=manifest_db_path,
                     )
                     runtime_state = result.runtime_state
                     published = published or bool(result.publish_result and result.publish_result.changed)
@@ -3363,7 +4479,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         runtime_state,
                         current_session_callsign="",
                         current_session_qso_guid="",
-                        last_action="Managed Vault session disconnected.",
+                        last_action="Managed BBS Library session disconnected.",
                     )
                 processed += 1
             continue
@@ -3408,6 +4524,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                     now_ts=event.timestamp_utc or now_ts,
                     flamp_enabled=flamp_enabled,
                     reason="root_request",
+                    manifest_db_path=manifest_db_path,
                 )
             runtime_state = result.runtime_state
             published = published or bool(result.publish_result and result.publish_result.changed)
@@ -3428,6 +4545,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                 now_ts=event.timestamp_utc or now_ts,
                 flamp_enabled=flamp_enabled,
                 reason="root_return",
+                manifest_db_path=manifest_db_path,
             )
             runtime_state = result.runtime_state
             published = published or bool(result.publish_result and result.publish_result.changed)
@@ -3453,6 +4571,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                 cooldown_seconds=cooldown_seconds,
                 global_code_policy=global_code_policy,
                 action_reason="legacy_code_open",
+                manifest_db_path=manifest_db_path,
             )
             runtime_state = result.runtime_state
             published = published or bool(result.publish_result and result.publish_result.changed)
@@ -3479,6 +4598,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                 cooldown_seconds=cooldown_seconds,
                 global_code_policy=global_code_policy,
                 action_reason="open_alias",
+                manifest_db_path=manifest_db_path,
             )
             runtime_state = result.runtime_state
             published = published or bool(result.publish_result and result.publish_result.changed)
@@ -3501,7 +4621,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                     current_view_label="FLAMP commands",
                     last_publish_manifest_path=publish_result.manifest_path,
                     last_publish_ts=event.timestamp_utc or now_ts,
-                    last_action=f"Managed Vault published FLAMP command help for {event.remote_callsign}.",
+                    last_action=f"Managed BBS Library published FLAMP command help for {event.remote_callsign}.",
                     last_request_ts=event.timestamp_utc or now_ts,
                     last_error="",
                     unmanaged_live_files=list(publish_result.unmanaged_live_files),
@@ -3529,7 +4649,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                     current_view_label=f"FLAMP {DEFAULT_LOCATION_NAME}",
                     last_publish_manifest_path=publish_result.manifest_path,
                     last_publish_ts=event.timestamp_utc or now_ts,
-                    last_action=f"Managed Vault published FLAMP queue list for {event.remote_callsign}.",
+                    last_action=f"Managed BBS Library published FLAMP queue list for {event.remote_callsign}.",
                     last_request_ts=event.timestamp_utc or now_ts,
                     last_error="",
                     unmanaged_live_files=list(publish_result.unmanaged_live_files),
@@ -3558,7 +4678,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         current_view_label=f"FLAMP {event.queue_id}",
                         last_publish_manifest_path=publish_result.manifest_path,
                         last_publish_ts=event.timestamp_utc or now_ts,
-                        last_action=f"Managed Vault published FLAMP block list {event.queue_id} for {event.remote_callsign}.",
+                        last_action=f"Managed BBS Library published FLAMP block list {event.queue_id} for {event.remote_callsign}.",
                         last_request_ts=event.timestamp_utc or now_ts,
                         last_error="",
                         unmanaged_live_files=list(publish_result.unmanaged_live_files),
@@ -3638,7 +4758,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                     current_overlay_file=overlay_name,
                     last_publish_manifest_path=publish_result.manifest_path,
                     last_publish_ts=event.timestamp_utc or now_ts,
-                    last_action=f"Managed Vault published FLAMP overlay {overlay_name} for {event.remote_callsign}.",
+                    last_action=f"Managed BBS Library published FLAMP overlay {overlay_name} for {event.remote_callsign}.",
                     last_request_ts=event.timestamp_utc or now_ts,
                     last_error="",
                     unmanaged_live_files=list(publish_result.unmanaged_live_files),
@@ -3689,6 +4809,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         now_ts=event.timestamp_utc or now_ts,
                         flamp_enabled=flamp_enabled,
                         reason="log_root_request",
+                        manifest_db_path=manifest_db_path,
                     )
                 runtime_state = result.runtime_state
                 published = published or bool(result.publish_result and result.publish_result.changed)
@@ -3713,6 +4834,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                     cooldown_seconds=cooldown_seconds,
                     global_code_policy=global_code_policy,
                     action_reason="legacy_code_open",
+                    manifest_db_path=manifest_db_path,
                 )
                 runtime_state = result.runtime_state
                 published = published or bool(result.publish_result and result.publish_result.changed)
@@ -3738,6 +4860,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                     cooldown_seconds=cooldown_seconds,
                     global_code_policy=global_code_policy,
                     action_reason="log_open_alias",
+                    manifest_db_path=manifest_db_path,
                 )
                 runtime_state = result.runtime_state
                 published = published or bool(result.publish_result and result.publish_result.changed)
@@ -3757,6 +4880,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                     now_ts=event.timestamp_utc or now_ts,
                     flamp_enabled=flamp_enabled,
                     reason="log_root_return",
+                    manifest_db_path=manifest_db_path,
                 )
                 runtime_state = result.runtime_state
                 published = published or bool(result.publish_result and result.publish_result.changed)
@@ -3780,7 +4904,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         current_view_label="FLAMP commands",
                         last_publish_manifest_path=publish_result.manifest_path,
                         last_publish_ts=event.timestamp_utc or now_ts,
-                        last_action=f"Managed Vault published FLAMP command help for {event.sender}.",
+                        last_action=f"Managed BBS Library published FLAMP command help for {event.sender}.",
                         last_request_ts=event.timestamp_utc or now_ts,
                         last_error="",
                         unmanaged_live_files=list(publish_result.unmanaged_live_files),
@@ -3809,7 +4933,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         current_view_label="FLAMP queue",
                         last_publish_manifest_path=publish_result.manifest_path,
                         last_publish_ts=event.timestamp_utc or now_ts,
-                        last_action=f"Managed Vault published FLAMP queue list for {event.sender}.",
+                        last_action=f"Managed BBS Library published FLAMP queue list for {event.sender}.",
                         last_request_ts=event.timestamp_utc or now_ts,
                         last_error="",
                         unmanaged_live_files=list(publish_result.unmanaged_live_files),
@@ -3838,7 +4962,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         current_view_label=f"FLAMP {event.queue_id} blocks",
                         last_publish_manifest_path=publish_result.manifest_path,
                         last_publish_ts=event.timestamp_utc or now_ts,
-                        last_action=f"Managed Vault published FLAMP block list {event.queue_id} for {event.sender}.",
+                        last_action=f"Managed BBS Library published FLAMP block list {event.queue_id} for {event.sender}.",
                         last_request_ts=event.timestamp_utc or now_ts,
                         last_error="",
                         unmanaged_live_files=list(publish_result.unmanaged_live_files),
@@ -3917,7 +5041,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         current_overlay_file=overlay_name,
                         last_publish_manifest_path=publish_result.manifest_path,
                         last_publish_ts=event.timestamp_utc or now_ts,
-                        last_action=f"Managed Vault published FLAMP overlay {overlay_name} for {event.sender}.",
+                        last_action=f"Managed BBS Library published FLAMP overlay {overlay_name} for {event.sender}.",
                         last_request_ts=event.timestamp_utc or now_ts,
                         last_error="",
                         unmanaged_live_files=list(publish_result.unmanaged_live_files),
@@ -3936,6 +5060,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         runtime_state=runtime_state,
                         reason="disconnect",
                         now_ts=event.timestamp_utc or now_ts,
+                        manifest_db_path=manifest_db_path,
                     )
                     runtime_state = result.runtime_state
                     published = published or bool(result.publish_result and result.publish_result.changed)
@@ -3958,6 +5083,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
         limit_access_enabled=limit_access_enabled,
         global_code_policy=global_code_policy,
         flamp_enabled=flamp_enabled,
+        manifest_db_path=manifest_db_path,
     )
     published = published or reconciled
 

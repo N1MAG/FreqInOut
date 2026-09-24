@@ -1,79 +1,52 @@
 # Changelog
 
+## [2.0.0]
+- Added: Multi-radio operation with profile-scoped radio runtime configuration, launch control, health monitoring, and JS8/Fast Light path handling. One-radio stations remain fully supported.
+- Changed: FreqInOut 2.0 is distributed as a source installation for Windows, macOS, and Linux. No 2.0 executable or signed application bundle is currently published.
+- Changed: Existing 1.2.8 single-radio profiles are offered an explicit, backup-first conversion into the 2.0 default-radio model. Operators should retain the verified backup and expect to review or rebuild affected companion-application settings if their station differs from the rehearsed upgrade path.
+- Added: Map intelligence now includes Regional Intel heat-map behavior, focused path rendering, station/report action panels, CommStat reported-for/reported-by handling, and map-to-Messages handoff.
+- Changed: Map now opens in one reusable nonmodal window so operators can keep it visible while working elsewhere in FIO; its validated normal placement and maximized state persist without changing the main window, and closing Map hides it for fast reuse.
+- Added: Map now provides a persistent `Show FIO` action, and station-detail Inbox/Compose actions bring the existing main window forward after navigation without closing, moving, or resizing Map.
+- Changed: Replaced the Chromium/WebEngine/Leaflet Map surface with one native Qt Quick and Qt Location renderer. The renderer is built in its final hidden parent before the Map window is shown, uses bounded worker-built overlays, and updates the existing surface without browser navigation or JavaScript handoffs.
+- Changed: The native Map now uses a provider-free offline coordinate canvas with bundled US, Canadian, and Mexican vector geography; it never requests map tiles, an API key, or network access.
+- Fixed: First Map launch no longer creates a browser native surface after the window is visible, eliminating the known flash, swipe, monitor jump, and window reconstruction path on macOS, Linux, and Windows.
+- Fixed: Native Map wheel/button/pinch zoom, drag panning, marker selection, and polygon detail actions now preserve the established Map interaction model without transporting recursive QML objects into Python.
+- Fixed: Native Map FEMA Regions, state labels, five-band SNR path colors, SitRep/Regional status colors, and data-aware legend now retain the proven layer meanings; crowded city labels are deterministically suppressed until zoom provides room.
+- Fixed: The native Map now shows the production SitRep station-pin key, keeps View/Topic/Group/Age together when space permits, constrains the Age chooser to its active screen, and reveals the native scene only after its first complete projection.
+- Fixed: `Show FIO` and Map station-detail handoffs now queue main-window presentation outside the originating Qt button signal, preventing the macOS/PySide re-entrant signal-connection deadlock observed from the direct toolbar action.
+- Fixed: Switching Light and Dark themes now updates the open Map canvas, selected-station detail, Map chrome, and Settings navigation from one shared palette without moving a window or rebuilding Map data.
+- Fixed: Message and map topic filtering no longer treats status labels such as `Power: Not Reported` as real topic evidence while preserving real reports such as outages or contaminated water.
+- Changed: Launch Control now presents configured supported apps and custom tools through one operator-facing software surface with Monitor Health, Launch at Startup, Start/Stop, and Status behavior.
+- Changed: Station Health and readiness guidance now better reflect multi-radio operating environments and the difference between monitored apps and manually managed tools.
+
 ## [1.2.8]
 - Changed: Station Health now shows one latest scheduler success plus an issue log instead of repeating routine already-applied scheduler checks.
 - Changed: Informational scheduler holds and old transient FLDigi busy-check diagnostics no longer count as active station responsiveness issues.
 - Fixed: ControlFreq now colors the `FLMsg / FLAmp` message-summary row consistently with other rows, highlighting only when new files are present.
-
-## [1.2.7.9]
+- Fixed: Routine companion-app detection now uses one thread-safe shared process inventory instead of independent scheduler, JS8Call, VarAC, and executable-path scans, reducing repeated Linux `/proc` reads and idle CPU activity.
+- Fixed: Process discovery now recognizes Windows-style command paths on Linux, improving VarAC and other Wine-launched companion detection without requiring repeated process scans.
 - Fixed: JS8Call scheduler and status checks now share one process-global JS8Net connection instead of starting new RX, TX, and heartbeat threads from each short-lived client, preventing thread count and CPU use from climbing over time.
 - Changed: VarAC Managed BBS Vault full reconciliation now adapts from active five-second checks to 30-second and two-minute idle checks while a lightweight five-second activity signature still wakes it promptly when files, logs, or settings change.
 - Fixed: Unchanged Managed BBS publish manifests and runtime state are no longer rewritten on every idle vault run, reducing repeated directory scans and SQLite WAL writes on Linux stations.
 
-## [1.2.7.8]
-- Fixed: Routine companion-app detection now uses one thread-safe shared process inventory instead of independent scheduler, JS8Call, VarAC, and executable-path scans, reducing repeated Linux `/proc` reads and idle CPU activity.
-- Fixed: Process discovery now recognizes Windows-style command paths on Linux, improving VarAC and other Wine-launched companion detection without requiring repeated process scans.
-- Changed: Scheduler process guards now reuse the same five-second cached status inventory as other FIO status consumers while actual schedule control remains authoritative through API calls and readback.
-
-## [1.2.7.7]
-- Fixed: Scheduler status and control worker timeouts no longer abandon blocked executor threads and create replacements, preventing an external dependency stall from growing FIO to thousands of threads and sustained high CPU use.
-- Changed: A truly stuck scheduler worker now remains bounded, is reported through Station Health, and asks the operator to restart the unresponsive companion app or FIO instead of attempting unsafe in-process thread replacement.
-
-## [1.2.7.6]
-- Fixed: FIO no longer scans the FLDigi log as part of routine scheduler status polling, reducing unnecessary idle CPU activity in both FIO and FLDigi.
-- Changed: FLDigi receive-busy checks are now demand-driven and run only while an HF/SOP scheduled frequency change is waiting to take control. Busy transitions continue to recheck every 5 seconds and retain the authoritative 3-minute breakaway.
-- Changed: The long-lived FLDigi log status reader now keeps an incremental file offset and bounds first or reset reads to the recent log tail.
-- Removed: The hidden, unused FLDigi NCS log-assisted intake path and parser are retired.
-
-## [1.2.7.5]
-- Added: Routine app/status polling now uses a shared dependency status service, so Settings and ControlFreq read cached worker-built snapshots instead of each tab repeatedly probing JS8Call, FLRig, and FLDigi from the UI path.
-- Changed: Launch readiness monitoring is more relaxed and operator-friendly, checking every 2 seconds for the first 30 seconds and every 5 seconds after that with a 90-second default timeout for slower JS8Call starts.
-- Fixed: Status indicator rows are no longer rebuilt on every visible timer tick when the visible program set has not changed.
-
-## [1.2.7.4]
-- Fixed: Python 3.9 installs no longer crash at startup in the splash-screen path because the main entry point now uses Python 3.9-compatible annotation handling.
-
-## [1.2.7.3]
-- Fixed: CommStat items deleted from Messages are now hidden with a durable local FIO tombstone instead of only deleting the temporary artifact row, so they do not reappear after refresh, restart, or CommStat ingest while the original CommStat source database remains untouched.
-- Changed: CommStat delete confirmations now explain that FIO is hiding the item from Messages, success feedback auto-closes, and bulk delete summaries distinguish hidden/deleted, skipped, and failed rows.
-
-## [1.2.7.2]
-- Fixed: Scheduler JS8 offset status now uses fresh readback before declaring `Off Schedule`, so a correct JS8Call offset does not remain falsely flagged after `Resume Schedule` while FIO still manages JS8 offset under FLRig control.
-
-## [1.2.7.1]
-- Fixed: macOS Python 3.9 installs that use LibreSSL no longer pull `urllib3` v2 through `requests`, avoiding the startup `NotOpenSSLWarning` after dependencies are reinstalled.
-- Fixed: ControlFreq message summary now colors the `FLMsg / FLAmp` row consistently with the other summary rows.
-
-## [1.2.7]
-- Changed: Scheduler authority now treats FIO-controlled schedule changes and `Resume Schedule` as authoritative operating-plan actions, with bounded busy deferral and stronger off-schedule recovery while still protecting active transmit and VarAC file-transfer cases.
-- Added: Scheduler and control decisions are persisted more clearly for Station Health and ControlFreq review, including off-schedule detection, resume requests, busy holds, break-throughs, failed control attempts, and schedule-state reasons.
-- Fixed: Hidden-tab and idle/wake UI refresh paths now defer heavy Messages table rebuilds until the tab is active and show stable visible loading text such as `Checking Messages...`, reducing macOS Qt/WebEngine lifecycle crash exposure.
-- Fixed: Managed VarAC BBS and VGuard validation now normalize sender evidence more consistently, report alias collisions, recover health state after slow vault jobs, and avoid silently trusting ambiguous inbound file senders.
-- Added: Messages now supports a guarded `+Relay` action for verified FLAMP `.b2s` / `.k2s` relay files received through VarAC when the FLAMP queue ID can be identified confidently from the filename or file content.
-- Changed: Help content now explains scheduler behavior, off-schedule/resume actions, and `+Relay` in plain operator language with cross-links between Settings, ControlFreq, Messages, and Station Health.
-
 ## [1.2.6.1]
+- Fixed: CommStat artifact rows deleted from Messages are now hidden with a durable local FIO tombstone instead of only deleting the temporary artifact row, so they do not reappear after refresh, restart, or CommStat ingest while the original CommStat source database remains untouched.
 - Fixed: `Resume Schedule` now forces the active operating plan back into FLDigi mode/offset enforcement instead of skipping FLDigi when the current schedule row looks already applied.
+- Fixed: Scheduler JS8 offset status now uses fresh readback before declaring `Off Schedule`, so a correct JS8Call offset does not remain falsely flagged after `Resume Schedule` while FIO still manages JS8 offset under FLRig/Rigctld control.
 - Added: Scheduler decisions are now persisted in a bounded `scheduler_events` journal so Station Health can show why FIO applied, skipped, held, retried, or failed a schedule action.
 - Changed: Station Health now includes recent scheduler decisions, making schedule-miss reports easier to diagnose without relying only on transient logs.
 - Fixed: FLDigi RX-busy holds now record the 3-minute watchdog recheck and the authoritative break-away decision before proceeding with the schedule change.
 
 ## [1.2.6]
-- Added: Map report layers now render mapped JS8Spotter weather, alert, infrastructure, and medical-style reports as clear icons when the sender has known station location data.
+- Added: Settings now includes a JS8Spotter Form Mapper so discovered `MCF*.txt` forms can be assigned operator-friendly purposes such as Net Check-in, SitRep / StatRep, Net Notification, Weather / Storm, Hazard / Early Warning, Intel / RFI, Medical / Hospital, and Station Capability.
+- Added: JS8Spotter mapper routing now drives Messages visibility, unread alert highlighting, and Map evidence for forms whose sender already has known station location data, using cached form-code sets instead of per-row Settings reads.
+- Added: Map now has operator-controlled layers for Stations, Links, Weather Reports, Alerts, and Infrastructure, with JS8Spotter weather/alert/infrastructure forms rendered as clustered operational icons when the sender has known station location data.
 - Changed: Map layer controls for Stations, Links, Weather, Alerts, and Infrastructure now live above the map so operators can reduce clutter without opening an overlay box.
 - Changed: Messages now uses a cleaner inbox control row with visible-tab refresh choices, a five-second countdown under the time display, a single clickable BBS status indicator, and a More menu for less common actions.
 - Changed: Dropdown controls across the app now auto-fit their displayed text and popup width more consistently, improving Messages and JS8 NCS readability.
 - Changed: ControlFreq now labels direct VarAC messages and VarAC BBS folder files separately so the message summary is understandable at a glance.
 - Changed: Help and README content now explain map icon interpretation, JS8Spotter form mapping, Messages refresh/BBS behavior, Managed BBS, and first-run setup in plainer operator language.
-
-## [1.2.5.8]
-- Fixed: JS8Spotter form display now understands prompt fields such as `TO[...]`, `ST[...]`, `GR[...]`, and `RM[...]`, so MAGNET forms like `F!701A`, `F!701B`, and `F!701C` display those answers in the proper form positions instead of leaving them as raw comment text.
-- Changed: JS8Spotter mapper defaults now recognize MAGNET `F!701A` and `F!701B` as SitRep / StatRep forms, including titles that use `STAT-REP`.
-
-## [1.2.5.7]
-- Added: Settings now includes a JS8Spotter Form Mapper so discovered `MCF*.txt` forms can be assigned operator-friendly purposes such as Net Check-in, SitRep / StatRep, Net Notification, Weather / Storm, Hazard / Early Warning, Intel / RFI, Medical / Hospital, and Station Capability.
-- Added: JS8Spotter mapper routing now drives Messages visibility, unread alert highlighting, and Map evidence for forms whose sender already has known station location data, using cached form-code sets instead of per-row Settings reads.
-- Changed: JS8 Net Control now uses forms mapped as `Net Check-in` for the default check-in filter and forms mapped as `Net Notification` for announcement detection, while keeping legacy `F!103`/`F!104`/`F!106` behavior when no mapper has been configured.
+- Changed: JS8 NCS check-in and net-notification handling now uses mapper-selected forms, so custom or group-specific check-in forms can flow to NCS without hard-coding new form IDs.
 - Changed: JS8Spotter SitRep ingest now uses mapper-selected status forms while preserving the existing conservative parsed-status behavior for `F!104`, `F!301`, and `F!304`.
 - Fixed: JS8Spotter form discovery now supports alpha-suffix form IDs such as `F!702A` when the form file is named like `MCF702A.txt`.
 
@@ -94,107 +67,93 @@
 - Added: ANCS relay compare now supports the case where the local ANCS roster has stations the NCS list missed, making those stations available as `Stations to Relay to NCS`.
 - Changed: Station Health now reports scheduler holds alongside external dependency responsiveness, marks stale OK checks as warnings, and describes FLDigi busy watchdog break-aways as possible stale/hung external app busy states.
 - Fixed: FLDigi busy schedule holds now force a fresh recheck after 3 minutes and break away if FLDigi still reports busy, preventing stale receive-state indications from blocking HF/SOP schedule changes indefinitely.
-- Fixed: Scheduler status snapshot and control-task stalls are now logged and surfaced through Station Health so support can distinguish FIO scheduler recovery from companion-app responsiveness problems.
+- Fixed: Multi-rig scheduler status snapshot, shared PTT, and control-task stalls are now logged and surfaced through Station Health so support can distinguish FIO scheduler recovery from companion-app responsiveness problems.
 
 ## [1.2.5.3]
-- Fixed: VarAC Managed BBS FLAMP block requests now accept clear operator-intent forms such as `BLKS 7,8 E957`, `BLOCK 7,8 E957`, `BLOCKS 7,8 E957`, and glued final-token forms such as `BLKS 8E957`, while keeping `LIST E957` / `LIST BLKS E957` as block-list inspection commands.
+- Fixed: Multi-rig VarAC Managed BBS FLAMP block requests now accept clear operator-intent forms such as `BLKS 7,8 E957`, `BLOCK 7,8 E957`, `BLOCKS 7,8 E957`, and glued final-token forms such as `BLKS 8E957`, while keeping `LIST E957` / `LIST BLKS E957` as block-list inspection commands.
 - Changed: FLAMP BBS helper files now teach `LIST <queue>` for inspection and `BLKS <blocks> <queue>` for block-file generation, and incomplete commands such as `BLKS E957` publish a helper notice instead of being silently ignored or guessed.
 - Fixed: `Resume Schedule` actions from the left ledge and ControlFreq are now authoritative operator actions even when JS8Call, VarAC, or FLDigi appear RX-busy; PTT protection still prevents unsafe immediate changes while a transmitter is actively keyed.
 
 ## [1.2.5.2]
-- Fixed: VarAC Managed BBS FLAMP block-fill files now remain stable after `BLK ...` requests. A follow-up `<BLR>` refresh republishes the same block-fill file, and FIO recreates the live overlay if VarAC consumes or removes it during download handling.
+- Fixed: Multi-rig VarAC Managed BBS FLAMP block-fill files now remain stable per radio profile after `BLK ...` requests. A follow-up `<BLR>` refresh republishes the same block-fill file, and FIO recreates the live overlay if VarAC consumes or removes it during download handling.
 
 ## [1.2.5.1]
-- Fixed: VarAC Managed BBS now treats the VarAC traffic log as the authoritative command source and tracks a durable per-log cursor instead of using `last_request_ts` to skip command rows.
-- Fixed: Managed BBS views now remain published until a new command is received or the VarAC session disconnects, preventing long file-transfer or multi-file retrieval sessions from being reset back to root too early.
+- Fixed: Multi-rig VarAC Managed BBS now treats each active radio profile's VarAC traffic log as the authoritative command source and tracks durable per-log cursors instead of relying on `last_request_ts`.
+- Fixed: Managed BBS views remain published until a new command or session disconnect, preventing long file-transfer or multi-file retrieval sessions from being reset back to root too early.
+- Fixed: active radio profiles with duplicate live VarAC BBS directories are skipped with a clear warning so concurrent radios cannot overwrite each other's BBS listing.
 - Fixed: Public-visible code-protected BBS locations now appear in the root listing while access enforcement still happens when the remote station opens the location.
-- Fixed: FLAMP Managed BBS helper views are now standalone and no longer blend with the current managed location's files.
+- Fixed: FLAMP Managed BBS helper views are standalone and no longer blend with the selected managed location's files.
 - Fixed: Access-code commands are case-insensitive and accept bracketed entry such as `HUBS [MRHUB]`.
-
-## [1.2.5]
-- Fixed: VarAC Managed BBS now uses a hardened traffic-log command parser as the primary command source, handling glued timestamp records, prefixed status text, portable callsigns such as `/P`, remote/local session direction, bare `<BLR>` refreshes, and VarAC file-transfer noise more deterministically.
-- Fixed: Managed BBS refresh commands from the VarAC traffic log now refresh the current location or FLAMP view instead of allowing stale BBS output to linger after a remote operator requests a listing refresh.
-- Changed: Managed BBS falls back to VarAC database scanning only when no traffic-log command events are available, reducing exposure to VarAC database locking/index issues during live operation.
-- Added: Regression coverage now exercises real managed-BBS traffic samples from the 2026-05-25 production log set and the BBSExamples field package.
-- Fixed: startup/background Qt timer updates are now marshaled back to the Qt controller thread for scheduler and background-ingest completion paths, reducing `QObject::startTimer/killTimer` warnings and unsafe timer handling during startup or Managed BBS activity.
-- Changed: runtime/package diagnostics were hardened with explicit runtime dependency checks, a Help-tab `Recent Issues` viewer for warning/error support context, and safer database migration guards.
-- Fixed: FLDigi Net Control and macro helper dataclasses no longer use the Python 3.10-only `slots=True` option, restoring launch compatibility with supported Python 3.9 environments.
 
 ## [1.2.4]
 - Changed: FLDigi / SSB Net Control now lists scheduled nets that are currently active or coming up within the near operating window, avoiding duplicate daily repeats while still letting late-starting operators select the intended net.
 - Changed: FLDigi Net Control roster copy output now includes the station role for NCS and ANCS rows, followed by traffic when present, and repeated callsign rows are merged so corrections do not create duplicate check-ins.
 - Added: FLDigi Net Control now tracks `Directed By` and `Acked By` with visible row chips, scoped action buttons for `NCS`, `ANCS`, `Shared`, and `All`, `ACK Needed` for unacknowledged check-ins, and `Next TFC` for stepping through one directed traffic station at a time.
 - Added: FLDigi Net Control now writes role-first macro files such as `NCS_ACK_Pending.txt`, `ANCS_ACK_Pending.txt`, `NCS_Next_TFC.txt`, and `ANCS_Next_TFC.txt`, while keeping full and role-scoped check-in files current from the roster without requiring `Save Check-ins`.
-- Fixed: Map JS8 link rendering now resolves portable suffixes such as `/P` through the base station position while preserving the displayed callsign, and map-triggered JS8/VarAC ingest now runs in a guarded background worker instead of the UI thread.
-- Added: FLDigi Net Control adds an editable roster `Notes` column that stretches into available table width and archives local operational notes at end-net without including them in copied roster text or live FLDigi macro files.
-- Changed: FLDigi Net Control now places the Net Roster and Compare/Reference workspace in an adjustable vertical splitter so the roster uses the available space when Compare is collapsed and pasted comparison lists get useful room when expanded.
-- Changed: FLDigi Net Control now defaults NCS and ANCS role rows to heard-by-both and acked-by-both when the roles are set, while still allowing operators to uncheck those chips if the exception does not fit the net.
 - Changed: FLDigi Net Control moves `Start Net` and `End Net` into the session/QSY row, separates `Save Check-ins` from live actions, highlights that save action only when roster edits are unsaved, renames `Local Roster` to `Net Roster`, and gives the roster table more practical column sizing.
 - Changed: FLDigi macro setup is now a compact collapsible header that shows `Macro: None`, `Macro: Needs Mapping`, or `Macro: Mapped`, hiding setup controls during normal mapped operation so the roster gets more room.
 - Added: Station Health provides a dedicated view of external dependency responsiveness, including grouped background ingest health and issue-since/cooldown context, while keeping traffic-busy state separate from app/dependency health.
 - Changed: Messages export/filtering, FLAMP incomplete awareness, and CommStat message handling were tightened for clearer field review and spreadsheet export behavior.
 - Changed: external dependency polling and background ingest paths now use stronger isolation/backoff behavior so slow or unreachable companion applications are less likely to stall visible UI workflows.
 - Changed: FLDigi log-assisted auto-add controls are hidden for 1.2.4 because real FLDigi logs can contain scripts, acknowledgements, repeated text, form payloads, and noisy decodes; the code is retained with comments for a future review-only/RX-only design.
-- Changed: the in-app Help guide now explains the updated FLDigi / SSB Net Control workflow, including scheduled-net selection, role-aware roster copying, copy/file combinations, macro file behavior, deduplication behavior, save highlighting, and visible-only NCS controls.
-
-## [1.2.3.3]
-- Fixed: Windows installers now build the PyInstaller app without UPX compression. This avoids real-machine Windows 11 startup crashes and security-tool interference that can occur with compressed Qt/Python DLLs even when the package starts correctly on a clean CI runner.
-- Fixed: Windows packaged builds now default Qt to software rendering and disable WebEngine GPU acceleration, reducing startup access violations caused by local graphics drivers on operator machines.
-
-## [1.2.3.2]
-- Fixed: Windows packaged builds now sanitize inherited Qt/Python development environment variables before importing PySide, avoiding native startup crashes caused by stale development `QT_PLUGIN_PATH`, QML, or Python path settings on machines that were also used for FreqInOut development.
-
-## [1.2.3.1]
-- Fixed: Windows release packaging now runs a packaged executable smoke test before publishing the installer, catching launch-time packaging failures before the `.exe` reaches GitHub releases.
-- Changed: startup failures now write `startup-error.log` beside the normal FreqInOut log directory so Windows users have a clear diagnostic file when the GUI cannot open.
+- Changed: the in-app Help guide now explains the updated multi-rig FLDigi / SSB Net Control workflow, including scheduled-net selection, role-aware roster copying, copy/file combinations, macro file behavior, deduplication behavior, save highlighting, and visible-only NCS controls.
 
 ## [1.2.3]
-- Changed: `Messages` now opens to Inbox from main navigation, shows Compose only after the internal Compose action is selected, starts each new compose draft from defaults, and resets the draft after successful staging while preserving durable station configuration such as selected folders and signing keys.
-- Changed: `Messages -> Compose` now uses a tighter drafting layout with a compact file/status strip, shorter compose utility buttons, shared `Save Under` / signing-key row, and operator-friendly signing-key labels with full key detail retained in tooltips.
-- Added: `Messages -> Compose` now lets operators choose the configured ICS/Messages root or existing subfolders up to two levels deep for FLMsg output, including per-radio folder memory in multi-rig builds while keeping selections constrained under the configured root.
-- Fixed: FLAmp compose staging now derives a transmit-side folder from common FLAmp `rx`/root paths, signs outbound FLAmp copies there, verifies the signed file, and fails closed instead of staging unsigned fallback files when signing fails.
-- Fixed: GPG setup now detects Kleopatra/GPA/GpgEX GUI executables before running them as command-line GPG, auto-uses a sibling `gpg.exe` when available, and reports a clear Settings warning when the selected Windows path is not a usable command-line executable.
-- Added: GPG compose signing now supports passphrase-protected keys through the OS credential store, with Settings-side passphrase confirmation and documentation that `keyring` must be installed and backed by a real OS keyring service.
 - Changed: Message Auth signature/hash verification now applies to VarAC and VarAC BBS `.k2s/.b2s` files and signature sidecars using the same trusted-key/hash workflow already used for signed FLAmp files.
 - Changed: `FLDigi Net Control` now offers `Copy Check-ins` instead of the callsign-only summary button, copying the full consolidated TFC/QRU/LATE check-in log and maintaining a `CheckIns_ALL.txt` macro feed beside the existing per-category check-in files.
 - Changed: the in-app Help guide now teaches the major FreqInOut tabs more explicitly, expanding the purpose, workflow, and cross-tab interaction notes for ControlFreq, Messages, Map, schedules, operators, SOP Builder, and Settings so operators can learn not only how controls work, but why those screens matter and how related settings influence them.
 - Fixed: VarAC schedule protection now also watches recent `VarAC.db` transfer lifecycle events, so scheduler-driven frequency changes are more reliably deferred during inbound or outbound file transfers even when log-tail visibility is incomplete.
 - Changed: `Map` now skips no-op refresh rebuilds when its lightweight input signature has not changed, reducing repeated redraw work during clustered filter and visibility activity while keeping full reloads for real config changes.
-- Changed: `Settings` now throttles repeated VarAC BBS operator-lookup rebuilds during tab activation, reducing unnecessary completion-list reload churn when the operator revisits the tab frequently.
+- Changed: multi-rig `Settings` now throttles repeated VarAC BBS operator-lookup rebuilds and avoids redundant section height relayouts during repeated visits, while `HF Daily` reuses its last activation token so unchanged schedule views do not pay the full activation-refresh cost.
 - Changed: `Messages` now fingerprints its JS8/local message stores and skips redundant JS8, JS8Spotter, CommStat, and unified SitRep reload passes when the backing DB files have not changed, reducing repeat activation churn.
 - Changed: `Map` now reuses short-lived query snapshots for repeated propagation, operator-activity, recent-calls, and status rollup lookups during clustered refresh bursts instead of immediately re-querying every source on each refresh request.
-- Fixed: `ControlFreq` now reloads saved settings before rebuilding software status visibility, so the radio-software LEDs stay aligned with the current saved `Software Used` selections instead of lagging behind the Settings tab.
+- Fixed: multi-rig `Settings` now tolerates radio-scoped VarAC Managed BBS runtime/cache values when they are loaded back from storage as JSON text, preventing startup failures while opening the selected radio software view.
+- Fixed: `ControlFreq` now reloads saved settings before rebuilding software status visibility and readiness context, so radio-software LEDs stay aligned with the currently saved radio/software selections instead of lagging behind the Settings tab.
 - Changed: `Map` now groups the `SitRep State Summary` panel by FEMA region, making the status rollup easier to scan operationally while still showing the same state-level counts inside each region.
 - Fixed: `Map` SitRep summary now rolls up all matching active states instead of truncating the summary source to the busiest eight state rows, keeping the visible region summary aligned with the pins shown on the map.
 - Fixed: `Map` `SitRep Status` mode now suppresses station-to-station links entirely, so recency changes and active link selections no longer clutter the status-only situational view.
-- Changed: `Settings -> FreqInOut Settings` now groups `FLRig`, `FLDigi`, `FLMsg`, and `FLAmp` on one cleaner software-used row, keeps `JS8Call`, `JS8Spotter`, and `CommStat` together on the next row, keeps `VarAC` on its own row, hides the setup-readiness card when the station is already `Ready`, and reshapes `VarAC Settings` into clearer `Paths and Launch`, `BBS Settings`, and `Vault / VGuard Settings` subsections.
+- Changed: `Settings` now hides focused radio readiness guidance once the selected radio or dialog draft is already `Ready`, groups radio software-used choices into cleaner Fast Light and JS8 rows with `VarAC` on its own row, and reshapes `VarAC Settings` into clearer `Paths and Launch`, `BBS Settings`, and `Vault / VGuard Settings` subsections for the selected radio.
 - Fixed: `VarAC.ini` BBS allowed-callsign sync now writes comma-separated callsigns without added spaces, matching VarAC's expected list style more closely.
-- Added: `Settings -> VarAC Settings` now supports a fuller `Managed BBS Services` workflow on top of the Managed Vault foundation, including alias-driven virtual folders, callsign-aware root-menu visibility, radio-safe root resets, VarAC.db session parsing, optional FLAMP relay queue/block responses, and clearer help for menu-style BBS exchanges.
+- Added: radio-scoped `Managed BBS Services` now extends the Managed Vault workflow with alias-driven virtual folders, callsign-aware root-menu visibility, VarAC.db session parsing, optional FLAMP relay queue/block responses, and clearer help for menu-style BBS exchanges while keeping each radio's live BBS directory stable for VarAC.
 - Added: CommStat now has first-class `Messages` tab artifacts for `CommStat StatRep`, `CommStat Message`, and `CommStat Alert`, with local staging, first-pass merged provenance, and filter entries for `CommStat`, `CommStat/StatRep`, `CommStat/Message`, and `CommStat/Alert`.
 - Changed: CommStat status artifacts now use stronger near-time semantic dedupe across CommStat and JS8Spotter-adjacent paths, reducing duplicate report rows in `Messages` while preserving the unified SitRep model used by `Map`, `Operator History`, and status rollups.
-- Added: `Settings -> VarAC Settings` now includes a `Managed BBS Vault` workflow with named locations, hashed access codes, managed-root initialization/import, default-location reset, background trigger handling from the VarAC traffic log, and compact status visibility in `Settings`, `ControlFreq`, and `Messages`.
-- Changed: `Settings -> VarAC Settings` now manages BBS allowed callsigns through a lookup-assisted selected list with manual callsign fallback, reducing whitelist typos while preserving the existing VarAC.ini-compatible callsign format.
-- Changed: crowded Settings, ControlFreq, and Map control bands now use roomier grouped layouts, including a clearer `Software Used` block, stacked timer controls, a calmer setup-review banner, and a less compressed map filter bar for a friendlier day-to-day UI.
-- Added: `Settings -> FreqInOut Settings` now includes explicit `Software Used` choices for FLRig, Fast Light, JS8, companion tools, and VarAC so setup review and status LEDs can respect software the operator intentionally does not run instead of repeatedly nagging about missing configuration.
-- Fixed: readiness visibility now treats explicit software opt-out as authoritative, so stale paths no longer keep JS8 or VarAC setup reminders alive after the operator marks those integrations as not used.
+- Added: `Settings -> VarAC Settings` now includes a radio-scoped `Managed BBS Vault` workflow with named locations, hashed access codes, managed-root initialization/import, default-location reset, background trigger handling from the VarAC traffic log, and compact status visibility in `Settings`, `ControlFreq`, and `Messages`.
+- Changed: `Settings -> VarAC Settings` now manages BBS allowed callsigns through a lookup-assisted selected list with manual callsign fallback, reducing whitelist typos while preserving the existing VarAC.ini-compatible callsign format for both the station view and radio-scoped VarAC settings.
+- Changed: crowded Settings, ControlFreq, and Map control bands now use roomier grouped layouts, including calmer top-level settings rows, a less cramped radio software chooser, a stacked setup-review banner, and a less compressed map filter bar for a friendlier operator experience.
+- Fixed: multi-rig runtime readiness now respects explicit per-radio software participation more strictly, so an active/default radio can intentionally opt out of JS8, Fast Light, or VarAC without stale projected global paths keeping setup reminders or status LEDs alive.
 - Fixed: FLDigi Net Control macro/status chips now derive their colors from the active theme so dark mode no longer shows pale light-mode pills in the macro workspace strip.
 - Changed: `Map` support now exposes `Copy Diagnostics` only while the map is `warming`, `loading`, or `degraded`, keeping the ready-state map UI quieter while preserving the support export when it is operationally relevant.
-- Fixed: `ControlFreq` and `Settings` setup review now read the current saved operator identity, frequency prompt, and VarAC BBS readiness keys consistently, eliminating false `Callsign missing` warnings and keeping readiness guidance aligned with the actual saved configuration.
+- Fixed: multi-rig `ControlFreq` and `Settings` setup review now read the current saved operator identity, frequency prompt, and VarAC BBS readiness keys consistently, eliminating false `Callsign missing` warnings and keeping readiness guidance aligned with the actual saved configuration.
 - Fixed: `Map` now uses a staged refresh lifecycle with coalesced light/medium/full refresh requests, safer load-failure handling, inline recovery actions, and copyable diagnostics so tab switches and filter changes are less likely to trigger unstable redraw behavior.
-- Changed: `Map` background refresh behavior is quieter when the tab is hidden, while visible-map refreshes now emit structured telemetry to make future field stability reports easier to diagnose.
+- Changed: multi-rig `Map` background refresh behavior is quieter when the tab is hidden, while visible-map refreshes now emit structured telemetry to make future field stability reports easier to diagnose.
 - Changed: `Messages` now adds `Copy Summary` for inbox/compose support context and skips unnecessary pending-backlog table rebuilds when the pending data has not changed.
 - Changed: several shared `ControlFreq` schedule/operator read paths now use the same SQLite helper discipline added for this slice, improving consistency around busy-timeout behavior and supportable performance instrumentation.
-- Fixed: single-rig `Settings` no longer fails at startup when the `JS8Spotter`, `CommStat`, or VarAC guard browse controls are built; the missing callback wiring and quarantine-folder picker are now aligned with the implemented handlers.
-- Changed: readiness guidance now uses the same shared wording model in `Settings` and `ControlFreq`, and `ControlFreq` adds `Copy Summary` so operators can quickly share the same setup review seen in-app with support or teammates.
+- Changed: readiness guidance now uses the same shared wording model in `Settings` and `ControlFreq`, and `ControlFreq` adds `Copy Summary` so operators can quickly share the current setup review with support or teammates.
 - Changed: `SOP Builder` now pauses its UI refresh timers while the tab is hidden, matching the broader 1.2.3 lifecycle cleanup that keeps hidden-tab overhead lower without changing active workflow behavior.
 - Added: `Settings -> VarAC Settings` now supports conflict-aware `VarAC.ini` BBS write-back with explicit `Sync From VarAC.ini` and `Write to VarAC.ini` actions, while preserving the rest of the file and keeping VarAC as the source of truth.
-- Added: `Settings -> VarAC Settings` now includes radio-ready VarAC BBS management fields for `VarAC.ini`, BBS enablement, announce mode, access limiting, and allowed callsigns, while `Messages` adds a `Manage VarAC BBS` shortcut and live BBS access summary; guide/help text now credits KG5RKW for the Vault and VGuard operational inspiration.
-- Added: `Settings -> VarAC Settings` now also includes an opt-in VGuard-style file-protection slice for VarAC inbound transfers, with explicit log-only/delete/quarantine modes, a quarantine folder picker, retry timing, and a background guard job that watches the VarAC traffic log without conflating file enforcement with BBS access control.
+- Added: multi-rig `VarAC Settings` now manages BBS access per radio, including `VarAC.ini`, BBS enablement, announce mode, access limiting, and allowed callsigns, while `Messages` adds a `Manage VarAC BBS` shortcut and live BBS access summary; guide/help text now credits KG5RKW for the Vault and VGuard operational inspiration.
+- Added: multi-rig `VarAC Settings` now also includes an opt-in VGuard-style file-protection slice for VarAC inbound transfers, with explicit log-only/delete/quarantine modes, a quarantine folder picker, retry timing, and a background guard job that watches the VarAC traffic log without conflating file enforcement with BBS access control.
 - Added: first-wave contextual in-app help for `Settings`, `Messages`, `ControlFreq`, and `Map`, using focused `Help` actions that deep-link into the relevant guide section instead of relying on the full guide alone.
 - Added: `Peer Schedules` now supports manual peer HF schedule entry and row editing in the UI, treats manual rows as authoritative explicit schedule data alongside imports, refreshes `ControlFreq` / `Map` immediately after save, and conservatively upserts peer operator identity/group metadata into `operator_checkins`.
 - Fixed: `Map` activation is now more crash-resistant on Linux and Windows by deferring first-ingest startup until after the first successful page load, coalescing render requests raised during page load, and preventing overlapping HTML/page replacement while Qt WebEngine is still loading.
 - Fixed: DB admin/init tooling now routes through the same runtime schema initializer and migration helpers used at app startup, so 1.2.3 DB changes are applied consistently for both fresh installs and upgrade installs.
 - Changed: FLDigi macro mappings now open in a high-confidence default view and add a confidence filter control so operators can quickly review clearly identified mappings or expand to all rows.
+- Changed: Multi-rig schedule assignment is now radio-first in Settings: `Radio Profiles` shows each radio's `Assigned Schedule`, adds direct `Assign Schedule...` and `Restore Schedule` actions, and keeps the advanced assignment grid available under clearer `Schedule Profiles` and `Radio Schedule Assignments` language.
+- Changed: Multi-rig `JS8Call Settings`, `Fast Light Settings`, and `VarAC Settings` now stay close to the familiar single-rig layout while editing a selected radio bundle instead of one global shell, with a new `Radio Software View` selector clarifying which radio owns those software settings.
+- Changed: Multi-rig `VarAC Clusters` and `VarAC Memberships` now sit directly below `VarAC Settings` and only appear when `Enable Cluster Mode` is turned on; cluster data is preserved when the mode is off, reducing noise for ordinary single-VarAC operators.
+- Changed: Multi-rig `Launch Control` now explains which Station Default radio bundle it is acting on, shows only apps that belong to that projected radio bundle plus global custom tools, and gives clearer guidance when no default radio has been selected.
+- Added: Multi-rig `Radio Profiles` now include a searchable radio-model picker that prefers the local Hamlib `rigctl -l` catalog when available, falls back to a bundled common-rig list when it is not, supports an explicit catalog refresh, and persists the selected model identity with each radio profile for clearer operator setup.
+- Changed: Multi-rig `Add Radio` and `Edit Radio` now use software-aware filtering so FLDigi and VarAC sections only appear when that radio is set up to use them, keeping the dialog closer to a guided radio workflow.
+- Changed: Multi-rig setup review now carries radio-specific readiness context through the shared readiness engine, shows richer per-radio diagnostics in `Radio Profiles`, and `ControlFreq -> Review Now` can jump directly to the radio row that needs attention.
+- Changed: Multi-rig startup setup review dismissal is now more operator-friendly: `Dismiss` suppresses the same review digest across restarts until the setup state changes, and `Do Not Remind Again For This Version` suppresses reminders for the current app version only.
+- Changed: `Settings -> Radio Profiles` now includes an inline readiness detail summary for the focused radio, so operators can see the radio-specific setup checklist and resolution hints without opening another dialog.
+- Changed: Multi-rig `Add Radio` and `Edit Radio` now use a scrollable sectioned layout with click-for-help `?` affordances, a collapsible optional-groups section, wider combo sizing, and a live in-dialog radio readiness panel to better coach setup while editing.
+- Changed: Multi-rig `Radio Profiles` now surfaces a highlighted full-width readiness card near the top of the tab for the focused radio, and the `Add Radio` / `Edit Radio` dialog now shows the live radio-readiness guidance in a matching top support card instead of burying it lower in the form.
+- Changed: Multi-rig `Operating Profiles`, `Device Assignments`, `VarAC Clusters`, and `VarAC Memberships` now use the same top-of-section guidance-card pattern as `Radio Profiles`, with focused row guidance, fuller-width support text, and row-selection context to reduce operator guesswork while configuring related settings.
+- Added: Multi-rig `Radio Profiles` now includes `Copy Readiness Summary` so operators can copy a compact in-app readiness digest to the clipboard for support or self-review without leaving Settings.
+- Changed: Multi-rig `Radio Profiles` now model a fuller radio software bundle instead of implying one backend plus extras: `Primary Rig Control` is now distinct from the radio's `Software Used` stack, `JS8Call`/`JS8Spotter`/`CommStat` are explicit per-radio options alongside Fast Light and VarAC, and the active/default radio's compatibility projection now only carries the software that is actually enabled for that radio.
+- Added: Multi-rig now includes a shared station-readiness review path that warns about missing default or active radios, incomplete active-radio backend settings, and key JS8, Fast Light, and VarAC setup gaps without requiring blocking startup popups.
+- Changed: Multi-rig `Device Profiles` are now presented as `Radio Profiles` in Settings, and `ControlFreq` plus `Settings` now show only status LEDs for configured integrations instead of always rendering every supported software indicator.
 - Added: `Settings -> VarAC Settings` now includes an explicit `VarAC Outbox Directory`, `Messages -> Compose` uses that configured Outbox path for staged VarAC copies, and `Settings -> Custom Tools` can define named script/tool launch commands that also appear in `Launch Control`.
 - Added: `Messages` now includes a stage-only `Compose` mode for outbound CUSTOM and standard blank-form traffic, with standardized filename previews, optional FLAmp signing, and staging targets for FLMsg, FLAmp, VarAC Outbox, and VarAC BBS.
 - Fixed: Cross-platform font rendering now stays more consistent across the main navigation accordion headers, HF/Net schedule menu-style action buttons, and Map overlay text by aligning shared button baselines and scaling map legend text from the UI text-size setting instead of fixed pixels.
@@ -249,7 +208,7 @@
 - Fixed: Scheduler shutdown now stops and tears down the serialized control executor cleanly, best-effort cancels any in-flight control future, and ignores stale control callbacks during app exit to reduce shutdown hangs and orphaned worker-thread risk.
 - Fixed: `SettingsManager` now enforces thread affinity at runtime so cross-thread reuse fails fast with a clear SQLite-style programming error instead of surfacing as intermittent thread-bound connection failures later.
 - Changed: Main-window teardown now emits targeted debug logging when scheduler/background-ingest/JS8/widget shutdown steps fail, and adds focused regression coverage for scheduler-stop cleanup and settings thread-affinity guardrails.
-- Changed: WebEngine startup prewarm now defaults to disabled for quiet startup; the first Windows Map open shows a contextual `Preparing Map...` indicator while on-demand warmup runs. The hidden `map_webengine_startup_prewarm` setting can still opt back into startup warmup.
+- Changed: WebEngine startup prewarm now defaults to enabled on Windows and disabled on macOS/Linux unless `map_webengine_startup_prewarm` explicitly overrides the platform default.
 - Changed: App/documentation/installer version references updated to `1.2.2`.
 
 ## [1.2.1]

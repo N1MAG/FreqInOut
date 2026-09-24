@@ -1,0 +1,119 @@
+Comprehensive Weather Report|F!504
+
+# Published 02/08/2026. See SitRepNet.com for details and supporting docs for this form. KN4AM
+# Version 02/09/2026 - Added Relative Humidity
+# Version 02/16/2026 - Changed Observation Time to UTC (was Local time)
+# Version 02/20/2026 - Wind speed changed to "Current Wind Speed at Observation Time". Was "Average during daylight hours", Added item codes.
+
+. 
+!!! Station and Report Info
+
+[ST] State (2-letter code):
+[GR] Maidenhead Grid Square:
+[DT] Observation Date - Current or Previous Month (2 digit date only):
+[TM] Observation Time - UTC:
+
+. 
+!!! Measured Data
+. === Leave fields empty if unavailable ===
+
+[PR] Precipitation during previous 24 hours (inches). Enter "0" if none, "T" for Trace:
+[HT] High Temperature F° in the past 24 hours: 
+[LT] Low Temperature F° in the past 24 hours:
+[CT] Current Temperature F° at Observation Time:
+[RH] Relative Humidity at Observation Time:
+[DP] Dew Point F° at Observation Time:
+[BP] Barometric Pressure (Millibars) at Observation Time:
+
+. 
+!!! Observed Data
+
+? (GCW) General current weather
+@0 *Unavailable
+@1 Sunny
+@2 Partly Cloudy
+@3 Cloudy
+@4 Light Rain
+@5 Moderate Rain
+@6 Heavy Rain
+@7 Snow
+@8 Sleet or Ice
+@9 Thunderstorms
+@A Major storm (hurricane, tornado, blizzard)
+
+? (CC) Cloud Coverage
+@0 *Unavailable
+@1 Few or Clear < 10%
+@2 Isolated 10 - 25%
+@3 Scattered 25 - 50%
+@4 Broken 50 - 90%
+@5 Overcast 90 - 100%
+
+? (PCT) Predominant Cloud Type
+@0 *Unavailable
+@C Clear, No clouds
+@1 Ci - Cirrus
+@2 Cc - Cirrocumulus
+@3 Cs - Cirrostratus
+@4 Ac - Altocumulus
+@5 As - Altostratus
+@6 Ns - Nimbostratus
+@7 Cu - Cumulus
+@8 Cb - Cumulonimbus
+@9 Sc - Stratocumulus
+@A St - Stratus
+
+? (BPT) Barometric Pressure 24 hour trend
+@0 *Unavailable
+@1 Rising
+@2 Steady
+@3 Falling
+
+? (WD) Wind Direction
+@0 *Unavailable
+@1 North
+@2 Northeast
+@3 East
+@4 Southeast
+@5 South
+@6 Southwest
+@7 West
+@8 Northwest
+@9 Variable
+
+? (CWS) Current Wind Speed at Observation Time
+@0 *Unavailable
+@1 Calm / 0 mph
+@2 Light Air / 1 to 3 mph
+@3 Light Breeze / 4 to 7 mph
+@4 Gentle Breeze / 8 to 12 mph
+@5 Moderate Breeze / 13 to 18 mph
+@6 Fresh Breeze / 19 to 24 mph
+@7 Strong Breeze / 25 to 31 mph
+@8 Near Gale / 32 to 38 mph
+@9 Gale / 39 to 46 mph
+@A Strong Gale / 47 to 54 mph
+@B Whole Gale / 55 to 63 mph
+@C Storm Force / 64 to 75 mph
+@D Hurricane Force / over 75 mph
+
+? (MWG) Maximum Wind Gust during previous 24 hours
+@0 *Unavailable
+@1 Calm / 0 mph
+@2 Light Air / 1 to 3 mph
+@3 Light Breeze / 4 to 7 mph
+@4 Gentle Breeze / 8 to 12 mph
+@5 Moderate Breeze / 13 to 18 mph
+@6 Fresh Breeze / 19 to 24 mph
+@7 Strong Breeze / 25 to 31 mph
+@8 Near Gale / 32 to 38 mph
+@9 Gale / 39 to 46 mph
+@A Strong Gale / 47 to 54 mph
+@B Whole Gale / 55 to 63 mph
+@C Storm Force / 64 to 75 mph
+@D Hurricane Force / over 75 mph
+. 
+
+[AI] Additional Information (Leave empty if none):
+
+. See SitRepNet.com for reporting resources and WeatherNet info.

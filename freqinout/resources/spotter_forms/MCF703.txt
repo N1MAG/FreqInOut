@@ -1,0 +1,50 @@
+9 LINE MEDIVAC|F!703
+
+! 9 Line Medivac Reporting Form
+!! Form Version: 11/3/2025 - WW9Y
+# Form published 11/3/2025 by WW9Y
+
+[LO] LOCATION:
+[RA] RADIO FREQ and CALL SIGN:
+
+? Patients by Precedence? 
+@1 URGENT
+@2 PRIORITY
+@3 ROUTINE
+@4 CONVENIENCE
+
+? Special Equipment?
+@1 HOIST
+@2 EXTRICATION
+@3 VENTILATOR
+@4 INCUBATOR
+@5 NONE 
+
+[PL] Number of LITTER Patients
+[PA] Number of AMBULATORY Patients
+
+? Security at Pickup? 
+@1 NO ENEMY
+@2 ENEMY IN AREA
+@3 POSSIBLE ENEMY
+@4 EVACUATE UNDER FIRE
+
+? Marking Method? 
+@1 PANELS
+@2 SMOKE
+@3 FLARE
+@4 LIGHT
+
+? Patient Nationality/Status? 
+@1 US MIL
+@2 US CIVILIAN
+@3 NON US MIL
+@4 NON US CIV
+@5 EPW
+
+? NBC Contamination/Terrain/Remarks? 
+@1 NONE
+@2 BIOLOGICAL
+@3 CHEMICAL
+@4 RADIOLOGICAL
+@E NUCLEAR

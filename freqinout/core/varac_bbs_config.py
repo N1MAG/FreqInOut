@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import configparser
 import json
+import os
 import re
 from dataclasses import dataclass
 from hashlib import sha256
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import List, Mapping, Optional
 
 
@@ -58,10 +59,6 @@ def parse_callsign_list(value: object) -> List[str]:
 
 
 def format_callsign_list(value: object) -> str:
-    return ", ".join(parse_callsign_list(value))
-
-
-def format_varac_ini_callsign_list(value: object) -> str:
     return ",".join(parse_callsign_list(value))
 
 
@@ -104,17 +101,49 @@ def _get_section_value(section: configparser.SectionProxy, key: str, default: ob
     return default
 
 
+def _infer_wine_prefix_from_path(value: object) -> Path:
+    txt = str(value or "").strip()
+    if txt:
+        try:
+            path = Path(txt).expanduser()
+            parts = path.parts
+            for index, part in enumerate(parts):
+                if re.fullmatch(r"drive_[A-Za-z]", part or ""):
+                    prefix_parts = parts[:index]
+                    if prefix_parts:
+                        return Path(*prefix_parts)
+        except Exception:
+            pass
+    return Path(os.environ.get("WINEPREFIX", "~/.wine")).expanduser()
+
+
+def varac_path_to_host_path(value: object, *, ini_path: object = "") -> str:
+    """Translate a VarAC/Wine Windows path to the current host path when needed."""
+    txt = str(value or "").strip()
+    if not txt:
+        return ""
+    win_match = re.match(r"^([A-Za-z]):[\\/](.*)$", txt)
+    if not win_match or os.name == "nt":
+        return str(Path(txt).expanduser()) if txt.startswith("~") else txt
+
+    drive = win_match.group(1).lower()
+    rest_parts = PureWindowsPath(txt).parts[1:]
+    wine_prefix = _infer_wine_prefix_from_path(ini_path)
+    return str(wine_prefix / f"drive_{drive}" / Path(*rest_parts))
+
+
 def load_varac_bbs_config(ini_path: object) -> Mapping[str, object]:
     resolved = locate_varac_ini_path(ini_path)
     if not resolved:
         raise FileNotFoundError("VarAC.ini not found")
     parser = configparser.ConfigParser(interpolation=None)
     parser.optionxform = str
-    with open(resolved, "r", encoding="utf-8", errors="replace") as handle:
+    with Path(resolved).open("r", encoding="utf-8", errors="replace") as handle:
         parser.read_file(handle)
     section_name = _resolve_section_name(parser, "BBS")
     if section_name is None:
         raise KeyError("VarAC.ini does not contain a [BBS] section")
+
     section = parser[section_name]
     return {
         "ini_path": resolved,
@@ -147,18 +176,13 @@ class VaracIniSyncState:
     digest: str
 
 
-def _read_file_bytes(file_path: Path) -> bytes:
-    with file_path.open("rb") as handle:
-        return handle.read()
-
-
 def get_varac_ini_sync_state(ini_path: object) -> VaracIniSyncState:
     resolved = locate_varac_ini_path(ini_path)
     if not resolved:
         raise FileNotFoundError("VarAC.ini not found")
     path = Path(resolved)
     stat = path.stat()
-    content = _read_file_bytes(path)
+    content = path.read_bytes()
     return VaracIniSyncState(
         path=str(path),
         size=int(stat.st_size),
@@ -243,39 +267,21 @@ def write_varac_bbs_config(
     if known_state is not None and not varac_ini_sync_state_matches(known_state, current_state):
         raise RuntimeError("VarAC.ini changed since it was loaded")
 
-    parser = configparser.ConfigParser(interpolation=None)
-    parser.optionxform = str
-    with path.open("r", encoding="utf-8", errors="replace") as handle:
-        parser.read_file(handle)
-    section_name = _resolve_section_name(parser, "BBS")
-    if section_name is None:
-        parser.add_section("BBS")
-        section_name = "BBS"
-
-    section = parser[section_name]
-    section["EnableBBS"] = "ON" if bool(enable_bbs) else "OFF"
-    section["BBSDirectory"] = str(bbs_directory or "").strip()
-    section["LimitAccessToCallsigns"] = "ON" if bool(limit_access) else "OFF"
-    allowed_callsigns_ini = format_varac_ini_callsign_list(allowed_callsigns)
-    section["LimitAccessToCallsignsList"] = allowed_callsigns_ini
-    section["Announce"] = "ON" if bool(announce) else "OFF"
-
+    raw_text = path.read_text(encoding="utf-8", errors="replace")
+    lines = raw_text.splitlines()
     bbs_lines = [
         "[BBS]",
         f"EnableBBS={'ON' if bool(enable_bbs) else 'OFF'}",
         f"BBSDirectory={str(bbs_directory or '').strip()}",
         f"LimitAccessToCallsigns={'ON' if bool(limit_access) else 'OFF'}",
-        f"LimitAccessToCallsignsList={allowed_callsigns_ini}",
+        f"LimitAccessToCallsignsList={format_callsign_list(allowed_callsigns)}",
         f"Announce={'ON' if bool(announce) else 'OFF'}",
     ]
     replacement = "\n".join(bbs_lines)
-    raw_text = path.read_text(encoding="utf-8", errors="replace")
-    lines = raw_text.splitlines()
     section_start = None
     section_end = None
     for idx, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.lower() == "[bbs]":
+        if line.strip().lower() == "[bbs]":
             section_start = idx
             for j in range(idx + 1, len(lines)):
                 nxt = lines[j].strip()
@@ -302,5 +308,4 @@ def write_varac_bbs_config(
             parts.append(after)
         updated_text = "\n\n".join(parts).rstrip() + "\n"
     path.write_text(updated_text, encoding="utf-8")
-    updated_state = get_varac_ini_sync_state(path)
-    return updated_state
+    return get_varac_ini_sync_state(path)

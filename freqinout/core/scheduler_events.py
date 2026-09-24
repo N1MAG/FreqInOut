@@ -39,6 +39,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             source TEXT,
             action TEXT,
             detail TEXT,
+            radio_profile_id TEXT,
             frequency_hz INTEGER,
             band TEXT,
             mode TEXT,
@@ -48,8 +49,12 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(scheduler_events)").fetchall()}
+    if "radio_profile_id" not in cols:
+        conn.execute("ALTER TABLE scheduler_events ADD COLUMN radio_profile_id TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_scheduler_events_ts ON scheduler_events(ts_utc)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_scheduler_events_code ON scheduler_events(code)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_scheduler_events_radio_profile_id ON scheduler_events(radio_profile_id)")
     _schema_initialized_paths.add(db_key)
 
 
@@ -60,6 +65,7 @@ def record_scheduler_event(
     source: str = "",
     action: str = "",
     detail: str = "",
+    radio_profile_id: str = "",
     frequency_hz: Optional[int] = None,
     band: str = "",
     mode: str = "",
@@ -74,9 +80,9 @@ def record_scheduler_event(
         conn.execute(
             """
             INSERT INTO scheduler_events(
-                ts_utc, event_type, code, source, action, detail, frequency_hz,
+                ts_utc, event_type, code, source, action, detail, radio_profile_id, frequency_hz,
                 band, mode, vfo, schedule_key, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 _utc_now_iso(),
@@ -85,6 +91,7 @@ def record_scheduler_event(
                 str(source or "").strip(),
                 str(action or "").strip(),
                 str(detail or "").strip(),
+                str(radio_profile_id or "").strip(),
                 int(frequency_hz) if frequency_hz is not None else None,
                 str(band or "").strip(),
                 str(mode or "").strip(),
@@ -121,7 +128,7 @@ def load_recent_scheduler_events(limit: int = 25) -> List[Dict[str, Any]]:
         rows = conn.execute(
             """
             SELECT id, ts_utc, event_type, code, source, action, detail, frequency_hz,
-                   band, mode, vfo, schedule_key, metadata_json
+                   radio_profile_id, band, mode, vfo, schedule_key, metadata_json
             FROM scheduler_events
             ORDER BY id DESC
             LIMIT ?

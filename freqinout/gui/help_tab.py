@@ -5,13 +5,14 @@ import re
 from pathlib import Path
 from typing import List, Tuple
 
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QEvent, Qt, QUrl
+from PySide6.QtGui import QFont, QImage, QTextDocument
 from PySide6.QtPrintSupport import QPrinter
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QBoxLayout,
     QListWidget,
     QListWidgetItem,
     QTextBrowser,
@@ -22,9 +23,11 @@ from PySide6.QtWidgets import (
     QDialog,
     QPlainTextEdit,
     QApplication,
+    QStyle,
 )
 
-from freqinout.gui.theme import resolve_theme, button_style
+from freqinout.gui.theme import button_height_for_font, resolve_theme, button_style, label_style
+from freqinout.gui.bounded_snapshot_worker import SnapshotWorkerController
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import get_recent_issues
 
@@ -38,15 +41,21 @@ class HelpTab(QWidget):
         super().__init__(parent)
         self._doc_path = Path(__file__).resolve().parents[2] / "docs" / "guide.html"
         self.settings = SettingsManager()
+        self._document_generation = 0
+        self._document_html = ""
+        self._pending_anchor = ""
+        self._document_worker: SnapshotWorkerController | None = None
 
-        layout = QHBoxLayout(self)
+        layout = QBoxLayout(QBoxLayout.LeftToRight, self)
+        self._help_layout = layout
 
         # Left: index with heading
         toc_col = QVBoxLayout()
         toc_col.setAlignment(Qt.AlignTop)
-        toc_col.addWidget(QLabel("<b>Table of Contents</b>"))
+        self.toc_title = QLabel("Table of Contents")
+        self.toc_title.setStyleSheet(label_style("text", resolve_theme(self.settings), weight=700))
+        toc_col.addWidget(self.toc_title)
         self.toc_list = QListWidget()
-        self.toc_list.setMinimumWidth(220)
         self.toc_list.itemClicked.connect(self._on_toc_clicked)
         toc_col.addWidget(self.toc_list)
         layout.addLayout(toc_col)
@@ -55,7 +64,8 @@ class HelpTab(QWidget):
         viewer_col = QVBoxLayout()
         viewer_col.setAlignment(Qt.AlignTop)
         header_row = QHBoxLayout()
-        header_row.addWidget(QLabel("<h3>FreqInOut Guide</h3>"))
+        self.guide_title = QLabel("FreqInOut Guide")
+        header_row.addWidget(self.guide_title)
         header_row.addStretch()
         self.export_pdf_btn = QPushButton("Export to PDF")
         theme = resolve_theme(self.settings)
@@ -70,18 +80,157 @@ class HelpTab(QWidget):
 
         self.viewer = QTextBrowser()
         self.viewer.setOpenExternalLinks(True)
-        if self._doc_path.exists():
-            self.viewer.setSource(QUrl.fromLocalFile(str(self._doc_path)))
-            self._build_toc()
+        self.viewer.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.viewer.setHtml("<p>Loading the FreqInOut guide…</p>")
         viewer_col.addWidget(self.viewer)
 
         layout.addLayout(viewer_col, stretch=1)
+        self._update_responsive_layout()
         self.apply_theme()
+        self._request_document_load()
+        self.destroyed.connect(self._stop_document_worker)
+
+    def _ensure_document_worker(self) -> SnapshotWorkerController:
+        worker = self._document_worker
+        if worker is None:
+            worker = SnapshotWorkerController(self, self._on_document_ready)
+            self._document_worker = worker
+        return worker
+
+    def _stop_document_worker(self) -> None:
+        worker = getattr(self, "_document_worker", None)
+        if worker is not None:
+            worker.stop()
+            self._document_worker = None
+
+    def shutdown(self) -> None:
+        self._stop_document_worker()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt virtual
+        self.shutdown()
+        super().closeEvent(event)
+
+    @staticmethod
+    def _read_document_snapshot(path: Path) -> str:
+        return path.read_text(encoding="utf-8", errors="ignore")
+
+    @staticmethod
+    def _resolve_local_image_urls(html_text: str, document_path: Path) -> str:
+        """Give Qt's viewer and PDF printer explicit URLs for local guide images."""
+
+        base_dir = Path(document_path).resolve().parent
+        pattern = re.compile(
+            r'(?P<prefix><img\b[^>]*?\bsrc\s*=\s*)(?P<quote>["\'])(?P<src>.*?)(?P=quote)',
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+
+        def replace(match: re.Match[str]) -> str:
+            source = html.unescape(match.group("src")).strip()
+            if not source or source.startswith(("data:", "file:", "http:", "https:", "qrc:", "#")):
+                return match.group(0)
+            candidate = Path(source)
+            if not candidate.is_absolute():
+                candidate = base_dir / candidate
+            candidate = candidate.resolve()
+            if not candidate.is_file():
+                return match.group(0)
+            quote = match.group("quote")
+            return f'{match.group("prefix")}{quote}{QUrl.fromLocalFile(str(candidate)).toString()}{quote}'
+
+        return pattern.sub(replace, str(html_text))
+
+    @staticmethod
+    def _register_local_image_resources(document: QTextDocument, html_text: str) -> None:
+        """Keep local images resident so QTextDocument printing cannot drop them."""
+
+        for source in re.findall(
+            r'<img\b[^>]*?\bsrc\s*=\s*["\']([^"\']+)["\']',
+            str(html_text),
+            flags=re.IGNORECASE | re.DOTALL,
+        ):
+            url = QUrl(html.unescape(source).strip())
+            if not url.isLocalFile():
+                continue
+            image = QImage(url.toLocalFile())
+            if image.isNull():
+                continue
+            document.addResource(QTextDocument.ImageResource, url, image)
+
+    def _request_document_load(self) -> None:
+        self._document_generation += 1
+        generation = self._document_generation
+        path = Path(self._doc_path)
+        self._ensure_document_worker().request(
+            generation,
+            lambda: HelpTab._read_document_snapshot(path),
+        )
+
+    def _on_document_ready(self, generation: int, payload: object, error: object) -> None:
+        if int(generation) != self._document_generation:
+            return
+        if error is not None or not isinstance(payload, str):
+            self.viewer.setPlainText(f"The FreqInOut guide could not be loaded: {error or 'invalid document'}")
+            return
+        try:
+            # QTextBrowser.setHtml() accepts only the HTML string in PySide6.
+            # Set the document base URL separately so relative guide assets
+            # still resolve without aborting the completion callback.
+            document = self.viewer.document()
+            document.setBaseUrl(QUrl.fromLocalFile(str(self._doc_path)))
+            rendered_payload = self._resolve_local_image_urls(payload, self._doc_path)
+            self._register_local_image_resources(document, rendered_payload)
+            self.viewer.setHtml(rendered_payload)
+            self._build_toc(payload)
+        except Exception as exc:
+            self._document_html = ""
+            self.toc_list.clear()
+            self.viewer.setPlainText(f"The FreqInOut guide could not be displayed: {exc}")
+            return
+        self._document_html = payload
+        self._update_responsive_layout()
+        if self._pending_anchor:
+            pending = self._pending_anchor
+            self._pending_anchor = ""
+            self.open_anchor(pending)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_responsive_layout()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange:
+            self.apply_theme()
+
+    def _update_responsive_layout(self) -> None:
+        """Stack navigation above guide content on compact screens."""
+        if not hasattr(self, "_help_layout"):
+            return
+        metrics = self.fontMetrics()
+        toc_width = max(
+            metrics.horizontalAdvance(self.toc_title.text()) + metrics.averageCharWidth() * 6,
+            self.toc_list.sizeHintForColumn(0)
+            + self.style().pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent)
+            + metrics.averageCharWidth() * 4,
+        )
+        readable_guide_width = metrics.averageCharWidth() * 84
+        margins = self._help_layout.contentsMargins()
+        breakpoint = toc_width + readable_guide_width + self._help_layout.spacing() + margins.left() + margins.right()
+        compact = int(self.width() or 0) < breakpoint
+        self._help_layout.setDirection(
+            QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight
+        )
+        self.toc_list.setMinimumWidth(0 if compact else toc_width)
 
     def apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
+        self.toc_title.setStyleSheet(label_style("text", theme, weight=700))
+        self.guide_title.setStyleSheet(label_style("text", theme, weight=700))
         self.export_pdf_btn.setStyleSheet(button_style("primary", theme))
         self.recent_issues_btn.setStyleSheet(button_style("secondary", theme))
+        for button in (self.export_pdf_btn, self.recent_issues_btn):
+            button.setMinimumHeight(button_height_for_font(button))
+        self._update_responsive_layout()
 
     def _show_recent_issues(self) -> None:
         issues = get_recent_issues()
@@ -161,15 +310,15 @@ class HelpTab(QWidget):
         return headings
 
     def open_anchor(self, anchor: str | None) -> None:
-        if not self._doc_path.exists():
-            return
         anchor_txt = str(anchor or "").strip().lstrip("#")
-        base_url = QUrl.fromLocalFile(str(self._doc_path))
+        if not self._document_html:
+            self._pending_anchor = anchor_txt
+            return
         if anchor_txt:
-            self.viewer.setSource(QUrl(f"{base_url.toString()}#{anchor_txt}"))
+            self.viewer.scrollToAnchor(anchor_txt)
             self._select_toc_anchor(anchor_txt)
             return
-        self.viewer.setSource(base_url)
+        self.viewer.verticalScrollBar().setValue(0)
 
     def _select_toc_anchor(self, anchor: str) -> None:
         if not hasattr(self, "toc_list"):
@@ -186,13 +335,12 @@ class HelpTab(QWidget):
                 self.toc_list.setCurrentRow(idx)
                 break
 
-    def _build_toc(self):
+    def _build_toc(self, html_text: str | None = None):
         """
         Parse headings from the guide to build a formatted index.
         """
-        try:
-            html_text = self._doc_path.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
+        html_text = self._document_html if html_text is None else str(html_text)
+        if not html_text:
             return
         headings = self._parse_headings(html_text)
         self.toc_list.clear()

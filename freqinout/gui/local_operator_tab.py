@@ -4,7 +4,8 @@ import csv
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QEvent
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -22,12 +23,27 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QTextEdit,
     QCheckBox,
+    QBoxLayout,
+    QScrollArea,
 )
 
 from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
-from freqinout.core.local_ops_store import get_all_operators, upsert_operator, delete_operators
-from freqinout.gui.theme import resolve_theme, button_style
+from freqinout.core.local_ops_store import (
+    delete_operators,
+    get_all_operators,
+    latest_report_summaries_for_callsigns,
+    upsert_operator,
+)
+from freqinout.gui.theme import (
+    resolve_theme,
+    button_style,
+    button_height_for_font,
+    contrast_text_for_background,
+    control_height_for_font,
+    horizontal_layout_breakpoint,
+    label_style,
+)
 
 
 LOCAL_CATEGORIES = ["VHF", "UHF", "GMRS", "MURS", "FRS", "Other"]
@@ -39,24 +55,21 @@ class LocalOperatorTab(QWidget):
     """
 
     local_operator_updated = Signal()
+    local_reports_requested = Signal(str)
 
     COL_SELECT = 0
     COL_CALLSIGN = 1
-    COL_FIRST_NAME = 2
-    COL_LAST_NAME = 3
-    COL_CITY = 4
-    COL_STATE = 5
-    COL_CATEGORY = 6
-    COL_FIRST_SEEN = 7
-    COL_LAST_SEEN = 8
-    COL_COUNT = 9
-    COL_SITREP = 10
-    COL_NOTES = 11
+    COL_NAME = 2
+    COL_LOCATION = 3
+    COL_ACTIVITY = 4
+    COL_SITREP = 5
+    COL_REPORT = 6
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.settings = SettingsManager()
         self._rows: List[Dict[str, Any]] = []
+        self._report_summaries: Dict[str, Dict[str, Any]] = {}
         self._build_ui()
         self._load_data()
         self.apply_theme()
@@ -65,14 +78,16 @@ class LocalOperatorTab(QWidget):
         layout = QVBoxLayout(self)
 
         header = QHBoxLayout()
-        header.addWidget(QLabel("<h3>Local Operators</h3>"))
+        self.title_label = QLabel("Local Operators")
+        header.addWidget(self.title_label)
         header.addStretch()
         layout.addLayout(header)
 
         filter_row = QHBoxLayout()
+        self.filter_row = filter_row
         filter_row.addWidget(QLabel("Search:"))
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Callsign, first/last name, city, state, category, sitrep, notes")
+        self.search_edit.setPlaceholderText("Callsign, name, city/state, category, sitrep, report topic, keyword, notes")
         filter_row.addWidget(self.search_edit, stretch=1)
         filter_row.addWidget(QLabel("Category:"))
         self.category_filter = QComboBox()
@@ -81,36 +96,34 @@ class LocalOperatorTab(QWidget):
         layout.addLayout(filter_row)
 
         actions = QHBoxLayout()
+        self.actions_row = actions
         self.refresh_btn = QPushButton("Refresh")
         self.add_btn = QPushButton("Add")
         self.edit_btn = QPushButton("Edit Selected")
+        self.view_reports_btn = QPushButton("View Reports")
         self.delete_btn = QPushButton("Delete Selected")
         self.import_btn = QPushButton("Import CSV")
         self.export_btn = QPushButton("Export CSV")
         actions.addWidget(self.refresh_btn)
         actions.addWidget(self.add_btn)
         actions.addWidget(self.edit_btn)
+        actions.addWidget(self.view_reports_btn)
         actions.addWidget(self.delete_btn)
         actions.addWidget(self.import_btn)
         actions.addWidget(self.export_btn)
         actions.addStretch()
         layout.addLayout(actions)
 
-        self.table = QTableWidget(0, 12)
+        self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(
             [
                 "Selected",
                 "Callsign",
-                "First Name",
-                "Last Name",
-                "City",
-                "State",
-                "Category",
-                "First Seen",
-                "Last Seen",
-                "Check-ins",
+                "Name",
+                "Location",
+                "Activity",
                 "SitRep",
-                "Notes",
+                "Latest Report",
             ]
         )
         self.table.verticalHeader().setVisible(False)
@@ -119,21 +132,20 @@ class LocalOperatorTab(QWidget):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(self.COL_SELECT, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(self.COL_CALLSIGN, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(self.COL_FIRST_NAME, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(self.COL_LAST_NAME, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(self.COL_CITY, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(self.COL_STATE, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(self.COL_CATEGORY, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(self.COL_FIRST_SEEN, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(self.COL_LAST_SEEN, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(self.COL_COUNT, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(self.COL_NAME, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(self.COL_LOCATION, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(self.COL_ACTIVITY, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(self.COL_SITREP, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(self.COL_NOTES, QHeaderView.Stretch)
+        header.setSectionResizeMode(self.COL_REPORT, QHeaderView.Stretch)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         layout.addWidget(self.table)
+
+        self._apply_responsive_layout()
 
         self.refresh_btn.clicked.connect(self._load_data)
         self.add_btn.clicked.connect(self._add_operator)
         self.edit_btn.clicked.connect(self._edit_selected)
+        self.view_reports_btn.clicked.connect(self._view_selected_reports)
         self.delete_btn.clicked.connect(self._delete_selected)
         self.import_btn.clicked.connect(self._import_csv)
         self.export_btn.clicked.connect(self._export_csv)
@@ -142,13 +154,54 @@ class LocalOperatorTab(QWidget):
 
     def apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
+        self.title_label.setStyleSheet(label_style("text", theme, weight=700))
         self.refresh_btn.setStyleSheet(button_style("muted", theme))
         self.add_btn.setStyleSheet(button_style("eligible_success", theme))
         role = "eligible_info" if self._selected_callsigns() else "muted"
         self.edit_btn.setStyleSheet(button_style(role, theme))
+        self.view_reports_btn.setStyleSheet(button_style("eligible_info" if len(self._selected_callsigns()) == 1 else "muted", theme))
         self.delete_btn.setStyleSheet(button_style("eligible_danger" if self._selected_callsigns() else "muted", theme))
         self.import_btn.setStyleSheet(button_style("muted", theme))
         self.export_btn.setStyleSheet(button_style("muted", theme))
+        for button in (
+            self.refresh_btn,
+            self.add_btn,
+            self.edit_btn,
+            self.view_reports_btn,
+            self.delete_btn,
+            self.import_btn,
+            self.export_btn,
+        ):
+            button.setMinimumHeight(button_height_for_font(button))
+        self.search_edit.setMinimumHeight(control_height_for_font(self.search_edit))
+        self.category_filter.setMinimumHeight(control_height_for_font(self.category_filter))
+        self.table.verticalHeader().setDefaultSectionSize(
+            max(1, self.table.fontMetrics().lineSpacing() + 10)
+        )
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, self.COL_SITREP)
+            if item is not None:
+                self._apply_sitrep_item_style(item, item.text(), theme)
+        self._apply_responsive_layout()
+
+    def _apply_responsive_layout(self) -> None:
+        """Keep the dense roster controls usable without changing cached data."""
+        compact = self.width() > 0 and self.width() < max(
+            horizontal_layout_breakpoint(self.filter_row, reserve_controls=1),
+            horizontal_layout_breakpoint(self.actions_row, reserve_controls=1),
+        )
+        direction = QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight
+        self.filter_row.setDirection(direction)
+        self.actions_row.setDirection(direction)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_responsive_layout()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange:
+            self.apply_theme()
 
     def on_settings_saved(self) -> None:
         try:
@@ -160,9 +213,13 @@ class LocalOperatorTab(QWidget):
     def _load_data(self) -> None:
         try:
             self._rows = get_all_operators()
+            self._report_summaries = latest_report_summaries_for_callsigns(
+                [str(row.get("callsign", "")) for row in self._rows]
+            )
         except Exception as e:
             log.error("LocalOperatorTab: load failed: %s", e)
             self._rows = []
+            self._report_summaries = {}
         self._refresh_category_filter()
         self._apply_filters()
         self.local_operator_updated.emit()
@@ -202,6 +259,7 @@ class LocalOperatorTab(QWidget):
                 str(row.get("checkin_count", "")),
                 str(row.get("sitrep_status", "")),
                 str(row.get("notes", "")),
+                self._report_search_text(str(row.get("callsign", ""))),
             ]
         ).upper()
         return query.upper() in hay
@@ -232,38 +290,105 @@ class LocalOperatorTab(QWidget):
 
                 vals = [
                     str(row.get("callsign", "")).upper(),
-                    str(row.get("first_name", "")),
-                    str(row.get("last_name", "")),
-                    str(row.get("city", "")),
-                    str(row.get("state", "")).upper(),
-                    str(row.get("category", "")),
-                    str(row.get("first_seen_utc", "")),
-                    str(row.get("last_seen_utc", "")),
-                    str(int(row.get("checkin_count", 0) or 0)),
+                    self._operator_display_name(row),
+                    self._operator_location(row),
+                    self._operator_activity(row),
                     str(row.get("sitrep_status", "GREEN")).upper(),
-                    str(row.get("notes", "")),
+                    self._report_display_text(str(row.get("callsign", ""))),
                 ]
                 for idx, value in enumerate(vals, start=1):
                     item = QTableWidgetItem(value)
                     self.table.setItem(r, idx, item)
                     if idx == self.COL_SITREP:
                         self._apply_sitrep_item_style(item, value)
-                    if idx == self.COL_NOTES:
-                        item.setToolTip(value)
+                    if idx == self.COL_REPORT:
+                        item.setToolTip(self._report_tooltip(str(row.get("callsign", ""))))
         finally:
             self.table.setSortingEnabled(sorting_enabled)
 
-    def _apply_sitrep_item_style(self, item: QTableWidgetItem, status: str) -> None:
+    @staticmethod
+    def _operator_display_name(row: Dict[str, Any]) -> str:
+        name = str(row.get("name", "")).strip()
+        if name:
+            return name
+        return " ".join(
+            part
+            for part in (
+                str(row.get("first_name", "")).strip(),
+                str(row.get("last_name", "")).strip(),
+            )
+            if part
+        )
+
+    @staticmethod
+    def _operator_location(row: Dict[str, Any]) -> str:
+        city = str(row.get("city", "")).strip()
+        state = str(row.get("state", "")).strip().upper()
+        if city and state:
+            return f"{city}, {state}"
+        return city or state
+
+    @staticmethod
+    def _operator_activity(row: Dict[str, Any]) -> str:
+        category = str(row.get("category", "")).strip().upper()
+        try:
+            checkins = int(row.get("checkin_count", 0) or 0)
+        except Exception:
+            checkins = 0
+        parts = []
+        if category:
+            parts.append(category)
+        parts.append(f"{checkins} check-in{'s' if checkins != 1 else ''}")
+        return " | ".join(parts)
+
+    def _report_summary(self, callsign: str) -> Dict[str, Any]:
+        return self._report_summaries.get(str(callsign or "").strip().upper(), {})
+
+    def _report_display_text(self, callsign: str) -> str:
+        summary = self._report_summary(callsign)
+        return str(summary.get("display", "") or "")
+
+    def _report_search_text(self, callsign: str) -> str:
+        summary = self._report_summary(callsign)
+        topics = " ".join(str(topic) for topic in summary.get("topics", []) if str(topic).strip())
+        return " ".join(
+            [
+                str(summary.get("display", "")),
+                str(summary.get("latest_display", "")),
+                str(summary.get("highest_display", "")),
+                topics,
+            ]
+        )
+
+    def _report_tooltip(self, callsign: str) -> str:
+        summary = self._report_summary(callsign)
+        if not summary:
+            return ""
+        parts = [str(summary.get("display", ""))]
+        count = int(summary.get("count", 0) or 0)
+        if count > 1:
+            parts.append(f"{count} recent report(s) loaded for this operator")
+        topics = ", ".join(str(topic) for topic in summary.get("topics", []) if str(topic).strip())
+        if topics:
+            parts.append(f"Topics: {topics}")
+        return "\n".join(part for part in parts if part)
+
+    def _apply_sitrep_item_style(
+        self,
+        item: QTableWidgetItem,
+        status: str,
+        theme: Optional[Dict[str, str]] = None,
+    ) -> None:
+        theme = theme or resolve_theme(self.settings)
         key = (status or "").strip().upper()
         if key == "RED":
-            item.setBackground(Qt.red)
-            item.setForeground(Qt.white)
+            background = theme["danger"]
         elif key == "YELLOW":
-            item.setBackground(Qt.yellow)
-            item.setForeground(Qt.black)
+            background = theme["warning"]
         else:
-            item.setBackground(Qt.darkGreen)
-            item.setForeground(Qt.white)
+            background = theme["success"]
+        item.setBackground(QColor(background))
+        item.setForeground(QColor(contrast_text_for_background(background, theme)))
 
     def _selected_callsigns(self) -> List[str]:
         out: List[str] = []
@@ -281,7 +406,15 @@ class LocalOperatorTab(QWidget):
     def _dialog_profile(self, existing: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         dlg = QDialog(self)
         dlg.setWindowTitle("Edit Local Operator" if existing else "Add Local Operator")
-        form = QFormLayout(dlg)
+        dialog_layout = QVBoxLayout(dlg)
+        form_scroll = QScrollArea(dlg)
+        form_scroll.setWidgetResizable(True)
+        form_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        form_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        form_body = QWidget(form_scroll)
+        form = QFormLayout(form_body)
+        form_scroll.setWidget(form_body)
+        dialog_layout.addWidget(form_scroll)
 
         callsign_edit = QLineEdit(str((existing or {}).get("callsign", "")))
         first_name_edit = QLineEdit(str((existing or {}).get("first_name", "")))
@@ -294,7 +427,12 @@ class LocalOperatorTab(QWidget):
         if existing and str((existing or {}).get("category", "")):
             category_combo.setCurrentText(str((existing or {}).get("category", "")))
         notes_edit = QTextEdit(str((existing or {}).get("notes", "")))
-        notes_edit.setMinimumHeight(90)
+        notes_edit.setMinimumHeight(
+            max(
+                control_height_for_font(notes_edit, vertical_padding=18, floor=44) * 2,
+                notes_edit.fontMetrics().lineSpacing() * 3 + 20,
+            )
+        )
         sitrep_combo = QComboBox()
         sitrep_combo.addItems(["GREEN", "YELLOW", "RED"])
         sitrep_combo.setCurrentText(str((existing or {}).get("sitrep_status", "GREEN")).strip().upper() or "GREEN")
@@ -314,7 +452,7 @@ class LocalOperatorTab(QWidget):
         btn_row.addStretch()
         btn_row.addWidget(save_btn)
         btn_row.addWidget(cancel_btn)
-        form.addRow(btn_row)
+        dialog_layout.addLayout(btn_row)
 
         out: Dict[str, Any] = {}
 
@@ -417,6 +555,16 @@ class LocalOperatorTab(QWidget):
             return
         delete_operators(selected)
         self._load_data()
+
+    def _view_selected_reports(self) -> None:
+        selected = self._selected_callsigns()
+        if not selected:
+            QMessageBox.information(self, "View Local Reports", "Select one local operator to view reports.")
+            return
+        if len(selected) > 1:
+            QMessageBox.information(self, "View Local Reports", "Select only one local operator to view reports.")
+            return
+        self.local_reports_requested.emit(selected[0])
 
     @staticmethod
     def _csv_pick(row: Dict[str, Any], keys: List[str]) -> str:

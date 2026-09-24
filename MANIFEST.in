@@ -3,5 +3,26 @@ include README.md
 include LICENSE.md
 include CREDITS.md
 include CHANGELOG.md
-recursive-include docs *.md *.yaml
-recursive-include freqinout *.py
+include SECURITY.md
+include requirements.txt
+include install_freqinout.py
+include install_FreqInOut_linux.sh
+include uninstall_FreqInOut_linux.sh
+include start-multi-rig.sh
+include start-multi-rig.cmd
+include docs/guide.html
+include docs/Installation.md
+include docs/FreqInOut-linux-installer.md
+recursive-include docs/images/readme-2.0 *.jpg
+recursive-include freqinout *.py *.qml
+recursive-include freqinout/resources/spotter_forms *.txt
+recursive-include assets *.png *.ico *.svg
+recursive-include config/leaflet *.css *.js *.geojson
+recursive-include config/net_resources *.json
+recursive-include config/propagation *.db *.json
+recursive-include config/resource_catalog *.json
+recursive-include config/shortwave/eibi *.csv *.TXT
+include third_party/js8net/js8net-main/js8net.py
+include third_party/js8net/js8net-main/LICENSE
+exclude freqinout/core/config_lab_preset.py
+global-exclude __pycache__ *.py[cod]

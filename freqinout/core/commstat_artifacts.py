@@ -52,13 +52,13 @@ def ensure_commstat_artifact_tables(conn: sqlite3.Connection) -> None:
             state_code TEXT,
             scope TEXT,
             transport_mode TEXT,
+            reach_mode TEXT,
+            origin_path TEXT,
             status_label TEXT,
             alert_color TEXT,
             title TEXT,
             body_text TEXT,
             remarks_text TEXT,
-            brevity_code TEXT,
-            brevity_summary TEXT,
             source_first TEXT,
             source_last TEXT,
             sources_json TEXT,
@@ -87,13 +87,13 @@ def ensure_commstat_artifact_tables(conn: sqlite3.Connection) -> None:
             "state_code": "TEXT",
             "scope": "TEXT",
             "transport_mode": "TEXT",
+            "reach_mode": "TEXT",
+            "origin_path": "TEXT",
             "status_label": "TEXT",
             "alert_color": "TEXT",
             "title": "TEXT",
             "body_text": "TEXT",
             "remarks_text": "TEXT",
-            "brevity_code": "TEXT",
-            "brevity_summary": "TEXT",
             "source_first": "TEXT",
             "source_last": "TEXT",
             "sources_json": "TEXT",
@@ -341,13 +341,13 @@ def upsert_commstat_artifact(
     state_code: str = "",
     scope: str = "",
     transport_mode: str = "",
+    reach_mode: str = "",
+    origin_path: str = "",
     status_label: str = "",
     alert_color: str = "",
     title: str = "",
     body_text: str = "",
     remarks_text: str = "",
-    brevity_code: str = "",
-    brevity_summary: str = "",
     source: str = "",
     source_ref: str = "",
     external_ids: Iterable[str] | None = None,
@@ -364,9 +364,8 @@ def upsert_commstat_artifact(
     cur.execute(
         """
         SELECT id, event_ts, event_ts_utc, from_call, target, report_group, grid, state_code, scope,
-               transport_mode, status_label, alert_color, title, body_text, remarks_text,
-               source_first, source_last, sources_json, source_refs_json, external_ids_json, payload_json, subtype,
-               brevity_code, brevity_summary
+               transport_mode, reach_mode, origin_path, status_label, alert_color, title, body_text, remarks_text,
+               source_first, source_last, sources_json, source_refs_json, external_ids_json, payload_json, subtype
         FROM commstat_artifacts
         WHERE artifact_key=?
         """,
@@ -380,6 +379,8 @@ def upsert_commstat_artifact(
     ext_ids = _dedupe_str_list(external_ids or [])
     payload_json = json.dumps(payload or {}, separators=(",", ":"), ensure_ascii=True)
     transport_txt = normalize_transport_mode(transport_mode)
+    reach_txt = str(reach_mode or "").strip().lower()
+    origin_txt = str(origin_path or "").strip().lower()
     status_txt = normalize_status_label(status_label)
     alert_color_txt = str(alert_color or "").strip().upper()
     subtype_txt = str(subtype or "").strip().upper()
@@ -392,16 +393,13 @@ def upsert_commstat_artifact(
     title_txt = str(title or "").strip()
     body_txt = str(body_text or "").strip()
     remarks_txt = str(remarks_text or "").strip()
-    brevity_code_txt = str(brevity_code or "").strip().upper()
-    brevity_summary_txt = str(brevity_summary or "").strip()
 
     if not row:
         cur.execute(
             """
             INSERT INTO commstat_artifacts (
                 artifact_key, artifact_kind, subtype, event_ts, event_ts_utc, from_call, target, report_group,
-                grid, state_code, scope, transport_mode, status_label, alert_color, title, body_text, remarks_text,
-                brevity_code, brevity_summary,
+                grid, state_code, scope, transport_mode, reach_mode, origin_path, status_label, alert_color, title, body_text, remarks_text,
                 source_first, source_last, sources_json, source_count, source_refs_json, external_ids_json,
                 payload_json, inserted_ts, updated_ts
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -419,13 +417,13 @@ def upsert_commstat_artifact(
                 state_txt,
                 scope_txt,
                 transport_txt,
+                reach_txt,
+                origin_txt,
                 status_txt,
                 alert_color_txt,
                 title_txt,
                 body_txt,
                 remarks_txt,
-                brevity_code_txt,
-                brevity_summary_txt,
                 source_txt,
                 source_txt,
                 json.dumps([source_txt] if source_txt else [], separators=(",", ":"), ensure_ascii=True),
@@ -450,6 +448,8 @@ def upsert_commstat_artifact(
         existing_state,
         existing_scope,
         existing_transport,
+        existing_reach,
+        existing_origin,
         existing_status,
         existing_alert_color,
         existing_title,
@@ -462,8 +462,6 @@ def upsert_commstat_artifact(
         ext_ids_json,
         existing_payload_json,
         existing_subtype,
-        existing_brevity_code,
-        existing_brevity_summary,
     ) = row
 
     sources = set(_safe_json_array_loads(sources_json))
@@ -504,13 +502,13 @@ def upsert_commstat_artifact(
             state_code=?,
             scope=?,
             transport_mode=?,
+            reach_mode=?,
+            origin_path=?,
             status_label=?,
             alert_color=?,
             title=?,
             body_text=?,
             remarks_text=?,
-            brevity_code=?,
-            brevity_summary=?,
             source_first=?,
             source_last=?,
             sources_json=?,
@@ -532,13 +530,13 @@ def upsert_commstat_artifact(
             state_txt or str(existing_state or "").strip().upper(),
             scope_txt or str(existing_scope or "").strip(),
             merge_transport_modes(existing_transport, transport_txt),
+            reach_txt or str(existing_reach or "").strip().lower(),
+            origin_txt or str(existing_origin or "").strip().lower(),
             status_txt if richer and status_txt else normalize_status_label(existing_status),
             alert_color_txt if richer and alert_color_txt else str(existing_alert_color or "").strip().upper(),
             title_txt if richer and title_txt else str(existing_title or "").strip(),
             body_txt if richer and body_txt else str(existing_body or "").strip(),
             remarks_txt if richer and remarks_txt else str(existing_remarks or "").strip(),
-            brevity_code_txt if richer and brevity_code_txt else str(existing_brevity_code or "").strip().upper(),
-            brevity_summary_txt if richer and brevity_summary_txt else str(existing_brevity_summary or "").strip(),
             str(source_first or source_txt or "").strip().upper(),
             source_txt or str(_source_last or source_first or "").strip().upper(),
             json.dumps(source_list, separators=(",", ":"), ensure_ascii=True),

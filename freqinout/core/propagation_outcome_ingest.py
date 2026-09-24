@@ -91,6 +91,9 @@ class _Event:
     outcome: str
     source: str
     source_ref: str
+    source_key: str = ""
+    app_instance_id: str = ""
+    source_radio_id: str = ""
 
 
 def ingest_propagation_outcomes(settings, *, max_rows_per_source: int = 500) -> Dict[str, int]:
@@ -144,14 +147,16 @@ def _ingest_js8_links(conn: sqlite3.Connection, operator_meta: Dict[str, Dict], 
         source_key=SOURCE_JS8_LINKS,
         source_label="JS8",
         query="""
-            SELECT rowid AS rid, COALESCE(ts, 0) AS ts_val, origin, destination, band, freq_hz
+            SELECT rowid AS rid, COALESCE(ts, 0) AS ts_val, origin, destination, band, freq_hz,
+                   COALESCE(source_id, '') AS source_key,
+                   COALESCE(app_instance_id, '') AS app_instance_id,
+                   COALESCE(source_radio_id, '') AS source_radio_id
             FROM js8_links
-            WHERE (COALESCE(ts, 0) > ?)
-               OR (COALESCE(ts, 0) = ? AND rowid > ?)
-            ORDER BY COALESCE(ts, 0) ASC, rowid ASC
+            WHERE rowid > ?
+            ORDER BY rowid ASC
             LIMIT ?
         """,
-        params_builder=lambda cp_ts, cp_ref, limit: (cp_ts, cp_ts, cp_ref, limit),
+        params_builder=lambda cp_ts, cp_ref, limit: (cp_ref, limit),
         row_to_events=lambda row: _row_to_events(
             source_key=SOURCE_JS8_LINKS,
             source_label="JS8",
@@ -164,25 +169,27 @@ def _ingest_js8_links(conn: sqlite3.Connection, operator_meta: Dict[str, Dict], 
             freq_hz=_float_or_none(row["freq_hz"]),
             outcome="HEARD",
             operator_meta=operator_meta,
+            provenance=_row_provenance(row),
         ),
         max_rows=max_rows,
     )
 
 
 def _ingest_varac_links(conn: sqlite3.Connection, operator_meta: Dict[str, Dict], *, max_rows: int) -> Dict[str, int]:
+    source_key_expr = _column_expr(conn, "varac_links", "ingest_source_key", alias="source_key")
     return _ingest_rows(
         conn,
         source_key=SOURCE_VARAC_LINKS,
         source_label="VARAC",
-        query="""
-            SELECT rowid AS rid, COALESCE(ts, 0) AS ts_val, origin, destination, band, freq_hz, source
+        query=f"""
+            SELECT rowid AS rid, COALESCE(ts, 0) AS ts_val, origin, destination, band, freq_hz, source,
+                   {source_key_expr}
             FROM varac_links
-            WHERE (COALESCE(ts, 0) > ?)
-               OR (COALESCE(ts, 0) = ? AND rowid > ?)
-            ORDER BY COALESCE(ts, 0) ASC, rowid ASC
+            WHERE rowid > ?
+            ORDER BY rowid ASC
             LIMIT ?
         """,
-        params_builder=lambda cp_ts, cp_ref, limit: (cp_ts, cp_ts, cp_ref, limit),
+        params_builder=lambda cp_ts, cp_ref, limit: (cp_ref, limit),
         row_to_events=lambda row: _row_to_events(
             source_key=SOURCE_VARAC_LINKS,
             source_label="VARAC",
@@ -195,6 +202,7 @@ def _ingest_varac_links(conn: sqlite3.Connection, operator_meta: Dict[str, Dict]
             freq_hz=_float_or_none(row["freq_hz"]),
             outcome="QSO" if str(row["source"] or "").strip().lower() == "qso" else "HEARD",
             operator_meta=operator_meta,
+            provenance=_row_provenance(row),
         ),
         max_rows=max_rows,
     )
@@ -208,14 +216,16 @@ def _ingest_js8_messages(
         source_key=SOURCE_JS8_MESSAGES,
         source_label="JS8",
         query="""
-            SELECT rowid AS rid, COALESCE(utc_ts, 0) AS ts_val, from_call, to_call, msg_type
+            SELECT rowid AS rid, COALESCE(utc_ts, 0) AS ts_val, from_call, to_call, msg_type,
+                   COALESCE(source_key, '') AS source_key,
+                   COALESCE(js8_instance_id, '') AS app_instance_id,
+                   COALESCE(source_radio_id, '') AS source_radio_id
             FROM js8_messages
-            WHERE (COALESCE(utc_ts, 0) > ?)
-               OR (COALESCE(utc_ts, 0) = ? AND rowid > ?)
-            ORDER BY COALESCE(utc_ts, 0) ASC, rowid ASC
+            WHERE rowid > ?
+            ORDER BY rowid ASC
             LIMIT ?
         """,
-        params_builder=lambda cp_ts, cp_ref, limit: (cp_ts, cp_ts, cp_ref, limit),
+        params_builder=lambda cp_ts, cp_ref, limit: (cp_ref, limit),
         row_to_events=lambda row: _row_to_events(
             source_key=SOURCE_JS8_MESSAGES,
             source_label="JS8",
@@ -228,6 +238,7 @@ def _ingest_js8_messages(
             freq_hz=None,
             outcome="ACKED" if "ACK" in str(row["msg_type"] or "").upper() else "DELIVERED",
             operator_meta=operator_meta,
+            provenance=_row_provenance(row),
         ),
         max_rows=max_rows,
     )
@@ -241,14 +252,14 @@ def _ingest_varac_messages(
         source_key=SOURCE_VARAC_MESSAGES,
         source_label="VARAC",
         query="""
-            SELECT rowid AS rid, COALESCE(ts, 0) AS ts_val, from_call, to_call, msg_type, band, freq_hz, read_status
+            SELECT rowid AS rid, COALESCE(ts, 0) AS ts_val, from_call, to_call, msg_type, band, freq_hz, read_status,
+                   COALESCE(ingest_source_key, '') AS source_key
             FROM varac_messages
-            WHERE (COALESCE(ts, 0) > ?)
-               OR (COALESCE(ts, 0) = ? AND rowid > ?)
-            ORDER BY COALESCE(ts, 0) ASC, rowid ASC
+            WHERE rowid > ?
+            ORDER BY rowid ASC
             LIMIT ?
         """,
-        params_builder=lambda cp_ts, cp_ref, limit: (cp_ts, cp_ts, cp_ref, limit),
+        params_builder=lambda cp_ts, cp_ref, limit: (cp_ref, limit),
         row_to_events=lambda row: _row_to_events(
             source_key=SOURCE_VARAC_MESSAGES,
             source_label="VARAC",
@@ -261,6 +272,7 @@ def _ingest_varac_messages(
             freq_hz=_float_or_none(row["freq_hz"]),
             outcome=_varac_message_outcome(row["msg_type"], row["read_status"]),
             operator_meta=operator_meta,
+            provenance=_row_provenance(row),
         ),
         max_rows=max_rows,
     )
@@ -269,19 +281,22 @@ def _ingest_varac_messages(
 def _ingest_spotter_traffic(
     conn: sqlite3.Connection, operator_meta: Dict[str, Dict], *, max_rows: int
 ) -> Dict[str, int]:
+    source_key_expr = _column_expr(conn, "spotter_traffic", "source_key", alias="source_key")
     return _ingest_rows(
         conn,
         source_key=SOURCE_SPOTTER,
         source_label="JS8",
-        query="""
-            SELECT rowid AS rid, COALESCE(utc_ts, 0) AS ts_val, from_call, to_call
+        query=f"""
+            SELECT rowid AS rid, COALESCE(utc_ts, 0) AS ts_val, from_call, to_call,
+                   {source_key_expr},
+                   COALESCE(js8_instance_id, '') AS app_instance_id,
+                   COALESCE(source_radio_id, '') AS source_radio_id
             FROM spotter_traffic
-            WHERE (COALESCE(utc_ts, 0) > ?)
-               OR (COALESCE(utc_ts, 0) = ? AND rowid > ?)
-            ORDER BY COALESCE(utc_ts, 0) ASC, rowid ASC
+            WHERE rowid > ?
+            ORDER BY rowid ASC
             LIMIT ?
         """,
-        params_builder=lambda cp_ts, cp_ref, limit: (cp_ts, cp_ts, cp_ref, limit),
+        params_builder=lambda cp_ts, cp_ref, limit: (cp_ref, limit),
         row_to_events=lambda row: _row_to_events(
             source_key=SOURCE_SPOTTER,
             source_label="JS8",
@@ -294,6 +309,7 @@ def _ingest_spotter_traffic(
             freq_hz=None,
             outcome="DELIVERED",
             operator_meta=operator_meta,
+            provenance=_row_provenance(row),
         ),
         max_rows=max_rows,
     )
@@ -313,6 +329,8 @@ def _ingest_rows(
         return {"rows_scanned": 0, "events_inserted": 0, "stats_updated": 0}
 
     cp_ts, cp_ref = _get_checkpoint(conn, source_key)
+    if cp_ref and _max_projection_rowid(conn, source_key) < cp_ref:
+        cp_ts, cp_ref = 0.0, 0
     cur = conn.cursor()
     params = params_builder(cp_ts, cp_ref, max_rows)
     cur.execute(query, params)
@@ -362,6 +380,7 @@ def _row_to_events(
     freq_hz: Optional[float],
     outcome: str,
     operator_meta: Dict[str, Dict],
+    provenance: Optional[Dict[str, str]] = None,
 ) -> List[_Event]:
     if ts_val <= 0:
         return []
@@ -407,6 +426,9 @@ def _row_to_events(
                 outcome=outcome_up,
                 source=source_label,
                 source_ref=f"{source_key}:{rowid}",
+                source_key=str((provenance or {}).get("source_key", "") or source_key),
+                app_instance_id=str((provenance or {}).get("app_instance_id", "") or ""),
+                source_radio_id=str((provenance or {}).get("source_radio_id", "") or ""),
             )
         )
     return events
@@ -419,8 +441,8 @@ def _insert_event(conn: sqlite3.Connection, event: _Event, *, inserted_utc: str)
         INSERT OR IGNORE INTO prop_contact_events
             (event_key, ts_utc, origin_callsign, origin_grid6, target_type, target_id,
              target_callsign, target_grid6, band, mode, freq_hz, distance_km,
-             outcome, source, source_ref, inserted_utc)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             outcome, source, source_ref, source_key, app_instance_id, source_radio_id, inserted_utc)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             event.event_key,
@@ -438,10 +460,38 @@ def _insert_event(conn: sqlite3.Connection, event: _Event, *, inserted_utc: str)
             event.outcome,
             event.source,
             event.source_ref,
+            event.source_key,
+            event.app_instance_id,
+            event.source_radio_id,
             inserted_utc,
         ),
     )
     return cur.rowcount > 0
+
+
+def _row_provenance(row: sqlite3.Row) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for key in ("source_key", "app_instance_id", "source_radio_id"):
+        try:
+            out[key] = str(row[key] or "").strip()
+        except Exception:
+            out[key] = ""
+    return out
+
+
+def _column_expr(conn: sqlite3.Connection, table: str, column: str, *, alias: str) -> str:
+    if _table_has_column(conn, table, column):
+        return f"COALESCE({column}, '') AS {alias}"
+    return f"'' AS {alias}"
+
+
+def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    try:
+        cur = conn.cursor()
+        cur.execute(f"PRAGMA table_info({table})")
+        return str(column or "") in {str(row[1] or "") for row in cur.fetchall()}
+    except Exception:
+        return False
 
 
 def _upsert_stats(conn: sqlite3.Connection, event: _Event, *, updated_utc: str) -> None:
@@ -571,6 +621,28 @@ def _set_checkpoint(
 
 
 def _table_exists_for_source(conn: sqlite3.Connection, source_key: str) -> bool:
+    table = _projection_table_for_source(source_key)
+    if not table:
+        return False
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,))
+    return cur.fetchone() is not None
+
+
+def _max_projection_rowid(conn: sqlite3.Connection, source_key: str) -> int:
+    table = _projection_table_for_source(source_key)
+    if not table:
+        return 0
+    try:
+        cur = conn.cursor()
+        cur.execute(f"SELECT COALESCE(MAX(rowid), 0) FROM {table}")
+        row = cur.fetchone()
+        return _to_int(row[0] if row else 0)
+    except Exception:
+        return 0
+
+
+def _projection_table_for_source(source_key: str) -> str:
     table_by_source = {
         SOURCE_JS8_LINKS: "js8_links",
         SOURCE_VARAC_LINKS: "varac_links",
@@ -578,12 +650,7 @@ def _table_exists_for_source(conn: sqlite3.Connection, source_key: str) -> bool:
         SOURCE_VARAC_MESSAGES: "varac_messages",
         SOURCE_SPOTTER: "spotter_traffic",
     }
-    table = table_by_source.get(source_key, "")
-    if not table:
-        return False
-    cur = conn.cursor()
-    cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,))
-    return cur.fetchone() is not None
+    return table_by_source.get(source_key, "")
 
 
 def _stats_key_hash(

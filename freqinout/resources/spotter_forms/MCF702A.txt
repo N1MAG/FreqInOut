@@ -1,0 +1,26 @@
+SEEN Net Checkin|F!702A
+
+# Form created 11/06/2025. This is a default SEEN MCForms form. 
+
+! IMPORTANT INFO
+!! Needs & Status
+. These questions are important for your net check-in.
+. They will help Net Control to determine if you need additional time on the net, or attention from net participants.
+
+? Do you have any traffic?
+@Y Yes
+@N *No
+
+? What is your status?
+@1 *All operations normal
+@5 Situation report, retrieve form F!301 for details
+
+? What digital modes are you capable of running?
+@1 JS8Call, + all modes supported by FLDigi + Winlink, VARAC
+@2 JS8Call, + all modes supported by FLDigi + Winlink
+@3 JS8Call, + all modes supported by FLDigi
+@4 JS8Call, + Winlink, VARAC
+@5 JS8Call, + VARAC
+
+
+
