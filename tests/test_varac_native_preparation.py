@@ -96,6 +96,10 @@ def test_prepare_existing_standalone_and_new_member_is_immutable_and_ready(tmp_p
     assert result.plan.members[0].vara_target_runtime_folder != result.plan.members[1].vara_target_runtime_folder
     assert result.plan.members[0].vara_changes["Setup"]["TCP Command Port"] == "8300"
     assert result.plan.members[1].vara_changes["Setup"]["TCP Command Port"] == "8310"
+    assert all(
+        member.changes["VARAHF_CONFIG"]["VarahfLaunchOnModemConnect"] == "ON"
+        for member in result.plan.members
+    )
     assert result.plan.native_shared_db_path.startswith("C:\\")
     assert (
         result.plan.members[1].changes["OTHER"]["DBCustomFilePath"]
@@ -170,6 +174,9 @@ def test_linux_wine_targets_and_apply_use_native_drive_paths_not_managed_root_z_
     assert r"VarahfMainPath=C:\VARA-new-radio\VARA.exe" in (
         Path(new_member.target_path).read_text(encoding="utf-8")
     )
+    assert "VarahfLaunchOnModemConnect=ON" in Path(
+        new_member.target_path
+    ).read_text(encoding="utf-8")
 
 
 def test_linux_wine_rejects_source_without_verified_wine_drive_instead_of_generating_z_runtime(tmp_path) -> None:

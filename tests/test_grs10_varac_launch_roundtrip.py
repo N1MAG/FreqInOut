@@ -132,6 +132,116 @@ def test_existing_canonical_varac_recipe_is_not_replaced_by_legacy_node_projecti
     assert orchestrator._restore_canonical_launch_items(1, [canonical]) == [canonical]
 
 
+def test_legacy_managed_cluster_recovery_gives_varac_exclusive_launch_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import freqinout.core.launch_orchestrator as launch_module
+
+    ini_path = tmp_path / "VarAC-ft-710.ini"
+    ini_path.write_text(
+        "[VARAHF_CONFIG]\r\nVarahfLaunchOnModemConnect=ON\r\n",
+        encoding="utf-8",
+    )
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator.multi_radio_store = SimpleNamespace(
+        radio_software_identity_generation=lambda _radio_id: 0,
+        get_device_profile=lambda _radio_id: {
+            "id": 1,
+            "varac_node_id": 7,
+            "varac_cluster_member_enabled": 1,
+        },
+        get_varac_node=lambda _node_id: {
+            "id": 7,
+            "install_path": "/home/bill/.wine/drive_c/VarAC",
+            "ini_path": str(ini_path),
+            "native_management_state": "managed",
+        },
+    )
+    monkeypatch.setattr(launch_module.platform, "system", lambda: "Linux")
+    rows = [
+        {
+            "name": "VARA",
+            "instance_key": "varac:ft-710:vara",
+            "enabled": True,
+            "startup": True,
+            "dependencies": [],
+            "readiness_policy": {},
+        },
+        {
+            "name": "VarAC",
+            "instance_key": "varac:ft-710:varac",
+            "enabled": True,
+            "startup": True,
+            "dependencies": ["vara"],
+            "readiness_policy": {},
+        },
+    ]
+
+    restored = orchestrator._restore_canonical_launch_items(1, rows)
+
+    vara = next(row for row in restored if row["name"] == "VARA")
+    varac = next(row for row in restored if row["name"] == "VarAC")
+    assert vara["startup"] is False
+    assert vara["readiness_policy"]["parent_managed"] is True
+    assert vara["readiness_policy"]["launch_authority"] == "VarAC"
+    assert varac["dependencies"] == []
+
+
+def test_managed_cluster_with_unrepaired_off_policy_retains_legacy_vara_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import freqinout.core.launch_orchestrator as launch_module
+
+    ini_path = tmp_path / "VarAC-ft-710.ini"
+    ini_path.write_text(
+        "[VARAHF_CONFIG]\r\nVarahfLaunchOnModemConnect=OFF\r\n",
+        encoding="utf-8",
+    )
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator.multi_radio_store = SimpleNamespace(
+        radio_software_identity_generation=lambda _radio_id: 0,
+        get_device_profile=lambda _radio_id: {
+            "id": 1,
+            "varac_node_id": 7,
+            "varac_cluster_member_enabled": 1,
+        },
+        get_varac_node=lambda _node_id: {
+            "id": 7,
+            "install_path": str(tmp_path),
+            "ini_path": str(ini_path),
+            "native_management_state": "managed",
+        },
+    )
+    monkeypatch.setattr(launch_module.platform, "system", lambda: "Linux")
+    rows = [
+        {
+            "name": "VARA",
+            "instance_key": "varac:ft-710:vara",
+            "enabled": True,
+            "startup": True,
+            "dependencies": [],
+            "readiness_policy": {},
+        },
+        {
+            "name": "VarAC",
+            "instance_key": "varac:ft-710:varac",
+            "enabled": True,
+            "startup": True,
+            "dependencies": ["vara"],
+            "readiness_policy": {},
+        },
+    ]
+
+    restored = orchestrator._restore_canonical_launch_items(1, rows)
+
+    assert next(row for row in restored if row["name"] == "VARA")["startup"] is True
+    assert next(row for row in restored if row["name"] == "VarAC")["dependencies"] == [
+        "vara"
+    ]
+
+
 def test_legacy_windows_varac_recipe_uses_native_argv_and_working_directory() -> None:
     recipe = legacy_varac_structured_launch(
         {

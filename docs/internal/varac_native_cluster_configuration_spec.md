@@ -792,3 +792,103 @@ Regression evidence covers Linux/Wine and Windows structured launch, the
 canonical-over-legacy precedence guard, transactional copy/rewrite/readback,
 reconcile-only recovery, running-process deferral, old-runtime retention,
 four-projection persistence, and native-Windows migration no-op behavior.
+
+## VNC-11 — Cluster Launch Authority And Station-Wide Process Attribution
+
+Status: implemented and covered by the focused automated gate on 2026-09-24;
+live Linux/Wine operator qualification remains open.
+
+### Observable defect
+
+With the FTDX-10 VarAC/VARA node already running, an explicit row `Start` for
+the FT-710 VarAC node reports a duplicate-risk failure and launches nothing.
+The launch-owned inventory sees the existing family process, but the
+selected-radio queue contains only the FT-710 candidate. Counting only that
+queue makes the valid FTDX-10 process appear unattributed and incorrectly
+blocks the distinct FT-710 member.
+
+Separately, the managed FT-710 cluster INI was produced with
+`[VARAHF_CONFIG] VarahfLaunchOnModemConnect=OFF`. In managed cluster mode,
+VarAC is the launch authority for its node-local VARA modem. The value must be
+`ON` so starting that VarAC member also starts the VARA runtime named by that
+member's `VarahfMainPath`.
+
+### Surgical correction
+
+The selected-radio launch plan remains selected-radio scoped: it may start only
+the requested radio's rows. Process attribution, however, is station-wide. The
+preflight constructs one immutable attribution catalog from every persisted,
+configured VarAC and VARA identity before evaluating the selected target. Each
+observed process is matched against the exact executable, VarAC INI argument,
+Wine prefix/working directory where applicable, or distinct VARA runtime path.
+
+An existing FTDX-10 process that matches the FTDX-10 identity is therefore
+attributed and does not block an absent FT-710 identity. The requested FT-710
+VarAC process launches with its own INI. A process matching the requested
+FT-710 identity is `already running`. Any same-family process that cannot be
+attributed to the complete persisted station catalog remains a fail-closed
+duplicate-risk result. The correction must not relax exact matching or permit
+the selected-radio action to launch another radio's application.
+
+For every FIO-managed **cluster member**, qualified native preparation and
+targeted repair write and semantically read back:
+
+`[VARAHF_CONFIG] VarahfLaunchOnModemConnect=ON`
+
+The node's `VarahfMainPath`, command port, KISS configuration/port, monitor
+path/port, VarAC INI, and VARA runtime remain member-distinct. Existing
+standalone or operator-managed nodes retain their reviewed policy; this rule
+does not broadly rewrite their INIs.
+
+When this key is `ON`, the VarAC row owns starting VARA. The hidden canonical
+VARA component remains in the radio bundle as runtime identity, readiness,
+port, and recovery evidence, but FIO does not independently spawn it as a
+second startup row for that managed member. This prevents FIO and VarAC from
+racing to start the same modem. Status and duplicate prevention still
+attribute an already-running VARA process to the exact member runtime.
+
+An existing managed cluster member whose key is missing or `OFF` is repairable
+without replacing its Fast Light, JS8Call, message, schedule, launch-choice, or
+cluster configuration. The repair is limited to this qualified allowlisted key,
+uses the existing native backup/atomic-write/semantic-readback transaction,
+and preserves comments, unknown keys, encoding, newline convention, and every
+unrelated byte-semantic value. If the affected VarAC or VARA process is
+running, FIO performs no native write and reports the exact stop-and-retry
+action. Unsupported or ambiguous layouts remain read-only.
+
+### Acceptance and regression boundary
+
+1. With exact FTDX-10 VarAC and VARA processes running, manual FT-710 VarAC
+   `Start` launches only the FT-710 VarAC command and is not blocked by the
+   known FTDX-10 processes.
+2. The same station-wide attribution behavior governs automatic startup,
+   `Start Startup Apps`, and row `Start` without broadening their launch scope.
+3. An exact already-running FT-710 VarAC process is credited and never
+   duplicated; an unknown VarAC or VARA family process still fails closed.
+4. Managed create-cluster and join-cluster fixtures write
+   `VarahfLaunchOnModemConnect=ON`, read it back, and retain distinct runtime
+   paths and ports on Linux/Wine and native Windows.
+5. The resulting launch plan starts VarAC once and does not independently spawn
+   that member's parent-managed VARA component.
+6. A targeted legacy managed-member repair changes only the launch-on-connect
+   key and the corresponding canonical projection/audit evidence. Cancel,
+   write failure, readback failure, and persistence failure restore the prior
+   INI and FIO state.
+7. Standalone and operator-managed VarAC policies remain unchanged, and all
+   existing cluster database, BBS, mailbox, launch-choice, and recovery tests
+   remain green.
+
+No destructive migration is authorized. This slice is complete only after the
+focused automated gate passes and a Linux/Wine operator confirms that starting
+the second VarAC member opens its distinct VARA modem and connects through the
+configured member ports without duplicating the first node.
+
+Implementation evidence: managed preparation and the qualified writer require
+launch-on-connect `ON`; startup/manual planning keeps the parent-managed VARA
+row out of the execution queue; saved legacy recipes receive the same in-memory
+authority correction; launch preflight attributes family processes against the
+complete saved station catalog; and automatic recovery performs a one-key
+backup/stage/semantic-readback repair only for an idle, exact managed member.
+Unknown family process evidence remains fail-closed. The focused VarAC,
+launch-planner, identity, transaction, and Launch Control gate completed with
+197 passing tests on 2026-09-24.

@@ -828,6 +828,10 @@ def _validate_request(request: VarACNativeClusterRequest, capability: VarACWrite
         supplied = {_casefold(key): str(value) for key, value in member.vara_settings.items()}
         if set(supplied) != allowed_vara:
             raise VarACNativeConfigurationError("VARAHF_CONFIG settings must be the exact qualified allowlist.")
+        if _casefold(supplied.get("varahflaunchonmodemconnect", "")) != "on":
+            raise VarACNativeConfigurationError(
+                "Managed VarAC cluster members must launch their node-local VARA modem."
+            )
         _validate_runtime_files(runtime)
         _validate_vara_settings(member.member_id, supplied, runtime.settings, claimed_ports, runtime)
     for index, left in enumerate(target_keys):

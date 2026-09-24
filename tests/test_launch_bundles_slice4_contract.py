@@ -672,6 +672,31 @@ def test_manual_selected_radio_plan_includes_inactive_radio_but_startup_does_not
     assert unattended.instances == ()
 
 
+def test_parent_managed_vara_is_reviewable_but_never_independently_enqueued() -> None:
+    profiles = [{"id": 7, "name": "Field", "runtime_active": 1}]
+    vara = _item("VARA", instance_key="varac:field:vara")
+    vara["readiness_policy"].update(
+        parent_managed=True,
+        launch_authority="VarAC",
+    )
+    varac = _item("VarAC", instance_key="varac:field:varac")
+    bundles = {7: {"launch_enabled": True, "items": [vara, varac]}}
+    planner = StationLaunchPlanner()
+
+    review = planner.plan_review(profiles, bundles)
+    startup = planner.plan_startup(profiles, bundles)
+    manual = planner.plan_startup(
+        profiles,
+        bundles,
+        scope_radio_id=7,
+        trigger="manual",
+    )
+
+    assert [instance.name for instance in review.instances] == ["VARA", "VarAC"]
+    assert [instance.name for instance in startup.instances] == ["VarAC"]
+    assert [instance.name for instance in manual.instances] == ["VarAC"]
+
+
 def test_explicit_manual_sequence_preserves_structured_instance_recipe() -> None:
     orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
     orchestrator._active = False
@@ -2144,6 +2169,102 @@ def test_missing_distinct_fast_light_message_instance_launches_when_running_fami
     )
 
     assert orchestrator._unattributed_process_blocker(missing, False) == ""
+
+
+def test_selected_radio_varac_launch_credits_running_sibling_from_station_catalog() -> None:
+    running = {
+        "name": "VarAC",
+        "instance_identity": "varac:ftdx-10:varac",
+        "launch_path_override": "wine",
+        "launch_arguments": ["/wine/VarAC.exe", r"C:\VarAC\VarAC.ini"],
+    }
+    requested = {
+        "name": "VarAC",
+        "instance_identity": "varac:ft-710:varac",
+        "launch_path_override": "wine",
+        "launch_arguments": ["/wine/VarAC.exe", r"C:\VarAC\VarAC-ft-710.ini"],
+    }
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator._queue = [requested]
+    orchestrator._sequence_attribution_candidates = (running, requested)
+    orchestrator.status = SimpleNamespace(
+        cached_program_process_count=lambda _name: 1,
+    )
+    orchestrator._configured_instance_process_running = (
+        lambda item: item is running
+    )
+
+    assert orchestrator._unattributed_process_blocker(requested, False) == ""
+
+
+def test_selected_radio_preflight_catalog_contains_both_saved_varac_nodes() -> None:
+    profiles = [
+        {"id": 1, "name": "FTDX-10", "runtime_active": 1},
+        {"id": 2, "name": "FT-710", "runtime_active": 1},
+    ]
+    bundles = {
+        1: {
+            "launch_enabled": True,
+            "items": [
+                _item(
+                    "VarAC",
+                    instance_key="varac:ftdx-10:varac",
+                    path="wine",
+                )
+            ],
+        },
+        2: {
+            "launch_enabled": True,
+            "items": [
+                _item(
+                    "VarAC",
+                    instance_key="varac:ft-710:varac",
+                    path="wine",
+                )
+            ],
+        },
+    }
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator.multi_radio_store = SimpleNamespace(
+        list_device_profiles=lambda: profiles,
+    )
+    orchestrator.get_radio_launch_bundle = lambda radio_id: bundles[radio_id]
+    orchestrator.planner = StationLaunchPlanner()
+    requested = StationLaunchPlanner().plan_startup(
+        profiles,
+        bundles,
+        scope_radio_id=2,
+        trigger="manual",
+    ).queue()
+
+    catalog = orchestrator._station_process_attribution_candidates(requested)
+
+    assert {
+        row["instance_key"]
+        for row in catalog
+        if row["name"] == "VarAC"
+    } == {"varac:ftdx-10:varac", "varac:ft-710:varac"}
+
+
+def test_selected_radio_varac_launch_still_blocks_unknown_family_process() -> None:
+    requested = {
+        "name": "VarAC",
+        "instance_identity": "varac:ft-710:varac",
+        "launch_path_override": "wine",
+        "launch_arguments": ["/wine/VarAC.exe", r"C:\VarAC\VarAC-ft-710.ini"],
+    }
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator._queue = [requested]
+    orchestrator._sequence_attribution_candidates = (requested,)
+    orchestrator.status = SimpleNamespace(
+        cached_program_process_count=lambda _name: 1,
+    )
+    orchestrator._configured_instance_process_running = lambda _item: False
+
+    assert "duplicate launch skipped" in orchestrator._unattributed_process_blocker(
+        requested,
+        False,
+    )
 
 
 def test_canonical_lowercase_component_dependency_still_orders_launch_apps() -> None:

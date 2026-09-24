@@ -8,7 +8,12 @@ from freqinout.core.software_identity_bundle import (
     SoftwareIdentityRecord,
 )
 from freqinout.core.varac_native_preparation import prepare_managed_varac_runtime_repair
-from freqinout.core.varac_runtime_repair import repair_managed_varac_wine_runtime_paths
+from freqinout.core.varac_runtime_repair import (
+    managed_varac_process_attribution,
+    repair_managed_varac_cluster_launch_policy,
+    repair_managed_varac_wine_runtime_paths,
+    running_managed_varac_node_ids,
+)
 
 
 def _legacy_managed_state(tmp_path: Path):
@@ -63,6 +68,166 @@ def _legacy_managed_state(tmp_path: Path):
         }
     )
     return store, node, profile, ini, legacy_vara
+
+
+def _clustered_managed_state(tmp_path: Path):
+    store, node, profile, ini, legacy_vara = _legacy_managed_state(tmp_path)
+    cluster = store.save_varac_cluster(
+        {
+            "name": "Field Cluster",
+            "cluster_id": "FIELD",
+            "native_management_state": "managed",
+        }
+    )
+    store.set_varac_cluster_member(
+        cluster["id"],
+        profile["id"],
+        instance_number=1,
+        enabled=True,
+    )
+    return store, node, profile, ini, legacy_vara
+
+
+def test_managed_cluster_launch_policy_repairs_only_vara_autostart_key(tmp_path) -> None:
+    store, node, _profile, ini, _legacy_vara = _clustered_managed_state(tmp_path)
+    before = ini.read_text(encoding="utf-8")
+
+    result = repair_managed_varac_cluster_launch_policy(
+        store,
+        backup_root=tmp_path / "backups",
+        platform_override="linux-wine",
+    )
+
+    assert result == (
+        {
+            "node_id": node["id"],
+            "state": "launch-policy-repaired",
+            "detail": "VarAC modem launch enabled and verified.",
+        },
+    )
+    after = ini.read_text(encoding="utf-8")
+    assert "VarahfLaunchOnModemConnect=OFF" in before
+    assert "VarahfLaunchOnModemConnect=ON" in after
+    assert after.replace(
+        "VarahfLaunchOnModemConnect=ON",
+        "VarahfLaunchOnModemConnect=OFF",
+    ) == before
+    assert "launches its node-local VARA modem" in store.get_varac_node(
+        node["id"]
+    )["native_verification_summary"]
+
+
+def test_windows_managed_cluster_launch_policy_uses_same_qualified_repair(tmp_path) -> None:
+    store, node, _profile, ini, _legacy_vara = _clustered_managed_state(tmp_path)
+    saved = store.get_varac_node(node["id"])
+    store.save_varac_node(
+        {
+            **saved,
+            "native_writer_key": "varac:13.2.7:windows:create-member",
+        }
+    )
+
+    result = repair_managed_varac_cluster_launch_policy(
+        store,
+        backup_root=tmp_path / "backups",
+        platform_override="windows",
+    )
+
+    assert result[0]["state"] == "launch-policy-repaired"
+    assert "VarahfLaunchOnModemConnect=ON" in ini.read_text(encoding="utf-8")
+
+
+def test_running_cluster_member_defers_launch_policy_repair_without_writes(tmp_path) -> None:
+    store, node, _profile, ini, _legacy_vara = _clustered_managed_state(tmp_path)
+    before = ini.read_bytes()
+
+    result = repair_managed_varac_cluster_launch_policy(
+        store,
+        backup_root=tmp_path / "backups",
+        running_node_ids=(node["id"],),
+        platform_override="linux-wine",
+    )
+
+    assert result[0]["state"] == "deferred"
+    assert ini.read_bytes() == before
+    assert not (tmp_path / "backups").exists()
+
+
+def test_exact_running_node_detection_does_not_defer_idle_cluster_sibling(tmp_path) -> None:
+    store, node, profile, _ini, _legacy_vara = _clustered_managed_state(tmp_path)
+    store.save_radio_launch_bundle(
+        profile["id"],
+        launch_enabled=True,
+        items=(
+            {
+                "name": "VarAC",
+                "instance_key": "varac:radio-a:varac",
+                "enabled": True,
+                "startup": True,
+                "monitor_health": True,
+                "launch_path_override": "wine",
+                "dependencies": (),
+                "readiness_policy": {
+                    "structured_launch": True,
+                    "executable": "wine",
+                    "launch_arguments": [
+                        str(Path(node["install_path"]) / "VarAC.exe"),
+                        r"C:\VarAC\VarAC.ini",
+                    ],
+                },
+            },
+        ),
+    )
+
+    class _Status:
+        def program_instance_running(self, name, target, arguments):
+            assert name == "VarAC"
+            assert target == "wine"
+            assert arguments[-1] == r"C:\VarAC\VarAC.ini"
+            return True
+
+        def cached_program_process_count(self, name):
+            return 1 if name == "VarAC" else 0
+
+    assert running_managed_varac_node_ids(store, _Status()) == (node["id"],)
+
+
+def test_unknown_varac_process_keeps_automatic_policy_repair_fail_closed(tmp_path) -> None:
+    store, _node, profile, _ini, _legacy_vara = _clustered_managed_state(tmp_path)
+    store.save_radio_launch_bundle(
+        profile["id"],
+        launch_enabled=True,
+        items=(
+            {
+                "name": "VarAC",
+                "instance_key": "varac:radio-a:varac",
+                "enabled": True,
+                "startup": True,
+                "monitor_health": True,
+                "launch_path_override": "wine",
+                "dependencies": (),
+                "readiness_policy": {
+                    "structured_launch": True,
+                    "executable": "wine",
+                    "launch_arguments": ["/managed/VarAC.exe", r"C:\VarAC\VarAC.ini"],
+                },
+            },
+        ),
+    )
+
+    class _Status:
+        def program_instance_running(self, _name, _target, _arguments):
+            return False
+
+        def cached_program_process_count(self, name):
+            return 1 if name == "VarAC" else 0
+
+    attribution = managed_varac_process_attribution(store, _Status())
+
+    assert attribution["running_node_ids"] == ()
+    assert attribution["observed_process_count"] == 1
+    assert attribution["attributed_process_count"] == 0
+    assert attribution["complete"] is False
 
 
 def test_legacy_managed_z_runtime_is_transactionally_moved_into_wine_drive(tmp_path) -> None:

@@ -45,7 +45,7 @@ def _varahf(target: Path, number: int) -> dict[str, str]:
     return {
         "VarahfMainPath": exe, "VarahfMainPort": str(command), "VarahfMainHost": "127.0.0.1",
         "VarahfEnableKissInterface": "ON", "VarahfMainKissPort": str(command + 2),
-        "VarahfMonitorPath": exe, "VarahfMonitorPort": str(command + 3), "VarahfLaunchOnModemConnect": "OFF",
+        "VarahfMonitorPath": exe, "VarahfMonitorPort": str(command + 3), "VarahfLaunchOnModemConnect": "ON",
     }
 
 
@@ -95,6 +95,24 @@ def test_plan_fingerprint_covers_reviewed_native_policy_and_values(tmp_path) -> 
         VarACNativeClusterRequest(**{**request.__dict__, "ptt_lock_enabled": False})
     ).plan_fingerprint
     assert len({baseline, without_sender, without_ptt_lock}) == 3
+
+
+def test_managed_cluster_member_requires_varac_to_launch_its_vara_modem(tmp_path) -> None:
+    request = _request(tmp_path, 1)
+    member = request.members[0]
+    settings = dict(member.vara_settings)
+    settings["VarahfLaunchOnModemConnect"] = "OFF"
+    member = VarACMemberInput(**{**member.__dict__, "vara_settings": settings})
+
+    with pytest.raises(
+        VarACNativeConfigurationError,
+        match="launch their node-local VARA modem",
+    ):
+        build_varac_native_cluster_plan(
+            VarACNativeClusterRequest(
+                **{**request.__dict__, "members": (member,)}
+            )
+        )
 
 
 def test_clones_distinct_runtime_updates_real_keys_and_preserves_unknown_files(tmp_path) -> None:

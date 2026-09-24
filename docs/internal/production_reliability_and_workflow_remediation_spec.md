@@ -1083,6 +1083,93 @@ than an ambiguous cross-radio rename. Hidden canonical companion rows such as
 VARA and SDR++ remain in the bundle even though they are not rendered as
 independent Launch Control checkboxes.
 
+### Future slice — Custom-tool launch and runtime identity
+
+Status: specified 2026-09-24; not implemented.
+
+A Custom Tool has two deliberately separate identities:
+
+- the **launch recipe** is what FIO executes, such as
+  `/home/bill/Desktop/Rigctld-JS8.sh`; and
+- the **runtime identity** is the long-lived process and optional endpoint that
+  prove the tool is already running, such as `rigctld` with one radio's exact
+  `-r` and `-t` arguments.
+
+FIO must not infer the runtime identity by reading or interpreting a shell,
+PowerShell, batch, Python, or other wrapper script. A wrapper may use `exec`,
+spawn a child, remain resident, or change independently after configuration.
+The operator therefore supplies an optional explicit runtime identity when a
+Custom Tool needs monitoring or duplicate-safe startup. Existing launch-only
+Custom Tools remain valid and require no migration guess.
+
+The radio-owned Custom Tool assignment supports these optional facts:
+
+- executable/process identity, stored separately from the display name and
+  launch command;
+- ordered identifying arguments, using the same normalized contiguous-argv
+  matching contract as built-in multi-instance applications;
+- optional TCP host/port health evidence when a listener is the strongest
+  readiness signal;
+- readiness mode: process, TCP endpoint, or process plus TCP endpoint;
+- working directory and environment, which remain launch facts and are not
+  silently treated as process selectors; and
+- a stable instance key so two radios may use the same executable without
+  sharing status, startup selection, or command snapshots.
+
+Runtime identity belongs to the radio assignment, not merely the station-wide
+catalog definition. This permits two `rigctld` processes to share one binary
+while remaining distinct by arguments. A canonical example is:
+
+| Radio | Launch command | Runtime executable | Required runtime arguments | Optional health endpoint |
+|---|---|---|---|---|
+| FTDX-10 | `/home/bill/Desktop/Rigctld-JS8.sh` | `rigctld` | `-m 4 -r 127.0.0.1:12345 -T 127.0.0.1 -t 4539` | `127.0.0.1:4539` |
+| FT-710 | radio-specific wrapper | `rigctld` | `-m 4 -r 127.0.0.1:12346 -T 127.0.0.1 -t 4538` | `127.0.0.1:4538` |
+
+The launch preflight uses a fresh launch-owned process inventory. An exact
+runtime match is `already running` and prohibits another launch. A process for
+the other radio is attributed to that radio and neither satisfies nor blocks
+the requested identity. A visible same-family process that cannot be
+attributed remains fail-closed. When endpoint checking is configured, an
+occupied target endpoint also prohibits launch; an exact process with an
+unreachable required endpoint reports a process/endpoint mismatch rather than
+starting a duplicate.
+
+Platform matching uses the same semantic identity on Linux, Windows, and
+macOS. Executable suffixes, path case, app launchers, and wrapper processes are
+normalized by the platform adapter, but required arguments and endpoint values
+are not weakened. FIO never uses a Custom Tool's human display name as the sole
+process identity when explicit runtime facts exist.
+
+The Configuration UI keeps the normal Custom Tool form compact. `Runtime
+identity (optional)` is progressive disclosure and explains that it is needed
+for accurate health and duplicate prevention when the launch command is a
+wrapper. Enabling `Monitor Health` or `Launch at Startup` without a provable
+runtime identity remains allowed for a legacy launch-only tool, but the UI must
+state `Runtime not configured`; it must not claim `Not running` from the
+wrapper name or authorize repeated automatic launches as though absence had
+been proved.
+
+The additive persistence change preserves all existing catalog and per-radio
+rows. Blank runtime fields mean legacy launch-only behavior. No migration
+parses scripts, copies another radio's selectors, or invents a TCP endpoint.
+
+Acceptance requires:
+
+1. A wrapper using `exec rigctld ...` launches once and is subsequently
+   recognized by the saved `rigctld` runtime identity.
+2. Two concurrent `rigctld` processes are attributed independently by their
+   complete radio-specific arguments and listener ports.
+3. Automatic startup, `Start Startup Apps`, and row `Start` share the same
+   duplicate decision.
+4. A wrong `-r` source port, `-t` listener port, executable, or required
+   argument does not satisfy the selected radio.
+5. An unknown same-family process fails closed without blocking a known process
+   from being credited to its correct radio.
+6. Linux, native Windows, and macOS process fixtures exercise equivalent direct
+   commands and wrapper-launched children.
+7. Legacy Custom Tools remain launchable, retain their existing persistence,
+   and never receive fabricated health evidence.
+
 ### One planner for startup and manual launch
 
 One `StationLaunchPlanner` composes launch requests from active radio bundles.

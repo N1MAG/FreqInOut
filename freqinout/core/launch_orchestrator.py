@@ -20,6 +20,7 @@ from freqinout.core.dependency_status_service import (
     LEGACY_PRIMARY_DEPENDENCY_SCOPE,
     get_dependency_status_service,
 )
+from freqinout.core.config_varac_managed import parse_varac_ini_bytes
 from freqinout.core.launch_bundle_store import LaunchBundleStore, normalize_launch_items
 from freqinout.core.js8_storage import resolve_js8_storage, variant_family_from_version
 from freqinout.core.guided_launch_recipes import managed_instance_window_title
@@ -173,6 +174,7 @@ class LaunchOrchestrator(QObject):
         self._endpoint_preflight_requested: set[str] = set()
         self._endpoint_preflight_clear: set[str] = set()
         self._sequence_claimed_identities: set[str] = set()
+        self._sequence_attribution_candidates: tuple[Mapping[str, Any], ...] = ()
         self._sequence_process_records: tuple[Mapping[str, object], ...] = ()
         self._sequence_process_records_ready = False
         self._sequence_preflight_started_wall = 0.0
@@ -342,17 +344,26 @@ class LaunchOrchestrator(QObject):
                 int(radio_profile_id)
             )
             if generation <= 0:
-                return self._restore_legacy_varac_launch_item(
-                    int(radio_profile_id), restored
+                return self._apply_managed_cluster_vara_launch_policy(
+                    int(radio_profile_id),
+                    self._restore_legacy_varac_launch_item(
+                        int(radio_profile_id), restored
+                    ),
                 )
             records = self.multi_radio_store.list_radio_software_identity_records(
                 int(radio_profile_id)
             )
         except Exception:
-            return restored
+            return self._apply_managed_cluster_vara_launch_policy(
+                int(radio_profile_id),
+                restored,
+            )
         if not records:
-            return self._restore_legacy_varac_launch_item(
-                int(radio_profile_id), restored
+            return self._apply_managed_cluster_vara_launch_policy(
+                int(radio_profile_id),
+                self._restore_legacy_varac_launch_item(
+                    int(radio_profile_id), restored
+                ),
             )
         if not any(record.family_key == "varac" for record in records):
             restored = self._restore_legacy_varac_launch_item(
@@ -520,7 +531,80 @@ class LaunchOrchestrator(QObject):
                     restored.append(canonical)
                     consumed.add(selected_index)
 
-        return [row for index, row in enumerate(restored) if index not in removed]
+        retained = [row for index, row in enumerate(restored) if index not in removed]
+        return self._apply_managed_cluster_vara_launch_policy(
+            int(radio_profile_id),
+            retained,
+        )
+
+    def _apply_managed_cluster_vara_launch_policy(
+        self,
+        radio_profile_id: int,
+        items: Sequence[Mapping[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Keep managed cluster VARA as parent-owned runtime evidence.
+
+        Older saved recipes independently started VARA before VarAC.  A
+        managed cluster INI now requires VarAC to launch its own node-local
+        modem, so recovery must suppress only that hidden VARA row and remove
+        the obsolete dependency without changing operator choices for any
+        visible application.
+        """
+
+        rows = [dict(item) for item in items if isinstance(item, Mapping)]
+        try:
+            profile = self.multi_radio_store.get_device_profile(int(radio_profile_id)) or {}
+            if int(profile.get("varac_cluster_member_enabled", 0) or 0) != 1:
+                return rows
+            node_id = int(profile.get("varac_node_id", 0) or 0)
+            node = self.multi_radio_store.get_varac_node(node_id) if node_id > 0 else None
+            if not isinstance(node, Mapping):
+                return rows
+            if str(node.get("native_management_state", "operator") or "operator").strip().casefold() != "managed":
+                return rows
+            ini_path = Path(str(node.get("ini_path") or "")).expanduser()
+            if not ini_path.is_file() or ini_path.is_symlink():
+                return rows
+            source = parse_varac_ini_bytes(ini_path, ini_path.read_bytes())
+            launch_on_connect = ""
+            for section_name, section_values in source.values.items():
+                if str(section_name).strip().casefold() != "varahf_config":
+                    continue
+                for field_name, value in section_values.items():
+                    if (
+                        str(field_name).strip().casefold()
+                        == "varahflaunchonmodemconnect"
+                    ):
+                        launch_on_connect = str(value or "").strip().casefold()
+                        break
+            if launch_on_connect != "on":
+                return rows
+        except Exception:
+            return rows
+
+        for row in rows:
+            name = str(row.get("name", "") or "").strip().casefold()
+            if name == "vara":
+                readiness = row.get("readiness_policy", {})
+                readiness = dict(readiness) if isinstance(readiness, Mapping) else {}
+                readiness.update(
+                    {
+                        "parent_managed": True,
+                        "launch_authority": "VarAC",
+                    }
+                )
+                row["startup"] = False
+                row["readiness_policy"] = readiness
+            elif name == "varac":
+                dependencies = row.get("dependencies", ())
+                if not isinstance(dependencies, (list, tuple)):
+                    dependencies = ()
+                row["dependencies"] = [
+                    str(value)
+                    for value in dependencies
+                    if str(value).strip().casefold() != "vara"
+                ]
+        return rows
 
     def _restore_legacy_varac_launch_item(
         self,
@@ -826,6 +910,64 @@ class LaunchOrchestrator(QObject):
             instances.append(replace(instance, effective_command=tuple(command or ())))
         return LaunchPlan(trigger=plan.trigger, scope_radio_id=plan.scope_radio_id, instances=tuple(instances))
 
+    def _station_process_attribution_candidates(
+        self,
+        requested_queue: Sequence[Any],
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Return all persisted station identities plus the requested draft.
+
+        Launch scope and attribution scope are intentionally different.  A
+        row Start for one radio may launch only that row, but an already
+        running sibling radio's VarAC/VARA process must be credited against
+        the complete station catalog rather than misclassified as unknown.
+        """
+
+        candidates: List[Mapping[str, Any]] = []
+        try:
+            profiles = self.multi_radio_store.list_device_profiles()
+            bundles = {
+                int(profile["id"]): self.get_radio_launch_bundle(int(profile["id"]))
+                for profile in profiles
+                if int(profile.get("id", 0) or 0) > 0
+            }
+            review = self.planner.plan_review(
+                profiles,
+                bundles,
+                trigger="process-attribution",
+            )
+            candidates.extend(review.queue())
+        except Exception as exc:
+            # The requested queue remains usable, but any process that cannot
+            # be attributed through it will retain the existing fail-closed
+            # duplicate guard.
+            log.warning(
+                "LaunchOrchestrator: station process attribution catalog is incomplete: %s",
+                exc,
+            )
+
+        requested = [dict(item) for item in requested_queue if isinstance(item, Mapping)]
+        requested_keys = {
+            str(item.get("instance_key", "") or "").strip().casefold()
+            for item in requested
+            if str(item.get("instance_key", "") or "").strip()
+        }
+        if requested_keys:
+            candidates = [
+                item
+                for item in candidates
+                if str(item.get("instance_key", "") or "").strip().casefold()
+                not in requested_keys
+            ]
+        candidates.extend(requested)
+
+        unique: Dict[str, Mapping[str, Any]] = {}
+        for index, item in enumerate(candidates):
+            identity = str(item.get("instance_identity", "") or "").strip()
+            instance_key = str(item.get("instance_key", "") or "").strip()
+            key = identity or instance_key or f"candidate:{index}:{self._queue_item_name(item)}"
+            unique[key] = item
+        return tuple(unique.values())
+
     def set_launch_items(self, items: List[Dict[str, Any]], launch_all_with_startup: bool) -> None:
         """Compatibility entry point; writes the runtime-primary radio bundle, never legacy KV."""
         profile = self.multi_radio_store.get_runtime_primary_device_profile()
@@ -1114,6 +1256,9 @@ class LaunchOrchestrator(QObject):
         self._endpoint_preflight_requested = set()
         self._endpoint_preflight_clear = set()
         self._sequence_claimed_identities = set()
+        self._sequence_attribution_candidates = self._station_process_attribution_candidates(
+            queue
+        )
         self._sequence_process_records = ()
         self._sequence_process_records_ready = False
         self._sequence_preflight_started_wall = time.time()
@@ -2210,7 +2355,12 @@ class LaunchOrchestrator(QObject):
             return ""
 
         attributed: set[str] = set()
-        for candidate in getattr(self, "_queue", ()):
+        candidates = getattr(self, "_sequence_attribution_candidates", ()) or getattr(
+            self,
+            "_queue",
+            (),
+        )
+        for candidate in candidates:
             if self._queue_item_name(candidate) != name:
                 continue
             try:
@@ -2611,6 +2761,7 @@ class LaunchOrchestrator(QObject):
         self._endpoint_preflight_requested = set()
         self._endpoint_preflight_clear = set()
         self._sequence_claimed_identities = set()
+        self._sequence_attribution_candidates = ()
         self._sequence_preflight_started_wall = 0.0
         self._process_preflight_reason = ""
         self.sequence_finished.emit(summary)

@@ -11103,3 +11103,44 @@ reasoning-effort label was exposed, and no new delegation was used.
 
 Exit gate: public source promotion is complete. Future executable packaging,
 maintenance patches, or a GitHub Release page are separate work items.
+
+## 2026-09-24 — Custom-tool runtime identity and VarAC cluster launch follow-up
+
+Status: specifications and VarAC cluster launch correction complete; live
+Linux/Wine operator qualification remains pending.
+
+The Custom Tool launch contract now separates the command FIO executes from
+the long-lived process and endpoint that prove the tool is running. The future
+slice adds optional radio-owned executable, exact argument, and TCP readiness
+facts without parsing wrapper scripts or guessing identities for legacy tools.
+The production-shaped `rigctld` example distinguishes FTDX-10 (`12345`/`4539`)
+from FT-710 (`12346`/`4538`) while preserving the existing wrapper commands.
+
+The VarAC native specification now records the selected-radio launch defect:
+family processes were counted station-wide but attributed only against the
+selected queue. The correction keeps launch scope narrow while matching
+observed VarAC and VARA processes against the complete persisted station
+catalog. It also makes managed cluster VarAC the sole VARA launch authority by
+requiring semantic readback of
+`[VARAHF_CONFIG] VarahfLaunchOnModemConnect=ON`; the hidden VARA component
+remains identity/readiness evidence and is not independently spawned.
+
+Primary `gpt-6-astra` owns both architecture specifications and the VarAC
+implementation. No delegation was used. The Custom Tool runtime-identity slice
+remains intentionally unimplemented for later work.
+
+The VarAC correction now writes and validates launch-on-connect `ON` for new
+managed cluster members, transactionally repairs that one key for qualified
+existing members, and gives VarAC exclusive authority to start its node-local
+VARA modem. The hidden VARA row remains available for exact process attribution
+but is excluded from startup and manual execution plans. Selected-radio launch
+continues to launch only the selected radio while duplicate preflight credits
+known sibling processes from the complete station catalog; unknown processes
+still fail closed. Automatic repair distinguishes exact live nodes from idle
+siblings and refuses writes when family process evidence is not fully
+attributable.
+
+Automated exit gate: 197 focused VarAC writer/preparation/transaction,
+Launch Control, identity, and launch-planner tests passed. No schema or runtime
+data was changed, and nothing was pushed. Remaining exit gate: operator verify
+the FT-710 manual start on Linux/Wine opens its distinct VarAC and VARA pair.
