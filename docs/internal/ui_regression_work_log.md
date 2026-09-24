@@ -11153,3 +11153,49 @@ launch-policy repair now project each radio independently and combine the
 result only as a read-only process-attribution catalog. Normal station launch
 planning retains its existing cross-radio collision checks. A shared-cluster-DB
 fixture covers both paths; the focused gate is now 201 passing tests.
+
+## 2026-09-24 — Terminal process exclusion and launch-child reaping
+
+Status: implementation gate passes; live Linux/Wine requalification remains
+open.
+
+Production evidence showed `[VarAC.exe] <defunct>` with FIO as its parent. The
+exited child held no port, but the immutable launch-preflight inventory counted
+it as VarAC family evidence. With the valid FTDX-10 VarAC running, manual
+FT-710 Start therefore failed closed before Popen with an unattributed-process
+duplicate-risk result. The separate VARA files and their `8300`/`8100` and
+`8310`/`8312` values remained correct; this slice does not change ports,
+application configuration, or persisted launch bundles.
+
+Process inventory now excludes positively identified zombie/dead application
+and wrapper processes before publishing shared tokens or records. Cached family
+counts and exact-instance matching enforce the same rule. Unknown or
+permission-denied live evidence remains fail-closed. LaunchOrchestrator retains
+every qualifying Popen handle and uses a one-second Qt timer to call only
+nonblocking `poll()` until the child exit status is collected; no GUI-thread
+`wait()` was added.
+
+Work-package ownership:
+
+- Primary `gpt-6-astra` owned lifecycle/concurrency design, implementation,
+  integration review, specification, and exit gate. No reliable primary
+  reasoning-effort label was exposed.
+- `gpt-5.6-luna` at `medium` performed the required bounded read-only test and
+  safety audit. It identified the missing terminal-status and nonblocking-reap
+  cases and confirmed that live unmatched Wine evidence must retain the
+  existing fail-closed behavior. The primary reviewed and implemented the
+  resulting cases; the delegate made no file changes.
+
+Acceptance evidence:
+
+- `./.venv/bin/python -m pytest -q tests/test_slice0_refresh_coordination.py tests/test_software_status_endpoints.py tests/test_launch_bundles_slice4_contract.py tests/test_grs10_varac_launch_roundtrip.py tests/test_varac_native_cluster_writer.py tests/test_varac_native_preparation.py tests/test_varac_runtime_repair.py`
+  — 175 passed, 2 skipped;
+- `./.venv/bin/python -m pytest -q tests/test_launch*.py tests/test_software_status*.py tests/test_slice0_refresh_coordination.py tests/test_varac*.py tests/test_grs10_varac_launch_roundtrip.py`
+  — 361 passed, 5 skipped;
+- changed-file compilation and `git diff --check` — pass.
+
+Exit gate: automated implementation passes. Operator qualification requires a
+restart onto this code, confirmation that no historical zombie remains, and a
+manual FT-710 VarAC Start while the DX10 VarAC/VARA pair is running. The result
+must be two distinct VarAC/VARA pairs on their configured ports with no duplicate
+processes.

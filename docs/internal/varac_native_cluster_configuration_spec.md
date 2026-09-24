@@ -900,3 +900,72 @@ backup/stage/semantic-readback repair only for an idle, exact managed member.
 Unknown family process evidence remains fail-closed. The focused VarAC,
 launch-planner, identity, transaction, and Launch Control gate completed with
 201 passing tests on 2026-09-24.
+
+## VNC-12 — Terminal-Process Exclusion And FIO Child Reaping
+
+Status: implemented on 2026-09-24; focused automated gate passes and live
+Linux/Wine operator requalification remains open.
+
+### Observable defect
+
+After a prior VarAC launch exited, Linux reported `[VarAC.exe] <defunct>` with
+the FIO process as its parent. The process held no socket or runtime resources,
+but launch preflight counted it as VarAC family evidence. With the valid
+FTDX-10 VarAC already running, the terminal child made process count exceed the
+number of attributable live instances. Manual FT-710 `Launch Control > Start`
+therefore failed closed with:
+
+`VarAC process evidence is present but could not be attributed to every configured instance; duplicate launch skipped`
+
+The saved DX10 and FT-710 VARA files remained physically distinct and retained
+their unique command and KISS ports. No port or native-configuration migration
+is authorized by this correction.
+
+### Surgical correction
+
+Every launch-owned process inventory obtains a best-effort native process
+status for application-family and known wrapper processes. Positively
+identified `zombie` or `dead` records are excluded before they can populate the
+shared process token or record snapshots. A disappearing process is terminal;
+permission denial or unavailable status remains unknown evidence and preserves
+the existing fail-closed behavior. Cached family counts and exact-instance
+matching independently reject terminal-status records so an immutable launch
+snapshot cannot reintroduce stale evidence.
+
+FIO retains each `subprocess.Popen` handle it creates. A dedicated Qt timer
+calls only nonblocking `poll()` operations and removes the handle after an exit
+status is collected. The GUI thread never calls blocking `wait()`. Long-lived
+applications remain tracked, Wine launcher processes that hand off and exit
+are reaped, and application readiness continues to be determined by the
+existing endpoint/process identity contract rather than by the lifetime of the
+original launcher handle.
+
+Live Wine/VarAC evidence is not relaxed. An unattributed live VarAC or VARA
+process still blocks a duplicate-risk launch; a verified exact instance is
+still `already running`; and an attributable sibling does not suppress the
+requested radio's absent member.
+
+### Acceptance and regression boundary
+
+1. A snapshot containing only a zombie VarAC reports no running VarAC and a
+   family count of zero.
+2. A zombie plus one live VarAC reports exactly one live family process.
+3. FIO retains a launched child until `poll()` reports an exit, then reaps it
+   without invoking blocking `wait()` on the GUI thread.
+4. The Popen execution path always registers a qualifying child with the
+   reaper before readiness polling begins.
+5. Live unmatched Wine/VarAC evidence continues to fail closed, and exact
+   multi-radio process attribution remains unchanged.
+6. No database, launch bundle, port, VarAC INI, or VARA INI is modified.
+
+Implementation exit requires focused process-status, Launch Control, VarAC
+native preparation/writer/repair, and round-trip tests to pass. Live Linux/Wine
+qualification must confirm that restarting FIO removes the historical zombie,
+starting the FT-710 row launches its distinct VarAC/VARA pair, and the DX10
+pair remains connected on its own ports.
+
+Automated evidence: the focused affected-file gate completed with 175 passed
+and 2 platform skips; the broader launch, software-status, refresh-coordination,
+VarAC, and round-trip regression gate completed with 361 passed and 5 platform
+skips. `git diff --check` passed. No runtime database or native INI was opened
+for writing.

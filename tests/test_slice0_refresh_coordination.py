@@ -4,6 +4,8 @@ import os
 import time
 import threading
 
+import psutil
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
@@ -344,3 +346,42 @@ def test_launch_inventory_attributes_wine_child_command_lines(monkeypatch) -> No
         "wine",
         ("/home/bill/.wine/drive_c/VARA-ft-710/VARA.exe",),
     ) is True
+
+
+def test_process_inventory_excludes_zombie_application_evidence(monkeypatch) -> None:
+    class _Process:
+        def __init__(self, pid: int, status: str):
+            self.pid = pid
+            self.info = {"name": "VarAC.exe"}
+            self._status = status
+
+        def status(self) -> str:
+            return self._status
+
+        def exe(self) -> str:
+            return "/usr/lib/wine/VarAC.exe"
+
+        def cmdline(self) -> list[str]:
+            return ["C:\\VarAC\\VarAC.exe"]
+
+    processes = [_Process(10, psutil.STATUS_ZOMBIE)]
+    monkeypatch.setattr(
+        "freqinout.core.software_status_service.psutil.process_iter",
+        lambda attrs: list(processes),
+    )
+    monkeypatch.setattr(SoftwareStatusService, "_shared_proc_snapshot", [])
+    monkeypatch.setattr(SoftwareStatusService, "_shared_proc_records", [])
+    monkeypatch.setattr(SoftwareStatusService, "_shared_proc_snapshot_ts", 0.0)
+    service = SoftwareStatusService(_Settings())
+
+    service._refresh_process_snapshot(force=True, inspect_all=True)
+
+    assert service.cached_program_process_count("VarAC") == 0
+    assert service.program_is_running("VarAC") is False
+    assert service._proc_records == []
+
+    processes.append(_Process(11, psutil.STATUS_RUNNING))
+    service._refresh_process_snapshot(force=True, inspect_all=True)
+
+    assert service.cached_program_process_count("VarAC") == 1
+    assert [record["pid"] for record in service._proc_records] == [11]

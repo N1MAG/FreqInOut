@@ -60,6 +60,7 @@ LAUNCH_READINESS_RELAX_AFTER_SEC = 30.0
 LAUNCH_PROCESS_PREFLIGHT_TIMEOUT_SEC = 15.0
 LAUNCH_ENDPOINT_PREFLIGHT_TIMEOUT_SEC = 15.0
 LAUNCH_ENDPOINT_PREFLIGHT_POLL_MS = 250
+LAUNCH_PROCESS_REAPER_INTERVAL_MS = 1000
 
 
 LAUNCH_APP_META: Dict[str, Dict[str, Any]] = {
@@ -186,6 +187,10 @@ class LaunchOrchestrator(QObject):
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(LAUNCH_READINESS_INITIAL_POLL_MS)
         self._poll_timer.timeout.connect(self._poll_current_readiness)
+        self._launched_processes: Dict[int, Any] = {}
+        self._process_reaper_timer = QTimer(self)
+        self._process_reaper_timer.setInterval(LAUNCH_PROCESS_REAPER_INTERVAL_MS)
+        self._process_reaper_timer.timeout.connect(self._reap_launched_processes)
         try:
             self.dependency_status.snapshot_changed.connect(
                 self._on_launch_preflight_snapshot_changed
@@ -1736,6 +1741,7 @@ class LaunchOrchestrator(QObject):
                 cwd=cwd,
                 env=environment,
             )
+            self._track_launched_process(process)
             self._schedule_process_window_title(queue_item, process)
             if sequence_identity:
                 self._sequence_claimed_identities = getattr(
@@ -1773,6 +1779,60 @@ class LaunchOrchestrator(QObject):
             self._results.append(result)
             self.sequence_progress.emit(result)
             self._schedule_advance_queue(0)
+
+    def _track_launched_process(self, process: Any) -> None:
+        """Retain and non-blockingly reap a process started by FIO."""
+
+        poll = getattr(process, "poll", None)
+        if not callable(poll):
+            return
+        try:
+            pid = int(getattr(process, "pid", 0) or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        key = pid if pid > 0 else id(process)
+        owned = getattr(self, "_launched_processes", None)
+        if not isinstance(owned, dict):
+            owned = {}
+            self._launched_processes = owned
+        owned[key] = process
+        self._reap_launched_processes()
+        timer = getattr(self, "_process_reaper_timer", None)
+        if owned and timer is not None:
+            try:
+                if not timer.isActive():
+                    timer.start()
+            except Exception:
+                pass
+
+    def _reap_launched_processes(self) -> None:
+        """Poll owned children so exited launchers never remain as zombies."""
+
+        owned = getattr(self, "_launched_processes", None)
+        if not isinstance(owned, dict):
+            return
+        for key, process in tuple(owned.items()):
+            try:
+                return_code = process.poll()
+            except (ChildProcessError, ProcessLookupError):
+                return_code = -1
+            except Exception as exc:
+                log.warning("LaunchOrchestrator: could not poll launched process %s: %s", key, exc)
+                continue
+            if return_code is None:
+                continue
+            owned.pop(key, None)
+            log.info(
+                "LaunchOrchestrator: reaped launched process pid=%s return_code=%s",
+                key,
+                return_code,
+            )
+        timer = getattr(self, "_process_reaper_timer", None)
+        if not owned and timer is not None:
+            try:
+                timer.stop()
+            except Exception:
+                pass
 
     @staticmethod
     def _window_title_for_item(item: Any) -> str:

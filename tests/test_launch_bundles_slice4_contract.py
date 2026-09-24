@@ -772,10 +772,12 @@ def test_selected_radio_endpoint_identity_launches_when_only_other_radio_process
 
     captured: dict[str, object] = {}
 
+    launched_process = SimpleNamespace()
+
     def fake_popen(command, **kwargs):
         captured["command"] = list(command)
         captured.update(kwargs)
-        return SimpleNamespace()
+        return launched_process
 
     monkeypatch.setattr(launch_module.subprocess, "Popen", fake_popen)
     item = {
@@ -806,6 +808,8 @@ def test_selected_radio_endpoint_identity_launches_when_only_other_radio_process
     orchestrator._is_self_launch_command = lambda _cmd: False
     orchestrator._materialize_item_managed_directories = lambda _item: ()
     orchestrator._infer_launch_cwd = lambda *_args: None
+    tracked: list[object] = []
+    orchestrator._track_launched_process = lambda process: tracked.append(process)
     orchestrator._schedule_advance_queue = lambda _delay=0: None
     orchestrator.dependency_status = SimpleNamespace(refresh_now=lambda **_kwargs: None)
     orchestrator._poll_timer = SimpleNamespace(setInterval=lambda _value: None, start=lambda: None)
@@ -813,7 +817,54 @@ def test_selected_radio_endpoint_identity_launches_when_only_other_radio_process
     orchestrator._advance_queue()
 
     assert captured["command"] == [f"/usr/local/bin/{name.casefold()}"]
+    assert tracked == [launched_process]
     assert orchestrator._current_item is item
+
+
+def test_launched_process_reaper_polls_without_blocking_wait() -> None:
+    class _Timer:
+        def __init__(self) -> None:
+            self.active = False
+
+        def isActive(self) -> bool:
+            return self.active
+
+        def start(self) -> None:
+            self.active = True
+
+        def stop(self) -> None:
+            self.active = False
+
+    class _Process:
+        pid = 432190
+
+        def __init__(self) -> None:
+            self.poll_results = [None, 0]
+            self.poll_calls = 0
+
+        def poll(self):
+            self.poll_calls += 1
+            return self.poll_results.pop(0)
+
+        def wait(self, *_args, **_kwargs):
+            raise AssertionError("the GUI thread must never block waiting for a launched app")
+
+    process = _Process()
+    timer = _Timer()
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator._launched_processes = {}
+    orchestrator._process_reaper_timer = timer
+
+    orchestrator._track_launched_process(process)
+
+    assert orchestrator._launched_processes == {432190: process}
+    assert timer.active is True
+
+    orchestrator._reap_launched_processes()
+
+    assert process.poll_calls == 2
+    assert orchestrator._launched_processes == {}
+    assert timer.active is False
 
 
 def test_selected_radio_endpoint_identity_verifies_port_before_crediting_exact_process(monkeypatch) -> None:

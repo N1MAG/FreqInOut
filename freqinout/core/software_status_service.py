@@ -70,6 +70,15 @@ PROCESS_WRAPPER_TOKENS = {
     "env",
 }
 
+_INACTIVE_PROCESS_STATUSES = frozenset(
+    str(value or "").strip().casefold()
+    for value in (
+        getattr(psutil, "STATUS_ZOMBIE", "zombie"),
+        getattr(psutil, "STATUS_DEAD", "dead"),
+    )
+    if str(value or "").strip()
+)
+
 STATUS_KEYS: Sequence[str] = (
     "JS8Call_API",
     "FLRig",
@@ -253,6 +262,32 @@ class SoftwareStatusService:
                     return True
         return False
 
+    @staticmethod
+    def _process_status(proc: object) -> str:
+        """Return a best-effort psutil status without treating denial as absence."""
+
+        try:
+            info = getattr(proc, "info", {})
+            if isinstance(info, Mapping):
+                saved = str(info.get("status") or "").strip().casefold()
+                if saved:
+                    return saved
+            getter = getattr(proc, "status", None)
+            if callable(getter):
+                return str(getter() or "").strip().casefold()
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            return getattr(psutil, "STATUS_DEAD", "dead")
+        except (psutil.AccessDenied, OSError):
+            # Unknown evidence remains fail-closed. Only positively identified
+            # terminal processes are discarded.
+            return ""
+        return ""
+
+    @staticmethod
+    def _process_record_is_active(record: Mapping[str, object]) -> bool:
+        status = str(record.get("status") or "").strip().casefold()
+        return status not in _INACTIVE_PROCESS_STATUSES
+
     def _refresh_process_snapshot(
         self,
         *,
@@ -298,6 +333,11 @@ class SoftwareStatusService:
                         or name in PROCESS_WRAPPER_TOKENS
                         or not name
                     )
+                    process_status = ""
+                    if direct_match or name in PROCESS_WRAPPER_TOKENS or not name:
+                        process_status = self._process_status(proc)
+                        if process_status in _INACTIVE_PROCESS_STATUSES:
+                            continue
                     if direct_match:
                         try:
                             exe_path = str(proc.exe() or "").strip()
@@ -321,12 +361,21 @@ class SoftwareStatusService:
                         if token:
                             cmd_paths.append(path)
                             cmd_tokens.append(token)
+                    if not process_status and any(
+                        self._matches_target_process_name(token, target_tokens)
+                        for token in cmd_tokens
+                    ):
+                        process_status = self._process_status(proc)
+                        if process_status in _INACTIVE_PROCESS_STATUSES:
+                            continue
                     for token in (name, exe, *cmd_tokens):
                         if token:
                             snap.append(token)
                     records.append(
                         {
+                            "pid": int(getattr(proc, "pid", 0) or 0),
                             "name": name,
+                            "status": process_status,
                             "exe": exe,
                             "exe_path": exe_path,
                             "cmd_tokens": tuple(cmd_tokens),
@@ -444,6 +493,8 @@ class SoftwareStatusService:
             targets = {normalized, f"{normalized}.exe"}
         count = 0
         for record in records:
+            if not self._process_record_is_active(record):
+                continue
             record_tokens = {
                 str(record.get("name") or "").casefold(),
                 str(record.get("exe") or "").casefold(),
@@ -533,6 +584,8 @@ class SoftwareStatusService:
         cls = type(self)
         records = cls._shared_proc_records if process_records is None else process_records
         for record in records:
+            if not self._process_record_is_active(record):
+                continue
             record_tokens = {
                 str(record.get("name") or ""),
                 str(record.get("exe") or ""),
