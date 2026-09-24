@@ -11079,3 +11079,27 @@ was exposed. No new delegation was used for this primary-owned release action.
 Exit gate: the local public candidate is ready for the maintainer's exact-diff
 and inventory approval. Pushing the branch, merging public `main`, and creating
 `v2.0.0` require the maintainer's next explicit authorization.
+
+## 2026-09-24 — FreqInOut 2.0 public source promotion
+
+Status: complete.
+
+After the maintainer approved the exact public comparison, the reviewed commit
+was promoted with one atomic remote update. Public `main` advanced from
+`2c3ba1af81d7d1ac319637a8eb77dae21254564c` (`v1.2.8`) to
+`2f03e5f72c8d5dc27d0666b8444849d282079809`. The retained
+`release/public-2.0-candidate` branch resolves to the same commit, and the new
+annotated `v2.0.0` tag dereferences to it. The original `v1.2.8` tag remains
+available as the archived single-radio source release.
+
+Remote-ref verification passed for `main`, the candidate branch, and the tag;
+the local public candidate worktree remained clean. No executable or signed
+bundle was published. The first push command failed locally before contacting
+GitHub because zsh parsed an undelimited SHA refspec; remote state remained
+unchanged, and the corrected explicitly delimited atomic push then succeeded.
+
+Primary `gpt-6-astra` owned final ref verification and promotion. No reliable
+reasoning-effort label was exposed, and no new delegation was used.
+
+Exit gate: public source promotion is complete. Future executable packaging,
+maintenance patches, or a GitHub Release page are separate work items.

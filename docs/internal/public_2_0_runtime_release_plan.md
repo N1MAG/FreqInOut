@@ -429,6 +429,20 @@ down cleanly with `--smoke-test`, and 38 private help/runtime/upgrade tests pass
 against a qualification copy containing the exact projected application code.
 No `v2.0.0` tag, remote promotion branch, merge, or public push exists yet.
 
+### Public promotion completion (2026-09-24)
+
+After explicit maintainer review and approval, the exact public candidate was
+promoted atomically. Remote `main` and
+`release/public-2.0-candidate` now both resolve to
+`2f03e5f72c8d5dc27d0666b8444849d282079809`. The annotated `v2.0.0` tag
+dereferences to that same commit. Public `v1.2.8` remains preserved at
+`2c3ba1af81d7d1ac319637a8eb77dae21254564c` for recovery and archived
+single-radio installations.
+
+No executable, installer binary, or signed application bundle was published.
+The promotion branch remains as an audit trail. Remote-ref verification and the
+local candidate worktree cleanliness check passed immediately after promotion.
+
 ## Promotion And Rollback
 
 After every gate closes, push the curated runtime branch to the public

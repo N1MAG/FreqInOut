@@ -119,3 +119,9 @@ hash is `c67241bd2c0367c8dfa869fd0f883221f29ba8f2d863b862d5b7833415ff1b19`.
 The exact projected source passed clean startup/shutdown and 38 focused private
 harness tests. Final maintainer approval and all remote push/merge/tag actions
 remain outstanding.
+
+The maintainer subsequently approved the exact candidate. On 2026-09-24,
+public `main`, `release/public-2.0-candidate`, and the dereferenced annotated
+`v2.0.0` tag were verified at
+`2f03e5f72c8d5dc27d0666b8444849d282079809`. The prior `v1.2.8` tag remains
+unchanged at `2c3ba1af81d7d1ac319637a8eb77dae21254564c`.
