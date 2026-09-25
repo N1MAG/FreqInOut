@@ -108,6 +108,45 @@ def bbs_library_db_path_from_settings(settings: object) -> Path:
     return default_bbs_library_db_path()
 
 
+def load_station_bbs_sweeper_rules(conn: sqlite3.Connection) -> list[dict[str, object]] | None:
+    """Return the station-owned automation rules, or ``None`` before cutover.
+
+    ``None`` deliberately differs from an empty list: it lets one release of
+    runtime code fall back to the legacy radio/settings copy only when the
+    station-owned value has never been created.  Once an operator saves an
+    empty rule set, automatic copying stays disabled instead of resurrecting a
+    stale profile value.
+    """
+
+    ensure_bbs_library_schema(conn)
+    row = conn.execute(
+        "SELECT value FROM bbs_library_meta WHERE key='station_sweeper_rules_json' LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        value = json.loads(str(row[0] or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, Mapping)]
+
+
+def save_station_bbs_sweeper_rules(
+    conn: sqlite3.Connection,
+    rules: Sequence[Mapping[str, object]],
+) -> None:
+    """Persist the canonical station-owned BBS automation rule list."""
+
+    ensure_bbs_library_schema(conn)
+    payload = [dict(item) for item in rules if isinstance(item, Mapping)]
+    conn.execute(
+        "INSERT OR REPLACE INTO bbs_library_meta(key, value) VALUES('station_sweeper_rules_json', ?)",
+        (_json(payload, default="[]"),),
+    )
+
+
 def stable_bbs_artifact_id(*parts: object) -> str:
     text = "|".join(str(part or "").strip() for part in parts)
     return hashlib.sha1(text.encode("utf-8")).hexdigest()

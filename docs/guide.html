@@ -31,7 +31,7 @@
   </div>
 
   <h1 id="guide-home">FreqInOut User Guide</h1>
-  <p><strong>Current version</strong>: 2.0.0</p>
+  <p><strong>Current version</strong>: 2.0.1</p>
   <div class="callout">
     <p><strong>Dedication</strong></p>
     <p>Dedicated to my Dad (SK), a U.S. Navy Radioman who learned HF Digital Tri-Mode at age 86.</p>
@@ -155,7 +155,7 @@
       <tr>
         <td><a href="#fio-bbs">BBS</a></td>
         <td>This is the station-owned FIO BBS administration service.</td>
-        <td>Radio Service chooses serving VarAC radios. Locations &amp; Access defines policy. Publishing manages catalog membership. Visitor Preview verifies what callers see. Visitor Helpers explains generated navigation files.</td>
+        <td>Radio Service chooses serving VarAC radios and initializes the managed library. Locations &amp; Access defines policy. Publishing manages catalog membership. Automation routes explicitly matched incoming files. Visitor Preview verifies what callers see. Visitor Helpers explains generated navigation files.</td>
         <td>Use this service to administer one station catalog projected to one or more VarAC live folders. Native VarAC launch, inbox, and outbox paths remain in Configuration &gt; Radios.</td>
       </tr>
       <tr>
@@ -547,7 +547,7 @@
   <ul class="section-list">
     <li><strong>BBS concept</strong>: in VarAC, the <code>BBS Directory</code> is the live folder remote stations can browse and pull from. It is not the same as <code>Incoming Files</code>, which is where files addressed to you arrive, and it is not the same as <code>Outbox</code>, which is where files you want to send directly are staged.</li>
     <li><strong>Ordinary workflow</strong>: use <code>+BBS</code> or a compose-stage copy choice when you want a file offered through the VarAC BBS. Use <code>Outbox</code> when you want VarAC to send a file directly to a station instead of publishing it for later pickup.</li>
-    <li><strong>Manage FIO BBS</strong>: opens the top-level <code>BBS</code> service, which is authoritative for serving radios, locations, access, retention, publication, preview, and visitor helpers. Native VarAC launcher, inbox, outbox, and radio paths remain in Configuration &gt; Radios.</li>
+    <li><strong>Manage FIO BBS</strong>: opens the top-level <code>BBS</code> service, which is authoritative for serving radios, locations, access, retention, publication, automation, preview, and visitor helpers. Native VarAC launcher, inbox, outbox, and radio paths remain in Configuration &gt; Radios.</li>
     <li><strong>Managed BBS Library concept</strong>: FreqInOut keeps shared BBS content in a managed library, then publishes a clean copy into each selected radio's live VarAC BBS folder. Think of the library as the source of truth and each live BBS folder as the radio-specific on-air copy.</li>
     <li><strong>Virtual folders</strong>: menu names such as <code>DOCDROP</code>, <code>INTEL</code>, <code>MISC</code>, and <code>ROOT</code> are virtual aliases, not real nested folders inside the live BBS directory.</li>
     <li><strong>When to use Managed BBS Library</strong>: use the normal BBS workflow when one live BBS folder is enough. Use Managed BBS Library when you need controlled alternate file sets, menu-style browsing, callsign-aware visibility, per-radio published copies, or FLAMP relay block support.</li>
@@ -562,11 +562,12 @@
   <h2 id="fio-bbs">FIO BBS</h2>
   <p><strong>Purpose</strong>: administer one station-owned BBS catalog and project its published view into each enabled VarAC radio's live folder.</p>
   <p><strong>Operational use</strong>: callers experience the BBS as one station service even when several radios serve it. FIO keeps catalog membership, access, and retention in one place; each radio retains only its own live VarAC folder and service state.</p>
-  <p><strong>Important distinction</strong>: this top-level service is the current station catalog and publication workspace. Older VarAC settings and support text may use the term <em>Managed BBS Library</em> for the underlying library-and-projection mechanism. Do not create a second catalog there: use this BBS workspace for serving radios, locations, access, retention, publication, preview, and visitor helpers; use Software &gt; VarAC only for each radio's native application paths, live folders, launch, and inbound guard.</p>
+  <p><strong>Important distinction</strong>: this top-level service is the current station catalog and publication workspace. Older VarAC settings and support text may use the term <em>Managed BBS Library</em> for the underlying library-and-projection mechanism. Do not create a second catalog there: use this BBS workspace for serving radios, locations, access, retention, publication, automation, preview, and visitor helpers; use Software &gt; VarAC only for each radio's native application paths, live folders, launch, and inbound guard.</p>
   <ol class="section-list">
-    <li><strong>Radio Service</strong>: choose a serving radio, review its Serving/Published/health state, enable the VarAC BBS, publish the FIO catalog, and optionally announce it. Use <code>Save Radio Service</code> to apply changes. Native VarAC launch, inbox, and outbox paths stay behind <code>Managed in Configuration &gt; Radios</code>.</li>
+    <li><strong>Radio Service</strong>: choose a serving radio, review its Serving/Published/health state, enable the VarAC BBS, publish the FIO catalog, and optionally announce it. Use <code>Save Radio Service</code> to apply changes. <code>Initialize BBS…</code> safely creates or reuses the station-managed library beside the selected radio's existing live BBS folder and offers to copy the current live files into the Default location. It does not replace or delete the live folder. Native VarAC launch, inbox, and outbox paths stay behind <code>Managed in Configuration &gt; Radios</code>.</li>
     <li><strong>Locations &amp; Access</strong>: select a location to read its enabled state, access rule, retention, and source-folder state. <code>Add</code> or <code>Edit</code> deliberately opens the policy editor; <code>Cancel</code> closes it without saving. Disabling a location preserves its history and source files.</li>
     <li><strong>Publishing</strong>: select a location and stage catalog membership changes. Apply changes explicitly. Removing an artifact from BBS publication does not delete its source file.</li>
+    <li><strong>Automation</strong>: define station-owned rules that copy newly received VarAC, FLMsg, or FLAmp files into one or more managed locations. An enabled rule requires a sender callsign or message/filename term and an explicit destination; FIO never interprets a blank match as “copy everything.” Rules run in the background after message-file discovery, and the same unchanged source version is not copied again during a restart or forced rescan.</li>
     <li><strong>Visitor Preview</strong>: verify the files and locations visible to a caller under the current access rules. This is a read-only preview; it does not reveal or validate access codes.</li>
     <li><strong>Visitor Helpers</strong>: review FIO-generated caller instructions separately from operator-published artifacts.</li>
   </ol>
@@ -1682,7 +1683,7 @@
   </ul>
 
   <h3 id="settings-varac-details">VarAC Settings Details</h3>
-  <p><strong>Where to configure it</strong>: open <a href="#settings-software-administration">Configuration &gt; Software</a>, choose VarAC, then choose the radio and task. Use top-level <a href="#fio-bbs">BBS</a> for station catalog, locations, access, retention, publication, visitor preview, and visitor helpers.</p>
+  <p><strong>Where to configure it</strong>: open <a href="#settings-software-administration">Configuration &gt; Software</a>, choose VarAC, then choose the radio and task. Use top-level <a href="#fio-bbs">BBS</a> for station catalog, locations, access, retention, publication, automation, initialization, visitor preview, and visitor helpers.</p>
   <p><strong>Concept of use</strong>: treat the VarAC paths as three different jobs. <code>Incoming Files</code> is where files addressed to you arrive. <code>VarAC Outbox Directory</code> is where FreqInOut stages files that VarAC should transmit directly. <code>BBS Directory</code> is the live published file shelf remote stations can browse and pull from.</p>
   <ul class="section-list">
     <li><strong>Add Radio arrangement</strong>: when adding a radio that uses VarAC, choose <code>Standalone</code>, <code>Create a cluster with &lt;existing radio&gt; and this radio</code>, or <code>Join &lt;cluster&gt;</code> before preparation. A saved radio-to-VarAC assignment remains a valid cluster source even if one of its paths still needs review. If more than one standalone node exists, choose the named node; FIO does not guess.</li>
@@ -1720,7 +1721,7 @@
     <li><strong>FIO BBS</strong>: the top-level station service for choosing serving radios, defining locations and access, publishing files, checking the visitor view, and reviewing visitor helpers.</li>
     <li><strong>Enable Managed BBS Library</strong>: turns on the service that watches VarAC session traffic and publishes managed views into live BBS folders. This is the operational on/off switch for the library workflow; it does not erase your library folders.</li>
     <li><strong>Turn on FIO-managed BBS menus.</strong>: the short UI explanation shown beside <code>Enable Managed BBS Library</code>.</li>
-    <li><strong>Initialize Managed BBS Library</strong>: creates the managed library folder structure in the VarAC BBS area and imports the current live BBS contents into the default location so you can start from your existing BBS instead of rebuilding it by hand. After you confirm the import, the live BBS folder should be treated as FreqInOut's published output, not the long-term storage place for managed files.</li>
+    <li><strong>Initialize BBS</strong>: available from top-level <a href="#fio-bbs">BBS &gt; Radio Service</a>. It creates or reuses the managed library folder structure beside the selected radio's live BBS folder and can copy current live files into the Default location so you can start from the existing BBS. Repeating initialization does not replace the live folder or duplicate same-named imported files.</li>
     <li><strong>Create the FIO_BBS_Vault folders next to the live VarAC BBS folder.</strong>: the short UI explanation shown beside <code>Initialize Managed BBS Library</code>.</li>
     <li><strong>Return Live BBS Home</strong>: republishes the default location into the live BBS folder. Use this operational recovery action when you want callers returned to the main menu immediately, for example after testing a controlled location. It does not reset configuration, locations, access, retention, or catalog membership.</li>
     <li><strong>Managed Root</strong>: automatic FreqInOut-managed storage for named locations, audit state, and publish manifests. In the current release it is always created next to the live <code>BBS Directory</code> as <code>FIO_BBS_Vault</code>; it is not a free-form operator override.</li>

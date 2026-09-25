@@ -626,7 +626,10 @@ def _member(
             "VarahfMainKissPort": str(kiss),
             "VarahfMonitorPath": configured_target_exe,
             "VarahfMonitorPort": str(monitor),
-            "VarahfLaunchOnModemConnect": "OFF",
+            # A managed cluster member is launched through VarAC.  VarAC must
+            # own the child modem start so FIO and VarAC cannot race to spawn
+            # the same node-local VARA runtime.
+            "VarahfLaunchOnModemConnect": "ON",
         },
         executable_path=str(executable),
         vara_runtime=VarARuntimeInput(

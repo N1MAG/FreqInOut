@@ -255,8 +255,13 @@ class StationLaunchPlanner:
                     isinstance(item_readiness, Mapping)
                     and _truthy(item_readiness.get("operator_starts", False))
                 )
+                parent_managed_row = bool(
+                    isinstance(item_readiness, Mapping)
+                    and _truthy(item_readiness.get("parent_managed", False))
+                )
                 if not item["enabled"] or (
-                    not review_all and (not item["startup"] or operator_start_row)
+                    not review_all
+                    and (not item["startup"] or operator_start_row or parent_managed_row)
                 ):
                     continue
                 dependencies = tuple(item["dependencies"] or DEFAULT_DEPENDENCIES.get(name, ()))

@@ -197,7 +197,11 @@ from freqinout.core.varac_native_transaction import (
     recover_unfinished_varac_native_applies,
     rollback_varac_native_external_session,
 )
-from freqinout.core.varac_runtime_repair import repair_managed_varac_wine_runtime_paths
+from freqinout.core.varac_runtime_repair import (
+    managed_varac_process_attribution,
+    repair_managed_varac_cluster_launch_policy,
+    repair_managed_varac_wine_runtime_paths,
+)
 from freqinout.core.guided_launch_recipes import (
     canonical_js8_version,
     managed_instance_window_title,
@@ -1132,14 +1136,30 @@ class _VarACNativeApplyWorker(QObject):
             if self.action == "recover":
                 journals = recover_unfinished_varac_native_applies(store)
                 status = SoftwareStatusService({})
-                repairs = repair_managed_varac_wine_runtime_paths(
+                process_running = bool(
+                    status.program_is_running("VarAC")
+                    or status.program_is_running("VARA")
+                )
+                runtime_repairs = repair_managed_varac_wine_runtime_paths(
                     store,
                     backup_root=Path(self.db_path).parent / "backups" / "varac-native-repair",
-                    process_running=bool(
-                        status.program_is_running("VarAC")
-                        or status.program_is_running("VARA")
+                    process_running=process_running,
+                )
+                attribution = managed_varac_process_attribution(store, status)
+                policy_repairs = repair_managed_varac_cluster_launch_policy(
+                    store,
+                    backup_root=Path(self.db_path).parent / "backups" / "varac-native-repair",
+                    # Unknown family processes remain fail-closed.  When all
+                    # processes are attributable, only the exact live member
+                    # is deferred and an idle sibling can be repaired.
+                    process_running=(
+                        process_running and not bool(attribution.get("complete"))
+                    ),
+                    running_node_ids=tuple(
+                        attribution.get("running_node_ids", ()) or ()
                     ),
                 )
+                repairs = tuple(runtime_repairs) + tuple(policy_repairs)
                 self.finished.emit({"journals": journals, "repairs": repairs})
                 return
             raise ValueError(f"Unsupported native VarAC worker action: {self.action}")
@@ -35626,8 +35646,16 @@ class SettingsTab(QWidget):
                                 "dependencies": (),
                                 "execution_scope": "standard",
                                 "operator_starts": False,
-                                "launch_at_startup": launch_at_startup,
-                                "readiness": {"kind": "process"},
+                                # VarAC owns the managed member's VARA child.
+                                # Retain this component for exact runtime
+                                # attribution/readiness, but never enqueue it
+                                # as an independent FIO startup process.
+                                "launch_at_startup": False,
+                                "readiness": {
+                                    "kind": "process",
+                                    "parent_managed": True,
+                                    "launch_authority": "VarAC",
+                                },
                             },
                             {
                                 "component_key": "varac",
@@ -35637,7 +35665,7 @@ class SettingsTab(QWidget):
                                 "working_directory": member.working_directory,
                                 "managed_directories": varac_managed_directories,
                                 "environment": launch_environment,
-                                "dependencies": ("vara",),
+                                "dependencies": (),
                                 "execution_scope": "standard",
                                 "operator_starts": False,
                                 "launch_at_startup": launch_at_startup,

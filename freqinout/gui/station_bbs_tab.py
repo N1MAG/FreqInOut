@@ -11,6 +11,7 @@ thread. Those operations remain owned by their background services.
 from collections import defaultdict
 from dataclasses import dataclass
 import datetime as dt
+import json
 import math
 import re
 from pathlib import Path
@@ -31,6 +32,9 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QSplitter,
@@ -57,8 +61,19 @@ from freqinout.core.varac_bbs_library_store import (
     list_bbs_admin_rows,
     list_bbs_artifact_location_ids,
     list_bbs_locations,
+    load_station_bbs_sweeper_rules,
+    save_station_bbs_sweeper_rules,
     set_bbs_artifact_locations,
     upsert_bbs_location,
+)
+from freqinout.core.varac_bbs_sweeper import (
+    BbsSweeperRule,
+    bbs_sweeper_rules_to_data,
+    load_bbs_sweeper_rules,
+)
+from freqinout.core.varac_bbs_initialization import (
+    BbsInitializationResult,
+    initialize_station_bbs_library,
 )
 from freqinout.core.varac_bbs_vault import hash_access_code
 from freqinout.gui.help_registry import resolve_help_host
@@ -93,6 +108,7 @@ class _BbsCatalogSnapshot:
     default_location_id: str
     allowed_callsigns: frozenset[str]
     limit_access_enabled: bool
+    sweeper_rules: tuple[dict[str, object], ...]
 
 
 class _BbsCatalogWorker(QObject):
@@ -128,6 +144,21 @@ class _BbsCatalogWorker(QObject):
                 artifact_rows = tuple(
                     list_bbs_admin_rows(conn, location_id="", limit=MAX_ARTIFACT_ROWS)
                 )
+                station_rules = load_station_bbs_sweeper_rules(conn)
+                if station_rules is None:
+                    legacy_rules: object = []
+                    for profile in profiles:
+                        candidate = profile.get("varac_bbs_sweeper_rules_v1", [])
+                        if isinstance(candidate, str):
+                            try:
+                                candidate = json.loads(candidate)
+                            except (TypeError, ValueError, json.JSONDecodeError):
+                                candidate = []
+                        if candidate:
+                            legacy_rules = candidate
+                            break
+                    station_rules = bbs_sweeper_rules_to_data(load_bbs_sweeper_rules(legacy_rules))
+                sweeper_rules = tuple(station_rules)
             allowed = frozenset(
                 value.strip().upper()
                 for value in re.split(
@@ -147,10 +178,36 @@ class _BbsCatalogWorker(QObject):
                     limit_access_enabled=(
                         str(permission_rows.get("station_limit_access_enabled", "0") or "0") == "1"
                     ),
+                    sweeper_rules=sweeper_rules,
                 ),
             )
         except Exception as exc:
             self.failed.emit(self.generation, str(exc))
+
+
+class _BbsInitializationWorker(QObject):
+    """Prepare/import one Managed BBS library away from the GUI thread."""
+
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, db_path: Path, live_dir: Path, import_existing: bool) -> None:
+        super().__init__()
+        self.db_path = Path(db_path)
+        self.live_dir = Path(live_dir)
+        self.import_existing = bool(import_existing)
+
+    def run(self) -> None:
+        try:
+            self.finished.emit(
+                initialize_station_bbs_library(
+                    self.db_path,
+                    self.live_dir,
+                    import_existing_files=self.import_existing,
+                )
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 _DETACHED_BBS_CATALOG_JOBS: dict[int, tuple[QThread, QObject]] = {}
@@ -275,9 +332,19 @@ class StationBbsTab(QWidget):
         self._catalog_refresh_pending = False
         self._catalog_thread: QThread | None = None
         self._catalog_worker: _BbsCatalogWorker | None = None
+        self._initialization_thread: QThread | None = None
+        self._initialization_worker: _BbsInitializationWorker | None = None
+        self._initialization_profile_id = 0
+        self._initialization_live_dir = ""
         self._catalog_shutdown = False
         self._pending_location_status = ""
         self._pending_publication_status = ""
+        self._pending_radio_status = ""
+        self._automation_rules: list[dict[str, object]] = []
+        self._automation_saved_rules: list[dict[str, object]] = []
+        self._automation_selected_rule_id = ""
+        self._automation_dirty = False
+        self._automation_loading = False
         self._build_ui()
         self.refresh_catalog()
 
@@ -393,11 +460,19 @@ class StationBbsTab(QWidget):
         radio_editor_layout.addWidget(self.radio_native_paths_label, 3, 0, 1, 3)
         self.radio_service_save_btn = QPushButton("Save Radio Service")
         self.radio_service_save_btn.clicked.connect(self._save_selected_radio_service)
+        self.radio_initialize_btn = QPushButton("Initialize BBS…")
+        self.radio_initialize_btn.setToolTip(
+            "Create the station Managed BBS library beside this radio's live BBS folder "
+            "and optionally import its current files."
+        )
+        self.radio_initialize_btn.setAccessibleName("Initialize station Managed BBS library")
+        self.radio_initialize_btn.clicked.connect(self._initialize_selected_radio_bbs)
         self.radio_settings_btn = QPushButton("Open Radio Settings")
         self.radio_settings_btn.clicked.connect(self._open_radio_settings)
         radio_action_row = QHBoxLayout()
         radio_action_row.setContentsMargins(0, 0, 0, 0)
         radio_action_row.addWidget(self.radio_service_save_btn)
+        radio_action_row.addWidget(self.radio_initialize_btn)
         radio_action_row.addWidget(self.radio_settings_btn)
         radio_action_row.addStretch(1)
         radio_editor_layout.addLayout(radio_action_row, 4, 0, 1, 3)
@@ -528,6 +603,127 @@ class StationBbsTab(QWidget):
         for column in (1, 2, 3, 4):
             helper_header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
         helpers_layout.addWidget(self.helpers_table, 1)
+
+        self.automation_page = QWidget(self.service_tabs)
+        automation_layout = QVBoxLayout(self.automation_page)
+        automation_layout.setContentsMargins(0, 0, 0, 0)
+        self.automation_scroll = QScrollArea(self.automation_page)
+        self.automation_scroll.setWidgetResizable(True)
+        self.automation_scroll.setFrameShape(QFrame.NoFrame)
+        self.automation_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        automation_layout.addWidget(self.automation_scroll, 1)
+        automation_body = QWidget(self.automation_scroll)
+        automation_body_layout = QVBoxLayout(automation_body)
+        automation_body_layout.setContentsMargins(10, 10, 10, 10)
+        automation_body_layout.setSpacing(8)
+        self.automation_title = QLabel("BBS Automation Rules")
+        automation_body_layout.addWidget(self.automation_title)
+        automation_copy = QLabel(
+            "Automatically copy newly received VarAC, FLMsg, or FLAmp files into selected Managed BBS locations. "
+            "A rule runs only when it is enabled, has a destination, and includes a sender or text match."
+        )
+        automation_copy.setWordWrap(True)
+        automation_copy.setAccessibleName("BBS automation explanation")
+        automation_body_layout.addWidget(automation_copy)
+        self.automation_status_label = QLabel("Loading BBS automation rules…")
+        self.automation_status_label.setWordWrap(True)
+        self.automation_status_label.setAccessibleName("BBS automation status")
+        automation_body_layout.addWidget(self.automation_status_label)
+
+        automation_editor = QGroupBox("Rule editor", automation_body)
+        editor_grid = QGridLayout(automation_editor)
+        editor_grid.setContentsMargins(8, 8, 8, 8)
+        editor_grid.setHorizontalSpacing(8)
+        editor_grid.setVerticalSpacing(6)
+        self.automation_enabled_chk = QCheckBox("Use this rule")
+        editor_grid.addWidget(self.automation_enabled_chk, 0, 0)
+        self.automation_name_edit = QLineEdit()
+        self.automation_name_edit.setPlaceholderText("Rule name")
+        self.automation_name_edit.setAccessibleName("BBS automation rule name")
+        editor_grid.addWidget(self.automation_name_edit, 0, 1, 1, 3)
+        editor_grid.addWidget(QLabel("Sources"), 1, 0)
+        source_row = QHBoxLayout()
+        self.automation_source_varac_chk = QCheckBox("VarAC incoming")
+        self.automation_source_flmsg_chk = QCheckBox("FLMsg")
+        self.automation_source_flamp_chk = QCheckBox("FLAmp")
+        for checkbox in (
+            self.automation_source_varac_chk,
+            self.automation_source_flmsg_chk,
+            self.automation_source_flamp_chk,
+        ):
+            source_row.addWidget(checkbox)
+        source_row.addStretch(1)
+        editor_grid.addLayout(source_row, 1, 1, 1, 3)
+        editor_grid.addWidget(QLabel("From"), 2, 0)
+        self.automation_from_calls_edit = QLineEdit()
+        self.automation_from_calls_edit.setPlaceholderText("Optional callsigns, comma-separated")
+        self.automation_from_calls_edit.setAccessibleName("BBS automation sender callsigns")
+        editor_grid.addWidget(self.automation_from_calls_edit, 2, 1, 1, 3)
+        editor_grid.addWidget(QLabel("Text contains"), 3, 0)
+        self.automation_subject_contains_edit = QLineEdit()
+        self.automation_subject_contains_edit.setPlaceholderText("Optional filename, subject, or message terms")
+        self.automation_subject_contains_edit.setAccessibleName("BBS automation text terms")
+        editor_grid.addWidget(self.automation_subject_contains_edit, 3, 1, 1, 3)
+        editor_grid.addWidget(QLabel("Copy to"), 4, 0, Qt.AlignTop)
+        self.automation_targets_list = QListWidget(automation_editor)
+        self.automation_targets_list.setAccessibleName("BBS automation destination locations")
+        self.automation_targets_list.setSelectionMode(QAbstractItemView.NoSelection)
+        self.automation_targets_list.setMaximumHeight(
+            max(90, self.fontMetrics().lineSpacing() * 5 + 12)
+        )
+        editor_grid.addWidget(self.automation_targets_list, 4, 1, 1, 2)
+        self.automation_copy_mode_combo = QComboBox()
+        self.automation_copy_mode_combo.addItem("Copy each new arrival", "copy")
+        self.automation_copy_mode_combo.addItem("Copy once per filename", "copy_once")
+        self.automation_copy_mode_combo.setAccessibleName("BBS automation copy behavior")
+        editor_grid.addWidget(self.automation_copy_mode_combo, 4, 3, Qt.AlignTop)
+        editor_grid.setColumnStretch(1, 1)
+        editor_grid.setColumnStretch(2, 1)
+        automation_body_layout.addWidget(automation_editor)
+
+        edit_actions = QHBoxLayout()
+        self.automation_new_btn = QPushButton("New Rule")
+        self.automation_new_btn.clicked.connect(self._new_automation_rule)
+        edit_actions.addWidget(self.automation_new_btn)
+        self.automation_add_update_btn = QPushButton("Add Rule")
+        self.automation_add_update_btn.clicked.connect(self._add_or_update_automation_rule)
+        edit_actions.addWidget(self.automation_add_update_btn)
+        self.automation_delete_btn = QPushButton("Delete Rule")
+        self.automation_delete_btn.clicked.connect(self._delete_automation_rule)
+        edit_actions.addWidget(self.automation_delete_btn)
+        edit_actions.addStretch(1)
+        automation_body_layout.addLayout(edit_actions)
+
+        self.automation_rules_table = QTableWidget(0, 6, automation_body)
+        self.automation_rules_table.setHorizontalHeaderLabels(
+            ["Use", "Rule", "Sources", "Match", "Copy To", "Behavior"]
+        )
+        self.automation_rules_table.setAccessibleName("BBS automation rules")
+        self.automation_rules_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.automation_rules_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.automation_rules_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.automation_rules_table.verticalHeader().setVisible(False)
+        automation_header = self.automation_rules_table.horizontalHeader()
+        automation_header.setStretchLastSection(False)
+        automation_header.setSectionResizeMode(1, QHeaderView.Stretch)
+        for column in (0, 2, 3, 4, 5):
+            automation_header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        self.automation_rules_table.setMinimumHeight(
+            max(120, self.fontMetrics().lineSpacing() * 5 + 28)
+        )
+        self.automation_rules_table.itemSelectionChanged.connect(self._load_selected_automation_rule)
+        automation_body_layout.addWidget(self.automation_rules_table, 1)
+        automation_save_row = QHBoxLayout()
+        self.automation_save_btn = QPushButton("Save Automation Rules")
+        self.automation_save_btn.clicked.connect(self._save_automation_rules)
+        automation_save_row.addWidget(self.automation_save_btn)
+        self.automation_revert_btn = QPushButton("Revert")
+        self.automation_revert_btn.clicked.connect(self._revert_automation_rules)
+        automation_save_row.addWidget(self.automation_revert_btn)
+        automation_save_row.addStretch(1)
+        automation_body_layout.addLayout(automation_save_row)
+        self.automation_scroll.setWidget(automation_body)
+        self._clear_automation_editor()
 
         self.splitter = QSplitter(Qt.Horizontal, self.locations_page)
         self.splitter.setObjectName("stationBbsCatalogSplitter")
@@ -816,6 +1012,7 @@ class StationBbsTab(QWidget):
         self.service_tabs.addTab(self.locations_page, "Locations && Access")
         self.service_tabs.setTabToolTip(1, "Locations & Access")
         self.service_tabs.addTab(self.publishing_page, "Publishing")
+        self.service_tabs.addTab(self.automation_page, "Automation")
         self.service_tabs.addTab(self.visitor_preview_page, "Visitor Preview")
         self.service_tabs.addTab(self.helpers_page, "Visitor Helpers")
         self._apply_responsive_layout(force=True)
@@ -827,6 +1024,7 @@ class StationBbsTab(QWidget):
         for title in (
             self.bbs_title,
             self.radio_title,
+            self.automation_title,
             self.visitor_title,
             self.helpers_title,
         ):
@@ -834,6 +1032,7 @@ class StationBbsTab(QWidget):
         self.help_btn.setStyleSheet(button_style("muted", theme))
         self.refresh_btn.setStyleSheet(button_style("muted", theme))
         self.radio_service_save_btn.setStyleSheet(button_style("primary", theme))
+        self.radio_initialize_btn.setStyleSheet(button_style("muted", theme))
         self.radio_live_dir_browse_btn.setStyleSheet(button_style("muted", theme))
         self.radio_settings_btn.setStyleSheet(button_style("muted", theme))
         self.location_add_btn.setStyleSheet(button_style("muted", theme))
@@ -846,6 +1045,11 @@ class StationBbsTab(QWidget):
         self.remove_from_bbs_btn.setStyleSheet(button_style("warning", theme))
         self.keep_in_bbs_btn.setStyleSheet(button_style("muted", theme))
         self.republish_btn.setStyleSheet(button_style("muted", theme))
+        self.automation_new_btn.setStyleSheet(button_style("muted", theme))
+        self.automation_add_update_btn.setStyleSheet(button_style("primary", theme))
+        self.automation_delete_btn.setStyleSheet(button_style("warning", theme))
+        self.automation_save_btn.setStyleSheet(button_style("primary", theme))
+        self.automation_revert_btn.setStyleSheet(button_style("muted", theme))
         self.detail_group.setStyleSheet(
             f"QGroupBox {{ border: 1px solid {theme.get('border', '#d0d7de')}; border-radius: 4px; margin-top: 8px; }} "
             "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 3px; }"
@@ -859,11 +1063,17 @@ class StationBbsTab(QWidget):
             self.refresh_btn,
             self.radio_live_dir_browse_btn,
             self.radio_service_save_btn,
+            self.radio_initialize_btn,
             self.radio_settings_btn,
             self.location_add_btn,
             self.location_save_btn,
             self.location_disable_btn,
             self.location_cancel_btn,
+            self.automation_new_btn,
+            self.automation_add_update_btn,
+            self.automation_delete_btn,
+            self.automation_save_btn,
+            self.automation_revert_btn,
         ):
             button.setMinimumHeight(button_height_for_font(button))
         for chip_layout in (
@@ -1083,6 +1293,7 @@ class StationBbsTab(QWidget):
             self.radio_live_dir_edit,
             self.radio_live_dir_browse_btn,
             self.radio_service_save_btn,
+            self.radio_initialize_btn,
         ):
             widget.setEnabled(bool(enabled))
 
@@ -1192,6 +1403,329 @@ class StationBbsTab(QWidget):
         self.radio_service_status.setText(
             "Open Configuration → Radios to configure the selected radio's native VarAC paths."
         )
+
+    def _initialize_selected_radio_bbs(self) -> None:
+        if isinstance(self._initialization_thread, QThread) and self._initialization_thread.isRunning():
+            self.radio_service_status.setText("Managed BBS initialization is already running.")
+            return
+        profile = self._radio_profiles_by_id.get(self._selected_radio_service_id())
+        if profile is None or not bool(profile.get("use_varac", False)):
+            self.radio_service_status.setText("Select a configured VarAC radio before initializing its BBS.")
+            return
+        live_dir = Path(self.radio_live_dir_edit.text().strip()).expanduser()
+        if not live_dir.exists() or not live_dir.is_dir():
+            self.radio_service_status.setText("Choose an existing VarAC live BBS folder before initializing.")
+            self.radio_live_dir_edit.setFocus(Qt.OtherFocusReason)
+            return
+        answer = QMessageBox.question(
+            self,
+            "Initialize Managed BBS",
+            "Create or reuse the station Managed BBS library beside this live BBS folder?\n\n"
+            f"Live BBS: {live_dir}\n\n"
+            "The live folder will not be replaced or deleted. Catalog publication will be enabled for this radio.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            self.radio_service_status.setText("BBS initialization cancelled. No files or settings were changed.")
+            return
+        import_answer = QMessageBox.question(
+            self,
+            "Import Existing BBS Files",
+            "Copy the files currently in this live BBS folder into the managed Default location?\n\n"
+            "Choose No to initialize an empty managed location. Existing live files remain untouched either way.",
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            QMessageBox.Yes,
+        )
+        if import_answer == QMessageBox.Cancel:
+            self.radio_service_status.setText("BBS initialization cancelled. No files or settings were changed.")
+            return
+        self._initialization_profile_id = int(profile.get("id", 0) or 0)
+        self._initialization_live_dir = str(live_dir)
+        self.radio_initialize_btn.setEnabled(False)
+        self.radio_service_status.setText("Initializing the Managed BBS in the background…")
+        thread = QThread(self)
+        worker = _BbsInitializationWorker(
+            bbs_library_db_path_from_settings(self.settings),
+            live_dir,
+            import_answer == QMessageBox.Yes,
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_bbs_initialization_finished)
+        worker.failed.connect(self._on_bbs_initialization_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._on_bbs_initialization_thread_finished)
+        self._initialization_thread = thread
+        self._initialization_worker = worker
+        thread.start()
+
+    def _on_bbs_initialization_finished(self, result: object) -> None:
+        if self._catalog_shutdown or not isinstance(result, BbsInitializationResult):
+            return
+        profile_id = self._initialization_profile_id
+        profile = self._radio_profiles_by_id.get(profile_id)
+        if profile is None:
+            self.radio_service_status.setText(
+                "Managed BBS folders were initialized, but the selected radio is no longer available. "
+                "Refresh and save its Radio Service."
+            )
+            return
+        payload = dict(profile)
+        payload.update(
+            {
+                "varac_bbs_dir": self._initialization_live_dir,
+                "varac_bbs_enabled": True,
+                "varac_bbs_vault_enabled": True,
+            }
+        )
+        try:
+            saved = self._radio_store().save_device_profile(payload)
+        except Exception as exc:
+            self.radio_service_status.setText(
+                f"Managed BBS folders were initialized, but the radio service was not enabled: {exc}"
+            )
+            return
+        self._radio_profiles_by_id[profile_id] = dict(saved)
+        self._refresh_radio_services(self._radio_profiles_by_id.values())
+        self._pending_radio_status = (
+            f"Managed BBS initialized. {result.imported_files} existing file(s) copied; "
+            f"{result.cataloged_files} file(s) cataloged in {result.default_location_dir}."
+        )
+        self.radio_service_status.setText(self._pending_radio_status)
+        self.refresh_catalog()
+
+    def _on_bbs_initialization_failed(self, detail: str) -> None:
+        if not self._catalog_shutdown:
+            self.radio_service_status.setText(f"Managed BBS initialization failed: {detail}")
+
+    def _on_bbs_initialization_thread_finished(self) -> None:
+        self._initialization_thread = None
+        self._initialization_worker = None
+        self._initialization_profile_id = 0
+        self._initialization_live_dir = ""
+        if not self._catalog_shutdown:
+            profile = self._radio_profiles_by_id.get(self._selected_radio_service_id())
+            self.radio_initialize_btn.setEnabled(bool(profile and profile.get("use_varac", False)))
+
+    @staticmethod
+    def _automation_rule_id(name: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "-", str(name or "").strip().lower()).strip("-") or "rule"
+
+    def _refresh_automation_targets(self, selected_ids: Iterable[str] = ()) -> None:
+        selected = {str(value or "").strip() for value in selected_ids}
+        self.automation_targets_list.blockSignals(True)
+        try:
+            self.automation_targets_list.clear()
+            for location in sorted(
+                self._locations_by_id.values(),
+                key=lambda row: (row.name.lower(), row.location_id),
+            ):
+                item = QListWidgetItem(location.name)
+                item.setData(Qt.UserRole, location.location_id)
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Checked if location.location_id in selected else Qt.Unchecked)
+                if not location.enabled:
+                    item.setText(f"{location.name} · Disabled")
+                self.automation_targets_list.addItem(item)
+        finally:
+            self.automation_targets_list.blockSignals(False)
+
+    def _clear_automation_editor(self) -> None:
+        self._automation_loading = True
+        try:
+            self._automation_selected_rule_id = ""
+            if hasattr(self, "automation_rules_table"):
+                self.automation_rules_table.clearSelection()
+            self.automation_enabled_chk.setChecked(True)
+            self.automation_name_edit.clear()
+            self.automation_source_varac_chk.setChecked(True)
+            self.automation_source_flmsg_chk.setChecked(True)
+            self.automation_source_flamp_chk.setChecked(True)
+            self.automation_from_calls_edit.clear()
+            self.automation_subject_contains_edit.clear()
+            self._refresh_automation_targets()
+            self.automation_copy_mode_combo.setCurrentIndex(0)
+            self.automation_add_update_btn.setText("Add Rule")
+            self.automation_delete_btn.setEnabled(False)
+        finally:
+            self._automation_loading = False
+
+    def _new_automation_rule(self) -> None:
+        self._clear_automation_editor()
+        self.automation_status_label.setText("Enter the match and destination, then choose Add Rule.")
+        self.automation_name_edit.setFocus(Qt.OtherFocusReason)
+
+    def _automation_editor_rule(self) -> BbsSweeperRule | None:
+        name = self.automation_name_edit.text().strip()
+        if not name:
+            self.automation_status_label.setText("Enter a rule name.")
+            self.automation_name_edit.setFocus(Qt.OtherFocusReason)
+            return None
+        sources = []
+        if self.automation_source_varac_chk.isChecked():
+            sources.append("varac_bbs")
+        if self.automation_source_flmsg_chk.isChecked():
+            sources.append("flmsg")
+        if self.automation_source_flamp_chk.isChecked():
+            sources.append("flamp")
+        if not sources:
+            self.automation_status_label.setText("Choose at least one incoming message source.")
+            return None
+        targets = [
+            str(self.automation_targets_list.item(index).data(Qt.UserRole) or "")
+            for index in range(self.automation_targets_list.count())
+            if self.automation_targets_list.item(index).checkState() == Qt.Checked
+        ]
+        from_calls = [value for value in re.split(r"[,;\s]+", self.automation_from_calls_edit.text()) if value]
+        terms = [
+            value.strip()
+            for value in re.split(r"[,;\n]+", self.automation_subject_contains_edit.text())
+            if value.strip()
+        ]
+        raw = {
+            "id": self._automation_selected_rule_id or self._automation_rule_id(name),
+            "name": name,
+            "enabled": self.automation_enabled_chk.isChecked(),
+            "source_families": sources,
+            "from_calls": from_calls,
+            "subject_contains": terms,
+            "target_location_ids": targets,
+            "copy_mode": str(self.automation_copy_mode_combo.currentData() or "copy"),
+        }
+        normalized = load_bbs_sweeper_rules([raw])
+        if not normalized:
+            self.automation_status_label.setText("The rule could not be normalized.")
+            return None
+        rule = normalized[0]
+        if rule.enabled and not rule.target_location_ids:
+            self.automation_status_label.setText("Choose at least one BBS location for an enabled rule.")
+            return None
+        if rule.enabled and not (rule.from_calls or rule.subject_contains):
+            self.automation_status_label.setText(
+                "Add a sender callsign or message/filename term. "
+                "Enabled rules never copy all incoming traffic implicitly."
+            )
+            return None
+        return rule
+
+    def _add_or_update_automation_rule(self) -> None:
+        rule = self._automation_editor_rule()
+        if rule is None:
+            return
+        existing = load_bbs_sweeper_rules(self._automation_rules)
+        selected_id = self._automation_selected_rule_id
+        if not selected_id and any(item.id == rule.id for item in existing):
+            self.automation_status_label.setText("A rule with this name already exists. Select it to update it.")
+            return
+        updated = [rule if item.id == selected_id else item for item in existing] if selected_id else [*existing, rule]
+        self._automation_rules = bbs_sweeper_rules_to_data(updated)
+        self._automation_selected_rule_id = rule.id
+        self._automation_dirty = True
+        self._populate_automation_rules(select_rule_id=rule.id)
+        self.automation_status_label.setText("Automation rule staged. Choose Save Automation Rules to apply it.")
+
+    def _delete_automation_rule(self) -> None:
+        selected_id = self._automation_selected_rule_id
+        if not selected_id:
+            return
+        rules = [rule for rule in load_bbs_sweeper_rules(self._automation_rules) if rule.id != selected_id]
+        self._automation_rules = bbs_sweeper_rules_to_data(rules)
+        self._automation_dirty = True
+        self._populate_automation_rules()
+        self._clear_automation_editor()
+        self.automation_status_label.setText("Rule removal staged. Choose Save Automation Rules to apply it.")
+
+    def _populate_automation_rules(self, *, select_rule_id: str = "") -> None:
+        rules = load_bbs_sweeper_rules(self._automation_rules)
+        self._automation_loading = True
+        try:
+            self.automation_rules_table.setRowCount(len(rules))
+            selected_row = -1
+            for row, rule in enumerate(rules):
+                locations = [
+                    self._locations_by_id[target].name if target in self._locations_by_id else target
+                    for target in rule.target_location_ids
+                ]
+                match = ", ".join(rule.from_calls) or ", ".join(rule.subject_contains)
+                values = (
+                    "Yes" if rule.enabled else "No",
+                    rule.name,
+                    ", ".join(rule.source_families),
+                    match or "Not ready",
+                    ", ".join(locations) or "None",
+                    "Once per filename" if rule.copy_mode == "copy_once" else "Each new arrival",
+                )
+                for column, value in enumerate(values):
+                    item = QTableWidgetItem(value)
+                    item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    item.setData(Qt.UserRole, rule.id)
+                    self.automation_rules_table.setItem(row, column, item)
+                if rule.id == select_rule_id:
+                    selected_row = row
+            if selected_row >= 0:
+                self.automation_rules_table.selectRow(selected_row)
+        finally:
+            self._automation_loading = False
+
+    def _load_selected_automation_rule(self) -> None:
+        if self._automation_loading:
+            return
+        row = self.automation_rules_table.currentRow()
+        if row < 0:
+            return
+        item = self.automation_rules_table.item(row, 0)
+        rule_id = str(item.data(Qt.UserRole) or "") if item is not None else ""
+        rule = next((value for value in load_bbs_sweeper_rules(self._automation_rules) if value.id == rule_id), None)
+        if rule is None:
+            return
+        self._automation_loading = True
+        try:
+            self._automation_selected_rule_id = rule.id
+            self.automation_enabled_chk.setChecked(rule.enabled)
+            self.automation_name_edit.setText(rule.name)
+            self.automation_source_varac_chk.setChecked("varac_bbs" in rule.source_families)
+            self.automation_source_flmsg_chk.setChecked("flmsg" in rule.source_families)
+            self.automation_source_flamp_chk.setChecked("flamp" in rule.source_families)
+            self.automation_from_calls_edit.setText(", ".join(rule.from_calls))
+            self.automation_subject_contains_edit.setText(", ".join(rule.subject_contains))
+            self._refresh_automation_targets(rule.target_location_ids)
+            index = self.automation_copy_mode_combo.findData(rule.copy_mode)
+            self.automation_copy_mode_combo.setCurrentIndex(index if index >= 0 else 0)
+            self.automation_add_update_btn.setText("Update Rule")
+            self.automation_delete_btn.setEnabled(True)
+        finally:
+            self._automation_loading = False
+
+    def _save_automation_rules(self) -> None:
+        rules = bbs_sweeper_rules_to_data(load_bbs_sweeper_rules(self._automation_rules))
+        try:
+            with connect_sqlite(bbs_library_db_path_from_settings(self.settings)) as conn:
+                with conn:
+                    save_station_bbs_sweeper_rules(conn, rules)
+            setter = getattr(self.settings, "set", None)
+            if callable(setter):
+                setter("varac_bbs_sweeper_rules_v1", rules)
+        except Exception as exc:
+            self.automation_status_label.setText(f"Automation rules were not saved: {exc}")
+            return
+        self._automation_rules = [dict(rule) for rule in rules]
+        self._automation_saved_rules = [dict(rule) for rule in rules]
+        self._automation_dirty = False
+        self.automation_status_label.setText(
+            f"Saved {len(rules)} station BBS automation rule{'s' if len(rules) != 1 else ''}."
+        )
+
+    def _revert_automation_rules(self) -> None:
+        self._automation_rules = [dict(rule) for rule in self._automation_saved_rules]
+        self._automation_dirty = False
+        self._populate_automation_rules()
+        self._clear_automation_editor()
+        self.automation_status_label.setText("Reverted unsaved automation rule changes.")
 
     def _set_location_editor_visible(self, visible: bool) -> None:
         if not visible:
@@ -1443,6 +1977,19 @@ class StationBbsTab(QWidget):
                 )
         self._catalog_thread = None
         self._catalog_worker = None
+        init_thread = self._initialization_thread
+        if isinstance(init_thread, QThread) and init_thread.isRunning():
+            init_thread.requestInterruption()
+            init_thread.quit()
+            if not init_thread.wait(1000):
+                init_thread.setParent(None)
+                job_id = id(init_thread)
+                _DETACHED_BBS_CATALOG_JOBS[job_id] = (init_thread, self._initialization_worker)
+                init_thread.finished.connect(
+                    lambda ident=job_id: _release_detached_bbs_catalog_job(ident)
+                )
+        self._initialization_thread = None
+        self._initialization_worker = None
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().resizeEvent(event)
@@ -1558,6 +2105,9 @@ class StationBbsTab(QWidget):
             return
         self._catalog_rows = snapshot.artifact_rows
         self._refresh_radio_services(snapshot.profiles)
+        if self._pending_radio_status:
+            self.radio_service_status.setText(self._pending_radio_status)
+            self._pending_radio_status = ""
         locations = list(snapshot.locations)
         selected = self._selected_location_id
         self._locations_by_id = {location.location_id: location for location in locations}
@@ -1579,6 +2129,31 @@ class StationBbsTab(QWidget):
                 "",
             )
         self._populate_locations(locations)
+        if not self._automation_dirty:
+            normalized_rules = bbs_sweeper_rules_to_data(
+                load_bbs_sweeper_rules(list(snapshot.sweeper_rules))
+            )
+            self._automation_rules = [dict(rule) for rule in normalized_rules]
+            self._automation_saved_rules = [dict(rule) for rule in normalized_rules]
+            self._populate_automation_rules()
+            self._clear_automation_editor()
+            self.automation_status_label.setText(
+                f"{len(normalized_rules)} saved station automation rule"
+                f"{'s' if len(normalized_rules) != 1 else ''}."
+            )
+        else:
+            selected_targets: tuple[str, ...] = ()
+            selected_rule = next(
+                (
+                    rule
+                    for rule in load_bbs_sweeper_rules(self._automation_rules)
+                    if rule.id == self._automation_selected_rule_id
+                ),
+                None,
+            )
+            if selected_rule is not None:
+                selected_targets = selected_rule.target_location_ids
+            self._refresh_automation_targets(selected_targets)
         self._on_location_selection_changed()
         self._refresh_visitor_preview()
         if self._pending_location_status:

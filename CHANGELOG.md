@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.1]
+- Fixed: Managed VarAC cluster nodes now retain their radio-specific VarAC and VARA configuration paths, launch the intended node, and correctly attribute a shared VarAC executable without blocking the second radio.
+- Fixed: Launch Control now discards and reaps exited child processes before evaluating a new start, allowing a failed VarAC or companion-app launch to be retried without a restart.
+- Added: BBS Automation Rules are available again from the BBS workspace, with radio-aware VarAC, FLMsg, and FLAmp routing and a durable delivery ledger that prevents unchanged files from being copied repeatedly.
+- Added: Radio Service now provides a safe, idempotent `Initialize BBS…` action for creating or repairing the selected radio's managed BBS folders and metadata without replacing operator files.
+- Fixed: The first 1.2.8-to-2.0 startup now establishes the shared JS8 message schema and source identity before message projection and automation begin, improving upgrade reliability without requiring a manual JS8 traffic reload.
+
 ## [2.0.0]
 - Added: Multi-radio operation with profile-scoped radio runtime configuration, launch control, health monitoring, and JS8/Fast Light path handling. One-radio stations remain fully supported.
 - Changed: FreqInOut 2.0 is distributed as a source installation for Windows, macOS, and Linux. No 2.0 executable or signed application bundle is currently published.

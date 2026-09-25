@@ -2,13 +2,24 @@
 
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
 
+from freqinout.core.config_backup import create_config_backup, restore_config_backup
+from freqinout.core.config_varac_managed import (
+    SUPPORTED_VARAC_WRITERS,
+    VarACNativeConfigurationError,
+    parse_varac_ini_bytes,
+    render_varac_ini,
+)
+from freqinout.core.launch_bundle_store import LaunchBundleStore
 from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.software_identity_bundle import SoftwareIdentityComponent
+from freqinout.core.station_launch_planner import StationLaunchPlanner
 from freqinout.core.varac_native_preparation import (
     VarACManagedRuntimeRepair,
     prepare_managed_varac_runtime_repair,
@@ -246,6 +257,297 @@ def _persist_runtime_projection(
     return {"node": saved_node, "radio_profile_id": repair.radio_profile_id}
 
 
+def _ini_value(values: Mapping[str, Mapping[str, str]], section: str, key: str) -> str:
+    for section_name, section_values in values.items():
+        if str(section_name).strip().casefold() != section.casefold():
+            continue
+        for field_name, value in section_values.items():
+            if str(field_name).strip().casefold() == key.casefold():
+                return str(value or "").strip()
+    return ""
+
+
+def managed_varac_process_attribution(
+    store: MultiRadioStore,
+    status: Any,
+) -> Mapping[str, Any]:
+    """Attribute running VarAC/VARA processes to saved radio identities.
+
+    A sibling node must not defer repair of the requested member.  Use the
+    station's saved structured commands and arguments so Wine-hosted VarAC and
+    VARA processes are attributed to their exact radio instead of by family.
+    The ``complete`` flag stays false whenever family process counts cannot be
+    reconciled, preserving the fail-closed rule for an unknown process.
+    """
+
+    profiles = tuple(store.list_device_profiles())
+    profile_node_ids = {
+        int(profile.get("id") or 0): int(profile.get("varac_node_id") or 0)
+        for profile in profiles
+        if int(profile.get("id") or 0) > 0
+        and int(profile.get("varac_node_id") or 0) > 0
+    }
+    if not profile_node_ids:
+        return {
+            "running_node_ids": (),
+            "observed_process_count": 0,
+            "attributed_process_count": 0,
+            "catalog_complete": True,
+            "complete": True,
+        }
+    bundle_store = LaunchBundleStore(store.db_path)
+    planner = StationLaunchPlanner()
+    catalog: list[Mapping[str, Any]] = []
+    catalog_complete = True
+    for profile in profiles:
+        profile_id = int(profile.get("id") or 0)
+        if profile_id not in profile_node_ids:
+            continue
+        try:
+            # This is an attribution inventory, not authorization to launch
+            # multiple radios.  Planning one identity at a time preserves the
+            # normal station-wide collision guard while allowing members of a
+            # verified VarAC cluster to share their database by design.
+            review = planner.plan_review(
+                (profile,),
+                {profile_id: bundle_store.get_bundle(profile_id)},
+                trigger="varac-launch-policy-repair",
+            )
+            catalog.extend(review.queue())
+        except Exception:
+            catalog_complete = False
+    running: set[int] = set()
+    attributed: set[str] = set()
+    for item in catalog:
+        name = str(item.get("name") or "").strip()
+        if name.casefold() not in {"varac", "vara"}:
+            continue
+        target = str(
+            item.get("launch_command_override")
+            or item.get("launch_path_override")
+            or ""
+        ).strip()
+        arguments = item.get("launch_arguments", ())
+        if not isinstance(arguments, (list, tuple)):
+            arguments = ()
+        if not target:
+            continue
+        try:
+            exact_running = bool(
+                status.program_instance_running(name, target, arguments)
+            )
+        except Exception:
+            exact_running = False
+        if not exact_running:
+            continue
+        attributed.add(
+            repr(
+                (
+                    name.casefold(),
+                    target,
+                    tuple(str(value) for value in arguments),
+                )
+            )
+        )
+        for profile_id in item.get("radio_ids", ()) or ():
+            node_id = profile_node_ids.get(int(profile_id or 0), 0)
+            if node_id > 0:
+                running.add(node_id)
+    try:
+        observed = sum(
+            int(status.cached_program_process_count(name))
+            for name in ("VarAC", "VARA")
+        )
+        complete = catalog_complete and observed <= len(attributed)
+    except Exception:
+        observed = -1
+        complete = False
+    return {
+        "running_node_ids": tuple(sorted(running)),
+        "observed_process_count": observed,
+        "attributed_process_count": len(attributed),
+        "catalog_complete": catalog_complete,
+        "complete": complete,
+    }
+
+
+def running_managed_varac_node_ids(
+    store: MultiRadioStore,
+    status: Any,
+) -> tuple[int, ...]:
+    return tuple(
+        managed_varac_process_attribution(store, status).get(
+            "running_node_ids",
+            (),
+        )
+    )
+
+
+def repair_managed_varac_cluster_launch_policy(
+    store: MultiRadioStore,
+    *,
+    backup_root: Path,
+    process_running: bool = False,
+    running_node_ids: tuple[int, ...] = (),
+    platform_override: str = "",
+) -> tuple[Mapping[str, Any], ...]:
+    """Repair only managed cluster members whose VarAC does not start VARA.
+
+    This intentionally does not reuse the full runtime-clone transaction: the
+    existing VARA runtime is already the reviewed identity.  The correction
+    backs up and atomically rewrites one qualified VarAC key, verifies it, and
+    restores the backup if either native readback or FIO persistence fails.
+    """
+
+    platform_key = str(platform_override or _platform_key()).strip().casefold()
+    if platform_key not in {"linux-wine", "windows"}:
+        return ()
+    running_ids = {int(value) for value in running_node_ids if int(value) > 0}
+    profiles = store.list_device_profiles()
+    profiles_by_id = {int(row.get("id") or 0): row for row in profiles}
+    nodes = {int(row.get("id") or 0): row for row in store.list_varac_nodes()}
+    results: list[Mapping[str, Any]] = []
+    for membership in store.list_varac_cluster_members():
+        if int(membership.get("enabled", 1) or 0) != 1:
+            continue
+        profile = profiles_by_id.get(int(membership.get("device_profile_id") or 0))
+        if not isinstance(profile, Mapping):
+            continue
+        node = nodes.get(int(profile.get("varac_node_id") or 0))
+        if not isinstance(node, Mapping):
+            continue
+        node_id = int(node.get("id") or 0)
+        if str(node.get("native_management_state") or "operator").strip().casefold() != "managed":
+            continue
+        try:
+            ini_path = Path(str(node.get("ini_path") or "")).expanduser()
+            if not ini_path.is_file() or ini_path.is_symlink():
+                raise VarACNativeConfigurationError(
+                    "The managed cluster VarAC INI is unavailable or unsafe to update."
+                )
+            source = parse_varac_ini_bytes(ini_path, ini_path.read_bytes())
+            current = _ini_value(
+                source.values,
+                "VARAHF_CONFIG",
+                "VarahfLaunchOnModemConnect",
+            )
+            if current.casefold() == "on":
+                continue
+            writer_key = str(node.get("native_writer_key") or "")
+            version = next(
+                (
+                    capability.version
+                    for capability in SUPPORTED_VARAC_WRITERS
+                    if capability.version in writer_key
+                ),
+                "",
+            )
+            capability = next(
+                (
+                    item
+                    for item in SUPPORTED_VARAC_WRITERS
+                    if item.version == version
+                    and item.platform == platform_key
+                    and item.operation == "update-member"
+                    and item.layout_fingerprint == source.layout_fingerprint
+                ),
+                None,
+            )
+            if capability is None:
+                raise VarACNativeConfigurationError(
+                    "The managed cluster VarAC writer version or INI layout is not qualified."
+                )
+            if process_running or node_id in running_ids:
+                results.append(
+                    {
+                        "node_id": node_id,
+                        "state": "deferred",
+                        "detail": "This VarAC or VARA cluster member is running.",
+                    }
+                )
+                continue
+
+            backup = create_config_backup(
+                (ini_path,),
+                reason="varac-cluster-launch-policy",
+                backup_root=Path(backup_root),
+            )
+            if len(backup.items) != 1 or backup.items[0].status != "backed_up":
+                raise OSError("Managed VarAC launch-policy backup failed.")
+            payload = render_varac_ini(
+                source,
+                {"VARAHF_CONFIG": {"VarahfLaunchOnModemConnect": "ON"}},
+                capability=capability,
+            )
+            descriptor, stage_name = tempfile.mkstemp(
+                prefix=f".{ini_path.name}.fio-",
+                suffix=".stage",
+                dir=str(ini_path.parent),
+            )
+            stage = Path(stage_name)
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.chmod(stage, ini_path.stat().st_mode & 0o777)
+                staged = parse_varac_ini_bytes(stage, stage.read_bytes())
+                if _ini_value(
+                    staged.values,
+                    "VARAHF_CONFIG",
+                    "VarahfLaunchOnModemConnect",
+                ).casefold() != "on":
+                    raise VarACNativeConfigurationError(
+                        "Managed VarAC launch-policy staged readback failed."
+                    )
+                os.replace(stage, ini_path)
+                observed = parse_varac_ini_bytes(ini_path, ini_path.read_bytes())
+                if _ini_value(
+                    observed.values,
+                    "VARAHF_CONFIG",
+                    "VarahfLaunchOnModemConnect",
+                ).casefold() != "on":
+                    raise VarACNativeConfigurationError(
+                        "Managed VarAC launch-policy readback failed."
+                    )
+                store.save_varac_node(
+                    {
+                        **dict(node),
+                        "native_verification_summary": (
+                            "Managed cluster VarAC launches its node-local VARA modem; native INI readback verified."
+                        ),
+                    }
+                )
+            except Exception:
+                restore = restore_config_backup(backup)
+                if not restore.ok:
+                    raise VarACNativeConfigurationError(
+                        "Managed VarAC launch-policy repair failed and backup restoration needs attention."
+                    )
+                raise
+            finally:
+                try:
+                    stage.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            results.append(
+                {
+                    "node_id": node_id,
+                    "state": "launch-policy-repaired",
+                    "detail": "VarAC modem launch enabled and verified.",
+                }
+            )
+        except Exception as exc:
+            results.append(
+                {
+                    "node_id": node_id,
+                    "state": "needs-attention",
+                    "detail": str(exc),
+                }
+            )
+    return tuple(results)
+
+
 def repair_managed_varac_wine_runtime_paths(
     store: MultiRadioStore,
     *,
@@ -311,4 +613,9 @@ def repair_managed_varac_wine_runtime_paths(
     return tuple(results)
 
 
-__all__ = ["repair_managed_varac_wine_runtime_paths"]
+__all__ = [
+    "managed_varac_process_attribution",
+    "repair_managed_varac_cluster_launch_policy",
+    "repair_managed_varac_wine_runtime_paths",
+    "running_managed_varac_node_ids",
+]
