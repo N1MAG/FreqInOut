@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QScrollArea
+from PySide6.QtWidgets import QApplication, QMessageBox, QScrollArea
 
 from freqinout.core.sqlite_utils import connect_sqlite
 from freqinout.core.multi_radio_store import MultiRadioStore
@@ -26,9 +26,15 @@ from freqinout.gui.station_bbs_tab import MAX_ARTIFACT_ROWS, StationBbsTab
 @dataclass
 class _Settings:
     db_path: str
+    values: dict[str, object] | None = None
 
-    def get(self, _key: str, default=None):
-        return default
+    def get(self, key: str, default=None):
+        return (self.values or {}).get(key, default)
+
+    def set(self, key: str, value: object) -> None:
+        if self.values is None:
+            self.values = {}
+        self.values[key] = value
 
 
 def _qapplication_or_skip():
@@ -425,11 +431,12 @@ def test_bbs_guided_tabs_and_visitor_helpers_are_separate_from_publishing(tmp_pa
     tab = StationBbsTab(settings=settings)
     _wait_for_catalog(tab, app)
     try:
-        assert tab.service_tabs.count() == 5
+        assert tab.service_tabs.count() == 6
         assert [tab.service_tabs.tabText(index) for index in range(tab.service_tabs.count())] == [
             "Radio Service",
             "Locations && Access",
             "Publishing",
+            "Automation",
             "Visitor Preview",
             "Visitor Helpers",
         ]
@@ -509,6 +516,8 @@ def test_radio_service_saves_bbs_fields_without_changing_native_varac_paths(tmp_
     _wait_for_catalog(tab, app)
     try:
         assert tab.radio_service_selector.count() == 1
+        assert tab.radio_initialize_btn.text() == "Initialize BBS…"
+        assert tab.radio_initialize_btn.isEnabled()
         tab.radio_publish_enabled_chk.setChecked(True)
         tab.radio_service_enabled_chk.setChecked(False)
         tab.radio_live_dir_edit.setText(str(tmp_path / "live-bbs"))
@@ -527,6 +536,119 @@ def test_radio_service_saves_bbs_fields_without_changing_native_varac_paths(tmp_
         assert saved["varac_install_path"] == "/native/varac"
         assert saved["varac_outbox_dir"] == "/native/outbox"
     finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
+def test_station_bbs_automation_rules_round_trip_in_canonical_catalog(tmp_path):
+    app = _qapplication_or_skip()
+    settings, _source, _artifact_id = _seed_catalog(tmp_path)
+    first = StationBbsTab(settings=settings)
+    _wait_for_catalog(first, app)
+    try:
+        first.service_tabs.setCurrentWidget(first.automation_page)
+        first.automation_name_edit.setText("Field status")
+        first.automation_source_varac_chk.setChecked(False)
+        first.automation_source_flmsg_chk.setChecked(True)
+        first.automation_source_flamp_chk.setChecked(False)
+        first.automation_from_calls_edit.setText("W1ABC")
+        target = next(
+            first.automation_targets_list.item(index)
+            for index in range(first.automation_targets_list.count())
+            if first.automation_targets_list.item(index).data(Qt.UserRole) == "public"
+        )
+        target.setCheckState(Qt.Checked)
+        first._add_or_update_automation_rule()
+        first._save_automation_rules()
+        assert "Saved 1" in first.automation_status_label.text()
+
+        with connect_sqlite(settings.db_path) as conn:
+            from freqinout.core.varac_bbs_library_store import load_station_bbs_sweeper_rules
+
+            rules = load_station_bbs_sweeper_rules(conn)
+        assert rules is not None and rules[0]["name"] == "Field status"
+        assert rules[0]["target_location_ids"] == ["public"]
+
+        second = StationBbsTab(settings=settings)
+        _wait_for_catalog(second, app)
+        try:
+            assert second.automation_rules_table.rowCount() == 1
+            assert second.automation_rules_table.item(0, 1).text() == "Field status"
+        finally:
+            second.deleteLater()
+            app.processEvents()
+    finally:
+        first.deleteLater()
+        app.processEvents()
+
+
+def test_initialize_bbs_action_runs_off_thread_and_enables_selected_radio(monkeypatch, tmp_path):
+    app = _qapplication_or_skip()
+    settings, _source, _artifact_id = _seed_catalog(tmp_path)
+    live_dir = tmp_path / "VarAC" / "BBS"
+    live_dir.mkdir(parents=True)
+    (live_dir / "existing.txt").write_text("existing", encoding="utf-8")
+    store = MultiRadioStore(Path(settings.db_path))
+    profile = store.save_device_profile(
+        {
+            "name": "FIO-A",
+            "system_key": "fio-a",
+            "use_varac": 1,
+            "varac_bbs_dir": str(live_dir),
+        }
+    )
+    answers = iter((QMessageBox.Yes, QMessageBox.Yes))
+    monkeypatch.setattr(QMessageBox, "question", lambda *_args, **_kwargs: next(answers))
+    tab = StationBbsTab(settings=settings)
+    _wait_for_catalog(tab, app)
+    try:
+        tab._initialize_selected_radio_bbs()
+        assert tab._initialization_thread is not None
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and tab._initialization_thread is not None:
+            app.processEvents()
+            time.sleep(0.005)
+        assert tab._initialization_thread is None
+        saved = store.get_device_profile(int(profile["id"]))
+        assert saved is not None
+        assert bool(saved["varac_bbs_enabled"]) is True
+        assert bool(saved["varac_bbs_vault_enabled"]) is True
+        assert Path(live_dir.parent, "FIO_BBS_Vault", "locations", "Default", "existing.txt").exists()
+        assert "Managed BBS initialized" in tab.radio_service_status.text()
+    finally:
+        tab.shutdown()
+        tab.deleteLater()
+        app.processEvents()
+
+
+def test_initialize_bbs_cancel_is_non_mutating(monkeypatch, tmp_path):
+    app = _qapplication_or_skip()
+    settings, _source, _artifact_id = _seed_catalog(tmp_path)
+    live_dir = tmp_path / "VarAC" / "BBS"
+    live_dir.mkdir(parents=True)
+    store = MultiRadioStore(Path(settings.db_path))
+    profile = store.save_device_profile(
+        {
+            "name": "FIO-A",
+            "system_key": "fio-a",
+            "use_varac": 1,
+            "varac_bbs_dir": str(live_dir),
+        }
+    )
+    monkeypatch.setattr(QMessageBox, "question", lambda *_args, **_kwargs: QMessageBox.No)
+    tab = StationBbsTab(settings=settings)
+    _wait_for_catalog(tab, app)
+    try:
+        tab._initialize_selected_radio_bbs()
+        assert tab._initialization_thread is None
+        assert not Path(live_dir.parent, "FIO_BBS_Vault").exists()
+        saved = store.get_device_profile(int(profile["id"]))
+        assert saved is not None
+        assert bool(saved["varac_bbs_enabled"]) is False
+        assert bool(saved["varac_bbs_vault_enabled"]) is False
+        assert "cancelled" in tab.radio_service_status.text().lower()
+    finally:
+        tab.shutdown()
         tab.deleteLater()
         app.processEvents()
 

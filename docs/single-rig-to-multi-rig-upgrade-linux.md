@@ -210,10 +210,12 @@ sqlite3 "$HOME/.freqinout/config/freqinout.db" \
 
 Expected:
 
-- `multi_rig_migration_version` is at least `2`.
+- `multi_rig_migration_version` is at least `3`.
 - `multi_rig_migration_deferred` is false/cleared after setup.
 - A completed-at timestamp exists.
 - If production had daily/net schedules, a migrated Frequency Plan exists and is assigned to the migrated radio.
+
+If the upgraded radio already served a VarAC BBS, open **BBS → Radio Service**, select that radio, verify its existing live BBS folder, and choose **Initialize BBS…**. FIO creates or reuses the station-managed library beside that folder and asks whether to copy the current live files into the Default location. The live folder is never replaced or deleted. This action is also safe to use later if BBS folders or configuration have changed since the original upgrade.
 
 ## 10. Post-Upgrade Acceptance Checks
 

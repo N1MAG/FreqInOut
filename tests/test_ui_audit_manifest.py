@@ -34,6 +34,7 @@ PRINCIPAL_NESTED_TAB_MANIFEST = {
         "Radio Service",
         "Locations && Access",
         "Publishing",
+        "Automation",
         "Visitor Preview",
         "Visitor Helpers",
     },

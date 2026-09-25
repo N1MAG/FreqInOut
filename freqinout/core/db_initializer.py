@@ -14,6 +14,7 @@ from freqinout.core.commstat_artifacts import ensure_commstat_artifact_tables
 from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.group_utils import normalize_group_name
+from freqinout.core.js8_message_schema import ensure_js8_message_cache_schema
 from freqinout.core.message_projection_store import ensure_message_projection_schema
 from freqinout.core.message_projection_queue import ensure_source_dirty_triggers
 from freqinout.core.multi_radio_store import ensure_multi_radio_settings_schema
@@ -2162,6 +2163,8 @@ def _ensure_nets_db() -> None:
             _ensure_operator_checkins(conn)
         with perf_span("startup.database.nets.local_operators", min_ms=10.0):
             _ensure_local_operator_tables(conn)
+        with perf_span("startup.database.nets.js8_message_cache", min_ms=10.0):
+            ensure_js8_message_cache_schema(conn)
         with perf_span("startup.database.nets.message_projection", min_ms=10.0):
             ensure_message_projection_schema(conn)
         with perf_span("startup.database.nets.js8_links", min_ms=10.0):

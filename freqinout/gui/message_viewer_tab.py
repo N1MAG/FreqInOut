@@ -442,6 +442,7 @@ from freqinout.core.message_intelligence import (
     analyze_spotter_text,
 )
 from freqinout.core.message_ingest import MessageIngestor
+from freqinout.core.js8_message_schema import ensure_js8_message_cache_schema
 from freqinout.core.sitrep_metadata import (
     source_family_display_label,
     source_families_from_sources,
@@ -462,11 +463,7 @@ from freqinout.core.commstat_sitrep import (
 from freqinout.utils.timezones import get_timezone
 from freqinout.core.varac_bbs_config import bbs_summary_text
 from freqinout.core.varac_bbs_inventory import build_bbs_inventory
-from freqinout.core.varac_bbs_sweeper import (
-    apply_bbs_sweeper_copy_plan,
-    load_bbs_sweeper_rules,
-    plan_bbs_sweeper_copies,
-)
+from freqinout.core.varac_bbs_automation import apply_station_bbs_automation
 from freqinout.core.varac_bbs_vault import (
     DEFAULT_LOCATION_ID,
     FlampRelayStore,
@@ -923,11 +920,19 @@ class _FileScanWorker(QObject):
         base_dir_mtimes: Optional[Dict[str, float]] = None,
         db_path: str = "",
         watch_signature: str = "",
+        bbs_db_path: str = "",
+        legacy_bbs_rules: object = (),
+        legacy_bbs_locations: object = (),
+        legacy_bbs_enabled: bool = False,
     ):
         super().__init__()
         self._force = bool(force)
         self._db_path = str(db_path or "")
         self._watch_signature = str(watch_signature or "")
+        self._bbs_db_path = str(bbs_db_path or "")
+        self._legacy_bbs_rules = legacy_bbs_rules
+        self._legacy_bbs_locations = legacy_bbs_locations
+        self._legacy_bbs_enabled = bool(legacy_bbs_enabled)
         self._scanner = MessageFileScanner(
             watch_dirs,
             force=force,
@@ -958,12 +963,29 @@ class _FileScanWorker(QObject):
                 "elapsed_ms": result.elapsed_ms,
                 "error": result.error,
             }
+        automation: Dict[str, object] = {}
+        if self._bbs_db_path and delta.added_or_changed:
+            sweep = apply_station_bbs_automation(
+                self._bbs_db_path,
+                delta.added_or_changed,
+                legacy_rules=self._legacy_bbs_rules,
+                legacy_locations=self._legacy_bbs_locations,
+                legacy_enabled=self._legacy_bbs_enabled,
+            )
+            automation = {
+                "considered": sweep.considered,
+                "planned": sweep.planned,
+                "copied": sweep.copied,
+                "skipped": sweep.skipped,
+                "error": sweep.error,
+            }
         self.finished.emit(
             {
                 "records": records,
                 "dir_mtimes": dir_mtimes,
                 "mode": mode,
                 "projection": projection,
+                "automation": automation,
             },
             self._force,
         )
@@ -15414,6 +15436,12 @@ class MessageViewerTab(QWidget):
             base_dir_mtimes=base_dir_mtimes,
             db_path=str(db_path) if db_path else "",
             watch_signature=watch_signature,
+            bbs_db_path=str(bbs_library_db_path_from_settings(self.settings)),
+            legacy_bbs_rules=self.settings.get("varac_bbs_sweeper_rules_v1", []),
+            legacy_bbs_locations=self.settings.get("varac_bbs_vault_locations_v1", []),
+            legacy_bbs_enabled=self._is_truthy(
+                self.settings.get("varac_bbs_vault_enabled", False), False
+            ),
         )
         self._file_scan_worker.moveToThread(self._file_scan_thread)
         self._file_scan_thread.started.connect(self._file_scan_worker.run)
@@ -15443,6 +15471,7 @@ class MessageViewerTab(QWidget):
         dir_mtimes: Dict[str, float] = {}
         mode = "legacy"
         projection: Dict[str, object] = {}
+        automation: Dict[str, object] = {}
         if isinstance(payload, dict) and "records" in payload:
             maybe_records = payload.get("records")
             if isinstance(maybe_records, dict):
@@ -15460,6 +15489,9 @@ class MessageViewerTab(QWidget):
             maybe_projection = payload.get("projection")
             if isinstance(maybe_projection, dict):
                 projection = maybe_projection
+            maybe_automation = payload.get("automation")
+            if isinstance(maybe_automation, dict):
+                automation = maybe_automation
         elif isinstance(payload, dict):
             records = payload  # type: ignore[assignment]
         else:
@@ -15499,6 +15531,17 @@ class MessageViewerTab(QWidget):
                 elif projection_state in {"unchanged", "cached"}:
                     self._message_check_status_text = "No new messages"
                 self._update_message_check_status()
+                automation_error = str(automation.get("error", "") or "")
+                automation_copied = int(automation.get("copied", 0) or 0)
+                if automation_error:
+                    log.warning("MessageViewer: BBS automation failed: %s", automation_error)
+                elif automation_copied:
+                    log.info(
+                        "MessageViewer: BBS automation copied=%s skipped=%s planned=%s",
+                        automation_copied,
+                        int(automation.get("skipped", 0) or 0),
+                        int(automation.get("planned", 0) or 0),
+                    )
         finally:
             self._refresh_files_inflight = False
             self._last_file_refresh_ts = time.time()
@@ -15551,79 +15594,6 @@ class MessageViewerTab(QWidget):
                 log.debug("MessageViewer: projected %s message file observations", projected)
         except Exception as exc:
             log.debug("MessageViewer: message file observation projection failed: %s", exc)
-
-    def _bbs_sweeper_target_dirs(self) -> Dict[str, str]:
-        if not self._is_truthy(self.settings.get("varac_bbs_vault_enabled", False), False):
-            return {}
-        targets: Dict[str, str] = {}
-        for location in load_vault_locations(self.settings.get("varac_bbs_vault_locations_v1", [])):
-            if not location.enabled:
-                continue
-            location_id = str(location.id or "").strip()
-            source_dir = str(location.source_dir or "").strip()
-            if not location_id or not source_dir:
-                continue
-            try:
-                path = Path(source_dir).expanduser()
-                if path.exists() and path.is_dir():
-                    targets[location_id] = str(path)
-            except Exception:
-                continue
-        return targets
-
-    def _bbs_sweeper_candidate_for_record(self, rec: FileRecord, source_family: str) -> Dict[str, object]:
-        text = _read_text_head(rec.path, 32768)
-        sender = ""
-        if source_family in {"flmsg", "flamp"}:
-            sender = self._extract_sender_from_file(rec)
-        return {
-            "path": str(rec.path),
-            "source": source_family,
-            "sender": sender,
-            "subject": rec.path.name,
-            "body": text,
-        }
-
-    def _apply_bbs_sweeper_rules_after_file_scan(self, records: Dict[str, List[FileRecord]]) -> None:
-        try:
-            rules = load_bbs_sweeper_rules(self.settings.get("varac_bbs_sweeper_rules_v1", []))
-        except Exception as exc:
-            log.debug("MessageViewer: BBS sweeper rules could not be loaded: %s", exc)
-            return
-        if not any(rule.ready_to_apply for rule in rules):
-            return
-        target_dirs = self._bbs_sweeper_target_dirs()
-        if not target_dirs:
-            return
-        archive_roots = self._bbs_archive_roots()
-        candidates: List[Dict[str, object]] = []
-        for origin, source_family in (("bbs", "varac_bbs"), ("flmsg", "flmsg"), ("flamp", "flamp")):
-            for rec in records.get(origin, []) or []:
-                if not isinstance(rec, FileRecord):
-                    continue
-                if source_family == "varac_bbs" and self._is_bbs_archive_record(rec, archive_roots=archive_roots):
-                    continue
-                candidates.append(self._bbs_sweeper_candidate_for_record(rec, source_family))
-        if not candidates:
-            return
-        try:
-            plans = plan_bbs_sweeper_copies(
-                rules,
-                candidates,
-                available_location_ids=target_dirs.keys(),
-            )
-            if not plans:
-                return
-            results = apply_bbs_sweeper_copy_plan(plans, target_dirs)
-        except Exception as exc:
-            log.warning("MessageViewer: BBS sweeper failed: %s", exc)
-            return
-        copied = sum(1 for result in results if result.copied)
-        skipped = len(results) - copied
-        if copied or skipped:
-            log.info("MessageViewer: BBS sweeper copied=%s skipped=%s plans=%s", copied, skipped, len(plans))
-        if copied and hasattr(self, "inbox_bbs_summary_label"):
-            self._refresh_varac_bbs_status_label()
 
     def _project_commstat_alerts_to_observations(self) -> None:
         db_path = self._db_path()
@@ -25490,85 +25460,7 @@ class MessageViewerTab(QWidget):
         if not db_path:
             return
         conn = sqlite3.connect(db_path)
-        cur = conn.cursor()
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS js8_messages (
-                id INTEGER PRIMARY KEY,
-                from_call TEXT,
-                to_call TEXT,
-                msg_type TEXT,
-                utc_str TEXT,
-                utc_ts REAL,
-                raw_text TEXT,
-                decoded_text TEXT,
-                state TEXT,
-                read_ts REAL,
-                flag_state INTEGER DEFAULT 0
-            )
-            """
-        )
-        cur.execute(
-            "CREATE TABLE IF NOT EXISTS js8_inbox_state (id INTEGER PRIMARY KEY, state TEXT, last_seen REAL, read_ts REAL, last_ingested_id INTEGER)"
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS js8_bad_records (
-                source TEXT NOT NULL,
-                source_id INTEGER NOT NULL,
-                reason TEXT NOT NULL,
-                raw_preview TEXT,
-                first_seen_ts REAL,
-                last_seen_ts REAL,
-                count INTEGER DEFAULT 1,
-                PRIMARY KEY (source, source_id, reason)
-            )
-            """
-        )
-        # Add columns if missing
-        try:
-            cur.execute("ALTER TABLE js8_messages ADD COLUMN read_ts REAL")
-        except Exception:
-            pass
-        try:
-            cur.execute("ALTER TABLE js8_messages ADD COLUMN flag_state INTEGER DEFAULT 0")
-        except Exception:
-            pass
-        for column, col_type in (
-            ("source_key", "TEXT"),
-            ("source_id", "INTEGER"),
-            ("source_radio_id", "TEXT"),
-            ("js8_instance_id", "TEXT"),
-            ("source_path", "TEXT"),
-        ):
-            try:
-                cur.execute(f"ALTER TABLE js8_messages ADD COLUMN {column} {col_type}")
-            except Exception:
-                pass
-        try:
-            cur.execute("UPDATE js8_messages SET source_key='' WHERE source_key IS NULL")
-            cur.execute("UPDATE js8_messages SET source_id=id WHERE source_id IS NULL")
-        except Exception:
-            pass
-        try:
-            cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN read_ts REAL")
-        except Exception:
-            pass
-        try:
-            cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN last_ingested_id INTEGER")
-        except Exception:
-            pass
-        try:
-            cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN source_key TEXT")
-        except Exception:
-            pass
-        try:
-            cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN source_id INTEGER")
-        except Exception:
-            pass
-        cur.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_js8_messages_source_native ON js8_messages(source_key, source_id)"
-        )
+        ensure_js8_message_cache_schema(conn)
         conn.commit()
         conn.close()
 

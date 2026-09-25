@@ -1,5 +1,64 @@
 # UI Regression Work Log
 
+## 2026-09-25 — BBS automation restoration and 1.2.8 upgrade hardening
+
+Status: implementation and focused regression gate complete; live operator
+qualification remains pending.
+
+The top-level FIO BBS workspace now restores station-owned Automation Rules as
+a first-class page between Publishing and Visitor Preview. Operators can stage,
+save, update, delete, and revert sender/text-filtered rules for VarAC incoming,
+FLMsg, and FLAmp sources. Rules require explicit match evidence and one or more
+enabled destinations. Background message-file discovery applies them off the UI
+thread, and a durable source-version/destination ledger prevents a forced scan
+or restart from copying the same unchanged arrival again. Canonical station
+metadata is authoritative; legacy saved rules are a one-release fallback only
+until the station value is saved.
+
+Radio Service now exposes `Initialize BBS…`. The confirmed action preflights the
+selected radio's existing live BBS folder, creates or reuses the adjacent
+station managed root and Default location, optionally imports current live
+files, and enables the selected radio's catalog publication. It never replaces
+or deletes the live folder, and repeated initialization skips same-named files
+instead of producing duplicate imports.
+
+The 1.2.8-to-2.0 audit confirmed one startup-ordering defect: message projection
+could query `js8_messages.source_key` before the additive multi-radio JS8 cache
+schema had run. A shared idempotent schema owner now upgrades and backfills
+legacy JS8 rows before projection schema and dirty-trigger installation.
+Historic rows keep their original primary key as `source_id` and a blank legacy
+`source_key`. The backup-and-operator-confirmed multi-radio migration gate is
+unchanged. The Linux upgrade guide now checks migration version 3 and points
+existing VarAC BBS operators to the new initialization action.
+
+Work-package ownership:
+
+- Primary `gpt-6-astra` owned design, implementation, integration, tests,
+  documentation, and final verification.
+- `gpt-5.6-luna` at `low` performed the read-only BBS automation ownership and
+  persistence audit.
+- `gpt-5.6-terra` at `medium` performed the read-only 1.2.8 upgrade and BBS
+  initialization audit.
+
+Acceptance evidence:
+
+- BBS automation/initialization, Station BBS, responsive layout, UI manifest,
+  message ingest/projection, JS8 policy, sweeper, catalog, and database-manifest
+  suites — 112 passed;
+- contextual Help and guide rendering/export regression suites — 23 passed;
+- Messages BBS worker/helper, reader action, and BBS core identity/contract
+  suites — 15 passed;
+- public 1.2.8 upgrade rehearsal, migration preview, multi-radio Wave 1, and
+  settings thread-affinity suites — 48 passed;
+- changed-file compilation and `git diff --check` — pass.
+
+Exit gate: automated qualification passes. Operator qualification should open
+BBS, verify the restored Automation page and any migrated rules, initialize an
+existing radio BBS with and without import, and confirm one newly matched
+VarAC/FLMsg/FLAmp file is copied once without making the BBS or Inbox UI
+unresponsive.
+
+
 ## 2026-09-22 — In-app help coverage and navigation alignment
 
 Observable acceptance route: open Help and use the table of contents to reach

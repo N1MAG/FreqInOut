@@ -99,8 +99,8 @@ retention is still enforced from the source modification time.
 ## Administration And Message Contract
 
 Top-level `BBS` is the first-class station service. Its guided tabs are ordered
-`Radio Service`, `Locations & Access`, `Publishing`, `Visitor Preview`, and
-`Visitor Helpers`. It provides:
+`Radio Service`, `Locations & Access`, `Publishing`, `Automation`, `Visitor
+Preview`, and `Visitor Helpers`. It provides:
 
 - a logical location tree with access, retention, and disabled state;
 - progressive Add/Edit/Save/Disable location administration;
@@ -124,6 +124,20 @@ VarAC radio. VarAC Settings retains the native launcher, inbox, outbox, and
 radio-specific inbound-safety configuration, plus a route to BBS. Existing
 radio-profile fields remain valid adapter persistence and do not imply that BBS
 administration belongs under the selected radio.
+
+`Initialize BBS…` is the explicit recovery/setup boundary for an existing live
+BBS folder. After confirmation it creates or reuses the adjacent managed root
+and Default location, optionally copies existing live files without replacing
+or deleting them, records canonical station metadata, and enables publication
+for the selected radio. Repeated initialization skips same-named imports.
+
+The `Automation` tab owns sender/text-filtered VarAC incoming, FLMsg, and FLAmp
+copy rules. Rules persist in `bbs_library_meta.station_sweeper_rules_json`, not
+in a selected radio profile. File discovery applies them off the UI thread only
+to changed records. `bbs_automation_delivery` records source-version/location
+delivery identities so startup and forced rescans cannot duplicate unchanged
+traffic. A saved empty station rule list is authoritative; legacy profile rules
+are fallback input only before the canonical value exists.
 
 Visitor Preview reuses this surface in read-only mode. It filters the effective
 location tree using public/hidden visibility, the entered caller callsign, and

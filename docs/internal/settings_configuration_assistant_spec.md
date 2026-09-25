@@ -557,7 +557,7 @@ Target behavior:
   selected-radio Settings mental model. The radio Settings surface contains
   `Radio Paths` and `Inbound Guard`; `Manage FIO BBS` opens the top-level BBS
   service. Its guided order is `Radio Service`, `Locations & Access`,
-  `Publishing`, `Visitor Preview`, and `Visitor Helpers`.
+  `Publishing`, `Automation`, `Visitor Preview`, and `Visitor Helpers`.
 - Provide VarAC Cluster node configuration guidance that explains when cluster
   mode is useful, what each node contributes, and which radio/profile owns each
   VarAC instance. Initial guidance is now present in Settings and should remain
@@ -594,8 +594,18 @@ Target behavior:
   multiple managed BBS locations. Initial implementation adds the pure sweeper
   rule model, matcher, copy-planning helper, and explicit safe copy helper for
   VarAC BBS, FLMsg, and FLAmp sources. Radio Settings exposes only its adapter;
-  station-owned review and publication live in Managed BBS. Background rule
-  application remains a future slice.
+  station-owned review and publication live in Managed BBS. The implemented
+  `Automation` page persists rules in station-owned catalog metadata. Rules are
+  applied after background message-file discovery only to changed source
+  versions, with a durable source-version/destination delivery guard so forced
+  rescans and restarts do not create duplicate BBS copies. Legacy profile rules
+  are read only until the station-owned value is first saved.
+- Provide `Initialize BBS…` on the top-level `Radio Service` page. It must
+  preflight an existing radio-specific live BBS folder, show confirmation before
+  changing anything, create or reuse the station managed root and Default
+  location, optionally copy existing live files without replacing or deleting
+  them, and enable publication only after the operator confirms. Repeating the
+  action must not duplicate same-named imports.
 - In Messages, preserve the existing `+BBS` action and add a clear way to remove
   FLMsg/FLAmp content from BBS sync without deleting the original message or
   source artifact. The implemented checkbox dialog preselects current station

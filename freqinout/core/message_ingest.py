@@ -45,6 +45,7 @@ from freqinout.core.condition_alert_ingest import condition_alert_observations_f
 from freqinout.core.condition_alerts import CONDITION_ALERT_RULES_SETTING_KEY
 from freqinout.core.message_intelligence import analyze_spotter_text
 from freqinout.core.message_projection_queue import ensure_source_dirty_triggers
+from freqinout.core.js8_message_schema import ensure_js8_message_cache_schema
 from freqinout.core.observation_projection import observation_from_message_intelligence
 from freqinout.core.observation_store import upsert_observation_conn
 from freqinout.core.settings_manager import SettingsManager
@@ -2212,86 +2213,7 @@ class MessageIngestor:
         except Exception:
             pass
         conn = sqlite3.connect(db_path)
-        cur = conn.cursor()
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS js8_messages (
-                id INTEGER PRIMARY KEY,
-                from_call TEXT,
-                to_call TEXT,
-                msg_type TEXT,
-                utc_str TEXT,
-                utc_ts REAL,
-                raw_text TEXT,
-                decoded_text TEXT,
-                state TEXT,
-                read_ts REAL,
-                flag_state INTEGER DEFAULT 0
-            )
-            """
-        )
-        cur.execute(
-            "CREATE TABLE IF NOT EXISTS js8_inbox_state (id INTEGER PRIMARY KEY, state TEXT, last_seen REAL, read_ts REAL, last_ingested_id INTEGER)"
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS js8_ingest_checkpoint (
-                source_key TEXT PRIMARY KEY,
-                last_source_id INTEGER NOT NULL DEFAULT 0,
-                updated_ts REAL NOT NULL DEFAULT 0
-            )
-            """
-        )
-        try:
-            cur.execute("ALTER TABLE js8_messages ADD COLUMN read_ts REAL")
-        except Exception:
-            pass
-        try:
-            cur.execute("ALTER TABLE js8_messages ADD COLUMN flag_state INTEGER DEFAULT 0")
-        except Exception:
-            pass
-        for column, col_type in (
-            ("source_key", "TEXT"),
-            ("source_id", "INTEGER"),
-            ("source_radio_id", "TEXT"),
-            ("js8_instance_id", "TEXT"),
-            ("source_path", "TEXT"),
-        ):
-            try:
-                cur.execute(f"ALTER TABLE js8_messages ADD COLUMN {column} {col_type}")
-            except Exception:
-                pass
-        try:
-            cur.execute("UPDATE js8_messages SET source_key='' WHERE source_key IS NULL")
-            cur.execute("UPDATE js8_messages SET source_id=id WHERE source_id IS NULL")
-        except Exception:
-            pass
-        try:
-            cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN read_ts REAL")
-        except Exception:
-            pass
-        try:
-            cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN last_ingested_id INTEGER")
-        except Exception:
-            pass
-        try:
-            cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN source_key TEXT")
-        except Exception:
-            pass
-        try:
-            cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN source_id INTEGER")
-        except Exception:
-            pass
-        cur.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_js8_messages_source_native ON js8_messages(source_key, source_id)"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS idx_js8_messages_utc_ts ON js8_messages(utc_ts DESC, from_call)"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS idx_js8_messages_projection "
-            "ON js8_messages(utc_ts DESC, source_id DESC, id DESC)"
-        )
+        ensure_js8_message_cache_schema(conn)
         self._ensure_projection_triggers_once(conn, "js8_messages")
         conn.commit()
         conn.close()

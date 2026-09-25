@@ -362,8 +362,10 @@ the caller can use and why:
    caller access, and retention;
 3. `Publishing` — staged, location-scoped membership and artifact lifecycle
    actions;
-4. `Visitor Preview` — a dedicated read-only caller simulation;
-5. `Visitor Helpers` — generated navigation/command files, clearly separated
+4. `Automation` — station-owned, explicitly filtered inbound copy rules with
+   selected managed-location destinations;
+5. `Visitor Preview` — a dedicated read-only caller simulation;
+6. `Visitor Helpers` — generated navigation/command files, clearly separated
    from operator-published content.
 
 Radio Service gives the selected service editor the primary workspace. On a
@@ -1929,8 +1931,8 @@ retention expiry, and location enablement are modeled independently. The
 background service reconciles missing sources and expiries in bounded batches.
 
 Top-level `BBS` now owns the graphical service workflow. Its guided tabs cover
-Radio Service, Locations & Access, Publishing, Visitor Preview, and Visitor
-Helpers. Radio Service is first because it answers where the station BBS is
+Radio Service, Locations & Access, Publishing, Automation, Visitor Preview, and
+Visitor Helpers. Radio Service is first because it answers where the station BBS is
 served; its selector and editor share the available workspace instead of
 stacking a tall table over a compressed form. Locations & Access includes the
 useful service summary and puts the selected location's wrapped policy and
@@ -1946,6 +1948,13 @@ native VarAC paths and inbound guard plus a link to BBS; live BBS folders and
 service enablement are managed under Radio Service. Messages `+BBS` uses the
 identical station locations and atomically replaces memberships, including
 uncheck-all, without copying or deleting the received source file.
+
+Automation owns station-level, explicitly filtered VarAC incoming, FLMsg, and
+FLAmp copy rules. File discovery applies them in its background worker, and a
+durable source-version/location delivery identity prevents unchanged traffic
+from being copied again after a force refresh or restart. Radio Service also
+provides the confirmed, non-destructive Initialize BBS action for existing live
+folders; importing runs off the UI thread.
 
 Each radio live directory has a distinct manifest keyed to its resolved path,
 so one catalog projects independently through one or multiple VarAC instances.
