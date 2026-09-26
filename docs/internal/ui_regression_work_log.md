@@ -11261,7 +11261,11 @@ processes.
 
 ## 2026-09-25 — MeshCore/Meshtastic canonical Inbox hotfix
 
-Status: **Awaiting maintainer pass approval**.
+Status: **Approved—queued for next point release**.
+
+Maintainer operator testing passed on 2026-09-25. The fix is now eligible for
+the next accumulated hotfix bundle, but this approval does not authorize an
+individual public push or assign a point-release version.
 
 Production reported MeshCore traffic in Ops Center but not in the Message
 Inbox. The failure was not transport discovery or channel policy: local mesh

@@ -1019,8 +1019,10 @@ Implemented now:
 
 ### Hotfix: canonical Mesh Inbox projection (2026-09-25)
 
-Status: **Awaiting maintainer pass approval** on the private internal-testing
-branch. Automated qualification does not promote this state.
+Status: **Approved—queued for next point release** after maintainer operator
+testing on the private internal-testing branch. This approval does not authorize
+an individual public push; the fix will remain queued until the maintainer
+directs FIO to bundle and push the accumulated hotfixes.
 
 The 2.0 projection-primary Inbox reads only `message_projection`. MeshCore and
 Meshtastic ingest previously stopped after writing `mesh_messages` and the
