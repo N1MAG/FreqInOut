@@ -1017,6 +1017,41 @@ Implemented now:
   disconnected
 - Tests for config validation, lazy package loading, packet normalization, manager lifecycle, persistence, projection, and view-contract coverage
 
+### Hotfix: canonical Mesh Inbox projection (2026-09-25)
+
+Status: **Awaiting maintainer pass approval** on the private internal-testing
+branch. Automated qualification does not promote this state.
+
+The 2.0 projection-primary Inbox reads only `message_projection`. MeshCore and
+Meshtastic ingest previously stopped after writing `mesh_messages` and the
+policy-shaped `observation_projection`; Ops Center therefore displayed the
+traffic while the Inbox's legacy observation loader was intentionally bypassed.
+
+The correction preserves the existing authority boundaries:
+
+- `mesh_messages` remains the immutable transport receipt;
+- channel policy and `observation_projection.provenance.surfaces` remain the
+  visibility authority for Inbox, Ops Center, Map, and topic scan;
+- a bounded `mesh` source adapter in the shared message-projection coordinator
+  is the only new Inbox path; the GUI does not synchronously merge a second
+  observation list;
+- live receipts are queued only after their policy observation is complete,
+  preventing a raw-write/policy-write race;
+- retained history is discovered by the coordinator's existing rowid
+  watermark and processed in normal bounded cycles;
+- source identity includes protocol and adapter, so the same device message id
+  observed by two configured adapters is not collapsed incorrectly;
+- a repeated receipt updates one canonical row and preserves operator read,
+  pin, archive, and delete state through the existing projection writer; and
+- removal of Inbox permission removes the canonical Inbox presentation while
+  preserving the native Mesh receipt and any still-authorized Ops/Map
+  observation.
+
+Acceptance requires both MeshCore and Meshtastic Inbox rows, idempotent retries,
+adapter-distinct identity, retained-history catch-up, Ops-only exclusion, policy
+transition removal, read-state preservation, unchanged Ops visibility, and no
+legacy/projection-primary double rendering.
+
 Not implemented yet:
 
 - persisted retry countdown diagnostics in settings (runtime backoff and manual

@@ -123,6 +123,18 @@ _SOURCE_SPECS: Mapping[str, Mapping[str, str]] = {
         "version": "printf('%s:%s',COALESCE(artifact_key,''),COALESCE(deleted_ts,0))",
         "operation": "delete",
     },
+    "mesh": {
+        "family": "mesh",
+        "table": "mesh_messages",
+        "kind": "mesh_message",
+        "source_id": (
+            "'mesh:' || COALESCE(NULLIF(transport,''),'mesh') || ':' || "
+            "COALESCE(NULLIF(adapter_id,''),'adapter')"
+        ),
+        "watermark": "rowid",
+        "key": "CAST(source_ref AS TEXT)",
+        "version": "printf('%s:%s',COALESCE(source_ref,''),COALESCE(updated_utc,''))",
+    },
 }
 
 

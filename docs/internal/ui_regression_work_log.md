@@ -11258,3 +11258,48 @@ restart onto this code, confirmation that no historical zombie remains, and a
 manual FT-710 VarAC Start while the DX10 VarAC/VARA pair is running. The result
 must be two distinct VarAC/VARA pairs on their configured ports with no duplicate
 processes.
+
+## 2026-09-25 — MeshCore/Meshtastic canonical Inbox hotfix
+
+Status: **Awaiting maintainer pass approval**.
+
+Production reported MeshCore traffic in Ops Center but not in the Message
+Inbox. The failure was not transport discovery or channel policy: local mesh
+ingest correctly persisted the raw receipt and policy-shaped observation, which
+Ops Center consumed. Projection-primary Inbox mode intentionally returns before
+the legacy mesh-observation loader and queries only `message_projection`; no
+Mesh projector populated that canonical read model.
+
+The private hotfix adds Mesh as a bounded native projection source, uses the
+policy observation's explicit `inbox` surface as the visibility gate, queues
+live receipts only after policy projection finishes, and catches up retained
+history through the existing durable rowid watermark. Canonical identity keeps
+protocol and adapter distinct, repeated receipts coalesce, and an Ops-only
+policy removes Inbox presentation without changing the native receipt or Ops
+observation. No GUI merge path or synchronous Inbox database scan was added.
+
+Work-package ownership:
+
+- Primary `gpt-6-astra` owned diagnosis, architecture, implementation,
+  integration, tests, specification, and private delivery. The primary
+  reasoning-effort label was not exposed by the runtime.
+- `gpt-5.6-luna` at `low` performed the bounded independent read-only audit. It
+  confirmed the observation/canonical-projection boundary, recommended the
+  shared writer/coordinator path, and identified surface gating, adapter-aware
+  identity, retained-history backfill, state preservation, and double-rendering
+  risks. The delegate changed no files; the primary reviewed and applied the
+  findings.
+
+Automated acceptance evidence:
+
+- Mesh-focused policy, persistence, protocol, and projection suite: 123 tests
+  passed;
+- message projection coordinator, regression, qualification, read-model, and
+  Mesh hotfix suite: 44 tests passed;
+- changed-file compilation and `git diff --check`: pass.
+
+Maintainer pass gate: restart FIO from the internal-testing branch, receive one
+accepted MeshCore or Meshtastic operator message, and verify it appears once in
+Inbox while remaining visible in Ops Center. Also verify an Ops-only channel
+does not enter Inbox. Approval moves this item only to
+`Approved—queued for next point release`; it does not authorize a public push.

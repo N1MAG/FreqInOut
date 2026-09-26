@@ -17,6 +17,7 @@ from freqinout.core.mesh.channel_policy import (
 )
 from freqinout.core.mesh.models import MeshAdapterEvent, MeshChannel, MeshHealthSnapshot, MeshMessage, MeshNode, utc_now
 from freqinout.core.message_intelligence import normalize_topic_terms
+from freqinout.core.message_projection_queue import DirtyProjectionItem, enqueue_dirty_conn
 from freqinout.core.observation_projection import Observation
 from freqinout.core.observation_store import delete_observations_by_source_refs, upsert_observation
 from freqinout.core.source_connection import source_connection_from_mesh_health
@@ -839,6 +840,7 @@ def store_mesh_message_with_channel_policy(
     surfaces = message_allowed_surfaces(message, active_policies)
     if not surfaces:
         delete_observations_by_source_refs(db_path, [source_ref], source_family=message.transport)
+        _enqueue_mesh_message_projection(db_path, message, source_ref=source_ref)
         return source_ref
 
     policy = policy_for_message(message, active_policies)
@@ -894,6 +896,7 @@ def store_mesh_message_with_channel_policy(
     )
     observation = _apply_route_derived_location(db_path, observation, message)
     upsert_observation(db_path, observation)
+    _enqueue_mesh_message_projection(db_path, message, source_ref=source_ref)
     return source_ref
 
 
@@ -1149,7 +1152,59 @@ def prune_mesh_messages_by_channel_policy(
             removed += int(cur.rowcount or 0)
         finally:
             conn.close()
+        for source_ref in source_refs:
+            _enqueue_mesh_message_projection(
+                db_path,
+                None,
+                source_ref=source_ref,
+                adapter_id=policy.adapter_id,
+                transport=policy.transport,
+                operation="delete",
+            )
     return removed
+
+
+def _enqueue_mesh_message_projection(
+    db_path: str | Path,
+    message: MeshMessage | None,
+    *,
+    source_ref: str,
+    adapter_id: str = "",
+    transport: str = "",
+    operation: str = "upsert",
+) -> None:
+    """Queue a policy-complete Mesh receipt when the projection queue exists.
+
+    Mesh ingest can run before message-index startup and in small standalone
+    tests, so this helper never owns queue schema.  The coordinator's bounded
+    reconciliation later catches any receipt stored before that schema exists.
+    """
+
+    clean_transport = _clean(message.transport if message is not None else transport) or "mesh"
+    clean_adapter = _clean(message.adapter_id if message is not None else adapter_id) or "adapter"
+    stamp = utc_now().isoformat()
+    conn = connect_sqlite(db_path)
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_projection_dirty'"
+        ).fetchone()
+        if exists is None:
+            return
+        with conn:
+            enqueue_dirty_conn(
+                conn,
+                DirtyProjectionItem(
+                    source_id=f"mesh:{clean_transport}:{clean_adapter}",
+                    source_family="mesh",
+                    external_kind="mesh_message",
+                    external_key=_clean(source_ref),
+                    operation=_clean(operation).lower() or "upsert",
+                    source_version=f"{_clean(source_ref)}:{stamp}",
+                ),
+                observed_utc=stamp,
+            )
+    finally:
+        conn.close()
 
 
 def _retention_cutoff(now: datetime, window: str) -> datetime | None:

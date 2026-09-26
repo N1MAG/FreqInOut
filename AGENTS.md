@@ -44,3 +44,29 @@
   - `freqinout_nets.db` contains traffic, messages, observations, schedules, and operator/map data.
 - In multi-rig work, verify linked configuration rows as well as the visible radio row. For example, `device_profiles.js8_instance_id` may point to a `js8_instances` row that owns `install_path`, `spotter_launch_path`, and `commstat_launch_path`.
 - If the observed UI behavior and the inspected database disagree, stop and identify the active configuration root before patching code. Acting on the wrong workspace or database is high-risk.
+
+## Public-Release Hotfix Mode
+
+- While the maintainer has declared hotfix mode, implement each bounded fix on
+  the private WIP branch and push it only to `FreqInOut-internal-testing`.
+- Record every private hotfix in the governing specification and
+  `docs/internal/ui_regression_work_log.md` with one explicit state:
+  `Awaiting maintainer pass approval`, `Approved—queued for next point release`,
+  or `Rejected/superseded`.
+- Passing automated tests does not grant maintainer approval. After the private
+  push, stop at `Awaiting maintainer pass approval` until the maintainer reports
+  that the fix passed operator testing.
+- Maintainer approval of one hotfix authorizes only the status change to
+  `Approved—queued for next point release`; it does not authorize a public push.
+- Do not update the public candidate, public `main`, tags, or release artifacts
+  for an individual hotfix unless the maintainer explicitly says to push the
+  accumulated hotfixes.
+- When the maintainer says `push hot-fixes`, bundle every approved and
+  non-superseded queued fix as the next point-release candidate based on the
+  current public `main`. Assign the version at bundle time, update public
+  version/help/changelog metadata, use the reviewed allowlisted runtime export,
+  and exclude tests, specifications, internal logs, tools, emulators, lab
+  assets, and private Git history.
+- Unapproved, rejected, or superseded fixes must never enter the public bundle.
+  Preserve each private hotfix as an independently reviewable commit and keep
+  public release authorization distinct from implementation approval.
