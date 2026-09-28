@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from freqinout.core.launch_orchestrator import LaunchOrchestrator
+from freqinout.core.js8_storage import stable_managed_rig_name
 from freqinout.core.station_launch_planner import StationLaunchPlanner
 
 
@@ -205,6 +206,57 @@ def test_js8_launch_uses_persisted_reviewed_rig_identity_not_system_key() -> Non
     assert instance.launch_arguments == ("--rig-name", "FT-710")
     assert instance.application_data_root == "/operator/.local/share/JS8Call - FT-710"
     assert "opaque-db-key" not in " ".join(instance.effective_command)
+
+
+def test_legacy_default_js8_launch_keeps_native_profile_and_uses_radio_title() -> None:
+    generated = stable_managed_rig_name(
+        system_key="default_js8_instance",
+        name="FTDX-10 JS8",
+    )
+    profile = {
+        **_profile(),
+        "name": "FTDX-10",
+        "js8_instance_system_key": "default_js8_instance",
+        "js8_instance_name": "FTDX-10 JS8",
+        "js8_rig_name": generated,
+        "js8_rig_name_source": "persisted",
+        "js8_message_storage_root": "/home/operator/.local/share/JS8Call",
+        "js8_storage_evidence": "runtime_verified:message_files",
+    }
+    item = _item("JS8Call", "JS8Call", path="/usr/bin/js8call-subspace")
+
+    instance = StationLaunchPlanner().plan_startup(
+        [profile],
+        {1: {"launch_enabled": True, "items": [item]}},
+    ).instances[0]
+    queue_item = instance.as_queue_item()
+
+    assert instance.launch_arguments == ()
+    assert instance.rig_name == ""
+    assert instance.rig_name_source == "legacy_default"
+    assert instance.application_data_root.endswith("/home/operator/.local/share/JS8Call")
+    assert LaunchOrchestrator._window_title_for_item(queue_item) == "JS8Call — FTDX-10"
+
+
+def test_legacy_default_js8_preserves_operator_selected_rig_name() -> None:
+    profile = {
+        **_profile(),
+        "name": "FTDX-10",
+        "js8_instance_system_key": "default_js8_instance",
+        "js8_instance_name": "FTDX-10 JS8",
+        "js8_rig_name": "FTDX-10",
+        "js8_message_storage_root": "/home/operator/.local/share/JS8Call - FTDX-10",
+    }
+    item = _item("JS8Call", "JS8Call", path="/usr/bin/js8call")
+
+    instance = StationLaunchPlanner().plan_startup(
+        [profile],
+        {1: {"launch_enabled": True, "items": [item]}},
+    ).instances[0]
+
+    assert instance.launch_arguments == ("--rig-name", "FTDX-10")
+    assert instance.rig_name_source == "persisted"
+    assert LaunchOrchestrator._window_title_for_item(instance.as_queue_item()) == ""
 
 
 def test_varac_exact_command_and_working_directory_reach_execution_preview() -> None:

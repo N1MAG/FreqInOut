@@ -537,6 +537,40 @@ def test_existing_structured_varac_row_derives_title_from_one_radio_context() ->
     ) == ""
 
 
+def test_legacy_default_js8_window_title_is_pid_scoped_and_non_blocking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import freqinout.core.launch_orchestrator as launch_module
+
+    scheduled: list[tuple[int, object]] = []
+    attempts: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        launch_module,
+        "QTimer",
+        SimpleNamespace(
+            singleShot=lambda delay, callback: scheduled.append((delay, callback))
+        ),
+    )
+    monkeypatch.setattr(
+        launch_module,
+        "set_process_window_title",
+        lambda pid, title: attempts.append((pid, title)) or True,
+    )
+    item = {
+        "name": "JS8Call",
+        "radio_names": ["FTDX-10"],
+        "rig_name_source": "legacy_default",
+        "readiness_policy": {},
+    }
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+
+    orchestrator._schedule_process_window_title(item, SimpleNamespace(pid=9876))
+
+    assert scheduled[0][0] == 250
+    scheduled.pop(0)[1]()
+    assert attempts == [(9876, "JS8Call — FTDX-10")]
+
+
 def test_varac_legacy_launch_command_remains_compatibility_fallback() -> None:
     profile = {
         "id": 1,

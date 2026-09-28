@@ -1,5 +1,53 @@
 # UI Regression Work Log
 
+## 2026-09-28 — Legacy JS8Call default-profile launch hotfix
+
+Status: `Awaiting maintainer pass approval`
+
+The supplied production database confirmed the reported FT-DX10 failure. Its
+legacy/default JS8 row correctly retained `/usr/bin/js8call-subspace`, API
+endpoint `127.0.0.1:2442`, and the established
+`/home/bill/.local/share/JS8Call` message root, but launch planning appended
+`--rig-name fio-default_js8_instance-50f8a9bb`. JS8Call uses `--rig-name` as
+both an application title suffix and a settings namespace, so FIO selected a
+new unconfigured profile instead of the working profile used by the installed
+Linux package launcher.
+
+The bounded fix recognizes only the untouched `default_js8_instance`
+migration identity: a blank rig name or the exact former machine-generated
+fallback now launches through the saved executable with no `--rig-name`. The
+configured API and file paths remain authoritative and no JS8-owned file is
+copied, rewritten, moved, or deleted. FIO then makes a best-effort, PID-scoped
+desktop title update to `JS8Call — <radio name>`; a desktop that refuses the
+presentation-only title does not invalidate or alter the correctly configured
+launch. Explicit operator-selected rig names and all non-default managed
+multi-instance identities retain their existing `--rig-name` isolation.
+
+Work-package ownership:
+
+- Primary `gpt-6-astra` owned the migration-safety analysis, implementation,
+  supplied-database replay, integration review, tests, specification, and exit
+  gate. The runtime did not expose a trustworthy reasoning-effort label. No
+  delegation was used for this small migration-sensitive correction.
+
+Acceptance evidence:
+
+- focused planner, orchestrator, JS8 application/storage, launch-bundle, and
+  software-identity partition — 150 passed;
+- broader launch, GRS-4, JS8, and process-title partition — 303 passed;
+- a temporary copy of the supplied database planned the FTDX-10 command as
+  `/usr/bin/js8call-subspace` with no launch arguments, retained the default
+  data/profile paths, marked the effective identity `legacy_default`, and
+  derived `JS8Call — FTDX-10` for the exact launched PID;
+- explicit-rig and non-default-instance regressions remain covered;
+- changed-file compilation and `git diff --check` — pass.
+
+Maintainer pass gate: restart FIO on the production Linux station, start JS8Call
+for FTDX-10 from FIO, and verify that it opens the same configured station used
+by the installed package launcher, connects on `127.0.0.1:2442`, and shows the
+FTDX-10 radio label in the title bar. Approval moves this item to the next
+public point-release bundle; it does not authorize a public push by itself.
+
 ## 2026-09-28 — In-FIO MeshCore Linux authentication hotfix
 
 Status: `Released in public FreqInOut 2.0.1`

@@ -1844,7 +1844,18 @@ class LaunchOrchestrator(QObject):
         saved = str(readiness.get("window_title") or "").strip()
         if saved:
             return saved
-        if LaunchOrchestrator._queue_item_name(item) != "VarAC":
+        name = LaunchOrchestrator._queue_item_name(item)
+        radio_names = item.get("radio_names", ())
+        if not isinstance(radio_names, (list, tuple)) or len(radio_names) != 1:
+            return ""
+        if name == "JS8Call":
+            if str(item.get("rig_name_source", "") or "").strip() != "legacy_default":
+                return ""
+            # The legacy/default JS8 namespace must launch without
+            # --rig-name so it continues to read the operator's configured
+            # JS8Call.ini. Apply only a presentation title to the exact PID.
+            return managed_instance_window_title("JS8Call", radio_names[0])
+        if name != "VarAC":
             return ""
         nested = readiness.get("launch_recipe")
         recipe = nested if isinstance(nested, Mapping) else readiness
@@ -1855,9 +1866,6 @@ class LaunchOrchestrator(QObject):
             or "launch_arguments" in recipe
         ):
             return ""
-        radio_names = item.get("radio_names", ())
-        if not isinstance(radio_names, (list, tuple)) or len(radio_names) != 1:
-            return ""
         # Compatibility for already-saved structured VarAC rows: the stable
         # selected-radio context is sufficient to derive presentation text,
         # but never changes the executable/INI launch identity.
@@ -1867,13 +1875,15 @@ class LaunchOrchestrator(QObject):
         """Apply a non-native title without delaying or blocking launch.
 
         FLMsg and FLAmp consume their supported ``-title`` argument directly.
-        VarAC has no qualified title argument, so FIO retries a PID-scoped OS
-        title update while its first window is being created.  A compositor
-        may reject this presentation-only request; that never changes process
-        readiness or the launch result.
+        VarAC has no qualified title argument. A migrated single-radio JS8Call
+        must omit --rig-name to retain its native default settings file. FIO
+        retries a PID-scoped OS title update for those two cases while the first
+        window is being created. A compositor may reject this presentation-only
+        request; that never changes process readiness or the launch result.
         """
 
-        if self._queue_item_name(item) != "VarAC":
+        name = self._queue_item_name(item)
+        if name not in {"VarAC", "JS8Call"}:
             return
         title = self._window_title_for_item(item)
         try:
@@ -1885,14 +1895,15 @@ class LaunchOrchestrator(QObject):
 
         def _attempt(remaining: int) -> None:
             if set_process_window_title(pid, title):
-                log.info("LaunchOrchestrator: set VarAC window title to %s", title)
+                log.info("LaunchOrchestrator: set %s window title to %s", name, title)
                 return
             if remaining > 1:
                 QTimer.singleShot(750, lambda: _attempt(remaining - 1))
                 return
             log.warning(
-                "LaunchOrchestrator: VarAC started, but the desktop did not permit "
+                "LaunchOrchestrator: %s started, but the desktop did not permit "
                 "the requested radio title '%s'; launch remains valid.",
+                name,
                 title,
             )
 

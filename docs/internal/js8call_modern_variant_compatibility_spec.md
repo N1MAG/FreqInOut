@@ -382,6 +382,38 @@ from a busy endpoint.
 - If FIO detects a duplicate rig name or data root, identify both affected radio
   names and provide one direct action to review their JS8 configuration.
 
+### Hotfix: legacy default-profile launch preservation (2026-09-28)
+
+Status: **Awaiting maintainer pass approval**.
+
+Observable production case: an upgraded single-radio station whose linked JS8
+instance still owns `default_js8_instance` and the default JS8 application-data
+root must launch the configured package executable with its established native
+default settings. FIO must not turn the old migration key into a new
+`--rig-name`, because JS8Call uses that value for its settings filename as well
+as its visible application name.
+
+The bounded compatibility rule is:
+
+- when the default migrated instance has no rig name, or only the exact old
+  FIO-generated fallback for `default_js8_instance`, launch the configured
+  executable without `--rig-name`;
+- retain its configured API endpoint, save/forms paths, verified message root,
+  and native default settings namespace without copying, rewriting, or moving
+  any JS8-owned file;
+- apply `JS8Call — <radio name>` only as a best-effort PID-scoped desktop title
+  after launch, so presentation cannot select a different JS8 profile;
+- preserve any explicit operator-selected rig name, including one attached to
+  the default database row; and
+- keep every non-default managed or adopted JS8 instance on the existing unique
+  `--rig-name`, endpoint, and storage-isolation contract.
+
+The supplied production-shaped database is the acceptance fixture: its FTDX-10
+record uses `/usr/bin/js8call-subspace`, endpoint `127.0.0.1:2442`, default
+message root `/home/bill/.local/share/JS8Call`, and the obsolete generated rig
+name `fio-default_js8_instance-50f8a9bb`. The corrected plan must remove only
+that generated argument while preserving the other configured facts.
+
 ## Acceptance Gate
 
 The automated implementation gate is complete. Linux production qualification
