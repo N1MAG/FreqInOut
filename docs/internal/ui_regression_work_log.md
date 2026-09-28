@@ -4,6 +4,9 @@
 
 Status: `Awaiting maintainer pass approval`
 
+Private implementation commit: `b8070e43c52c7a6a5be3493e2822f4837cdc30f4` on
+`wip/private-testing-multi-rig-1.2.3-not-ready`.
+
 The supplied production database confirmed the reported FT-DX10 failure. Its
 legacy/default JS8 row correctly retained `/usr/bin/js8call-subspace`, API
 endpoint `127.0.0.1:2442`, and the established
