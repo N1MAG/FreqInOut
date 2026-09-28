@@ -6,47 +6,70 @@ accepted; Python 3.11 is the tested and recommended release interpreter.
 Companion radio applications are installed separately. No 2.0 executable or
 signed application bundle is currently published.
 
-## Before an upgrade
+## One installation rule
 
-An existing single-radio station can be upgraded in place. Before changing the
-application:
+New installations and upgrades use the same `install_freqinout.py` check. Do
+not start FIO until it prints exactly:
 
-1. Close FreqInOut and the companion radio applications it manages.
-2. Back up the FIO profile and verify that the backup can be opened.
-3. Keep the existing application folder and profile until the upgraded station
-   has been reviewed.
-4. Use the same profile location during the update.
+```text
+Installation verified. Run: ...
+```
 
-On first 2.0 launch, FIO presents the proposed conversion of the existing
-station to the default radio. Nothing is migrated until the operator confirms
-that review. Cancel or Defer leaves the legacy profile unchanged.
+The installer validates the release files and Python version, repairs an
+incomplete `.venv` without deleting it, installs the requirements, and runs an
+isolated application/database check. When it finds an existing station, it
+also requires FIO to be closed, checks both FIO databases, creates a cold
+profile backup, verifies every copied file and database, and records the backup
+location. If any step fails, it prints `Installation failed. Do not launch
+FreqInOut.` and the launcher remains blocked.
 
-The conversion path has automated rehearsal coverage. A production-shaped
-operator migration was not a release prerequisite for 2.0, so the verified
-backup is mandatory and operators should be prepared to review or rebuild
-affected companion-application settings when an older station differs from the
-rehearsed profile.
+If database validation fails, do not delete, replace, or edit the named
+database. The installer made no changes; preserve the database and contact
+FreqInOut support before attempting the upgrade again.
 
-The detailed cross-platform procedure is in the
-[FreqInOut 2.0 upgrade guide](FreqInOut%20Version%202%20Upgrade%20Guide%20for%20Current%20Single%20Radio%20Users.docx).
+## Upgrade an existing 1.2.8 station
+
+1. Close FreqInOut, FLRig, FLDigi, JS8Call, FIO Spotter, VarAC, CommStat, and
+   other companion radio applications.
+2. Download the approved FreqInOut release archive and extract it to a **new
+   folder**. Keep the old application folder unchanged for rollback.
+3. Open PowerShell or a terminal in the new folder.
+4. Run the one installation command for your operating system shown below.
+5. Confirm that the final line says `Installation verified`. It will also show
+   the verified backup location. If either message is missing, stop and do not
+   launch FIO.
+6. Run the neutral `start-freqinout` launcher shown below. FIO automatically
+   uses the established profile unless `FREQINOUT_CONFIG_DIR` explicitly
+   selects another one.
+7. In **Upgrade Existing Station**, review or select the manufacturer, model,
+   display name, plan name, and detected software. Select **Back Up and Upgrade
+   Station**.
+8. Review the radio's software, schedule assignment, and Launch Control
+   settings. Launch Control remains off until the operator enables it.
+
+The only other choice in the upgrade window is **Exit FIO**. Closing the window
+also exits FIO. No migration writes occur, and the same upgrade is required on
+the next launch.
+
+For rollback, close FIO, retain the failed/new folder, restore the `config`
+folder from the reported `pre-install-...` backup, and launch the retained
+1.2.8 application folder. Do not copy a database while FIO is running.
 
 ## Windows 10/11
 
-Install 64-bit Python 3.11 from Python.org and Git for Windows, then open
-PowerShell:
+Install 64-bit Python 3.11 from Python.org. Extract the approved release, open
+PowerShell in that folder, and run:
 
 ```powershell
-git clone https://github.com/N1MAG/FreqInOut.git "$HOME\FreqInOut"
-Set-Location "$HOME\FreqInOut"
 py -3.11 install_freqinout.py
-.\start-multi-rig.cmd
+.\start-freqinout.cmd
 ```
 
 The launcher accepts normal FIO command-line options. An explicit
 `FREQINOUT_CONFIG_DIR` is honored when a separate profile is intentionally
 required.
 
-To update a source checkout, close FIO and its companion applications, then:
+Maintainers and technical testers updating an approved source checkout use:
 
 ```powershell
 Set-Location "$HOME\FreqInOut"
@@ -60,14 +83,12 @@ official FreqInOut release.
 
 ## macOS
 
-Install Git and Python 3.11 from Python.org or Homebrew. Do not use an obsolete
-system Python.
+Install Python 3.11 from Python.org or Homebrew. Do not use an obsolete system
+Python. Extract the approved release, open Terminal in that folder, and run:
 
 ```bash
-git clone https://github.com/N1MAG/FreqInOut.git "$HOME/FreqInOut"
-cd "$HOME/FreqInOut"
 python3.11 install_freqinout.py
-./start-multi-rig.sh
+./start-freqinout.sh
 ```
 
 For an update:
@@ -84,6 +105,16 @@ for file or automation access when configured companion applications are first
 used; grant only the access needed by those configured paths.
 
 ## Linux
+
+The same release-folder path used above is supported on Linux:
+
+```bash
+python3.11 install_freqinout.py
+./start-freqinout.sh
+```
+
+The guided Linux installer remains available for users who also need system
+packages, a desktop icon, and the account-wide `freqinout` command.
 
 The guided installer recognizes `apt`, `dnf`, `yum`, `pacman`, and `zypper`,
 installs supported system dependencies, creates a virtual environment, and
@@ -104,7 +135,7 @@ The native Map may require `libxcb-cursor0` and `libxcb-xinerama0` on
 Debian/Ubuntu-family desktops. The guided installer offers applicable platform
 packages when they are missing.
 
-## First launch
+## First launch for a new station
 
 1. Enter the station callsign, location, and time preferences under
    **Configuration**.

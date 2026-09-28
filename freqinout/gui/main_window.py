@@ -86,6 +86,8 @@ from freqinout.core.station_health_summary import runtime_observability_items, s
 from freqinout.core.launch_orchestrator import LAUNCH_APP_ORDER
 from freqinout.core.mesh import (
     MeshConnectionWorker,
+    MeshSendRequest,
+    MeshSendResult,
     activate_mesh_connection_config,
     default_mesh_db_path,
     load_mesh_connection_configs,
@@ -239,6 +241,7 @@ class MainWindow(QMainWindow):
     _message_projection_progressed = Signal(object)
     _receiver_qualification_finished = Signal(object)
     _mesh_retry_requested = Signal(str)
+    _mesh_send_requested = Signal(object)
 
     def __init__(self, startup_status: Callable[[str], None] | None = None):
         super().__init__()
@@ -3296,6 +3299,12 @@ class MainWindow(QMainWindow):
             worker.channel_capabilities_ready.connect(self.settings_tab.on_mesh_channel_capabilities_ready)
             worker.operation_ready.connect(self.settings_tab.on_mesh_operation_ready)
             self._mesh_retry_requested.connect(worker.retry_now, Qt.QueuedConnection)
+            try:
+                self._mesh_send_requested.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            self._mesh_send_requested.connect(worker.send_message, Qt.QueuedConnection)
+            worker.send_ready.connect(self._on_mesh_send_result)
             self.settings_tab.mesh_channel_refresh_requested.connect(worker.refresh_channels, Qt.QueuedConnection)
             self.settings_tab.mesh_channel_configure_requested.connect(worker.configure_channel, Qt.QueuedConnection)
             self.settings_tab.mesh_channel_remove_device_requested.connect(
@@ -3464,8 +3473,51 @@ class MainWindow(QMainWindow):
         if text:
             log.warning("Local Mesh runtime: %s", text)
 
+    @Slot(object)
+    def _request_mesh_send(self, request: object) -> None:
+        """Route one operator-confirmed send to the worker that owns the adapter session."""
+
+        if not isinstance(request, MeshSendRequest):
+            return
+        worker = getattr(self, "_mesh_worker", None)
+        thread = getattr(self, "_mesh_worker_thread", None)
+        unavailable = bool(
+            worker is None
+            or thread is None
+            or not thread.isRunning()
+            or getattr(self, "_mesh_runtime_stopping", False)
+        )
+        if unavailable:
+            self._on_mesh_send_result(
+                MeshSendResult(
+                    request_id=request.request_id,
+                    adapter_id=request.adapter_id,
+                    transport="",
+                    destination_kind=request.destination_kind,
+                    destination_id=request.destination_id,
+                    channel_id=request.channel_id,
+                    state="failed",
+                    requested_at=request.requested_at,
+                    completed_at=datetime.datetime.now(datetime.timezone.utc),
+                    detail="Local Mesh runtime is not available. Connect the selected device and try again.",
+                    retryable=True,
+                    evidence="runtime_unavailable",
+                )
+            )
+            return
+        self._mesh_send_requested.emit(request)
+
+    @Slot(object)
+    def _on_mesh_send_result(self, result: object) -> None:
+        viewer = getattr(self, "message_viewer_tab", None)
+        if viewer is not None and hasattr(viewer, "on_mesh_send_result"):
+            viewer.on_mesh_send_result(result)
+
     def _on_mesh_runtime_health(self, health) -> None:
         self._publish_station_command_mesh_snapshot(health=health)
+        viewer = getattr(self, "message_viewer_tab", None)
+        if viewer is not None and hasattr(viewer, "on_mesh_health_ready"):
+            viewer.on_mesh_health_ready(health)
         try:
             if hasattr(self, "station_health_tab") and hasattr(self.station_health_tab, "refresh"):
                 self.station_health_tab.refresh()
@@ -6004,6 +6056,10 @@ class MainWindow(QMainWindow):
                 pass
             try:
                 self.message_viewer_tab.busyStateChanged.connect(self._set_heavy_content_refresh_active)
+            except Exception:
+                pass
+            try:
+                self.message_viewer_tab.meshSendRequested.connect(self._request_mesh_send)
             except Exception:
                 pass
             return self.message_viewer_tab

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Mapping
+from uuid import uuid4
 
 
 def utc_now() -> datetime:
@@ -170,6 +171,56 @@ class MeshMessage:
             "snr": self.snr,
             "rssi": self.rssi,
         }
+
+
+@dataclass(frozen=True)
+class MeshSendRequest:
+    """One immutable operator-authorized outbound mesh operation."""
+
+    adapter_id: str
+    text: str
+    destination_kind: str
+    destination_id: str = ""
+    channel_id: str = ""
+    request_id: str = field(default_factory=lambda: uuid4().hex)
+    requested_at: datetime = field(default_factory=utc_now)
+    timeout_sec: float = 12.0
+    require_ack: bool = True
+
+
+@dataclass(frozen=True)
+class MeshSendResult:
+    """Evidence returned by a mesh adapter without overstating delivery."""
+
+    request_id: str
+    adapter_id: str
+    transport: str
+    destination_kind: str
+    destination_id: str = ""
+    channel_id: str = ""
+    state: str = "failed"
+    native_message_id: str = ""
+    requested_at: datetime | None = None
+    accepted_at: datetime | None = None
+    completed_at: datetime | None = None
+    acknowledged_at: datetime | None = None
+    detail: str = ""
+    retryable: bool = False
+    evidence: str = ""
+    raw: Mapping[str, object] = field(default_factory=dict)
+
+    @property
+    def accepted(self) -> bool:
+        return self.state in {"accepted", "sent", "acked"}
+
+
+@dataclass(frozen=True)
+class MeshSendCapabilities:
+    supported: bool = False
+    channel_send: bool = False
+    direct_send: bool = False
+    max_text_bytes: int = 0
+    guidance: str = "Mesh sending is not available for this connection."
 
 
 @dataclass(frozen=True)

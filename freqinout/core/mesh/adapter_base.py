@@ -9,6 +9,9 @@ from freqinout.core.mesh.models import (
     MeshHealthSnapshot,
     MeshMessage,
     MeshNode,
+    MeshSendCapabilities,
+    MeshSendRequest,
+    MeshSendResult,
 )
 
 
@@ -47,4 +50,10 @@ class MeshAdapter(Protocol):
         ...
 
     def remove_channel(self, channel_id: str) -> None:
+        ...
+
+    def send_capabilities(self) -> MeshSendCapabilities:
+        ...
+
+    def send_message(self, request: MeshSendRequest) -> MeshSendResult:
         ...

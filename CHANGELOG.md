@@ -1,6 +1,12 @@
 # Changelog
 
 ## [2.0.1]
+- Added: Message Compose now provides guarded Local Mesh sending through qualified Meshtastic and MeshCore connections, with explicit destination selection, exact payload preview, final confirmation, and evidence-specific results.
+- Fixed: MeshCore and Meshtastic traffic accepted for Inbox presentation now enters the canonical Messages read model while remaining available to Ops Center and Map according to channel policy.
+- Fixed: On Linux, connecting a secured MeshCore Bluetooth device now performs one bounded pair-before-connect retry when service discovery requires authentication, allowing the desktop PIN prompt to complete while FIO remains open.
+- Changed: Local Mesh now shows the default-off **Allow Send** permission with the selected saved device instead of hiding it inside Advanced connection details; qualified Meshtastic and MeshCore TCP/USB/BLE connections use the same visible permission and connected-only Compose guard.
+- Changed: New installations and upgrades now use the same verified source installer and neutral `start-freqinout` launcher. The installer validates and backs up an existing closed profile, repairs incomplete environments, verifies the runtime, and prevents launch after an incomplete installation.
+- Changed: Existing single-radio profiles now complete the mandatory **Upgrade Existing Station** review before runtime services start. The review preserves manufacturer and model and offers only **Back Up and Upgrade Station** or **Exit FIO**.
 - Fixed: Managed VarAC cluster nodes now retain their radio-specific VarAC and VARA configuration paths, launch the intended node, and correctly attribute a shared VarAC executable without blocking the second radio.
 - Fixed: Launch Control now discards and reaps exited child processes before evaluating a new start, allowing a failed VarAC or companion-app launch to be retried without a restart.
 - Added: BBS Automation Rules are available again from the BBS workspace, with radio-aware VarAC, FLMsg, and FLAmp routing and a durable delivery ledger that prevents unchanged files from being copied repeatedly.

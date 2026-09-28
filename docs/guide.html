@@ -467,7 +467,7 @@
   <p><strong>Concept note</strong>: a <code>SitRep</code> in FreqInOut is the normalized operational-status view, not necessarily the original message format. CommStat, JS8Spotter, local NCS inputs, and other sources may all describe status differently. FreqInOut preserves the original artifact here in Messages, but Map and rollup surfaces often use the normalized SitRep layer so operators can compare status consistently across sources.</p>
   <p><strong>CommStat filtering</strong>: use <code>MSG Type</code> for <code>CommStat</code>, <code>CommStat/StatRep</code>, <code>CommStat/Message</code>, and <code>CommStat/Alert</code>. Use the <code>To</code> filter to narrow by report group or target, including groups discovered from live CommStat traffic even when they are not part of your configured operating groups.</p>
   <p><strong>CommStat dedupe</strong>: FIO now merges near-time mirrored CommStat status artifacts so the same real report is not shown twice when it is seen through CommStat tables and JS8Spotter-adjacent paths. The fused SitRep model stays responsible for map pinning and latest status by callsign.</p>
-  <p><strong>Mesh traffic</strong>: enabled MeshCore or Meshtastic connections can place received text in this same Inbox and provide node-position context to Map. The source label identifies the mesh connection so the traffic is not confused with a radio-owned JS8Call, FLDigi, CommStat, or VarAC instance. Configure connection and channel policy under <a href="#settings-local-mesh">Configuration &gt; Main &gt; Local Mesh</a>. Mesh sending is not available in this release.</p>
+  <p><strong>Mesh traffic</strong>: enabled MeshCore or Meshtastic connections can place received text in this same Inbox and provide node-position context to Map. The source label identifies the mesh connection so the traffic is not confused with a radio-owned JS8Call, FLDigi, CommStat, or VarAC instance. Configure connection, outbound permission, and channel policy under <a href="#settings-local-mesh">Configuration &gt; Main &gt; Local Mesh</a>. Explicit operator sends are available from the <code>Local Mesh</code> Compose mode for qualified transports.</p>
 
   <h3 id="messages-header-actions">Header Actions</h3>
   <p><strong>Overview</strong>: the Messages header keeps the primary inbox view, refresh timing, and common session actions visible. Less common actions are grouped under <code>More...</code>. BBS details appear as a single status button instead of a long technical status line.</p>
@@ -535,6 +535,7 @@
   <ul class="section-list">
     <li><strong>Mode switch</strong>: use <code>Inbox</code> and <code>Compose</code> to move between received traffic review and outbound form staging.</li>
     <li><strong>Compose setup</strong>: choose form family and template, priority, send target, optional VarAC copy target, and report title before staging files.</li>
+    <li><strong>Local Mesh</strong>: choose a send-enabled, connected MeshCore or Meshtastic connection, then an accepted channel or known node. Review the exact UTF-8 payload and destination before confirming <code>Send Mesh Message</code>. A channel result proves Companion/API acceptance; a direct acknowledgement proves node/routing receipt, not that a person read the message.</li>
     <li><strong>Report title</strong>: keep the title short and file-safe. FreqInOut removes spaces and minimizes punctuation in the staged filename.</li>
     <li><strong>Refresh Forms</strong>: reloads the available NBEMS forms from your configured source folders without restarting the app.</li>
     <li><strong>Open Source Folder</strong>: opens the source folder for the currently selected form family so you can confirm templates or supporting files.</li>
@@ -1421,7 +1422,7 @@
       </tr>
       <tr>
         <td><a href="#settings-local-mesh">Local Mesh</a></td>
-        <td>Saved MeshCore/Meshtastic devices, BLE discovery, TCP/USB/BLE/HTTP connection details, optional MQTT bridge, Inbox/Map ingest, and channel policy.</td>
+        <td>Saved MeshCore/Meshtastic devices, BLE discovery, TCP/USB/BLE connection details, Inbox/Map ingest, guarded outbound permission for qualified transports, and channel policy.</td>
       </tr>
       <tr>
         <td>JS8Call Settings</td>
@@ -1473,14 +1474,14 @@
     <li><strong>VarAC completeness</strong>: warning highlights can appear when <code>VarAC Install Folder</code> is set without <code>Incoming Files</code>.</li>
   </ul>
 
-  <h3 id="settings-multirig-setup">Multi-Rig Setup and Runtime Radios</h3>
-  <p><strong>Overview</strong>: Multi-Rig setup identifies which physical radio performs live station work. A status indicating that FIO is using the current station setup means the setup has not yet been moved into a named runtime radio.</p>
+  <h3 id="settings-multirig-setup">Upgrade Existing Station and Runtime Radios</h3>
+  <p><strong>Overview</strong>: FIO upgrades an existing single-radio station into the named runtime-radio model before station services start. New installations proceed directly to radio setup.</p>
   <ul class="section-list">
     <li><strong>Primary radio</strong>: the radio FIO uses for the main window and <a href="#controlfreq">ControlFreq</a> unless a future radio-specific view says otherwise.</li>
     <li><strong>Active radio</strong>: a radio FIO is allowed to include in live station work. Shared views such as <a href="#messages">Messages</a> and <a href="#map">Map</a> use all active radios by default.</li>
     <li><strong>Paused radio</strong>: a configured radio that FIO will not use for Scheduler, Messages, Map, or other live work until you turn it back on.</li>
-    <li><strong>Set up Multi-Rig</strong>: starts a guided setup that turns your current station setup into the first runtime radio. Choose the supported radio model from the Hamlib-backed catalog when possible, then give it a display name such as <code>IC-7300 HF Desk</code>.</li>
-    <li><strong>Not Now</strong>: pauses Multi-Rig setup and keeps FIO using the current station setup. This is a normal operator choice, not an error.</li>
+    <li><strong>Upgrade Existing Station</strong>: reviews the manufacturer, model, display name, plan, and detected software before creating a verified backup and turning the existing station into the first runtime radio.</li>
+    <li><strong>Exit FIO</strong>: closes FIO without migration writes. The station upgrade is required again on the next launch.</li>
     <li><strong>Copy Summary</strong>: copies a support-safe summary with FIO version, platform, startup mode, migration state, and runtime radio names. It does not include access codes, private keys, or message contents.</li>
   </ul>
   <p><strong>Related features</strong>: Multi-Rig status identifies the radio context used by downstream tabs. Use <a href="#station-health">Health Details</a> for live external-software or scheduler problems, not for normal setup-paused states.</p>
@@ -1672,12 +1673,13 @@
   <p><strong>Purpose</strong>: connect FIO to station-level MeshCore or Meshtastic services so received text and position evidence can join the canonical Inbox and Map without pretending that a mesh device is an HF radio profile.</p>
   <ul class="section-list">
     <li><strong>Saved Devices</strong>: choose a named saved connection, then <code>Connect</code> or <code>Disconnect</code>. <code>Add Device</code> starts a new identity instead of overwriting another saved device. The visible connection name is separate from the advertised Bluetooth name.</li>
-    <li><strong>Find a MeshCore device</strong>: use <code>Scan</code>, select the exact discovered device, then <code>Use Device</code>. If the operating system requests a PIN, enter the PIN displayed by the device. Scanning is bounded and does not replace a saved identity until you choose one.</li>
+    <li><strong>Find and authenticate a MeshCore device</strong>: use <code>Scan</code>, select the exact discovered device, then <code>Use Device</code>. Keep FIO open. <code>Connect</code> uses an existing operating-system bond when available; on Linux, if secured service discovery indicates that the device is not paired, FIO makes one bounded pair-before-connect attempt and the desktop asks for the PIN displayed by the device. FIO never stores the PIN. Scanning is bounded and does not replace a saved identity until you choose one.</li>
     <li><strong>Protocol</strong>: select <code>MeshCore</code> or <code>Meshtastic</code>. FIO exposes only transports supported for that protocol and retains a stable adapter/connection identity for reconnect and audit.</li>
     <li><strong>Connection</strong>: configure the applicable TCP host/port, USB serial device and baud, saved BLE device identity, or HTTP base URL. Prefer the stable BLE identifier captured by discovery; the advertised name is a fallback and operator clue.</li>
-    <li><strong>MQTT bridge</strong>: optional broker and topic-root settings extend a supported connection; they do not replace the primary saved device identity.</li>
+    <li><strong>MQTT bridge</strong>: retained legacy broker and topic-root settings are not an active local transport in this release.</li>
     <li><strong>Use Data For</strong>: <code>Inbox</code> stores received mesh text in FIO's message pipeline. <code>Map</code> allows available node positions to contribute map context. Source labels preserve which mesh connection supplied the evidence.</li>
-    <li><strong>Receive-only boundary</strong>: mesh sending is not available in this release. Enabling ingest, Inbox, Map, or a channel policy does not authorize outbound traffic.</li>
+    <li><strong>Allow Send</strong>: shown directly in <code>Saved Devices</code> so outbound permission is visible without opening Advanced connection details. It is available for qualified Meshtastic and MeshCore TCP/USB/BLE connections and is off by default. MeshCore Bluetooth sending uses the official MeshCore client over the same connected session as receive. Enabling ingest, Inbox, Map, or a channel policy does not authorize outbound traffic.</li>
+    <li><strong>Outbound workflow</strong>: after enabling <code>Allow Send</code>, connect the device and use <code>Messages &gt; Compose &gt; Local Mesh</code>. Only accepted channel policies and known direct nodes are selectable. FIO requires a final confirmation and prevents overlapping sends through the same adapter.</li>
     <li><strong>Channel policy</strong>: <code>Stage Defaults</code> prepares supported default policies for review. <code>Add Private Feed</code> stages a private policy; configure its encryption key on the device before accepting it. Channel refresh/configure/remove actions distinguish the device's live channels from FIO's saved policy.</li>
     <li><strong>Check Configuration</strong>: validates the visible setup and reports actionable missing fields. It does not silently connect, send, or reconfigure the device.</li>
   </ul>

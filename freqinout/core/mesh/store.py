@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -15,8 +16,18 @@ from freqinout.core.mesh.channel_policy import (
     policy_from_channel,
     policy_from_mapping,
 )
-from freqinout.core.mesh.models import MeshAdapterEvent, MeshChannel, MeshHealthSnapshot, MeshMessage, MeshNode, utc_now
+from freqinout.core.mesh.models import (
+    MeshAdapterEvent,
+    MeshChannel,
+    MeshHealthSnapshot,
+    MeshMessage,
+    MeshNode,
+    MeshSendRequest,
+    MeshSendResult,
+    utc_now,
+)
 from freqinout.core.message_intelligence import normalize_topic_terms
+from freqinout.core.message_projection_queue import DirtyProjectionItem, enqueue_dirty_conn
 from freqinout.core.observation_projection import Observation
 from freqinout.core.observation_store import delete_observations_by_source_refs, upsert_observation
 from freqinout.core.source_connection import source_connection_from_mesh_health
@@ -69,6 +80,7 @@ def ensure_mesh_schema(conn: sqlite3.Connection) -> None:
             adapter_id TEXT NOT NULL,
             transport TEXT NOT NULL,
             node_id TEXT NOT NULL,
+            public_key_or_hash TEXT NOT NULL DEFAULT '',
             long_name TEXT,
             short_name TEXT,
             callsign TEXT,
@@ -97,6 +109,7 @@ def ensure_mesh_schema(conn: sqlite3.Connection) -> None:
         conn,
         "mesh_messages",
         {
+            "public_key_or_hash": "TEXT NOT NULL DEFAULT ''",
             "route_type": "TEXT",
             "direct_receive": "INTEGER",
             "via_node": "TEXT",
@@ -107,6 +120,7 @@ def ensure_mesh_schema(conn: sqlite3.Connection) -> None:
         conn,
         "mesh_nodes",
         {
+            "public_key_or_hash": "TEXT NOT NULL DEFAULT ''",
             "route_type": "TEXT",
             "direct_receive": "INTEGER",
             "via_node": "TEXT",
@@ -197,6 +211,147 @@ def ensure_mesh_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mesh_send_audit (
+            audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            request_id TEXT NOT NULL,
+            adapter_id TEXT NOT NULL,
+            transport TEXT NOT NULL DEFAULT '',
+            destination_kind TEXT NOT NULL,
+            destination_id TEXT NOT NULL DEFAULT '',
+            channel_id TEXT NOT NULL DEFAULT '',
+            payload_sha256 TEXT NOT NULL,
+            payload_bytes INTEGER NOT NULL,
+            state TEXT NOT NULL,
+            native_message_id TEXT NOT NULL DEFAULT '',
+            retryable INTEGER NOT NULL DEFAULT 0,
+            evidence TEXT NOT NULL DEFAULT '',
+            detail TEXT NOT NULL DEFAULT '',
+            event_utc TEXT NOT NULL
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_mesh_send_audit_request ON mesh_send_audit(request_id, audit_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_mesh_send_audit_adapter_time ON mesh_send_audit(adapter_id, event_utc)")
+
+
+def append_mesh_send_audit(
+    db_path: str | Path,
+    request: MeshSendRequest,
+    *,
+    transport: str = "",
+    result: MeshSendResult | None = None,
+    state: str = "requested",
+    detail: str = "",
+    event_utc: str | None = None,
+) -> int:
+    """Append one immutable outbound evidence event without storing message text."""
+
+    payload = str(request.text or "").encode("utf-8")
+    final_state = str(result.state if result is not None else state or "requested").strip().lower()
+    stamp = str(event_utc or utc_now().isoformat()).strip()
+    conn = connect_sqlite(db_path)
+    try:
+        ensure_mesh_schema(conn)
+        with conn:
+            cur = conn.execute(
+                """
+                INSERT INTO mesh_send_audit (
+                    request_id, adapter_id, transport, destination_kind,
+                    destination_id, channel_id, payload_sha256, payload_bytes,
+                    state, native_message_id, retryable, evidence, detail, event_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    request.request_id,
+                    request.adapter_id,
+                    str((result.transport if result is not None else transport) or ""),
+                    request.destination_kind,
+                    request.destination_id,
+                    request.channel_id,
+                    hashlib.sha256(payload).hexdigest(),
+                    len(payload),
+                    final_state,
+                    str(result.native_message_id if result is not None else ""),
+                    int(bool(result.retryable)) if result is not None else 0,
+                    str(result.evidence if result is not None else ""),
+                    str((result.detail if result is not None else detail) or "")[:1000],
+                    stamp,
+                ),
+            )
+        return int(cur.lastrowid or 0)
+    finally:
+        conn.close()
+
+
+def list_mesh_send_audit(db_path: str | Path, *, request_id: str = "", limit: int = 100) -> list[dict[str, object]]:
+    conn = connect_sqlite(db_path)
+    try:
+        ensure_mesh_schema(conn)
+        if request_id:
+            rows = conn.execute(
+                "SELECT * FROM mesh_send_audit WHERE request_id=? ORDER BY audit_id ASC LIMIT ?",
+                (str(request_id), max(1, int(limit))),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM mesh_send_audit ORDER BY audit_id DESC LIMIT ?",
+                (max(1, int(limit)),),
+            ).fetchall()
+        columns = [str(item[1]) for item in conn.execute("PRAGMA table_info(mesh_send_audit)").fetchall()]
+        return [dict(zip(columns, row)) for row in rows]
+    finally:
+        conn.close()
+
+
+def mesh_send_policy_issue(
+    db_path: str | Path,
+    request: MeshSendRequest,
+    *,
+    transport: str = "",
+) -> str:
+    """Return a fail-closed policy reason, or an empty string when send is allowed."""
+
+    kind = str(request.destination_kind or "").strip().lower()
+    if kind in {"channel", "broadcast"}:
+        return _mesh_channel_send_policy_issue(db_path, request)
+    if kind == "direct":
+        if str(transport or "").strip().lower() == "meshtastic":
+            channel_issue = _mesh_channel_send_policy_issue(db_path, request)
+            if channel_issue:
+                return channel_issue
+        destination = str(request.destination_id or "").strip()
+        nodes = list_mesh_nodes(db_path, adapter_id=request.adapter_id, limit=1000)
+        known = any(
+            destination
+            in {
+                str(node.get("node_id") or "").strip(),
+                str(node.get("public_key_or_hash") or "").strip(),
+            }
+            for node in nodes
+        )
+        if not known:
+            return "Refresh this device's known nodes and choose a listed direct destination."
+        return ""
+    return "Choose a channel or direct-node mesh destination."
+
+
+def _mesh_channel_send_policy_issue(db_path: str | Path, request: MeshSendRequest) -> str:
+    channel_id = str(request.channel_id or "").strip()
+    policies = list_mesh_channel_policies(db_path, adapter_id=request.adapter_id)
+    policy = next(
+        (row for row in policies if str(row.channel_id or "").strip() == channel_id),
+        None,
+    )
+    if policy is None:
+        return "Refresh and review this device's channels before sending."
+    if str(policy.review_state or "").strip().lower() != "accepted":
+        return "Accept this channel's Local Mesh policy before sending."
+    if policy.requires_key and not policy.key_available:
+        return "This private channel does not have a confirmed device key."
+    return ""
 
 
 def mesh_source_ref(message: MeshMessage) -> str:
@@ -310,6 +465,7 @@ def upsert_mesh_node(db_path: str | Path, node: MeshNode, *, updated_utc: str | 
                     adapter_id,
                     transport,
                     node_id,
+                    public_key_or_hash,
                     long_name,
                     short_name,
                     callsign,
@@ -329,11 +485,15 @@ def upsert_mesh_node(db_path: str | Path, node: MeshNode, *, updated_utc: str | 
                     raw_payload_json,
                     updated_utc
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_ref) DO UPDATE SET
                     adapter_id=excluded.adapter_id,
                     transport=excluded.transport,
                     node_id=excluded.node_id,
+                    public_key_or_hash=CASE
+                        WHEN excluded.public_key_or_hash IS NOT NULL AND excluded.public_key_or_hash <> '' THEN excluded.public_key_or_hash
+                        ELSE mesh_nodes.public_key_or_hash
+                    END,
                     long_name=CASE
                         WHEN excluded.long_name IS NOT NULL AND excluded.long_name <> '' THEN excluded.long_name
                         ELSE mesh_nodes.long_name
@@ -839,6 +999,7 @@ def store_mesh_message_with_channel_policy(
     surfaces = message_allowed_surfaces(message, active_policies)
     if not surfaces:
         delete_observations_by_source_refs(db_path, [source_ref], source_family=message.transport)
+        _enqueue_mesh_message_projection(db_path, message, source_ref=source_ref)
         return source_ref
 
     policy = policy_for_message(message, active_policies)
@@ -894,6 +1055,7 @@ def store_mesh_message_with_channel_policy(
     )
     observation = _apply_route_derived_location(db_path, observation, message)
     upsert_observation(db_path, observation)
+    _enqueue_mesh_message_projection(db_path, message, source_ref=source_ref)
     return source_ref
 
 
@@ -1149,7 +1311,59 @@ def prune_mesh_messages_by_channel_policy(
             removed += int(cur.rowcount or 0)
         finally:
             conn.close()
+        for source_ref in source_refs:
+            _enqueue_mesh_message_projection(
+                db_path,
+                None,
+                source_ref=source_ref,
+                adapter_id=policy.adapter_id,
+                transport=policy.transport,
+                operation="delete",
+            )
     return removed
+
+
+def _enqueue_mesh_message_projection(
+    db_path: str | Path,
+    message: MeshMessage | None,
+    *,
+    source_ref: str,
+    adapter_id: str = "",
+    transport: str = "",
+    operation: str = "upsert",
+) -> None:
+    """Queue a policy-complete Mesh receipt when the projection queue exists.
+
+    Mesh ingest can run before message-index startup and in small standalone
+    tests, so this helper never owns queue schema.  The coordinator's bounded
+    reconciliation later catches any receipt stored before that schema exists.
+    """
+
+    clean_transport = _clean(message.transport if message is not None else transport) or "mesh"
+    clean_adapter = _clean(message.adapter_id if message is not None else adapter_id) or "adapter"
+    stamp = utc_now().isoformat()
+    conn = connect_sqlite(db_path)
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_projection_dirty'"
+        ).fetchone()
+        if exists is None:
+            return
+        with conn:
+            enqueue_dirty_conn(
+                conn,
+                DirtyProjectionItem(
+                    source_id=f"mesh:{clean_transport}:{clean_adapter}",
+                    source_family="mesh",
+                    external_kind="mesh_message",
+                    external_key=_clean(source_ref),
+                    operation=_clean(operation).lower() or "upsert",
+                    source_version=f"{_clean(source_ref)}:{stamp}",
+                ),
+                observed_utc=stamp,
+            )
+    finally:
+        conn.close()
 
 
 def _retention_cutoff(now: datetime, window: str) -> datetime | None:
@@ -1287,6 +1501,7 @@ def list_mesh_nodes(
                 adapter_id,
                 transport,
                 node_id,
+                public_key_or_hash,
                 long_name,
                 short_name,
                 callsign,
@@ -1353,6 +1568,7 @@ def _mesh_node_values(source_ref: str, node: MeshNode, updated_utc: str) -> tupl
         _clean(node.adapter_id),
         _clean(node.transport),
         _clean(node.node_id),
+        _clean(node.public_key_or_hash),
         _clean(node.long_name),
         _clean(node.short_name),
         _clean(node.callsign).upper(),

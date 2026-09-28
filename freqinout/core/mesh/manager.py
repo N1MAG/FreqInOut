@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
+import math
 import threading
 
 from freqinout.core.mesh.adapter_base import MeshAdapter
-from freqinout.core.mesh.meshcore_adapter import MeshCoreBleAdapter, MeshCorePythonAdapter
+from freqinout.core.mesh.meshcore_adapter import MeshCorePythonAdapter
 from freqinout.core.mesh.meshtastic_adapter import MeshConnectionError, MeshtasticLocalAdapter
 from freqinout.core.mesh.models import (
     MeshAdapterEvent,
@@ -13,6 +14,9 @@ from freqinout.core.mesh.models import (
     MeshHealthSnapshot,
     MeshMessage,
     MeshNode,
+    MeshSendCapabilities,
+    MeshSendRequest,
+    MeshSendResult,
 )
 from freqinout.core.mesh.settings import MeshConnectionConfig, MeshConnectionType, mesh_transport_capability
 
@@ -28,8 +32,6 @@ def default_mesh_adapter_factory(config: MeshConnectionConfig) -> MeshAdapter:
     if protocol == "meshtastic":
         return MeshtasticLocalAdapter(config)
     if protocol == "meshcore":
-        if config.connection_type is MeshConnectionType.BLE:
-            return MeshCoreBleAdapter(config)
         return MeshCorePythonAdapter(config)
     raise MeshConnectionError(f"{config.protocol or 'Mesh'} adapters are configured for a later implementation slice.")
 
@@ -52,6 +54,7 @@ class MeshConnectionManager:
         # worker thread is inside a device call. Protect adapter publication and
         # snapshots without moving normal device work across threads.
         self._adapter_lock = threading.RLock()
+        self._send_locks: dict[str, threading.Lock] = {}
         for config in configs:
             self.upsert_config(config)
 
@@ -69,6 +72,7 @@ class MeshConnectionManager:
         with self._adapter_lock:
             self._adapters.pop(adapter_id, None)
         self._last_errors.pop(adapter_id, None)
+        self._send_locks.pop(adapter_id, None)
 
     def configured_ids(self) -> tuple[str, ...]:
         return tuple(self._configs)
@@ -281,6 +285,65 @@ class MeshConnectionManager:
         if not capabilities.can_remove_from_device or not callable(remove):
             raise MeshConnectionError(capabilities.guidance)
         remove(str(channel_id))
+
+    def send_capabilities(self, adapter_id: str) -> MeshSendCapabilities:
+        adapter = self._require_adapter(adapter_id)
+        getter = getattr(adapter, "send_capabilities", None)
+        if not callable(getter):
+            return MeshSendCapabilities()
+        capabilities = getter()
+        return capabilities if isinstance(capabilities, MeshSendCapabilities) else MeshSendCapabilities()
+
+    def send_message(self, request: MeshSendRequest) -> MeshSendResult:
+        if not isinstance(request, MeshSendRequest):
+            raise MeshConnectionError("Mesh send request is invalid.")
+        adapter_id = str(request.adapter_id or "").strip()
+        config = self._require_config(adapter_id)
+        if not config.enabled:
+            raise MeshConnectionError("This mesh connection is disabled.")
+        if not config.send_enabled:
+            raise MeshConnectionError("Sending is not enabled for this mesh connection.")
+        text = str(request.text or "")
+        if not text.strip():
+            raise MeshConnectionError("Enter a mesh message before sending.")
+        try:
+            timeout_sec = float(request.timeout_sec)
+        except (TypeError, ValueError) as exc:
+            raise MeshConnectionError("Mesh send timeout is invalid.") from exc
+        if not math.isfinite(timeout_sec) or timeout_sec < 0.1 or timeout_sec > 30.0:
+            raise MeshConnectionError("Mesh send timeout must be between 0.1 and 30 seconds.")
+        kind = str(request.destination_kind or "").strip().lower()
+        if kind == "direct" and not str(request.destination_id or "").strip():
+            raise MeshConnectionError("Choose a node for a direct mesh message.")
+        if kind in {"channel", "broadcast"} and not str(request.channel_id or "").strip():
+            raise MeshConnectionError("Choose a channel for this mesh message.")
+        if kind not in {"direct", "channel", "broadcast"}:
+            raise MeshConnectionError("Mesh destination kind must be direct, channel, or broadcast.")
+        adapter = self._require_adapter(adapter_id)
+        capabilities = self.send_capabilities(adapter_id)
+        if not capabilities.supported:
+            raise MeshConnectionError(capabilities.guidance)
+        if kind == "direct" and not capabilities.direct_send:
+            raise MeshConnectionError("This mesh connection does not support direct-node sending.")
+        if kind in {"channel", "broadcast"} and not capabilities.channel_send:
+            raise MeshConnectionError("This mesh connection does not support channel sending.")
+        snapshot = adapter.health()
+        if not snapshot.connected:
+            raise MeshConnectionError("Connect this mesh device before sending.")
+        with self._adapter_lock:
+            lock = self._send_locks.setdefault(adapter_id, threading.Lock())
+        if not lock.acquire(blocking=False):
+            raise MeshConnectionError("A message is already being sent through this mesh connection.")
+        try:
+            send = getattr(adapter, "send_message", None)
+            if not callable(send):
+                raise MeshConnectionError("This mesh adapter does not implement sending.")
+            result = send(request)
+            if not isinstance(result, MeshSendResult):
+                raise MeshConnectionError("Mesh adapter returned an invalid send result.")
+            return result
+        finally:
+            lock.release()
 
     def _require_config(self, adapter_id: str) -> MeshConnectionConfig:
         try:

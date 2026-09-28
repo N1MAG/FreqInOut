@@ -347,6 +347,8 @@ def setup_checklist_item_from_mapping(value: Mapping[str, Any] | None) -> SetupC
 def _compose_mode(value: object) -> str:
     raw = str(value or "js8").strip().lower()
     normalized = normalize_message_source_family(raw)
+    if raw in {"mesh", "meshcore", "meshtastic"} or normalized in {"meshcore", "meshtastic"}:
+        return "mesh"
     if raw in {"commstat", "commstat_rf"} or normalized == "commstat":
         return "commstat_rf"
     if raw in {"spotter", "js8spotter", "fiospotter"} or normalized == "spotter":

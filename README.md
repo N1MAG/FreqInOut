@@ -2,7 +2,7 @@
   <img src="assets/FreqInOut_logo.png" alt="FreqInOut logo" width="150">
 </p>
 
-# FreqInOut 2.0
+# FreqInOut 2.0.1
 
 ### A coordinated operations console for HF digital stations
 
@@ -125,7 +125,7 @@ Install Git and 64-bit Python 3.11 first:
 git clone https://github.com/N1MAG/FreqInOut.git "$HOME\FreqInOut"
 Set-Location "$HOME\FreqInOut"
 py -3.11 install_freqinout.py
-.\start-multi-rig.cmd
+.\start-freqinout.cmd
 ```
 
 ### macOS
@@ -136,7 +136,7 @@ Install Git and Python 3.11 from Python.org or Homebrew:
 git clone https://github.com/N1MAG/FreqInOut.git "$HOME/FreqInOut"
 cd "$HOME/FreqInOut"
 python3.11 install_freqinout.py
-./start-multi-rig.sh
+./start-freqinout.sh
 ```
 
 ### Linux
@@ -155,7 +155,8 @@ custom paths, repair, update, and uninstall instructions.
 
 ## Upgrading an existing FreqInOut station
 
-FreqInOut 2.0 is designed to carry an existing single-radio station forward.
+FreqInOut 2.0.1 is designed to carry an existing single-radio station forward
+and to update an existing 2.0 installation through the same verified installer.
 Before upgrading:
 
 1. Close FIO and affected companion applications.
@@ -170,7 +171,8 @@ its schedules, messages, software settings, and operating data forward. Adding
 a second radio is optional. The conversion path has automated rehearsal
 coverage, but operators should treat the verified backup as mandatory and be
 prepared to review or rebuild affected companion-application settings if an
-older station differs from the rehearsed profile. See the [FreqInOut 2.0 upgrade guide](docs/FreqInOut%20Version%202%20Upgrade%20Guide%20for%20Current%20Single%20Radio%20Users.docx)
+older station differs from the rehearsed profile. See the [FreqInOut 2.0.1
+installation and upgrade guide](docs/FreqInOut%202.0.1%20Installation%20and%20Upgrade%20Guide.docx)
 for the Windows, macOS, and Linux workflows and rollback guidance.
 
 ## First configuration

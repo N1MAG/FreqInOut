@@ -36,6 +36,46 @@ class MeshTransportCapability:
     reason: str = ""
 
 
+@dataclass(frozen=True)
+class MeshOutboundCapability:
+    protocol: str
+    connection_type: MeshConnectionType
+    supported: bool
+    reason: str = ""
+
+
+def mesh_outbound_capability(
+    protocol: object,
+    connection_type: MeshConnectionType | object,
+) -> MeshOutboundCapability:
+    """Return the qualified outbound contract for one local connection."""
+
+    normalized_protocol = str(protocol or "").strip().lower()
+    kind = (
+        connection_type
+        if isinstance(connection_type, MeshConnectionType)
+        else MeshConnectionType.from_value(connection_type)
+    )
+    if normalized_protocol == "meshtastic" and kind in {
+        MeshConnectionType.TCP,
+        MeshConnectionType.SERIAL,
+        MeshConnectionType.BLE,
+    }:
+        return MeshOutboundCapability(normalized_protocol, kind, True)
+    if normalized_protocol == "meshcore" and kind in {
+        MeshConnectionType.TCP,
+        MeshConnectionType.SERIAL,
+        MeshConnectionType.BLE,
+    }:
+        return MeshOutboundCapability(normalized_protocol, kind, True)
+    return MeshOutboundCapability(
+        normalized_protocol or "mesh",
+        kind,
+        False,
+        f"{normalized_protocol.title() or 'Mesh'} {kind.value.upper()} sending is not implemented.",
+    )
+
+
 def mesh_transport_capability(
     protocol: object,
     connection_type: MeshConnectionType | object,
@@ -459,10 +499,22 @@ def update_automatic_connection_name(
 def merge_mesh_connection_library(
     existing_values: Mapping[str, object],
     selected_config: MeshConnectionConfig,
+    *,
+    previous_key: str = "",
 ) -> tuple[MeshConnectionConfig, ...]:
-    configs = list(_load_mesh_connection_library(existing_values, include_disabled=True))
+    selected = normalize_mesh_connection_config(selected_config)
+    normalized_previous = _normalize_mesh_config_key(previous_key)
+    configs = [
+        config
+        for config in _load_mesh_connection_library(existing_values, include_disabled=True)
+        if (
+            not normalized_previous
+            or _normalize_mesh_config_key(mesh_connection_config_key(config)) != normalized_previous
+        )
+        and not _mesh_config_is_obvious_stale_sibling(config, selected)
+    ]
     if selected_config.enabled or _mesh_connection_has_endpoint(selected_config):
-        configs.append(normalize_mesh_connection_config(selected_config))
+        configs.append(selected)
     return tuple(_dedupe_mesh_connection_configs(configs))
 
 
@@ -649,6 +701,7 @@ def _mesh_config_looks_like_meshcore(config: MeshConnectionConfig) -> bool:
 
 
 def _dedupe_mesh_connection_configs(configs: Sequence[MeshConnectionConfig]) -> tuple[MeshConnectionConfig, ...]:
+    configs = _prune_obvious_stale_transport_siblings(configs)
     by_key: dict[str, MeshConnectionConfig] = {}
     for config in configs:
         by_key[mesh_connection_config_key(config)] = config
@@ -687,6 +740,41 @@ def _dedupe_mesh_connection_configs(configs: Sequence[MeshConnectionConfig]) -> 
     return tuple(unique)
 
 
+def _prune_obvious_stale_transport_siblings(
+    configs: Sequence[MeshConnectionConfig],
+) -> tuple[MeshConnectionConfig, ...]:
+    """Drop incomplete transport-switch copies of a saved BLE endpoint.
+
+    Older Settings saves could leave the BLE identity fields on a record after
+    changing its selected transport, then append that record under a TCP/serial
+    key.  Only remove a sibling when an actual BLE record owns the exact device
+    id and the sibling has no endpoint for its selected transport.  A complete
+    TCP or serial connection is preserved even when it retains historical BLE
+    metadata.
+    """
+
+    ble_owners = {
+        (str(config.protocol or "").strip().lower(), _normalize_mesh_config_key(config.ble_device_id))
+        for config in configs
+        if config.connection_type is MeshConnectionType.BLE
+        and _normalize_mesh_config_key(config.ble_device_id)
+        and _mesh_connection_has_selected_transport_endpoint(config)
+    }
+    return tuple(
+        config
+        for config in configs
+        if not (
+            config.connection_type is not MeshConnectionType.BLE
+            and (
+                str(config.protocol or "").strip().lower(),
+                _normalize_mesh_config_key(config.ble_device_id),
+            )
+            in ble_owners
+            and not _mesh_connection_has_selected_transport_endpoint(config)
+        )
+    )
+
+
 def _mesh_connection_has_endpoint(config: MeshConnectionConfig) -> bool:
     return bool(
         str(config.ble_device_id or "").strip()
@@ -720,6 +808,44 @@ def _mesh_configs_refer_to_same_endpoint(left: MeshConnectionConfig, right: Mesh
     left_tokens = _mesh_config_identity_tokens(left)
     right_tokens = _mesh_config_identity_tokens(right)
     return bool(left_tokens and right_tokens and left_tokens.intersection(right_tokens))
+
+
+def _mesh_config_is_obvious_stale_sibling(
+    candidate: MeshConnectionConfig,
+    selected: MeshConnectionConfig,
+) -> bool:
+    """Identify an invalid transport-switch artifact without merging real endpoints.
+
+    The Settings editor retains hidden transport fields while an operator changes
+    the transport selector. Older saves appended the changed record under its new
+    key, so a BLE device could acquire enabled TCP siblings with no TCP host. An
+    exact BLE id match plus a missing selected-transport endpoint makes that
+    artifact unambiguous and safe to prune when the real BLE record is saved.
+    """
+
+    if selected.connection_type is not MeshConnectionType.BLE:
+        return False
+    selected_ble_id = _normalize_mesh_config_key(selected.ble_device_id)
+    candidate_ble_id = _normalize_mesh_config_key(candidate.ble_device_id)
+    if not selected_ble_id or candidate_ble_id != selected_ble_id:
+        return False
+    if candidate.connection_type is MeshConnectionType.BLE:
+        return False
+    return not _mesh_connection_has_selected_transport_endpoint(candidate)
+
+
+def _mesh_connection_has_selected_transport_endpoint(config: MeshConnectionConfig) -> bool:
+    if config.connection_type is MeshConnectionType.TCP:
+        return bool(str(config.tcp_host or "").strip())
+    if config.connection_type is MeshConnectionType.SERIAL:
+        return bool(str(config.serial_port or "").strip())
+    if config.connection_type is MeshConnectionType.BLE:
+        return bool(str(config.ble_device_id or config.ble_device_name or "").strip())
+    if config.connection_type is MeshConnectionType.HTTP:
+        return bool(str(config.http_base_url or "").strip())
+    if config.connection_type is MeshConnectionType.MQTT:
+        return bool(str(config.mqtt_broker or "").strip())
+    return False
 
 
 def _mesh_config_identity_tokens(config: MeshConnectionConfig) -> set[str]:

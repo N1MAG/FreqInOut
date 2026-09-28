@@ -59,7 +59,7 @@ def native_projector_version(source_family: object) -> int:
     """Return the bounded replay version for one native source family."""
 
     family = _text(source_family).lower()
-    if family in {"js8", "spotter", "varac", "sitrep", "commstat"}:
+    if family in {"js8", "spotter", "varac", "sitrep", "commstat", "mesh"}:
         return PROJECTOR_VERSION
     return PROJECTOR_VERSION
 
@@ -1231,6 +1231,239 @@ def _project_varac_messages(conn: sqlite3.Connection, limit: int, force: bool, *
     return projected
 
 
+def _project_mesh_messages(
+    conn: sqlite3.Connection,
+    limit: int,
+    force: bool,
+    *,
+    external_keys: Sequence[str] | None = None,
+    source_ids: Sequence[str] | None = None,
+    bundle_sink: ProjectionBundleSink | None = None,
+) -> int:
+    """Project policy-approved local mesh messages into the canonical Inbox.
+
+    ``mesh_messages`` remains the transport receipt and
+    ``observation_projection`` remains the policy-owned operational record.
+    A row is eligible here only when that observation explicitly grants the
+    Inbox surface.  Ops-only, Map-only, pending, and rejected channel traffic
+    therefore cannot leak into the Inbox read model.
+    """
+
+    if not table_exists(conn, "mesh_messages") or not table_exists(conn, "observation_projection"):
+        return 0
+    targeted = _targeted_keys(external_keys)
+    targeted_sources = _targeted_source_ids(source_ids)
+    query = """
+        SELECT
+            m.source_ref,
+            m.adapter_id,
+            m.transport,
+            m.message_id AS transport_message_id,
+            m.from_node,
+            m.to_node,
+            m.channel,
+            m.portnum,
+            m.text,
+            m.rx_utc,
+            m.hop_count,
+            m.route_type,
+            m.direct_receive,
+            m.via_node,
+            m.path_hops_json,
+            m.snr,
+            m.rssi,
+            m.lat AS message_lat,
+            m.lon AS message_lon,
+            m.grid AS message_grid,
+            m.topics_json AS message_topics_json,
+            m.severity AS message_severity,
+            m.raw_payload_json,
+            m.updated_utc,
+            o.source_radio_id,
+            o.received_utc,
+            o.event_utc,
+            o.from_call,
+            o.to_target,
+            o.groups_json,
+            o.observed_topics_json,
+            o.operator_attention,
+            o.status AS observation_status,
+            o.urgency,
+            o.subject AS observation_subject,
+            o.summary AS observation_summary,
+            o.state,
+            o.grid AS observation_grid,
+            o.lat AS observation_lat,
+            o.lon AS observation_lon,
+            o.provenance_json
+        FROM mesh_messages AS m
+        JOIN observation_projection AS o
+          ON o.source_ref=m.source_ref
+         AND LOWER(COALESCE(o.source_family,''))=LOWER(COALESCE(m.transport,''))
+        WHERE 1=1
+    """
+    params: list[object] = []
+    if targeted:
+        marks = ",".join("?" for _ in targeted)
+        query += f" AND m.source_ref IN ({marks})"
+        params.extend(targeted)
+        if targeted_sources:
+            source_marks = ",".join("?" for _ in targeted_sources)
+            query += (
+                " AND ('mesh:' || COALESCE(NULLIF(m.transport,''),'mesh') || ':' || "
+                f"COALESCE(NULLIF(m.adapter_id,''),'adapter')) IN ({source_marks})"
+            )
+            params.extend(targeted_sources)
+    query += " ORDER BY COALESCE(NULLIF(m.rx_utc,''), m.updated_utc) DESC, m.rowid DESC LIMIT ?"
+    params.append(100 if targeted else max(1, int(limit or 1)))
+    rows = conn.execute(query, tuple(params)).fetchall()
+    projected = 0
+    for row in rows:
+        provenance = _json_object(row["provenance_json"])
+        surfaces = {
+            _text(surface).lower()
+            for surface in provenance.get("surfaces", ())
+            if _text(surface)
+        }
+        if "inbox" not in surfaces:
+            continue
+        transport = _text(row["transport"]).lower() or "mesh"
+        adapter_id = _text(row["adapter_id"]) or "adapter"
+        source_ref = _text(row["source_ref"])
+        source_id = f"mesh:{transport}:{adapter_id}"
+        source_label = "MeshCore" if transport == "meshcore" else (
+            "Meshtastic" if transport == "meshtastic" else "Local Mesh"
+        )
+        received_utc = _text(row["received_utc"] or row["rx_utc"] or row["updated_utc"])
+        event_utc = _text(row["event_utc"] or row["rx_utc"] or received_utc)
+        received_ts = _ts_from_utc(received_utc)
+        event_ts = _ts_from_utc(event_utc) or received_ts
+        body = _text(row["text"])
+        subject = _text(row["observation_subject"]) or _subject(body)
+        summary = _text(row["observation_summary"]) or body[:240]
+        source_status = _upper(row["observation_status"] or row["message_severity"])
+        status = "UNREAD" if source_status in {"", "INFO", "SEEN"} else source_status
+        groups = [_group(value) for value in _json_array(row["groups_json"]) if _group(value)]
+        topics = tuple(
+            dict.fromkeys(
+                _text(value)
+                for value in (
+                    *_json_array(row["observed_topics_json"]),
+                    *_json_array(row["message_topics_json"]),
+                )
+                if _text(value)
+            )
+        )
+        attention = bool(_int(row["operator_attention"]))
+        message_id = canonical_station_message_id(
+            transport,
+            event_ts=event_ts,
+            from_call=row["from_call"] or row["from_node"],
+            to_call=row["to_target"] or row["to_node"] or row["channel"],
+            payload=body,
+            message_type=source_label,
+            durable_id=source_ref,
+        )
+        source = MessageSourceRecord(
+            source_id=source_id,
+            source_family=transport,
+            source_label=f"{source_label} {adapter_id}",
+            radio_id=_optional_int(row["source_radio_id"]),
+            app_instance_id=adapter_id,
+            capabilities={"read": False, "delete": False, "native_open": False},
+            provenance={
+                "source_table": "mesh_messages",
+                "adapter_id": adapter_id,
+                "transport": transport,
+            },
+            last_seen_utc=received_utc,
+            last_ingested_utc=_utc_now(),
+        )
+        projection = MessageProjectionRecord(
+            message_id=message_id,
+            canonical_key=canonical_message_key(transport, message_id),
+            content_hash=content_hash(
+                native_projector_version("mesh"),
+                source_ref,
+                row["updated_utc"],
+                status,
+                subject,
+                body,
+                topics,
+            ),
+            primary_source_id=source_id,
+            source_family=transport,
+            source_label=source.source_label,
+            radio_id=_optional_int(row["source_radio_id"]),
+            app_instance_id=adapter_id,
+            message_type=source_label,
+            display_type=source_label,
+            status=status,
+            severity=_severity_from_status(row["urgency"] or source_status),
+            read_state=_read_state(status),
+            from_call=_upper(row["from_call"] or row["from_node"]),
+            to_call=_upper(row["to_target"] or row["to_node"]),
+            group_name=groups[0] if groups else _group(row["channel"]),
+            state_code=_upper(row["state"]),
+            grid=_upper(row["observation_grid"] or row["message_grid"]),
+            lat=row["observation_lat"] if row["observation_lat"] is not None else row["message_lat"],
+            lon=row["observation_lon"] if row["observation_lon"] is not None else row["message_lon"],
+            event_ts=event_ts,
+            received_ts=received_ts or event_ts,
+            event_utc=event_utc,
+            received_utc=received_utc,
+            subject=subject,
+            summary=summary[:240],
+            body_preview=body[:1200],
+            topics=topics,
+            entities={
+                "adapter_id": adapter_id,
+                "transport_message_id": _text(row["transport_message_id"]),
+                "channel": _text(row["channel"]),
+                "portnum": _text(row["portnum"]),
+                "hop_count": _int(row["hop_count"]),
+                "route_type": _text(row["route_type"]),
+                "direct_receive": bool(_int(row["direct_receive"])),
+                "via_node": _text(row["via_node"]),
+                "path_hops": _json_array(row["path_hops_json"]),
+                "snr": row["snr"],
+                "rssi": row["rssi"],
+            },
+            actionable=attention,
+            operator_attention=attention,
+            intelligence_version=1,
+            intelligence_utc=_utc_now(),
+            intelligence={"mesh_policy": provenance.get("channel_policy", {}), "routing": provenance.get("routing", {})},
+            retention_class="normal",
+            search_text=_search_text(
+                row["from_call"], row["from_node"], row["to_target"], row["to_node"],
+                row["channel"], subject, summary, body, " ".join(topics),
+            ),
+            projection_version=native_projector_version("mesh"),
+        )
+        _emit_projection_bundle(
+            conn,
+            source,
+            projection,
+            ExternalMessageRef(
+                message_id=message_id,
+                source_id=source_id,
+                external_kind="mesh_message",
+                external_key=source_ref,
+                metadata={
+                    "source_table": "mesh_messages",
+                    "adapter_id": adapter_id,
+                    "transport": transport,
+                    "transport_message_id": _text(row["transport_message_id"]),
+                    "surfaces": sorted(surfaces),
+                },
+            ),
+            bundle_sink=bundle_sink,
+        )
+        projected += 1
+    return projected
+
+
 def _project_sitrep_events(conn: sqlite3.Connection, limit: int, force: bool, *, external_keys: Sequence[str] | None = None, source_ids: Sequence[str] | None = None, bundle_sink: ProjectionBundleSink | None = None) -> int:
     if not table_exists(conn, "sitrep_events"):
         return 0
@@ -1520,6 +1753,7 @@ def prepare_native_message_bundles(
         "varac": _project_varac_messages,
         "sitrep": _project_sitrep_events,
         "commstat": _project_commstat_artifacts,
+        "mesh": _project_mesh_messages,
     }
     grouped: dict[str, list[object]] = {}
     unsupported: list[object] = []
@@ -1668,6 +1902,19 @@ def _utc_from_ts(value: object) -> str:
         return datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return ""
+
+
+def _ts_from_utc(value: object) -> float:
+    text = _text(value)
+    if not text:
+        return 0.0
+    try:
+        parsed = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+        return parsed.timestamp()
+    except Exception:
+        return 0.0
 
 
 def _source_label(base: str, source_key: str) -> str:

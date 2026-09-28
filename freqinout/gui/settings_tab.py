@@ -299,6 +299,7 @@ from freqinout.core.mesh import (
     validate_mesh_connection_config,
 )
 from freqinout.core.mesh.settings import (
+    mesh_outbound_capability,
     mesh_transport_capability,
     supported_mesh_connection_types,
 )
@@ -4682,7 +4683,7 @@ class SettingsTab(QWidget):
         multi_rig_status_layout = QVBoxLayout(self.multi_rig_status_card)
         multi_rig_status_layout.setContentsMargins(12, 10, 12, 10)
         multi_rig_status_layout.setSpacing(6)
-        self.multi_rig_status_title_label = QLabel("Multi-Rig Setup")
+        self.multi_rig_status_title_label = QLabel("Upgrade Existing Station")
         multi_rig_title_font = self.multi_rig_status_title_label.font()
         multi_rig_title_font.setBold(True)
         self.multi_rig_status_title_label.setFont(multi_rig_title_font)
@@ -4707,15 +4708,15 @@ class SettingsTab(QWidget):
             "Scan for installed apps and show what FIO would configure before changing anything."
         )
         self.multi_rig_preview_autoconfig_btn.clicked.connect(self._preview_multi_rig_autoconfiguration)
-        self.multi_rig_setup_btn = QPushButton("Set up Multi-Rig")
+        self.multi_rig_setup_btn = QPushButton("Upgrade Existing Station")
         self.multi_rig_setup_btn.clicked.connect(self._start_multi_rig_setup)
-        self.multi_rig_not_now_btn = QPushButton("Not Now")
-        self.multi_rig_not_now_btn.clicked.connect(self._defer_multi_rig_setup)
+        self.multi_rig_exit_btn = QPushButton("Exit FIO")
+        self.multi_rig_exit_btn.clicked.connect(lambda: self.window().close())
         self.multi_rig_copy_summary_btn = QPushButton("Copy Summary")
         self.multi_rig_copy_summary_btn.clicked.connect(self._copy_multi_rig_status_summary)
         multi_rig_status_actions.addWidget(self.multi_rig_preview_autoconfig_btn)
         multi_rig_status_actions.addWidget(self.multi_rig_setup_btn)
-        multi_rig_status_actions.addWidget(self.multi_rig_not_now_btn)
+        multi_rig_status_actions.addWidget(self.multi_rig_exit_btn)
         multi_rig_status_actions.addWidget(self.multi_rig_copy_summary_btn)
         multi_rig_status_actions.addStretch(1)
         multi_rig_status_layout.addWidget(self.multi_rig_status_actions_widget)
@@ -6393,6 +6394,21 @@ class SettingsTab(QWidget):
         self.mesh_status_label.setObjectName("localMeshStatus")
         self.mesh_status_label.setWordWrap(True)
         saved_devices_layout.addWidget(self.mesh_status_label)
+        self.mesh_send_permission_row = QWidget()
+        self.mesh_send_permission_row.setObjectName("meshOutboundPermissionRow")
+        mesh_send_permission_layout = QHBoxLayout(self.mesh_send_permission_row)
+        mesh_send_permission_layout.setContentsMargins(0, 0, 0, 0)
+        mesh_send_permission_layout.setSpacing(8)
+        mesh_send_permission_layout.addWidget(QLabel("Outbound messages:"))
+        self.mesh_send_enabled_chk = QCheckBox("Allow Send")
+        self.mesh_send_enabled_chk.setToolTip(
+            "Allow explicit operator sends from Message Compose through this connection. Automatic relays remain unavailable."
+        )
+        self.mesh_send_enabled_chk.setChecked(False)
+        self.mesh_send_enabled_chk.setEnabled(False)
+        mesh_send_permission_layout.addWidget(self.mesh_send_enabled_chk)
+        mesh_send_permission_layout.addStretch(1)
+        saved_devices_layout.addWidget(self.mesh_send_permission_row)
         mesh_layout.addWidget(saved_devices_group)
 
         self.mesh_discovery_group = QGroupBox("Find a MeshCore device")
@@ -6433,7 +6449,8 @@ class SettingsTab(QWidget):
         mesh_ble_results_layout.addWidget(self.mesh_ble_use_selected_btn)
         discovery_layout.addWidget(self.mesh_ble_results_row)
         self.mesh_ble_guidance_label = QLabel(
-            "MeshCore may not appear in Bluetooth settings for this computer until a connection requests pairing. Use Scan, then enter the PIN shown on the device if prompted."
+            "Use Scan, select the MeshCore device, then Connect. Keep FIO open: when authentication is needed, "
+            "FIO requests pairing and the operating system asks for the PIN shown on the device. FIO does not store the PIN."
         )
         self.mesh_ble_guidance_label.setWordWrap(True)
         self.mesh_ble_guidance_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
@@ -6598,18 +6615,11 @@ class SettingsTab(QWidget):
         self.mesh_store_messages_chk.setToolTip("Store received mesh text in FIO's message pipeline.")
         self.mesh_map_positions_chk = QCheckBox("Map")
         self.mesh_map_positions_chk.setToolTip("Use node position data for map context when available.")
-        self.mesh_send_enabled_chk = QCheckBox("Receive only (sending is not available)")
-        self.mesh_send_enabled_chk.setToolTip(
-            "This FIO release receives mesh traffic only. Sending remains unavailable until its completion, policy, and audit contract is implemented."
-        )
-        self.mesh_send_enabled_chk.setChecked(False)
-        self.mesh_send_enabled_chk.setEnabled(False)
         self.mesh_reticulum_bridge_chk = QCheckBox("Reticulum Bridge")
         self.mesh_reticulum_bridge_chk.setToolTip("Future bridge policy placeholder. Off by default.")
         for checkbox in (
             self.mesh_store_messages_chk,
             self.mesh_map_positions_chk,
-            self.mesh_send_enabled_chk,
             self.mesh_reticulum_bridge_chk,
         ):
             mesh_policy_layout.addWidget(checkbox)
@@ -13003,10 +13013,11 @@ class SettingsTab(QWidget):
                 if hasattr(self, "mesh_mqtt_topic_root_edit")
                 else ""
             ),
-            # Outbound mesh has no completion-aware implementation yet.  Keep a
-            # historical value round-trippable but never treat it as live UI
-            # authority or let it enable sending.
-            send_enabled=bool(getattr(self, "_mesh_legacy_send_enabled", False)),
+            send_enabled=(
+                bool(self.mesh_send_enabled_chk.isChecked())
+                if mesh_outbound_capability(protocol, MeshConnectionType.from_value(connection_type)).supported
+                else False
+            ),
             store_messages_enabled=bool(
                 hasattr(self, "mesh_store_messages_chk") and self.mesh_store_messages_chk.isChecked()
             ),
@@ -13024,11 +13035,32 @@ class SettingsTab(QWidget):
             existing_values = self.settings.all()
         except Exception:
             existing_values = {}
-        library = merge_mesh_connection_library(existing_values, config)
+        previous_key = (
+            ""
+            if bool(getattr(self, "_mesh_adding_new_connection", False))
+            else str(getattr(self, "_mesh_selected_connection_key", "") or "").strip()
+        )
+        previous_config = next(
+            (
+                candidate
+                for candidate in load_saved_mesh_connection_configs(existing_values)
+                if previous_key and mesh_connection_config_key(candidate) == previous_key
+            ),
+            None,
+        )
+        library = merge_mesh_connection_library(
+            existing_values,
+            config,
+            previous_key=previous_key,
+        )
         prefix = str(config.protocol or "meshtastic").strip().lower()
         if prefix not in {"meshcore", "meshtastic"}:
             prefix = "meshtastic"
         payload = mesh_connection_active_settings_payload(config, prefix=prefix)
+        if previous_config is not None:
+            previous_prefix = str(previous_config.protocol or "").strip().lower()
+            if previous_prefix in {"meshcore", "meshtastic"} and previous_prefix != prefix:
+                payload[f"{previous_prefix}_enabled"] = False
         payload["mesh_connection_library"] = serialize_mesh_connection_library(library)
         return payload
 
@@ -13726,16 +13758,27 @@ class SettingsTab(QWidget):
         del blocker
 
     def _set_mesh_receive_only_ui(self, config: MeshConnectionConfig | None = None) -> None:
-        """Keep the retired send setting inert without erasing a legacy value."""
+        """Expose send policy only for connections with a qualified adapter path."""
 
         checkbox = getattr(self, "mesh_send_enabled_chk", None)
         if not isinstance(checkbox, QCheckBox):
             return
-        if config is not None:
-            self._mesh_legacy_send_enabled = bool(config.send_enabled)
+        current = config or self._mesh_config_from_ui()
+        capability = mesh_outbound_capability(current.protocol, current.connection_type)
         checkbox_blocker = QSignalBlocker(checkbox)
-        checkbox.setChecked(False)
-        checkbox.setEnabled(False)
+        if capability.supported:
+            checkbox.setText("Allow Send")
+            checkbox.setToolTip(
+                "Allow explicit operator sends from Message Compose through this connection. "
+                "Automatic relays and unattended mesh sending remain unavailable."
+            )
+            checkbox.setChecked(bool(current.send_enabled))
+            checkbox.setEnabled(True)
+        else:
+            checkbox.setText("Receive only (sending is not available)")
+            checkbox.setToolTip(capability.reason)
+            checkbox.setChecked(False)
+            checkbox.setEnabled(False)
         del checkbox_blocker
 
     def _on_mesh_connection_name_edited(self, _text: str) -> None:
@@ -13766,6 +13809,7 @@ class SettingsTab(QWidget):
         self._mesh_connection_name_auto = is_auto
         self._refresh_mesh_connection_name_state()
         self._refresh_mesh_connection_visibility()
+        self._set_mesh_receive_only_ui()
         self._refresh_mesh_config_status()
         self._queue_mesh_section_fit_refresh()
 
@@ -13774,6 +13818,7 @@ class SettingsTab(QWidget):
         # legacy value remains reviewable after load, but choosing Serial again
         # is an explicit operator decision to use the qualified default.
         self._mesh_preserve_legacy_serial_baud = False
+        self._set_mesh_receive_only_ui()
 
     def _queue_mesh_section_fit_refresh(self) -> None:
         if bool(getattr(self, "_mesh_section_fit_refresh_pending", False)):
@@ -14368,15 +14413,17 @@ class SettingsTab(QWidget):
         if config.map_positions_enabled:
             data_targets.append("Map")
         target_text = ", ".join(data_targets) if data_targets else "no data views"
-        if config.protocol.strip().lower() == "meshcore" and config.connection_type is MeshConnectionType.BLE:
+        outbound = mesh_outbound_capability(config.protocol, config.connection_type)
+        if not outbound.supported:
             label.setText(
                 f"Receives: {target_text} · Receive only · "
-                "Pairing is requested only when the computer and device require it."
+                f"{outbound.reason}"
             )
             return
+        send_status = "operator sending enabled" if config.send_enabled else "operator sending off"
         label.setText(
             f"Ready to configure {config.protocol.title()} over {config.connection_type.value.upper()} "
-            f"for {target_text}; receive only."
+            f"for {target_text}; {send_status}."
         )
 
     def _refresh_mesh_connection_indicator(self, config: MeshConnectionConfig) -> None:
@@ -14557,7 +14604,15 @@ class SettingsTab(QWidget):
         issues = validate_mesh_connection_config(config)
         if issues:
             return f"{config.protocol.title()} needs setup"
-        return f"{config.protocol.title()} {config.connection_type.value.upper()} receive only"
+        outbound = mesh_outbound_capability(config.protocol, config.connection_type)
+        send_label = (
+            "send enabled"
+            if outbound.supported and config.send_enabled
+            else "send off"
+            if outbound.supported
+            else "receive only"
+        )
+        return f"{config.protocol.title()} {config.connection_type.value.upper()} {send_label}"
 
     def _summary_js8_settings(self) -> str:
         profile = "set" if hasattr(self, "js8_profile_edit") and self.js8_profile_edit.text().strip() else "missing"
@@ -21697,7 +21752,7 @@ class SettingsTab(QWidget):
         active_count = len(status.active_device_profile_ids)
         if mode == STARTUP_FRESH_DEFAULT_READY:
             return (
-                "Multi-Rig Setup",
+                "Radio Setup",
                 "No radios are configured yet.",
                 "Use Add Radio or Configure Automatically to set up the first radio.",
                 "success",
@@ -21709,22 +21764,22 @@ class SettingsTab(QWidget):
             return (f"{primary_name} - Status", "Multi-Rig is ready.", detail, "success")
         if mode == STARTUP_DEFERRED:
             return (
-                "Multi-Rig Setup",
-                "Multi-Rig setup is paused.",
-                "FIO is still using your current station setup. You can return to Multi-Rig setup from here any time.",
-                "info",
+                "Upgrade Existing Station",
+                "The station upgrade was previously paused.",
+                "Complete the station upgrade before using this version of FIO.",
+                "warning",
             )
         if mode == STARTUP_MIGRATION_ERROR:
             warning = " ".join(status.warnings[:2]) if status.warnings else ""
-            detail = "Your current settings were left unchanged. You can keep using FIO while this is reviewed."
+            detail = "Your current settings were left unchanged. Resolve the issue, then retry the station upgrade."
             if warning:
                 detail = f"{detail} Latest note: {warning}"
-            return ("Multi-Rig Setup", "FIO could not prepare Multi-Rig setup.", detail, "warning")
+            return ("Upgrade Existing Station", "FIO could not prepare the station upgrade.", detail, "warning")
         return (
-            "Multi-Rig Setup",
-            "FIO is using your current station setup.",
-            "Multi-Rig setup is available when you are ready. Your current settings will be left unchanged until you confirm setup.",
-            "info",
+            "Upgrade Existing Station",
+            "FIO found an existing single-radio station.",
+            "Back up and upgrade the station before using this version of FIO.",
+            "warning",
         )
 
     def _selected_radio_multi_rig_status_text(
@@ -21796,7 +21851,7 @@ class SettingsTab(QWidget):
         )
         self.multi_rig_preview_autoconfig_btn.setStyleSheet(button_style("secondary", theme))
         self.multi_rig_setup_btn.setStyleSheet(button_style("primary", theme))
-        self.multi_rig_not_now_btn.setStyleSheet(button_style("muted", theme))
+        self.multi_rig_exit_btn.setStyleSheet(button_style("muted", theme))
         self.multi_rig_copy_summary_btn.setStyleSheet(button_style("secondary", theme))
 
     def _refresh_multi_rig_status_card(self) -> None:
@@ -21817,13 +21872,17 @@ class SettingsTab(QWidget):
         }
         self.multi_rig_preview_autoconfig_btn.setVisible(setup_available)
         self.multi_rig_setup_btn.setVisible(setup_available)
-        self.multi_rig_setup_btn.setText("Continue Multi-Rig Setup" if status.startup_mode == STARTUP_DEFERRED else "Set up Multi-Rig")
-        self.multi_rig_not_now_btn.setVisible(status.startup_mode == STARTUP_EXISTING_UNMIGRATED)
+        self.multi_rig_setup_btn.setText(
+            "Continue Station Upgrade"
+            if status.startup_mode == STARTUP_DEFERRED
+            else "Upgrade Existing Station"
+        )
+        self.multi_rig_exit_btn.setVisible(setup_available)
         self.multi_rig_copy_summary_btn.setVisible(setup_available)
         self.multi_rig_status_actions_widget.setVisible(
             self.multi_rig_preview_autoconfig_btn.isVisible()
             or self.multi_rig_setup_btn.isVisible()
-            or self.multi_rig_not_now_btn.isVisible()
+            or self.multi_rig_exit_btn.isVisible()
             or self.multi_rig_copy_summary_btn.isVisible()
         )
         self._style_multi_rig_status_card(level)
@@ -21858,7 +21917,7 @@ class SettingsTab(QWidget):
         warnings = tuple(getattr(upgrade_preview, "warnings", ()) or ()) + tuple(
             getattr(discovery_proposal, "warnings", ()) or ()
         )
-        summary = str(getattr(upgrade_preview, "summary", "") or "FIO can preview Multi-Rig setup.").strip()
+        summary = str(getattr(upgrade_preview, "summary", "") or "FIO can preview the station upgrade.").strip()
         lines = [
             f"Apps found: {app_text}.",
             f"Suggested ports: {port_text or 'default local ports; no active radio apps found to validate yet'}.",
@@ -21973,26 +22032,6 @@ class SettingsTab(QWidget):
                 payload = {"entries": (), "source": "unavailable"}
             self._multi_rig_radio_catalog_payload = dict(payload or {})
         return dict(self._multi_rig_radio_catalog_payload)
-
-    def _defer_multi_rig_setup(self) -> None:
-        try:
-            with self.multi_radio_store.connect() as conn:
-                ensure_multi_rig_migration(
-                    conn,
-                    self._settings_values_for_migration(),
-                    defer=True,
-                )
-        except Exception as exc:
-            log.exception("Failed deferring multi-rig setup.")
-            QMessageBox.warning(self, "Multi-Rig Setup", f"Unable to pause Multi-Rig setup:\n{exc}")
-            return
-        self._refresh_cached_multi_rig_runtime_status()
-        QMessageBox.information(
-            self,
-            "Multi-Rig Setup",
-            "Multi-Rig setup is paused. FIO will keep using your current station setup.",
-        )
-        self._emit_device_profiles_changed()
 
     def _copy_multi_rig_status_summary(self) -> None:
         status = self._current_multi_rig_runtime_status()
@@ -22133,19 +22172,19 @@ class SettingsTab(QWidget):
             roles.add("commstat")
         return roles
 
-    def _start_multi_rig_setup(self) -> None:
+    def _start_multi_rig_setup(self) -> bool:
         status = self._current_multi_rig_runtime_status()
         if status.startup_mode in {STARTUP_FRESH_DEFAULT_READY, STARTUP_MIGRATED}:
             self._select_settings_section_group(getattr(self, "radio_profile_section_group", None))
-            return
+            return True
 
         dialog = QDialog(self)
-        dialog.setWindowTitle("Set up Multi-Rig")
+        dialog.setWindowTitle("Upgrade Existing Station")
         dialog.resize(620, 520)
         layout = QVBoxLayout(dialog)
         intro = QLabel(
-            "FIO found your current station setup. Multi-Rig setup will make that station the first runtime radio. "
-            "Your current settings stay unchanged until you confirm setup."
+            "FIO found your existing single-radio station. Review the radio identity and detected software below. "
+            "FIO will create and verify a backup before upgrading the station."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -22246,52 +22285,41 @@ class SettingsTab(QWidget):
         _sync_model_fields()
 
         buttons = QDialogButtonBox()
-        setup_btn = buttons.addButton("Set up Multi-Rig", QDialogButtonBox.AcceptRole)
-        not_now_btn = buttons.addButton("Not Now", QDialogButtonBox.DestructiveRole)
-        buttons.addButton(QDialogButtonBox.Cancel)
+        setup_btn = buttons.addButton("Back Up and Upgrade Station", QDialogButtonBox.AcceptRole)
+        exit_btn = buttons.addButton("Exit FIO", QDialogButtonBox.RejectRole)
         layout.addWidget(buttons)
-
-        action: Dict[str, str] = {"value": ""}
 
         def _accept_setup() -> None:
             if not name_edit.text().strip():
-                QMessageBox.warning(dialog, "Multi-Rig Setup", "Radio display name is required.")
+                QMessageBox.warning(dialog, "Upgrade Existing Station", "Radio display name is required.")
                 return
             if manual_chk.isChecked() and (
                 not manufacturer_edit.text().strip() or not model_edit.text().strip()
             ):
                 QMessageBox.warning(
                     dialog,
-                    "Multi-Rig Setup",
+                    "Upgrade Existing Station",
                     "Manufacturer and model are required for manual radio entry.",
                 )
                 return
             if not manual_chk.isChecked() and not _selected_catalog_entry():
                 QMessageBox.warning(
                     dialog,
-                    "Multi-Rig Setup",
+                    "Upgrade Existing Station",
                     "Choose a supported radio model from the list, or select manual model entry.",
                 )
                 return
-            action["value"] = "setup"
-            dialog.accept()
-
-        def _accept_defer() -> None:
-            action["value"] = "defer"
             dialog.accept()
 
         setup_btn.clicked.connect(_accept_setup)
-        not_now_btn.clicked.connect(_accept_defer)
+        exit_btn.clicked.connect(dialog.reject)
         buttons.rejected.connect(dialog.reject)
         if dialog.exec() != QDialog.Accepted:
-            return
-        if action["value"] == "defer":
-            self._defer_multi_rig_setup()
-            return
+            return False
 
         roles = tuple(sorted(role for role, chk in role_checks.items() if chk.isChecked()))
         migration_settings = self._settings_values_for_migration()
-        self._run_backup_backed_multi_rig_setup_apply(
+        return self._run_backup_backed_multi_rig_setup_apply(
             migration_settings=migration_settings,
             radio_name=name_edit.text().strip(),
             radio_manufacturer=manufacturer_edit.text().strip(),
@@ -22327,16 +22355,17 @@ class SettingsTab(QWidget):
         if not apply_plan.can_apply:
             detail = "\n".join(apply_plan.blockers)
             self._set_multi_rig_setup_preview_text(
-                f"Multi-Rig setup is blocked until backup readiness is resolved.\n{detail}".strip(),
+                f"Station upgrade is blocked until backup readiness is resolved.\n{detail}".strip(),
                 detail,
             )
             self._publish_settings_action_feedback(
                 status="blocked",
-                summary="Multi-Rig setup blocked: backup readiness needs review.",
+                summary="Station upgrade blocked: backup readiness needs review.",
                 detail=detail,
                 action_type="configure_automatically",
                 source_surface="settings.configure_automatically.multirig.apply",
             )
+            QMessageBox.warning(self, "Upgrade Existing Station", detail)
             return False
         try:
             backup_result = create_config_backup(apply_plan.backup_paths, reason=apply_plan.backup_reason)
@@ -22344,16 +22373,17 @@ class SettingsTab(QWidget):
             log.exception("Failed creating Multi-Rig migration backup.")
             detail = str(exc) or exc.__class__.__name__
             self._set_multi_rig_setup_preview_text(
-                f"Multi-Rig setup is blocked because the backup could not be created.\n{detail}".strip(),
+                f"Station upgrade is blocked because the backup could not be created.\n{detail}".strip(),
                 detail,
             )
             self._publish_settings_action_feedback(
                 status="failed",
-                summary="Multi-Rig setup blocked: backup could not be created.",
+                summary="Station upgrade blocked: backup could not be created.",
                 detail=detail,
                 action_type="configure_automatically",
                 source_surface="settings.configure_automatically.multirig.apply",
             )
+            QMessageBox.warning(self, "Upgrade Existing Station", detail)
             return False
         failed_backup_items = tuple(item for item in backup_result.items if item.status == "failed")
         primary_backup_ok = bool(backup_result.items and backup_result.items[0].status == "backed_up")
@@ -22363,20 +22393,21 @@ class SettingsTab(QWidget):
                 detail_parts.insert(0, "Primary FIO configuration backup did not complete.")
             detail = "\n".join(detail_parts)
             self._set_multi_rig_setup_preview_text(
-                f"Multi-Rig setup is blocked because the backup did not complete.\n{detail}".strip(),
+                f"Station upgrade is blocked because the backup did not complete.\n{detail}".strip(),
                 detail,
             )
             self._publish_settings_action_feedback(
                 status="blocked",
-                summary="Multi-Rig setup blocked: backup did not complete.",
+                summary="Station upgrade blocked: backup did not complete.",
                 detail=detail,
                 action_type="configure_automatically",
                 source_surface="settings.configure_automatically.multirig.apply",
             )
+            QMessageBox.warning(self, "Upgrade Existing Station", detail)
             return False
         self._publish_settings_action_feedback(
             status="succeeded",
-            summary="Multi-Rig setup backup created.",
+            summary="Station upgrade backup created.",
             detail=f"Backup saved to {backup_result.backup_dir}",
             action_type="configure_automatically",
             source_surface="settings.configure_automatically.multirig.apply",
@@ -22396,45 +22427,45 @@ class SettingsTab(QWidget):
             log.exception("Failed running multi-rig migration.")
             detail = str(exc) or exc.__class__.__name__
             self._set_multi_rig_setup_preview_text(
-                f"Multi-Rig setup could not be completed after backup.\n{detail}".strip(),
+                f"Station upgrade could not be completed after backup.\n{detail}".strip(),
                 detail,
             )
             self._publish_settings_action_feedback(
                 status="failed",
-                summary="Multi-Rig setup failed after backup.",
+                summary="Station upgrade failed after backup.",
                 detail=detail,
                 action_type="configure_automatically",
                 source_surface="settings.configure_automatically.multirig.apply",
             )
-            QMessageBox.warning(self, "Multi-Rig Setup", f"Unable to complete Multi-Rig setup:\n{exc}")
+            QMessageBox.warning(self, "Upgrade Existing Station", f"Unable to upgrade the station:\n{exc}")
             return False
         if not result.applied and not result.already_current:
             self._set_multi_rig_setup_preview_text(
-                "Multi-Rig setup could not be completed. Your current settings were left unchanged."
+                "Station upgrade could not be completed. Your current settings were left unchanged."
             )
             self._publish_settings_action_feedback(
                 status="failed",
-                summary="Multi-Rig setup failed after backup.",
-                detail="FIO could not complete Multi-Rig setup. Your current settings were left unchanged.",
+                summary="Station upgrade failed after backup.",
+                detail="FIO could not complete the station upgrade. Your current settings were left unchanged.",
                 action_type="configure_automatically",
                 source_surface="settings.configure_automatically.multirig.apply",
             )
             QMessageBox.warning(
                 self,
-                "Multi-Rig Setup",
-                "FIO could not complete Multi-Rig setup. Your current settings were left unchanged.",
+                "Upgrade Existing Station",
+                "FIO could not complete the station upgrade. Your current settings were left unchanged.",
             )
             return False
         self._refresh_multi_radio_tables(refresh_section_titles=False)
         self._refresh_cached_multi_rig_runtime_status()
         self._emit_device_profiles_changed()
         self._set_multi_rig_setup_preview_text(
-            f"Multi-Rig setup is ready. Backup saved to {backup_result.backup_dir}",
+            f"Station upgrade is complete. Backup saved to {backup_result.backup_dir}",
             f"Backup manifest: {backup_result.manifest_path}",
         )
         self._publish_settings_action_feedback(
             status="succeeded",
-            summary="Multi-Rig setup is ready.",
+            summary="Station upgrade is complete.",
             detail=f"FIO created the first runtime radio after backing up settings to {backup_result.backup_dir}",
             action_type="configure_automatically",
             source_surface="settings.configure_automatically.multirig.apply",
