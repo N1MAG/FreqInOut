@@ -1,5 +1,53 @@
 # UI Regression Work Log
 
+## 2026-09-28 — In-FIO MeshCore Linux authentication hotfix
+
+Status: `Awaiting maintainer pass approval`
+
+Private implementation commit: `1d8cc9d9eb2163b36f6abdb480f4c379741db97f` on
+`wip/private-testing-multi-rig-1.2.3-not-ready`.
+
+The Linux operator report established that a secured MeshCore device could
+briefly appear, then disappear while the official client failed during GATT
+service discovery. Requiring the operator to close FIO and pair from a separate
+Bluetooth-control workflow is not an acceptable routine connection path.
+
+MeshCore BLE Connect now keeps normal bonded connections unchanged. If the
+initial Linux connection instead reports authentication or the exact secured
+service-discovery failure, the same FIO worker makes one bounded Bleak
+pair-before-connect attempt. The desktop's registered BlueZ agent presents the
+PIN prompt; FIO does not collect, persist, or log the PIN. After the operating
+system completes pairing, FIO automatically retries the official MeshCore
+Companion connection without an application restart. Bleak 1.0 is now the
+minimum because its constructor-level `pair=True` performs pairing before
+service discovery; the MeshCore package's later `pair()` call cannot resolve
+this failure order.
+
+The repair deliberately does not replace an explicit stale bond such as
+`Peer removed pairing information` / CoreBluetooth Code 14. That remains a
+visible operator-recovery state rather than an automatic credential mutation.
+Cancellation, process-wide BLE session ownership, official-client send/receive,
+and the dependency-receipt installer guard remain intact.
+
+Acceptance evidence:
+
+- Mesh foundation, lifecycle, reconnect, Settings, and outbound partition —
+  180 passed;
+- installer and dependency-receipt partition — 25 passed;
+- focused regressions prove normal official-client BLE connection remains a
+  single attempt, the Linux discovery failure orders pair/connect/disconnect/
+  retry within FIO, and stale bonds are not automatically replaced;
+- changed-file compilation and `git diff --check` — pass.
+
+Maintainer pass gate: on the Linux host with the T1000-E advertising and no
+valid bond, keep FIO open, choose **Settings → Main → Local Mesh → Connect**,
+enter the device PIN in the desktop prompt, and verify FIO proceeds to
+Connected without a separate Bluetooth-control connection or FIO restart.
+Then disconnect/reconnect once and verify the stored OS bond is reused without
+another prompt. Confirm one short channel send and receive. If no desktop PIN
+prompt appears, retain the log and report the Linux desktop/BlueZ agent in use;
+do not mark this hotfix approved.
+
 ## 2026-09-28 — MeshCore BLE outbound and saved-device repair hotfix
 
 Status: `Awaiting maintainer pass approval`
