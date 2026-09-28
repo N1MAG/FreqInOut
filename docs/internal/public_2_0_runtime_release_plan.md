@@ -461,12 +461,12 @@ The hotfix inclusion matrix is:
 
 | Hotfix | Private implementation | Current 2.0.1 candidate | Approval state |
 | --- | --- | --- | --- |
-| BBS automation restoration, Radio Service initialization, and 1.2.8 JS8 schema ordering | `8ea27181f42a24eb5433bfebf7d2c77f58bf688b` | Included | Awaiting maintainer pass approval |
+| BBS automation restoration, Radio Service initialization, and 1.2.8 JS8 schema ordering | `8ea27181f42a24eb5433bfebf7d2c77f58bf688b` | Included | Approved—queued for next point release |
 | Canonical Mesh Inbox projection | `9f022118a6f38cd9abc83db0bbc5d7d0f85a6de5` | Missing | Approved—queued for next point release |
-| Guarded Local Mesh outbound Compose | `3501e021b1d03d8b2f637cf0591a1e27ddd4f22b` | Missing | Awaiting maintainer pass approval |
+| Guarded Local Mesh outbound Compose | `3501e021b1d03d8b2f637cf0591a1e27ddd4f22b` | Missing | Approved—queued for next point release |
 | Verified common installer and mandatory existing-station upgrade gate | `865bd61c8be46f6eb89943bc7e22df0a636769a0` | Missing | Awaiting maintainer pass approval |
-| Visible saved-device `Allow Send` permission | `fd2b543b92d2948bc23f9beee2097a3119f7895d` | Missing | Awaiting maintainer pass approval |
-| MeshCore BLE outbound, saved-device/schema repair, and dependency receipt enforcement | `53238486741d467abfec5c7691b4baae2810d00c` | Missing | Awaiting maintainer pass approval |
+| Visible saved-device `Allow Send` permission | `fd2b543b92d2948bc23f9beee2097a3119f7895d` | Missing | Approved—queued for next point release |
+| MeshCore BLE outbound, saved-device/schema repair, and dependency receipt enforcement | `53238486741d467abfec5c7691b4baae2810d00c` | Missing | Approved—queued for next point release |
 | In-FIO MeshCore Linux authentication | `1d8cc9d9eb2163b36f6abdb480f4c379741db97f` | Missing | Approved—queued for next point release |
 
 Private tracking-only commits such as the Inbox approval record and installer
@@ -475,9 +475,9 @@ private WIP export contains 413 allowlisted files; the two additional files are
 the neutral `start-freqinout.sh` and `start-freqinout.cmd` launchers introduced
 by the installer hotfix. The remaining candidate differences are the reviewed
 runtime, public documentation, manifest, and compatibility-launcher changes
-owned by the five post-candidate hotfixes above.
+owned by the six post-candidate hotfixes above.
 
-The intended 2.0.1 release scope includes all six rows. This scope decision is
+The intended 2.0.1 release scope includes all seven rows. This scope decision is
 not maintainer pass approval. Before rebuilding the public candidate, every
 row still marked awaiting approval must pass its work-log operator gate and be
 changed to `Approved—queued for next point release`. The next candidate must be

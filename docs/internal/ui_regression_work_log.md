@@ -49,7 +49,7 @@ public 2.0.1 hotfix bundle. Approval does not authorize an immediate public push
 
 ## 2026-09-28 — MeshCore BLE outbound and saved-device repair hotfix
 
-Status: `Awaiting maintainer pass approval`
+Status: `Approved—queued for next point release`
 
 Private implementation commit: `a0d782471fa22249f12c1a387be9a14f6e162712` on
 `wip/private-testing-multi-rig-1.2.3-not-ready`. Automated qualification is
@@ -110,21 +110,15 @@ Automated acceptance evidence:
   teardown segfault when multiple tests run in one process; the affected test
   passes alone and all Local Mesh Compose coverage in the mesh partition passes.
 
-Operator approval gate: pull this private WIP on the production-shaped host,
-open **Settings → Main → Mesh**, confirm that the T1000-E appears once as a
-MeshCore Bluetooth connection, and save once to persist cleanup of the invalid
-copies. Confirm **Allow Send** is available, connect the device, and verify the
-same named source is Connected in **Messages → Compose → Local Mesh**. Send one
-short public-channel message and one direct message to a known contact; verify
-receipt on a second MeshCore device, truthful command/acknowledgement evidence
-in FIO, and one requested plus one final audit row for each send. Disconnect and
-reconnect once, then confirm the log no longer reports missing TCP hosts or a
-missing `mesh_nodes.public_key_or_hash` column. Approval does not authorize a
-public push.
+Maintainer approval: the maintainer explicitly approved this hotfix for the
+public 2.0.1 bundle after the production Linux MeshCore connection and pairing
+work. It is queued with its automated saved-device/schema, official-client BLE,
+outbound, audit, and reconnect evidence. Approval does not authorize an
+immediate public push.
 
 ## 2026-09-28 — Guarded Local Mesh outbound Compose hotfix
 
-Status: `Awaiting maintainer pass approval`
+Status: `Approved—queued for next point release`
 
 Private hotfix commit: `3501e021b1d03d8b2f637cf0591a1e27ddd4f22b` on
 `wip/private-testing-multi-rig-1.2.3-not-ready`. Implementation and focused
@@ -139,9 +133,11 @@ acknowledgement policy. Results distinguish API acceptance, Companion command
 completion, node/routing acknowledgement, acknowledgement timeout,
 cancellation, and failure without claiming that a person read the message.
 
-Settings exposes default-off `Allow Send` only for Meshtastic TCP/USB/BLE and
-MeshCore TCP/USB. MeshCore's raw BLE Companion path remains explicitly
-receive-only. Message Compose adds a Local Mesh mode with a connected source,
+At the time of this original slice, Settings exposed default-off `Allow Send`
+for Meshtastic TCP/USB/BLE and MeshCore TCP/USB while the raw MeshCore BLE path
+remained receive-only. The later approved official-client MeshCore BLE hotfix
+supersedes that limitation and qualifies MeshCore BLE outbound through the same
+guarded contract. Message Compose adds a Local Mesh mode with a connected source,
 accepted channel or known direct-node destination, byte limit, exact payload
 preview, and final operator confirmation. The worker rechecks channel/node
 policy, serializes each adapter send, and appends requested plus final evidence
@@ -177,22 +173,21 @@ Automated acceptance evidence:
 - contextual Help and guide integration regression — 23 passed;
 - changed-file compilation and `git diff --check` — pass.
 
-Exit gate: automated behavior is complete. Before release, exercise
-Meshtastic TCP, USB serial, and BLE plus MeshCore TCP and USB serial against
-representative devices. Verify channel acceptance, direct ACK, ACK timeout,
-device disconnect during send, reconnect, and the audit result on each
-platform. MeshCore BLE must still show receive-only. Successful hardware QA
-qualifies this slice for maintainer review; it does not authorize a public push.
+Maintainer approval: the maintainer explicitly approved the guarded Local Mesh
+outbound Compose hotfix for the public 2.0.1 bundle. Its qualified transport
+matrix now includes the separately reviewed official-client MeshCore BLE path.
+The existing automated channel acceptance, direct ACK/timeout, disconnect,
+reconnect, and redacted-audit evidence remains the release record. Approval
+does not authorize an immediate public push.
 
 ## 2026-09-25 — BBS automation restoration and 1.2.8 upgrade hardening hotfix
 
-Status: `Awaiting maintainer pass approval`
+Status: `Approved—queued for next point release`
 
 Private hotfix commit: `8ea27181f42a24eb5433bfebf7d2c77f58bf688b`.
-Implementation and focused regression qualification are complete; live
-operator qualification remains pending. The runtime slice is already present
-in the current 2.0.1 tester candidate, but public-release approval remains
-blocked on the maintainer pass gate below.
+Implementation and focused regression qualification are complete. The runtime
+slice is already present in the current 2.0.1 tester candidate and the
+maintainer has approved it for the public 2.0.1 bundle.
 
 The top-level FIO BBS workspace now restores station-owned Automation Rules as
 a first-class page between Publishing and Visitor Preview. Operators can stage,
@@ -241,11 +236,11 @@ Acceptance evidence:
   settings thread-affinity suites — 48 passed;
 - changed-file compilation and `git diff --check` — pass.
 
-Exit gate: automated qualification passes. Operator qualification should open
-BBS, verify the restored Automation page and any migrated rules, initialize an
-existing radio BBS with and without import, and confirm one newly matched
-VarAC/FLMsg/FLAmp file is copied once without making the BBS or Inbox UI
-unresponsive.
+Maintainer approval: the maintainer explicitly approved the restored BBS
+Automation page, Radio Service initialization, and 1.2.8 JS8 schema-ordering
+hotfix for the public 2.0.1 bundle. The recorded automated BBS, migration,
+projection, and responsiveness evidence remains the release record. Approval
+does not authorize an immediate public push.
 
 
 ## 2026-09-22 — In-app help coverage and navigation alignment
@@ -11551,20 +11546,23 @@ PowerShell installer and neutral `.cmd` launcher on native Windows, then perform
 one healthy closed 1.2.8 station upgrade and verify the two backup locations,
 manufacturer/model selection, software assignments, schedules, BBS, and
 restart persistence. A database-integrity failure is a support stop, not an
-automatic repair or permission to discard operator data.
+automatic repair or permission to discard operator data. The maintainer does
+not currently have a Windows environment for this qualification, so this item
+remains `Awaiting maintainer pass approval`; the external gate has not been
+silently waived.
 
 ## 2026-09-28 — Visible Local Mesh outbound permission hotfix
 
-Status: `Awaiting maintainer pass approval`
+Status: `Approved—queued for next point release`
 
 The default-off **Allow Send** permission now appears directly in the selected
 saved-device area under Configuration > Main > Local Mesh. Operators no longer
 need to open Advanced connection details to find the primary outbound safety
-control. The same capability matrix remains authoritative: Meshtastic
-TCP/USB/BLE and MeshCore TCP/USB expose **Allow Send**, while MeshCore BLE and
-unsupported legacy transports remain visibly receive-only. Persistence,
-connection ownership, destination policy, confirmation, and audit behavior are
-unchanged.
+control. The final 2.0.1 capability matrix exposes **Allow Send** for qualified
+Meshtastic and MeshCore TCP/USB/BLE connections; unsupported legacy transports
+remain visibly receive-only. MeshCore BLE qualification comes from the later
+approved official-client outbound hotfix. Persistence, connection ownership,
+destination policy, confirmation, and audit behavior are unchanged.
 
 Acceptance evidence:
 
@@ -11584,9 +11582,8 @@ existing macOS Qt native crash in its layout-coalescing test when run as one
 process. The isolated Local Mesh Compose acceptance test passes; this hotfix
 does not change Compose layout or lifecycle code.
 
-Maintainer pass gate: select a saved qualified device and confirm **Allow
-Send** is visible without expanding Advanced details, remains off by default,
-saves and reloads, and permits a confirmed Local Mesh Compose send only while
-connected. Select a MeshCore BLE device and confirm the same visible row says
-receive-only and cannot be enabled. Approval changes only this entry to
-`Approved—queued for next point release`.
+Maintainer approval: the maintainer explicitly approved the visible default-off
+**Allow Send** control for the public 2.0.1 bundle. The later official-client
+MeshCore BLE hotfix supersedes the original receive-only BLE expectation;
+qualified MeshCore BLE now uses the same visible permission and connected-only
+Compose guard. Approval does not authorize an immediate public push.
