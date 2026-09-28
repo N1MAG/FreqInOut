@@ -4,6 +4,9 @@
 
 Status: `Awaiting maintainer pass approval`
 
+Private implementation commit: `18ca8d2f98586e9a390ab91639a0604a5bb7bff5`
+on `wip/private-testing-multi-rig-1.2.3-not-ready`.
+
 Governing specification:
 `js8_default_identity_multi_endpoint_hotfix_spec.md`.
 
