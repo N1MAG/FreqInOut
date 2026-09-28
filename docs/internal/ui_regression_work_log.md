@@ -11494,11 +11494,14 @@ does not enter Inbox. Approval moves this item only to
 
 ## 2026-09-28 — Minimal source-install and existing-station upgrade hotfix
 
-Status: `Awaiting maintainer pass approval`
+Status: `Approved for 2.0.1 with native Windows qualification deferred`
 
 Private hotfix commit: `865bd61c8be46f6eb89943bc7e22df0a636769a0` on
 `wip/private-testing-multi-rig-1.2.3-not-ready`. Automated qualification is
-complete; native Windows and operator upgrade qualification remain pending.
+complete. The maintainer explicitly authorized the 2.0.1 public release while
+accepting native Windows installation and operator-upgrade qualification as a
+documented post-release validation item because no Windows environment is
+currently available.
 
 The source-install path now uses neutral `start-freqinout` launchers, with the
 old multi-rig names retained as wrappers. `install_freqinout.py` validates the
@@ -11541,15 +11544,15 @@ Acceptance evidence:
 - the 11-page current-single-radio upgrade guide was rendered and every page
   was inspected after the final edit — pass.
 
-Exit gate: automated qualification passes. Before release, run the documented
-PowerShell installer and neutral `.cmd` launcher on native Windows, then perform
-one healthy closed 1.2.8 station upgrade and verify the two backup locations,
-manufacturer/model selection, software assignments, schedules, BBS, and
-restart persistence. A database-integrity failure is a support stop, not an
-automatic repair or permission to discard operator data. The maintainer does
-not currently have a Windows environment for this qualification, so this item
-remains `Awaiting maintainer pass approval`; the external gate has not been
-silently waived.
+Accepted residual qualification: automated and macOS source-install evidence
+passes. Native Windows remains unverified in the current release environment.
+The first available Windows pass must run the documented PowerShell installer
+and neutral `.cmd` launcher, then perform one healthy closed 1.2.8 station
+upgrade and verify the two backup locations, manufacturer/model selection,
+software assignments, schedules, BBS, and restart persistence. A database-
+integrity failure remains a support stop, not an automatic repair or permission
+to discard operator data. This deferral is visible release evidence, not a
+claim that native Windows qualification occurred.
 
 ## 2026-09-28 — Visible Local Mesh outbound permission hotfix
 
