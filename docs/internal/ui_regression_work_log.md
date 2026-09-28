@@ -1,5 +1,69 @@
 # UI Regression Work Log
 
+## 2026-09-28 — MeshCore BLE outbound and saved-device repair hotfix
+
+Status: `Awaiting maintainer pass approval`
+
+Private implementation commit: `a0d782471fa22249f12c1a387be9a14f6e162712` on
+`wip/private-testing-multi-rig-1.2.3-not-ready`. Automated qualification is
+complete; a real MeshCore BLE send/receive pass remains required before this
+entry can be approved for the 2.0.1 candidate.
+
+Production database and log copies exposed four related failures. The saved
+device library contained one valid MeshCore BLE record and two enabled TCP
+copies of the same BLE identity with no TCP host. Compose read every saved
+enabled record, so it presented the invalid copies as offline even though the
+active BLE session was connected. Settings retained a hidden send flag while
+labeling that transport unavailable. Runtime dispatch also routed MeshCore BLE
+to FIO's legacy raw receive-only implementation even though the packaged
+official MeshCore client supports BLE, channel send, direct send, and bounded
+acknowledgement evidence. Finally, the existing `mesh_nodes` table lacked the
+later `public_key_or_hash` column used for direct destinations, producing
+repeated persistence warnings.
+
+The repair stays within the existing outbound architecture:
+
+- MeshCore BLE now uses the official MeshCore client on FIO's persistent event
+  loop and retains the existing process-wide BLE ownership/teardown gate;
+- the established worker-owned send lock, operator `Allow Send`, channel/node
+  policy, preview/confirmation, result evidence, and redacted audit remain
+  unchanged;
+- incomplete TCP/serial transport-switch copies are pruned only when a valid
+  BLE record owns the exact device id and the copied record has no endpoint for
+  its selected transport; complete connections and distinct devices remain;
+- editing a saved device replaces its prior protocol/transport/endpoint key
+  instead of silently appending another row, and unsupported transports cannot
+  preserve a hidden true send permission;
+- Compose consumes active runtime configurations, aligning its source list with
+  the worker rather than advertising disconnected saved-library artifacts; and
+- schema initialization adds `public_key_or_hash` to an existing `mesh_nodes`
+  table as an additive migration.
+
+Automated acceptance evidence:
+
+- complete focused mesh partition — 197 passed;
+- contextual Help and main-shell UI regression partitions — 142 passed;
+- exact three-record production-shape repair, edit-in-place identity, official
+  BLE factory dispatch, BLE worker lifecycle, outbound capability, Settings
+  state, and legacy schema migration regressions are included;
+- changed-file compilation and `git diff --check` — pass;
+- Ruff is not installed in the project environment and therefore was not run;
+- the unrelated Compose workbench file still reproduces its existing macOS Qt
+  teardown segfault when multiple tests run in one process; the affected test
+  passes alone and all Local Mesh Compose coverage in the mesh partition passes.
+
+Operator approval gate: pull this private WIP on the production-shaped host,
+open **Settings → Main → Mesh**, confirm that the T1000-E appears once as a
+MeshCore Bluetooth connection, and save once to persist cleanup of the invalid
+copies. Confirm **Allow Send** is available, connect the device, and verify the
+same named source is Connected in **Messages → Compose → Local Mesh**. Send one
+short public-channel message and one direct message to a known contact; verify
+receipt on a second MeshCore device, truthful command/acknowledgement evidence
+in FIO, and one requested plus one final audit row for each send. Disconnect and
+reconnect once, then confirm the log no longer reports missing TCP hosts or a
+missing `mesh_nodes.public_key_or_hash` column. Approval does not authorize a
+public push.
+
 ## 2026-09-28 — Guarded Local Mesh outbound Compose hotfix
 
 Status: `Awaiting maintainer pass approval`
