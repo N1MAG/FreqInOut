@@ -1,5 +1,48 @@
 # UI Regression Work Log
 
+## 2026-09-28 — Windows verified-backup finalization hotfix
+
+Status: `Awaiting maintainer pass approval`
+
+Governing specification:
+`windows_verified_backup_finalization_hotfix_spec.md`.
+
+The affected Windows station repeatedly completed database validation, backup
+copying, hash comparison, copied-database validation, and manifest creation,
+then received `[WinError 5] Access is denied` only when the verified
+`.pre-install-*` directory was renamed to its preferred timestamped name. A
+second attempt produced the same result, disproving the initial transient-lock
+workaround.
+
+The installer now retries only that final rename with short bounded backoff. If
+Windows persistently denies it, FIO preserves the already verified staging
+directory, reports its exact path, records it in the installation receipt, and
+continues. No ACL is changed and no verification is waived. Any copy, database,
+hash, manifest, missing-directory, or non-permission rename failure still
+cleans up and blocks launch.
+
+Work-package ownership:
+
+- primary `gpt-6-astra` (high reasoning) owned backup-integrity semantics,
+  implementation, integration, specification, and exit-gate review;
+- independent `gpt-6-luna` (high reasoning) performed the read-only Windows
+  filesystem edge-case and test audit; it made no file changes.
+
+Acceptance evidence:
+
+- focused installer upgrade-gate suite — 18 passed;
+- broader installer and launcher compatibility partition — 80 passed;
+- regressions prove normal naming, transient denial recovery, persistent
+  denial preservation, verified manifest/content, actual-path receipt
+  recording, and fatal cleanup for non-permission finalization errors.
+
+Maintainer pass gate: on the affected Windows station, pull the private branch,
+close FIO and companion applications, and rerun
+`py -3.11 install_freqinout.py` without elevation. Confirm it reports a verified
+backup path, reaches `Installation verified`, and starts through
+`start-freqinout.cmd`. Approval queues this hotfix for the next public point
+release; it does not authorize a public push by itself.
+
 ## 2026-09-28 — JS8 native-default identity and endpoint isolation hotfix
 
 Status: `Awaiting maintainer pass approval`

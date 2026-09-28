@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -27,6 +28,7 @@ REQUIRED_PROJECT_FILES = (
     "freqinout/version.py",
 )
 INSTALL_RECEIPT = ".freqinout-install-verified.json"
+BACKUP_RENAME_RETRY_DELAYS = (0.1, 0.25, 0.5, 1.0)
 
 
 class InstallationError(RuntimeError):
@@ -198,6 +200,44 @@ def _existing_station_database(profile_root: Path) -> Path | None:
     return path if path.is_file() and path.stat().st_size > 0 else None
 
 
+def _finalize_verified_profile_backup(temporary_dir: Path, final_dir: Path) -> Path:
+    """Give a verified backup its preferred name without discarding valid data.
+
+    Windows security/indexing software can briefly or persistently deny a
+    same-directory rename even though FIO created and verified every file. The
+    friendly name is presentation only: after bounded retries, retain the
+    verified staging directory and let the installation receipt record its
+    actual path. Other filesystem errors remain fatal.
+    """
+
+    last_error: PermissionError | None = None
+    for attempt in range(len(BACKUP_RENAME_RETRY_DELAYS) + 1):
+        try:
+            temporary_dir.rename(final_dir)
+            return final_dir
+        except PermissionError as exc:
+            last_error = exc
+            if final_dir.is_dir() and not temporary_dir.exists():
+                return final_dir
+            if attempt < len(BACKUP_RENAME_RETRY_DELAYS):
+                time.sleep(BACKUP_RENAME_RETRY_DELAYS[attempt])
+
+    if (
+        not temporary_dir.is_dir()
+        or not (temporary_dir / "config").is_dir()
+        or not (temporary_dir / "manifest.json").is_file()
+    ):
+        if last_error is not None:
+            raise last_error
+        raise InstallationError("The verified station backup is no longer available.")
+    print(
+        "Backup naming warning: the operating system kept the verified backup "
+        "under its temporary folder name. Its contents and databases passed "
+        "verification, so installation can continue."
+    )
+    return temporary_dir
+
+
 def _create_verified_profile_backup(profile_root: Path) -> Path | None:
     station_db = _existing_station_database(profile_root)
     if station_db is None:
@@ -247,6 +287,7 @@ def _create_verified_profile_backup(profile_root: Path) -> Path | None:
             _sqlite_quick_check(path)
         manifest = {
             "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "verification_status": "verified",
             "profile_root": str(profile_root),
             "source_config": str(config_dir),
             "files": source_hashes,
@@ -255,7 +296,7 @@ def _create_verified_profile_backup(profile_root: Path) -> Path | None:
         (temporary_dir / "manifest.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8"
         )
-        temporary_dir.rename(final_dir)
+        final_dir = _finalize_verified_profile_backup(temporary_dir, final_dir)
     except Exception:
         shutil.rmtree(temporary_dir, ignore_errors=True)
         raise

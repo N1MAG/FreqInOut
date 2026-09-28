@@ -95,6 +95,117 @@ def test_installer_creates_and_verifies_cold_existing_station_backup(tmp_path: P
     assert installer._file_hashes(profile / "config") == installer._file_hashes(backup / "config")
 
 
+def test_installer_retries_transient_backup_rename(monkeypatch, tmp_path: Path) -> None:
+    installer = _installer_module()
+    profile = tmp_path / "profile"
+    _sqlite_database(profile / "config" / "freqinout.db")
+    real_rename = Path.rename
+    attempts = 0
+    delays: list[float] = []
+
+    def flaky_rename(path: Path, target: Path):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError(13, "Access is denied", str(path))
+        return real_rename(path, target)
+
+    monkeypatch.setattr(Path, "rename", flaky_rename)
+    monkeypatch.setattr(installer.time, "sleep", lambda delay: delays.append(delay))
+
+    backup = installer._create_verified_profile_backup(profile)
+
+    assert backup is not None
+    assert backup.name.startswith("pre-install-")
+    assert not backup.name.startswith(".pre-install-")
+    assert attempts == 3
+    assert delays == [0.1, 0.25]
+    manifest = json.loads((backup / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["verification_status"] == "verified"
+
+
+def test_installer_keeps_verified_backup_when_windows_denies_final_name(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    installer = _installer_module()
+    profile = tmp_path / "profile"
+    _sqlite_database(profile / "config" / "freqinout.db")
+    attempts = 0
+
+    def denied_rename(path: Path, target: Path):
+        nonlocal attempts
+        attempts += 1
+        raise PermissionError(13, "Access is denied", str(path))
+
+    monkeypatch.setattr(Path, "rename", denied_rename)
+    monkeypatch.setattr(installer.time, "sleep", lambda _delay: None)
+
+    backup = installer._create_verified_profile_backup(profile)
+
+    assert backup is not None
+    assert backup.is_dir()
+    assert backup.name.startswith(".pre-install-")
+    assert attempts == len(installer.BACKUP_RENAME_RETRY_DELAYS) + 1
+    manifest = json.loads((backup / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["verification_status"] == "verified"
+    assert installer._file_hashes(profile / "config") == installer._file_hashes(backup / "config")
+    output = capsys.readouterr().out
+    assert "Backup naming warning" in output
+    assert f"Verified pre-install station backup: {backup}" in output
+
+    root = tmp_path / "app"
+    root.mkdir()
+    (root / "requirements.txt").write_text("", encoding="utf-8")
+    installer._write_install_receipt(root, Path(installer.sys.executable), "2.0.2", backup)
+    receipt = json.loads((root / installer.INSTALL_RECEIPT).read_text(encoding="utf-8"))
+    assert receipt["pre_install_backup"] == str(backup)
+
+
+def test_installer_still_aborts_and_cleans_up_non_permission_finalization_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    installer = _installer_module()
+    profile = tmp_path / "profile"
+    _sqlite_database(profile / "config" / "freqinout.db")
+
+    def broken_rename(path: Path, target: Path):
+        raise OSError(22, "Invalid argument", str(path))
+
+    monkeypatch.setattr(Path, "rename", broken_rename)
+
+    with pytest.raises(OSError, match="Invalid argument"):
+        installer._create_verified_profile_backup(profile)
+
+    backup_root = profile / "backups"
+    assert not list(backup_root.glob(".pre-install-*"))
+    assert not list(backup_root.glob("pre-install-*"))
+
+
+def test_installer_does_not_accept_missing_verified_staging_backup(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    installer = _installer_module()
+    temporary = tmp_path / ".pre-install-test"
+    final = tmp_path / "pre-install-final"
+    (temporary / "config").mkdir(parents=True)
+    (temporary / "manifest.json").write_text("{}", encoding="utf-8")
+
+    def vanished_rename(path: Path, target: Path):
+        if path.exists():
+            installer.shutil.rmtree(path)
+        raise PermissionError(13, "Access is denied", str(path))
+
+    monkeypatch.setattr(Path, "rename", vanished_rename)
+    monkeypatch.setattr(installer.time, "sleep", lambda _delay: None)
+
+    with pytest.raises(PermissionError, match="Access is denied"):
+        installer._finalize_verified_profile_backup(temporary, final)
+
+
 def test_installer_blocks_corrupt_existing_station_before_backup(tmp_path: Path) -> None:
     installer = _installer_module()
     profile = tmp_path / "profile"
