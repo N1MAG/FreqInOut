@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.0.2]
+- Fixed: JS8Call launches for an upgraded single-radio station now preserve the native default profile when that is the configured instance, so an existing FT-DX10 installation does not silently open an invalid FIO-generated profile.
+- Fixed: If an obsolete FIO-generated JS8Call profile is still running during the transition, Launch Control stops safely and tells the operator to close that process before retrying instead of starting a duplicate instance.
+- Fixed: MeshCore connection workers now pause automatic retries after terminal Linux Bluetooth failures such as an unavailable adapter, a powered-off controller, a cancelled BlueZ connection, or failed pairing. The UI reports that operator action is required instead of repeatedly destabilizing the device connection.
+- Changed: The installation and upgrade guide now covers 1.2.8, 2.0, 2.0.1, and earlier 2.0.2 candidate starting points, uses the public `main` branch and immutable `v2.0.2` release tag, and verifies the application version in the title bar.
+
 ## [2.0.1]
 - Added: Message Compose now provides guarded Local Mesh sending through qualified Meshtastic and MeshCore connections, with explicit destination selection, exact payload preview, final confirmation, and evidence-specific results.
 - Fixed: MeshCore and Meshtastic traffic accepted for Inbox presentation now enters the canonical Messages read model while remaining available to Ops Center and Map according to channel policy.

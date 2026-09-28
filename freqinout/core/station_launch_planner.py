@@ -476,6 +476,7 @@ class StationLaunchPlanner:
         command = str(item.get("launch_command_override", "") or "").strip()
         rig_name = ""
         rig_source = ""
+        legacy_default = False
         launch_arguments: Tuple[str, ...] = ()
         if command:
             rig_name = StationLaunchPlanner._rig_name_from_command(command)
@@ -485,7 +486,20 @@ class StationLaunchPlanner:
             stored_rig = str(profile.get("js8_rig_name", profile.get("rig_name", "")) or "").strip()
             system_key = str(profile.get("js8_instance_system_key", "") or "").strip()
             instance_name = str(profile.get("js8_instance_name", "") or "").strip()
-            if stored_rig:
+            legacy_default = StationLaunchPlanner._uses_native_default_js8_profile(
+                system_key=system_key,
+                instance_name=instance_name,
+                stored_rig=stored_rig,
+            )
+            if legacy_default:
+                # The single-radio migration owns JS8Call's native default
+                # profile. Adding --rig-name changes both the title and the
+                # settings filename, which makes a correctly configured
+                # package launch look like a new/unconfigured installation.
+                # Keep the native default namespace; LaunchOrchestrator adds
+                # the radio label to the window title on supported desktops.
+                rig_source = "legacy_default"
+            elif stored_rig:
                 rig_name = normalize_rig_name(stored_rig)
                 rig_source = "persisted"
             elif not system_key and not instance_name:
@@ -498,14 +512,19 @@ class StationLaunchPlanner:
                 # the reviewed radio-derived rig name.
                 rig_name = stable_managed_rig_name(system_key=system_key, name=instance_name)
                 rig_source = "legacy_managed_fallback"
-            launch_arguments = ("--rig-name", rig_name)
+            if rig_name:
+                launch_arguments = ("--rig-name", rig_name)
         storage_values = {
             **dict(profile),
             "rig_name": rig_name,
             "rig_name_source": rig_source,
         }
         stored_rig = str(profile.get("js8_rig_name", profile.get("rig_name", "")) or "").strip()
-        if stored_rig and rig_name_collision_key(stored_rig) != rig_name_collision_key(rig_name):
+        if (
+            stored_rig
+            and not legacy_default
+            and rig_name_collision_key(stored_rig) != rig_name_collision_key(rig_name)
+        ):
             # A verified root belongs to the rig identity that produced it.
             # Changing --rig-name must derive a new Qt namespace instead of
             # carrying the prior rig's root forward.
@@ -537,6 +556,31 @@ class StationLaunchPlanner:
             "storage_mode": storage.storage_mode,
             "expected_storage_mode": storage.expected_mode,
         }
+
+    @staticmethod
+    def _uses_native_default_js8_profile(
+        *,
+        system_key: str,
+        instance_name: str,
+        stored_rig: str,
+    ) -> bool:
+        """Return true only for the untouched single-radio migration identity.
+
+        The migration key is stable across renamed radios. An operator-set rig
+        name must win, so a non-empty value qualifies only when it is the old
+        machine-generated fallback derived from that migration key.
+        """
+
+        if str(system_key or "").strip().casefold() != "default_js8_instance":
+            return False
+        normalized_stored = normalize_rig_name(stored_rig)
+        if not normalized_stored:
+            return True
+        generated = stable_managed_rig_name(
+            system_key=system_key,
+            name=instance_name,
+        )
+        return rig_name_collision_key(normalized_stored) == rig_name_collision_key(generated)
 
     @staticmethod
     def _rig_name_from_command(command: str) -> str:

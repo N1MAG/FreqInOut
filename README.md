@@ -2,7 +2,7 @@
   <img src="assets/FreqInOut_logo.png" alt="FreqInOut logo" width="150">
 </p>
 
-# FreqInOut 2.0.1
+# FreqInOut 2.0.2
 
 ### A coordinated operations console for HF digital stations
 
@@ -155,7 +155,7 @@ custom paths, repair, update, and uninstall instructions.
 
 ## Upgrading an existing FreqInOut station
 
-FreqInOut 2.0.1 is designed to carry an existing single-radio station forward
+FreqInOut 2.0.2 is designed to carry an existing single-radio station forward
 and to update an existing 2.0 installation through the same verified installer.
 Before upgrading:
 
@@ -171,8 +171,8 @@ its schedules, messages, software settings, and operating data forward. Adding
 a second radio is optional. The conversion path has automated rehearsal
 coverage, but operators should treat the verified backup as mandatory and be
 prepared to review or rebuild affected companion-application settings if an
-older station differs from the rehearsed profile. See the [FreqInOut 2.0.1
-installation and upgrade guide](docs/FreqInOut%202.0.1%20Installation%20and%20Upgrade%20Guide.docx)
+older station differs from the rehearsed profile. See the [FreqInOut 2.0.2
+installation and upgrade guide](docs/FreqInOut%202.0.2%20Installation%20and%20Upgrade%20Guide.docx)
 for the Windows, macOS, and Linux workflows and rollback guidance.
 
 ## First configuration

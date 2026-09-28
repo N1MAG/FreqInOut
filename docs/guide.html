@@ -31,7 +31,7 @@
   </div>
 
   <h1 id="guide-home">FreqInOut User Guide</h1>
-  <p><strong>Current version</strong>: 2.0.1</p>
+  <p><strong>Current version</strong>: 2.0.2</p>
   <div class="callout">
     <p><strong>Dedication</strong></p>
     <p>Dedicated to my Dad (SK), a U.S. Navy Radioman who learned HF Digital Tri-Mode at age 86.</p>
@@ -1673,7 +1673,7 @@
   <p><strong>Purpose</strong>: connect FIO to station-level MeshCore or Meshtastic services so received text and position evidence can join the canonical Inbox and Map without pretending that a mesh device is an HF radio profile.</p>
   <ul class="section-list">
     <li><strong>Saved Devices</strong>: choose a named saved connection, then <code>Connect</code> or <code>Disconnect</code>. <code>Add Device</code> starts a new identity instead of overwriting another saved device. The visible connection name is separate from the advertised Bluetooth name.</li>
-    <li><strong>Find and authenticate a MeshCore device</strong>: use <code>Scan</code>, select the exact discovered device, then <code>Use Device</code>. Keep FIO open. <code>Connect</code> uses an existing operating-system bond when available; on Linux, if secured service discovery indicates that the device is not paired, FIO makes one bounded pair-before-connect attempt and the desktop asks for the PIN displayed by the device. FIO never stores the PIN. Scanning is bounded and does not replace a saved identity until you choose one.</li>
+    <li><strong>Find and authenticate a MeshCore device</strong>: use <code>Scan</code>, select the exact discovered device, then <code>Use Device</code>. Keep FIO open. <code>Connect</code> uses an existing operating-system bond when available; on Linux, if secured service discovery indicates that the device is not paired, FIO makes one bounded pair-before-connect attempt and the desktop asks for the PIN displayed by the device. FIO never stores the PIN. If Linux reports that Bluetooth is powered off, cancels the connection, or cannot complete pairing, FIO pauses automatic reconnects; restore Bluetooth/card availability, wait for advertising, then choose <code>Connect</code> once. Scanning is bounded and does not replace a saved identity until you choose one.</li>
     <li><strong>Protocol</strong>: select <code>MeshCore</code> or <code>Meshtastic</code>. FIO exposes only transports supported for that protocol and retains a stable adapter/connection identity for reconnect and audit.</li>
     <li><strong>Connection</strong>: configure the applicable TCP host/port, USB serial device and baud, saved BLE device identity, or HTTP base URL. Prefer the stable BLE identifier captured by discovery; the advertised name is a fallback and operator clue.</li>
     <li><strong>MQTT bridge</strong>: retained legacy broker and topic-root settings are not an active local transport in this release.</li>
@@ -1853,6 +1853,7 @@
     <li><strong>Start Startup Apps</strong>: explicitly starts this selected radio's checked <code>Launch at Startup</code> applications in the displayed order without changing the automatic-start switch.</li>
     <li><strong>Stop Launch Sequence</strong>: stops an in-progress launch sequence. It does not necessarily close programs that already started successfully.</li>
     <li><strong>Multiple radios</strong>: each radio saves its own startup set, monitor choices, order, and automatic-start switch. Shared process identities are launched once; distinct radio-specific identities, profiles, paths, ports, arguments, and working directories remain separate. FIO identifies a selected instance by its executable and exact profile/config/rig-name launch arguments, so an FT-DX10 process does not make the FT-710 row appear running or prevent the FT-710 instance from starting. <code>Connected</code> remains a separate endpoint check.</li>
+    <li><strong>Upgraded default JS8Call profile</strong>: an upgraded single-radio station keeps the installed JS8Call package's established default settings. If an older FIO-generated JS8Call profile is still running after an update, FIO will not terminate it or start a competing copy. Close that JS8Call window/process, then choose <code>Launch</code> again.</li>
     <li><strong>Configuration review warnings</strong>: if FIO finds that an older canonical identity, manifest, or Software Administration projection no longer matches the saved launch projection, Launch Control reports the affected family as needing review but continues with independently valid reviewed recipes. FIO still blocks malformed commands, resource collisions, unsafe native-configuration recovery, dependency failures, and receive-only authority violations.</li>
     <li><strong>Custom Tool crossover</strong>: Custom Tools configured in <code>Configuration &gt; Main &gt; Custom Tools</code> also appear here, which lets you keep station-specific helpers near the same launch workflow as your built-in software stack.</li>
   </ul>
