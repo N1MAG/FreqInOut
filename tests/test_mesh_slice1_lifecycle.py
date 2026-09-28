@@ -238,6 +238,25 @@ def test_mesh_retry_state_operator_action_contract_requires_manual_retry() -> No
     assert state.due(10_000) is False
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        "No powered Bluetooth adapters found. Turn on Bluetooth and try again.",
+        "BleakBluetoothNotAvailableReason.POWERED_OFF",
+        "[org.bluez.Error.Failed] br-connection-canceled",
+        "Linux could not complete MeshCore Bluetooth pairing: failed to discover services, device disconnected",
+    ],
+)
+def test_mesh_hard_linux_ble_failures_require_operator_action(error: str) -> None:
+    assert mesh_error_requires_operator_action(error) is True
+
+
+def test_mesh_transient_timeout_retains_bounded_retry() -> None:
+    assert mesh_error_requires_operator_action(
+        "MeshCore BLE operation timed out. Check the selected device and connection."
+    ) is False
+
+
 def test_mesh_worker_blocks_code14_auto_retry_until_manual_retry() -> None:
     app = QApplication.instance() or QApplication([])
     operations: list[tuple[str, str, int]] = []
@@ -272,6 +291,43 @@ def test_mesh_worker_blocks_code14_auto_retry_until_manual_retry() -> None:
 
         worker.poll_once()
         assert adapter.connect_calls == 2
+    finally:
+        worker.stop()
+        worker.deleteLater()
+        app.processEvents()
+
+
+def test_mesh_worker_pauses_immediately_when_bluetooth_adapter_is_powered_off() -> None:
+    app = QApplication.instance() or QApplication([])
+    operations: list[tuple[str, str, int]] = []
+
+    class PoweredOffAdapter(FakeLifecycleAdapter):
+        def connect(self) -> None:
+            self.connect_calls += 1
+            raise RuntimeError(
+                "No powered Bluetooth adapters found. Turn on Bluetooth and try again."
+            )
+
+    worker = MeshConnectionWorker(
+        [MeshConnectionConfig(adapter_id="meshcore-field", enabled=True, tcp_host="192.0.2.2")],
+        poll_interval_ms=250,
+        reconnect_interval_ms=250,
+        reconnect_max_interval_ms=1200,
+        adapter_factory=PoweredOffAdapter,
+    )
+    worker.operation_state.connect(
+        lambda adapter_id, state, value: operations.append((adapter_id, state, value))
+    )
+
+    try:
+        worker.start()
+        adapter = worker.manager()._adapters["meshcore-field"]
+        assert adapter.connect_calls == 1
+        assert worker._retry_states["meshcore-field"].operator_action_required is True
+        assert operations[-1] == ("meshcore-field", "needs-attention", 0)
+
+        worker.poll_once()
+        assert adapter.connect_calls == 1
     finally:
         worker.stop()
         worker.deleteLater()
@@ -826,3 +882,17 @@ def test_meshcore_service_discovery_failure_preserves_pairing_and_guides_one_ret
     assert "restart the card if needed" in message
     assert "choose Connect once" in message
     assert "Re-pair only" in message
+
+
+def test_meshcore_powered_off_error_does_not_misdirect_to_pin_pairing() -> None:
+    message = meshcore_adapter._pairing_error_message(
+        RuntimeError(
+            "('No powered Bluetooth adapters found. Turn on Bluetooth and try again.', "
+            "<BleakBluetoothNotAvailableReason.POWERED_OFF: 3>)"
+        )
+    )
+
+    assert "No powered Bluetooth adapter is available" in message
+    assert "Turn on" in message
+    assert "choose Connect once" in message
+    assert "PIN shown on the device" not in message

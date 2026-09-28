@@ -1843,6 +1843,32 @@ database/configuration migration and does not change pairing, bonding, PIN,
 device-channel, or firmware behavior. The Linux/T1000-E hardware gate remains
 required.
 
+Linux production follow-up on 2026-09-28 showed a harder failure progression
+after the in-FIO PIN support was installed. Pair-before-connect failed during
+service discovery, BlueZ returned `br-connection-canceled`, and Linux then
+reported `No powered Bluetooth adapters found`; later attempts consumed the
+full 30-second BLE operation timeout. These states cannot be repaired by an
+unattended reconnect and repeated attempts can keep a recovering BlueZ adapter
+busy. They are therefore immediate operator-attention boundaries: FIO publishes
+`needs-attention` after the first powered-off, BlueZ-cancelled, or failed Linux
+pairing result and waits for an explicit Connect. A plain transport timeout
+retains the existing bounded three-attempt backoff because it may still be a
+transient advertisement or range failure.
+
+Operator wording is failure-specific. A powered-off adapter tells the operator
+to turn Bluetooth on, wait for the card to advertise, and choose Connect once;
+it does not append misleading PIN guidance. A BlueZ-cancelled connection asks
+the operator to keep Bluetooth on, recover the card if needed, and accept a PIN
+prompt only if one appears. FIO does not toggle the host adapter, remove a bond,
+store a PIN, terminate another client, or modify device configuration.
+
+Status: **Awaiting maintainer pass approval**. Automated acceptance proves the
+hard-error classifier, immediate retry pause, one-attempt worker boundary,
+failure-specific powered-off wording, and unchanged bounded timeout behavior.
+The Linux hardware gate remains: recover Bluetooth, power-cycle the T1000-E,
+wait for advertising, choose Connect once, accept the PIN prompt if presented,
+and verify a durable Companion-ready session without automatic retry churn.
+
 A two-device macOS follow-up with MOBL1 and a MOKO SMART LW010-R advertising as
 `MeshCore-N1MAG MOBL2` exposed a saved/runtime identity collision: both physical
 endpoints had been retained with `meshcore-mobl1` as their connection and

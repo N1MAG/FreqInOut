@@ -162,7 +162,7 @@ def release_mesh_connect_attempt(key: object) -> None:
 
 
 def mesh_error_requires_operator_action(error: object) -> bool:
-    """Return whether retries cannot repair the reported BLE security state."""
+    """Return whether another automatic attempt cannot repair the BLE state."""
 
     text = str(error or "").casefold()
     return any(
@@ -171,5 +171,9 @@ def mesh_error_requires_operator_action(error: object) -> bool:
             "peer removed pairing information",
             "card removed its saved bluetooth pairing information",
             "cberrordomain code=14",
+            "no powered bluetooth adapters found",
+            "bleakbluetoothnotavailablereason.powered_off",
+            "br-connection-canceled",
+            "linux could not complete meshcore bluetooth pairing",
         )
     )

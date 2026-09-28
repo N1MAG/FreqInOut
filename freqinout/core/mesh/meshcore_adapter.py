@@ -74,6 +74,14 @@ COMPANION_SERVICE_RECOVERY_GUIDANCE = (
     "Keep the saved Bluetooth pairing, restart the card if needed, wait for it to advertise, then choose Connect once. "
     "Re-pair only when the operating system reports an authentication, PIN, passkey, or removed-key error."
 )
+BLUETOOTH_POWER_RECOVERY_GUIDANCE = (
+    "Turn on the computer's Bluetooth adapter, restart the card if needed, wait for it to advertise, "
+    "then choose Connect once."
+)
+BLUETOOTH_CANCELLED_RECOVERY_GUIDANCE = (
+    "Keep Bluetooth on, restart the card if needed, wait for it to advertise, then choose Connect once. "
+    "Accept the operating-system PIN prompt if it appears."
+)
 MESHCORE_RECEIVE_PENDING_WARNING = MESHCORE_COMPANION_DECODER_WARNING
 MESHCORE_BLE_DISCONNECTING_MESSAGE = (
     "MeshCore Bluetooth is still disconnecting. Wait for it to finish before reconnecting."
@@ -1666,6 +1674,10 @@ def _pairing_error_message(exc: object) -> str:
         # them from keywords such as "pair" can hide the specific failure.
         return text
     lowered = text.casefold()
+    if "no powered bluetooth adapters found" in lowered or "powered_off" in lowered:
+        return f"No powered Bluetooth adapter is available. {BLUETOOTH_POWER_RECOVERY_GUIDANCE}"
+    if "br-connection-canceled" in lowered:
+        return f"Linux cancelled the MeshCore Bluetooth connection. {BLUETOOTH_CANCELLED_RECOVERY_GUIDANCE}"
     if _peer_removed_pairing_information(exc):
         return f"The MeshCore card removed its saved Bluetooth pairing information. {STALE_BOND_GUIDANCE}"
     if any(term in lowered for term in ("failed to encrypt", "encryption timeout", "encrypt the connection")):
