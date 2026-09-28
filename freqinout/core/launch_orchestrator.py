@@ -1504,6 +1504,27 @@ class LaunchOrchestrator(QObject):
             )
             self._schedule_advance_queue(0)
             return
+        legacy_js8_profile = self._legacy_default_js8_profile_conflict(queue_item)
+        if legacy_js8_profile:
+            detail = (
+                "an older FIO-generated JS8Call profile is still running "
+                f"({legacy_js8_profile}); close that JS8Call window or process, "
+                "then choose Launch again to start the configured default profile"
+            )
+            result = self._result_for(
+                queue_item,
+                status="failed",
+                detail=detail,
+            )
+            self._results.append(result)
+            self.sequence_progress.emit(result)
+            log.warning(
+                "LaunchOrchestrator: blocked default JS8Call launch because legacy "
+                "generated profile %s is still running",
+                legacy_js8_profile,
+            )
+            self._schedule_advance_queue(0)
+            return
         exact_process_running = self._configured_instance_process_running(queue_item)
         endpoint_key = self._endpoint_preflight_key(queue_item)
         if (
@@ -2378,6 +2399,62 @@ class LaunchOrchestrator(QObject):
                 except Exception:
                     return None
         return None
+
+    def _legacy_default_js8_profile_conflict(self, item: Any) -> str:
+        """Return the obsolete generated rig name of a running default-profile sibling.
+
+        The 2.0.1 compatibility launch intentionally removes ``--rig-name`` for
+        an untouched ``default_js8_instance`` so JS8Call opens its established
+        native settings namespace.  During an in-place update, however, the old
+        FIO-generated instance can survive the FIO restart.  An argument-free
+        exact-process check cannot distinguish that process from the native
+        default and would silently credit the wrong profile.  Fresh launch-owned
+        argv evidence lets us fail closed with an actionable transition message
+        without terminating an operator-owned process or starting a duplicate.
+        """
+
+        if not isinstance(item, Mapping):
+            return ""
+        if self._queue_item_name(item) != "JS8Call":
+            return ""
+        if str(item.get("rig_name_source", "") or "").strip() != "legacy_default":
+            return ""
+        target = str(
+            item.get("launch_command_override", "")
+            or item.get("launch_path_override", "")
+            or ""
+        ).strip()
+        process_records = self._launch_process_records()
+        if not target or process_records is None:
+            return ""
+        matcher = getattr(self.status, "cached_program_instance_running", None)
+        if not callable(matcher):
+            return ""
+        for record in process_records:
+            cmdline = tuple(str(value or "").strip() for value in record.get("cmdline", ()))
+            for index, token in enumerate(cmdline):
+                normalized = token.casefold()
+                rig_name = ""
+                expected: tuple[str, ...] = ()
+                if normalized in {"-r", "--rig-name"} and index + 1 < len(cmdline):
+                    rig_name = cmdline[index + 1]
+                    expected = (token, rig_name)
+                elif normalized.startswith("--rig-name=") or normalized.startswith("-r="):
+                    rig_name = token.split("=", 1)[1]
+                    expected = (token,)
+                if not rig_name.casefold().startswith("fio-default_js8_instance-"):
+                    continue
+                try:
+                    if matcher(
+                        "JS8Call",
+                        target,
+                        expected,
+                        process_records=process_records,
+                    ):
+                        return rig_name
+                except Exception:
+                    return ""
+        return ""
 
     def _launch_process_records(
         self,

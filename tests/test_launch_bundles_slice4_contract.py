@@ -1126,6 +1126,98 @@ def test_exact_process_with_unready_port_is_not_duplicated_or_held(
     assert "duplicate launch skipped" in orchestrator._results[0]["detail"]
 
 
+def test_legacy_default_js8_blocks_surviving_generated_profile_with_recovery(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    monkeypatch.setattr(
+        launch_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail(
+            "the legacy JS8 process must be closed before default launch"
+        ),
+    )
+    from freqinout.core.settings_manager import SettingsManager
+
+    generated_rig = "fio-default_js8_instance-50f8a9bb"
+    process_record = {
+        "pid": 43110,
+        "name": "js8call-subspace",
+        "status": "running",
+        "exe": "js8call-subspace",
+        "exe_path": "/usr/bin/js8call-subspace",
+        "cmd_tokens": ("js8call-subspace", "--rig-name", generated_rig),
+        "cmd_paths": ("/usr/bin/js8call-subspace", "--rig-name", generated_rig),
+        "cmdline": (
+            "/usr/bin/js8call-subspace",
+            "--rig-name",
+            generated_rig,
+        ),
+    }
+    item = {
+        "name": "JS8Call",
+        "instance_identity": "default-js8",
+        "launch_path_override": "/usr/bin/js8call-subspace",
+        "launch_arguments": [],
+        "rig_name_source": "legacy_default",
+        "readiness_policy": {"host": "127.0.0.1", "port": 2442},
+    }
+    orchestrator = LaunchOrchestrator(SettingsManager())
+    orchestrator._active = True
+    orchestrator._process_preflight_pending = False
+    orchestrator._cancel_requested = False
+    orchestrator._queue = [item]
+    orchestrator._index = 0
+    orchestrator._results = []
+    orchestrator._sequence_process_records = (process_record,)
+    orchestrator._sequence_process_records_ready = True
+    orchestrator._blocked_dependency_for = lambda _item: None
+    orchestrator._schedule_advance_queue = lambda _delay=0: None
+
+    orchestrator._advance_queue()
+
+    assert orchestrator._current_item is None
+    assert orchestrator._results[0]["status"] == "failed"
+    assert generated_rig in orchestrator._results[0]["detail"]
+    assert "close that JS8Call window or process" in orchestrator._results[0]["detail"]
+    assert "choose Launch again" in orchestrator._results[0]["detail"]
+
+
+def test_legacy_default_js8_conflict_ignores_native_default_process(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from freqinout.core.settings_manager import SettingsManager
+
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+
+    item = {
+        "name": "JS8Call",
+        "instance_identity": "default-js8",
+        "launch_path_override": "/usr/bin/js8call-subspace",
+        "launch_arguments": [],
+        "rig_name_source": "legacy_default",
+        "readiness_policy": {"host": "127.0.0.1", "port": 2442},
+    }
+    orchestrator = LaunchOrchestrator(SettingsManager())
+    orchestrator._sequence_process_records = (
+        {
+            "pid": 43111,
+            "name": "js8call-subspace",
+            "status": "running",
+            "exe": "js8call-subspace",
+            "exe_path": "/usr/bin/js8call-subspace",
+            "cmd_tokens": ("js8call-subspace",),
+            "cmd_paths": ("/usr/bin/js8call-subspace",),
+            "cmdline": ("/usr/bin/js8call-subspace",),
+        },
+    )
+    orchestrator._sequence_process_records_ready = True
+
+    assert orchestrator._legacy_default_js8_profile_conflict(item) == ""
+
+
 @pytest.mark.parametrize(
     ("name", "arguments", "port"),
     [

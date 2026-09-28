@@ -414,6 +414,32 @@ message root `/home/bill/.local/share/JS8Call`, and the obsolete generated rig
 name `fio-default_js8_instance-50f8a9bb`. The corrected plan must remove only
 that generated argument while preserving the other configured facts.
 
+### Hotfix follow-up: surviving generated-profile process (2026-09-28)
+
+Status: **Awaiting maintainer pass approval**.
+
+The production pull/restart log proved an in-place transition case that the
+launch-plan fixture did not cover. JS8Call launched before the update with
+`--rig-name fio-default_js8_instance-50f8a9bb` remained alive after FIO exited.
+The updated no-argument native-default recipe then treated that process as an
+exact match and suppressed the intended default-profile launch. FIO must not
+terminate an external application or start a competing instance on the same
+endpoint to resolve that ambiguity.
+
+After the launch-owned process inventory is fresh, a legacy-default JS8 item now
+checks the matching executable's argv for only the obsolete
+`fio-default_js8_instance-*` selector. If found, Launch Control fails closed with
+an explicit instruction to close that JS8Call window/process and choose Launch
+again. A true argument-free native-default process remains eligible for normal
+endpoint/readiness handling, and operator-selected or non-default rig names are
+unchanged.
+
+Automated acceptance covers the surviving generated selector, the actionable
+result, the no-spawn safety boundary, and the native-default non-conflict case.
+Linux operator qualification remains required: close the old generated-profile
+JS8Call, choose Launch once, confirm the installed default settings appear, and
+confirm the title becomes `JS8Call — FTDX-10` where the desktop permits it.
+
 ## Acceptance Gate
 
 The automated implementation gate is complete. Linux production qualification
