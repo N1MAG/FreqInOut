@@ -1,5 +1,52 @@
 # UI Regression Work Log
 
+## 2026-09-28 — JS8 native-default identity and endpoint isolation hotfix
+
+Status: `Awaiting maintainer pass approval`
+
+Governing specification:
+`js8_default_identity_multi_endpoint_hotfix_spec.md`.
+
+The production log and supplied database showed two JS8Call radios using the
+same `/usr/bin/js8call-subspace` executable: the upgraded FTDX-10 native-default
+profile on `127.0.0.1:2442` and the explicit `--rig-name FT-710` profile on
+`127.0.0.1:2443`. The generic empty-argument matcher treated the named process
+as an exact match for the default identity, suppressed the intended default
+launch, and produced repeated process-global `js8net` endpoint warnings.
+
+The bounded correction makes absence of `-r`/`--rig-name` part of only the
+legacy/native-default JS8 process identity, including selected-radio status.
+It preserves the working default profile and makes no JS8-owned file or
+database change. Endpoint status fallbacks now receive the requested port, and
+a process-global legacy fallback owned by another endpoint is rejected without
+crediting, controlling, or warning about that sibling.
+
+Work-package ownership:
+
+- primary `gpt-6-astra` (high reasoning) owned identity and endpoint-lifecycle
+  design, implementation, integration, specification, and exit-gate review;
+- independent `gpt-6-luna` (high reasoning) performed the read-only edge-case
+  and focused-test audit; it made no file changes.
+
+Acceptance evidence:
+
+- focused launch, process-status, JS8 native-client, and legacy-fallback
+  partition — 139 passed, 2 skipped;
+- broader JS8 identity, managed configuration, scheduler routing, readiness,
+  and status partition — 149 passed, 6 skipped;
+- focused regressions cover split, equals, bare, repeated, and conflicting
+  rig-name selectors, the true argument-free default, selected-radio status,
+  requested-port preservation, distinct endpoint registries, and cross-port
+  fallback suppression;
+- changed-file compilation and `git diff --check` — pass.
+
+Maintainer pass gate: close all JS8Call processes, start FIO, and launch both
+configured radios. Confirm the FTDX-10 native-default profile opens on port
+2442, the FT-710 named profile opens on port 2443, each remains independently
+visible/ready, and the log contains no repeated `shared js8net connection is
+using a different endpoint` warning. Approval queues this hotfix for the next
+public point release; it does not authorize a public push by itself.
+
 ## 2026-09-28 — Surviving generated-profile JS8 transition hotfix
 
 Status: `Released in public FreqInOut 2.0.2`

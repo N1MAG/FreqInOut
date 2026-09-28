@@ -544,12 +544,42 @@ class SoftwareStatusService:
             for index in range(len(observed) - len(wanted) + 1)
         )
 
+    @classmethod
+    def _process_arguments_exclude_options(
+        cls,
+        actual: Sequence[object],
+        excluded_options: Sequence[object],
+    ) -> bool:
+        """Return true when no excluded command-line option is present.
+
+        An empty expected-argument sequence intentionally remains a wildcard
+        for ordinary executable-only identities.  Native-default JS8Call is
+        stricter: its lack of ``--rig-name`` is part of the identity, so the
+        caller supplies that selector here as an excluded option.
+        """
+
+        excluded = {
+            str(value or "").strip().casefold()
+            for value in excluded_options
+            if str(value or "").strip()
+        }
+        if not excluded:
+            return True
+        for value in actual:
+            token = str(value or "").strip().casefold()
+            option = token.split("=", 1)[0]
+            if option in excluded:
+                return False
+        return True
+
     def cached_program_instance_running(
         self,
         program_name: str,
         configured_target: str,
         expected_arguments: Sequence[object] = (),
         process_records: Sequence[Mapping[str, object]] | None = None,
+        *,
+        excluded_options: Sequence[object] = (),
     ) -> bool:
         """Match one configured process identity from shared cached records.
 
@@ -613,6 +643,11 @@ class SoftwareStatusService:
                 expected_arguments,
             ):
                 continue
+            if not self._process_arguments_exclude_options(
+                record.get("cmdline", ()),
+                excluded_options,
+            ):
+                continue
             return True
         return False
 
@@ -621,12 +656,15 @@ class SoftwareStatusService:
         program_name: str,
         configured_target: str,
         expected_arguments: Sequence[object] = (),
+        *,
+        excluded_options: Sequence[object] = (),
     ) -> bool:
         self._refresh_process_snapshot()
         return self.cached_program_instance_running(
             program_name,
             configured_target,
             expected_arguments,
+            excluded_options=excluded_options,
         )
 
     def js8_api_reachable(
@@ -692,7 +730,7 @@ class SoftwareStatusService:
             try:
                 from freqinout.radio_interface.js8_status import JS8ControlClient
 
-                client = JS8ControlClient(host=primary_host)
+                client = JS8ControlClient(host=primary_host, port=port)
                 reachable = client.get_frequency() is not None
             except Exception:
                 reachable = False
@@ -1380,6 +1418,20 @@ class SoftwareStatusService:
                 if not isinstance(arguments, (list, tuple)):
                     arguments = ()
                 if target or arguments:
+                    excluded_options: tuple[str, ...] = ()
+                    if program_name == "JS8Call" and not arguments:
+                        # The native default JS8Call namespace is selected by
+                        # the absence of a rig-name option. A named sibling on
+                        # another API port is not evidence that this identity
+                        # is running.
+                        excluded_options = ("-r", "--rig-name")
+                    if excluded_options:
+                        return self.program_instance_running(
+                            program_name,
+                            target,
+                            arguments,
+                            excluded_options=excluded_options,
+                        )
                     return self.program_instance_running(
                         program_name,
                         target,

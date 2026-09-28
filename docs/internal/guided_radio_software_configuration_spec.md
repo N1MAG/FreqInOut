@@ -3749,6 +3749,14 @@ corresponding Qt local configuration/data locations on Windows. `DIRECTED.TXT`,
 linked to that native application-data identity. A qualified adopted instance
 retains its observed native locations unchanged.
 
+The upgraded single-radio `default_js8_instance` is a bounded compatibility
+exception: FIO preserves its native default settings and data namespace and
+launches without `--rig-name`. For this identity, absence of `-r` or
+`--rig-name` is part of the exact process identity, not an empty-argument
+wildcard. A named sibling using the same executable must never suppress the
+native-default launch or satisfy its selected-radio status. This exception does
+not promote or migrate the default profile into a named namespace.
+
 `--rig-name` and `--config` are not interchangeable. `--rig-name` selects the
 distinct application name, lock, settings file, and data identity. `--config`
 selects an alternate MultiSettings profile inside that already-selected

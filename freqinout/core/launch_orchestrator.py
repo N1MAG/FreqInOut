@@ -2381,6 +2381,26 @@ class LaunchOrchestrator(QObject):
                         else {"process_records": process_records}
                     )
                     if not arguments:
+                        excluded_options: tuple[str, ...] = ()
+                        if (
+                            name == "JS8Call"
+                            and str(item.get("rig_name_source", "") or "").strip()
+                            == "legacy_default"
+                        ):
+                            # For the native JS8Call default profile, omitting
+                            # --rig-name is identity, not a wildcard. A named
+                            # sibling uses the same executable but owns a
+                            # different settings namespace and endpoint.
+                            excluded_options = ("-r", "--rig-name")
+                        if excluded_options:
+                            return bool(
+                                self.status.cached_program_instance_running(
+                                    name,
+                                    target,
+                                    excluded_options=excluded_options,
+                                    **inventory,
+                                )
+                            )
                         return bool(
                             self.status.cached_program_instance_running(
                                 name,

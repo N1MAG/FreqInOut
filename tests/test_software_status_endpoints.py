@@ -46,6 +46,94 @@ def test_process_identity_uses_launch_arguments_when_radios_share_one_binary(mon
     )
 
 
+def test_default_js8_process_identity_excludes_named_sibling(monkeypatch):
+    named_record = {
+        "name": "js8call-subspace",
+        "exe": "js8call-subspace",
+        "exe_path": "/usr/bin/js8call-subspace",
+        "cmd_tokens": ("js8call-subspace",),
+        "cmd_paths": ("/usr/bin/js8call-subspace",),
+        "cmdline": ("/usr/bin/js8call-subspace", "--rig-name", "FT-710"),
+    }
+    monkeypatch.setattr(SoftwareStatusService, "_shared_proc_records", [named_record])
+    service = SoftwareStatusService(DummySettings())
+
+    assert not service.cached_program_instance_running(
+        "JS8Call",
+        "/usr/bin/js8call-subspace",
+        excluded_options=("-r", "--rig-name"),
+    )
+
+    native_default = {**named_record, "cmdline": ("/usr/bin/js8call-subspace",)}
+    monkeypatch.setattr(SoftwareStatusService, "_shared_proc_records", [native_default])
+    assert service.cached_program_instance_running(
+        "JS8Call",
+        "/usr/bin/js8call-subspace",
+        excluded_options=("-r", "--rig-name"),
+    )
+
+
+def test_selected_default_js8_status_does_not_credit_named_sibling(monkeypatch):
+    service = SoftwareStatusService(DummySettings())
+    seen: dict[str, object] = {}
+
+    def running(_name, _target, arguments=(), *, excluded_options=()):
+        seen["arguments"] = tuple(arguments)
+        seen["excluded_options"] = tuple(excluded_options)
+        return False
+
+    monkeypatch.setattr(service, "program_instance_running", running)
+    monkeypatch.setattr(service, "js8_api_reachable", lambda **_kwargs: False)
+    monkeypatch.setattr(service, "flrig_api_reachable", lambda **_kwargs: False)
+    monkeypatch.setattr(service, "fldigi_api_reachable", lambda **_kwargs: False)
+
+    snapshot = service.status_snapshot(
+        instance_identities={
+            "JS8Call": {
+                "target": "/usr/bin/js8call-subspace",
+                "arguments": (),
+                "instance_key": "JS8Call",
+            }
+        }
+    )
+
+    assert seen == {
+        "arguments": (),
+        "excluded_options": ("-r", "--rig-name"),
+    }
+    assert snapshot["JS8Call_API"]["running"] is False
+
+
+def test_js8_api_fallback_keeps_requested_port(monkeypatch):
+    import freqinout.core.software_status_service as status_module
+    import freqinout.radio_interface.js8_status as js8_status_module
+
+    seen: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+        def get_frequency(self):
+            return None
+
+    def unavailable(*_args, **_kwargs):
+        raise OSError("offline")
+
+    service = SoftwareStatusService(DummySettings())
+    monkeypatch.setattr(status_module.socket, "create_connection", unavailable)
+    monkeypatch.setattr(js8_status_module, "JS8ControlClient", FakeClient)
+
+    assert service.js8_api_reachable(
+        host_override="127.0.0.1",
+        port_override=2443,
+        allow_fallback=True,
+        force=True,
+    ) is False
+    assert seen["host"] == "127.0.0.1"
+    assert seen["port"] == 2443
+
+
 def test_flmsg_process_identity_uses_radio_scoped_nbems_arguments(monkeypatch):
     record = {
         "name": "flmsg",

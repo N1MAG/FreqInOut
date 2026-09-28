@@ -1219,6 +1219,69 @@ def test_legacy_default_js8_conflict_ignores_native_default_process(
 
 
 @pytest.mark.parametrize(
+    "selector",
+    (
+        ("--rig-name", "FT-710"),
+        ("--rig-name=FT-710",),
+        ("-r", "FT-710"),
+        ("-r=FT-710",),
+        ("--rig-name",),
+        ("--rig-name", "FTDX-10", "--rig-name", "FT-710"),
+    ),
+)
+def test_legacy_default_js8_exact_process_rejects_any_named_sibling(selector) -> None:
+    record = {
+        "name": "js8call-subspace",
+        "exe": "js8call-subspace",
+        "exe_path": "/usr/bin/js8call-subspace",
+        "cmd_tokens": ("js8call-subspace",),
+        "cmd_paths": ("/usr/bin/js8call-subspace",),
+        "cmdline": ("/usr/bin/js8call-subspace", *selector),
+    }
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator.status = SoftwareStatusService(
+        SimpleNamespace(get=lambda _key, default=None: default)
+    )
+    orchestrator._sequence_process_records = (record,)
+    orchestrator._sequence_process_records_ready = True
+    item = {
+        "name": "JS8Call",
+        "instance_identity": "default-js8",
+        "launch_path_override": "/usr/bin/js8call-subspace",
+        "launch_arguments": [],
+        "rig_name_source": "legacy_default",
+    }
+
+    assert orchestrator._configured_instance_process_running(item) is False
+
+
+def test_legacy_default_js8_exact_process_accepts_native_default() -> None:
+    record = {
+        "name": "js8call-subspace",
+        "exe": "js8call-subspace",
+        "exe_path": "/usr/bin/js8call-subspace",
+        "cmd_tokens": ("js8call-subspace",),
+        "cmd_paths": ("/usr/bin/js8call-subspace",),
+        "cmdline": ("/usr/bin/js8call-subspace",),
+    }
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator.status = SoftwareStatusService(
+        SimpleNamespace(get=lambda _key, default=None: default)
+    )
+    orchestrator._sequence_process_records = (record,)
+    orchestrator._sequence_process_records_ready = True
+    item = {
+        "name": "JS8Call",
+        "instance_identity": "default-js8",
+        "launch_path_override": "/usr/bin/js8call-subspace",
+        "launch_arguments": [],
+        "rig_name_source": "legacy_default",
+    }
+
+    assert orchestrator._configured_instance_process_running(item) is True
+
+
+@pytest.mark.parametrize(
     ("name", "arguments", "port"),
     [
         ("FLRig", ["--config-dir", "/profiles/FT-710"], 12346),

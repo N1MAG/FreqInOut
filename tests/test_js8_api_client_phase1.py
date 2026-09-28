@@ -131,6 +131,21 @@ def test_registry_returns_one_client_per_endpoint() -> None:
         JS8ApiClientRegistry.shutdown_all()
 
 
+def test_registry_keeps_distinct_clients_for_distinct_endpoints() -> None:
+    JS8ApiClientRegistry.shutdown_all()
+    first_endpoint = JS8ApiEndpoint("127.0.0.1", 2442)
+    second_endpoint = JS8ApiEndpoint("127.0.0.1", 2443)
+
+    first = JS8ApiClientRegistry.get(first_endpoint, auto_reconnect=False)
+    second = JS8ApiClientRegistry.get(second_endpoint, auto_reconnect=False)
+    try:
+        assert first is not second
+        assert first.endpoint.key == ("127.0.0.1", 2442)
+        assert second.endpoint.key == ("127.0.0.1", 2443)
+    finally:
+        JS8ApiClientRegistry.shutdown_all()
+
+
 def test_registry_status_snapshot_reports_managed_endpoints() -> None:
     JS8ApiClientRegistry.shutdown_all()
     endpoint = JS8ApiEndpoint("127.0.0.1", 2442)
