@@ -467,7 +467,7 @@ The hotfix inclusion matrix is:
 | Verified common installer and mandatory existing-station upgrade gate | `865bd61c8be46f6eb89943bc7e22df0a636769a0` | Missing | Awaiting maintainer pass approval |
 | Visible saved-device `Allow Send` permission | `fd2b543b92d2948bc23f9beee2097a3119f7895d` | Missing | Awaiting maintainer pass approval |
 | MeshCore BLE outbound, saved-device/schema repair, and dependency receipt enforcement | `53238486741d467abfec5c7691b4baae2810d00c` | Missing | Awaiting maintainer pass approval |
-| In-FIO MeshCore Linux authentication | `1d8cc9d9eb2163b36f6abdb480f4c379741db97f` | Missing | Awaiting maintainer pass approval |
+| In-FIO MeshCore Linux authentication | `1d8cc9d9eb2163b36f6abdb480f4c379741db97f` | Missing | Approved—queued for next point release |
 
 Private tracking-only commits such as the Inbox approval record and installer
 tracking update remain excluded by the public runtime allowlist. The current

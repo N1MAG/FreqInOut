@@ -2,7 +2,7 @@
 
 ## 2026-09-28 — In-FIO MeshCore Linux authentication hotfix
 
-Status: `Awaiting maintainer pass approval`
+Status: `Approved—queued for next point release`
 
 Private implementation commit: `1d8cc9d9eb2163b36f6abdb480f4c379741db97f` on
 `wip/private-testing-multi-rig-1.2.3-not-ready`.
@@ -39,14 +39,13 @@ Acceptance evidence:
   retry within FIO, and stale bonds are not automatically replaced;
 - changed-file compilation and `git diff --check` — pass.
 
-Maintainer pass gate: on the Linux host with the T1000-E advertising and no
-valid bond, keep FIO open, choose **Settings → Main → Local Mesh → Connect**,
-enter the device PIN in the desktop prompt, and verify FIO proceeds to
-Connected without a separate Bluetooth-control connection or FIO restart.
-Then disconnect/reconnect once and verify the stored OS bond is reused without
-another prompt. Confirm one short channel send and receive. If no desktop PIN
-prompt appears, retain the log and report the Linux desktop/BlueZ agent in use;
-do not mark this hotfix approved.
+Maintainer pass evidence: after repairing the supported FIO environment so the
+packaged `meshcore` dependency was present, the production Linux host completed
+the exact **Scan → Use Device → Connect** workflow. The desktop presented the
+MeshCore PIN prompt and FIO continued the connection as expected without being
+closed or handing the operator off to a separate Bluetooth-control workflow.
+The maintainer approved this bounded authentication fix for inclusion in the
+public 2.0.1 hotfix bundle. Approval does not authorize an immediate public push.
 
 ## 2026-09-28 — MeshCore BLE outbound and saved-device repair hotfix
 
