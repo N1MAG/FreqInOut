@@ -1,6 +1,6 @@
 # Windows Verified-Backup Finalization Hotfix
 
-Status: `Approved—queued for next point release`
+Status: `Released in public FreqInOut 2.0.3`
 
 Governing contract: `project_delivery_rules.md`
 
@@ -58,7 +58,8 @@ content/hash/database validity of the retained backup, and fatal cleanup for a
 non-permission finalization error. The broader installer and launcher contract
 tests, changed-file compilation, and `git diff --check` must pass.
 
-The operator gate remains open until the affected Windows station pulls the
-private hotfix, reruns `py -3.11 install_freqinout.py`, sees either the preferred
-or retained verified backup path followed by `Installation verified`, and then
-starts FIO through `start-freqinout.cmd` without elevation.
+The public implementation gate closed in `v2.0.3`. The field-confirmation gate
+remains open until the affected Windows station pulls that tag, reruns
+`py -3.11 install_freqinout.py`, sees either the preferred or retained verified
+backup path followed by `Installation verified`, and then starts FIO through
+`start-freqinout.cmd` without elevation.

@@ -2,7 +2,11 @@
 
 ## 2026-09-28 — Public FreqInOut 2.0.3 hotfix release
 
-Status: `Release authorized; public projection pending`
+Status: `Released in public FreqInOut 2.0.3`
+
+Public release commit: `90f6ed0de72bc1535eec9dfd813a57ef10db4dec`.
+Public references: `main`, `release/public-2.0.3-candidate`, and annotated tag
+`v2.0.3` all resolve to that commit.
 
 This point release is intentionally limited to the two approved runtime
 hotfixes below: Windows verified-backup finalization and JS8 native-default
@@ -37,7 +41,7 @@ modules without that cross-test native-state contamination.
 
 ## 2026-09-28 — Windows verified-backup finalization hotfix
 
-Status: `Approved—queued for next point release`
+Status: `Released in public FreqInOut 2.0.3`
 
 Governing specification:
 `windows_verified_backup_finalization_hotfix_spec.md`.
@@ -83,7 +87,7 @@ release; it does not authorize a public push by itself.
 
 ## 2026-09-28 — JS8 native-default identity and endpoint isolation hotfix
 
-Status: `Approved—queued for next point release`
+Status: `Released in public FreqInOut 2.0.3`
 
 Private implementation commit: `18ca8d2f98586e9a390ab91639a0604a5bb7bff5`
 on `wip/private-testing-multi-rig-1.2.3-not-ready`.

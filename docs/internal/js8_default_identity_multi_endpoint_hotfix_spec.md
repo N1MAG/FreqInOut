@@ -1,6 +1,6 @@
 # JS8 Native-Default Identity And Multi-Endpoint Status Hotfix
 
-Status: `Approved—queued for next point release`
+Status: `Released in public FreqInOut 2.0.3`
 
 Governing contracts:
 
@@ -67,9 +67,9 @@ Automated acceptance must prove:
 - a global fallback owned by 2442 is neither invoked nor warned about by a
   client for 2443.
 
-The implementation gate requires focused launch/status/API tests, broader JS8
-and scheduler regression tests, changed-file compilation, and
-`git diff --check`. The operator gate remains open until the maintainer runs the
-two configured JS8 instances and confirms that FIO launches the native default
-on 2442 while the named sibling remains on 2443 without the shared-endpoint
-warning.
+The implementation gate closed in `v2.0.3` after focused launch/status/API
+tests, broader JS8 and scheduler regression tests, changed-file compilation,
+and `git diff --check`. The field-confirmation gate remains open until the
+maintainer runs the two configured JS8 instances and confirms that FIO launches
+the native default on 2442 while the named sibling remains on 2443 without the
+shared-endpoint warning.
