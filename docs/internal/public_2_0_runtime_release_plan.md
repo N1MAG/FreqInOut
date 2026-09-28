@@ -466,7 +466,7 @@ The hotfix inclusion matrix is:
 | Guarded Local Mesh outbound Compose | `3501e021b1d03d8b2f637cf0591a1e27ddd4f22b` | Missing | Awaiting maintainer pass approval |
 | Verified common installer and mandatory existing-station upgrade gate | `865bd61c8be46f6eb89943bc7e22df0a636769a0` | Missing | Awaiting maintainer pass approval |
 | Visible saved-device `Allow Send` permission | `fd2b543b92d2948bc23f9beee2097a3119f7895d` | Missing | Awaiting maintainer pass approval |
-| MeshCore BLE outbound and saved-device/schema repair | `a0d782471fa22249f12c1a387be9a14f6e162712` | Missing | Awaiting maintainer pass approval |
+| MeshCore BLE outbound, saved-device/schema repair, and dependency receipt enforcement | `53238486741d467abfec5c7691b4baae2810d00c` | Missing | Awaiting maintainer pass approval |
 
 Private tracking-only commits such as the Inbox approval record and installer
 tracking update remain excluded by the public runtime allowlist. The current

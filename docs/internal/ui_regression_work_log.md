@@ -9,6 +9,15 @@ Private implementation commit: `a0d782471fa22249f12c1a387be9a14f6e162712` on
 complete; a real MeshCore BLE send/receive pass remains required before this
 entry can be approved for the 2.0.1 candidate.
 
+Installation follow-up commit: `53238486741d467abfec5c7691b4baae2810d00c`.
+The tester report exposed a stale-environment gap: `meshcore` was already in
+the shipped requirements, but a source pull could keep a valid same-version
+install receipt and launch the older virtual environment without reinstalling
+changed dependencies. The installer now records the exact requirements hash,
+both neutral launchers reject a missing or stale hash and direct the operator
+back to the installer, and isolated install verification imports the packaged
+MeshCore, Meshtastic, and BLE dependencies before writing a successful receipt.
+
 Production database and log copies exposed four related failures. The saved
 device library contained one valid MeshCore BLE record and two enabled TCP
 copies of the same BLE identity with no TCP host. Compose read every saved
@@ -47,6 +56,8 @@ Automated acceptance evidence:
   BLE factory dispatch, BLE worker lifecycle, outbound capability, Settings
   state, and legacy schema migration regressions are included;
 - changed-file compilation and `git diff --check` — pass;
+- installer/launcher contract — 11 passed, including stale dependency receipt
+  rejection; isolated runtime verification imported the packaged mesh clients;
 - Ruff is not installed in the project environment and therefore was not run;
 - the unrelated Compose workbench file still reproduces its existing macOS Qt
   teardown segfault when multiple tests run in one process; the affected test
