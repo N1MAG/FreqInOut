@@ -498,6 +498,39 @@ in the work log and release notes; no native Windows pass is claimed.
   verified fresh install, neutral-launcher receipt validation, packaged startup
   smoke, and clean shutdown: pass.
 
+### Public 2.0.2 release completion (2026-09-28)
+
+FreqInOut 2.0.2 contains the three approved post-2.0.1 production hotfixes:
+native-default JS8Call launch for migrated single-radio stations, fail-closed
+handling of a surviving obsolete FIO-generated JS8Call profile, and paused
+MeshCore automatic retries after terminal Linux BlueZ failures. The application
+version, splash, and main title bar now resolve to `2.0.2`; the title-bar
+contract remains `FreqInOut de N1MAG (v2.0.2)`.
+
+- Reviewed private release source: `b46c2bbe592ce4201556dff80f22f28cce092c16`.
+- Public `main` and `release/public-2.0.2-candidate`:
+  `4108eae083fa3f50f7be24ea365f25b764495a43`.
+- Annotated tag: `v2.0.2` (`ebaff467363b5831098ac99d2fb78390abe6213a`),
+  dereferencing to the public release commit above. The existing `v2.0.1` tag
+  remains unchanged and dereferences to `dbe96d2260c788699de995b79971bf123693c80e`.
+- Public Git tree: `96deb27db40e329dc2ac18c64a4504d32efdb23e`.
+- Allowlisted runtime inventory: 414 files; manifest SHA-256:
+  `b84a64aaf0c5483eb5d8bf0b861d47b0a38bf8b7ffccfd52b8e12005ce4f066d`.
+- Private focused release partition: 294 passed. Public-tree JS8, launch, and
+  Mesh replay: 281 passed.
+- Release preflight, Python compilation, diff hygiene, forbidden-marker scan,
+  exact archive/export comparison, DOCX package/content/render inspection,
+  fresh dependency installation, installer runtime verification, neutral
+  launcher receipt validation, packaged offscreen startup smoke, and clean
+  shutdown: pass.
+
+The updated six-page `FreqInOut 2.0.2 Installation and Upgrade Guide` covers
+operators starting from 1.2.8, 2.0, 2.0.1, or an earlier 2.0.2 candidate. It
+uses public `main`, names `v2.0.2` as the immutable release point, keeps the
+manufacturer/model review in **Upgrade Existing Station**, requires the
+verified installer before launch, and tells operators to confirm `v2.0.2` in
+the application title bar.
+
 ## Promotion And Rollback
 
 After every gate closes, push the curated runtime branch to the public
