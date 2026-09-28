@@ -2,7 +2,7 @@
 
 ## 2026-09-28 — In-FIO MeshCore Linux authentication hotfix
 
-Status: `Approved—queued for next point release`
+Status: `Released in public FreqInOut 2.0.1`
 
 Private implementation commit: `1d8cc9d9eb2163b36f6abdb480f4c379741db97f` on
 `wip/private-testing-multi-rig-1.2.3-not-ready`.
@@ -49,7 +49,7 @@ public 2.0.1 hotfix bundle. Approval does not authorize an immediate public push
 
 ## 2026-09-28 — MeshCore BLE outbound and saved-device repair hotfix
 
-Status: `Approved—queued for next point release`
+Status: `Released in public FreqInOut 2.0.1`
 
 Private implementation commit: `a0d782471fa22249f12c1a387be9a14f6e162712` on
 `wip/private-testing-multi-rig-1.2.3-not-ready`. Automated qualification is
@@ -118,7 +118,7 @@ immediate public push.
 
 ## 2026-09-28 — Guarded Local Mesh outbound Compose hotfix
 
-Status: `Approved—queued for next point release`
+Status: `Released in public FreqInOut 2.0.1`
 
 Private hotfix commit: `3501e021b1d03d8b2f637cf0591a1e27ddd4f22b` on
 `wip/private-testing-multi-rig-1.2.3-not-ready`. Implementation and focused
@@ -182,7 +182,7 @@ does not authorize an immediate public push.
 
 ## 2026-09-25 — BBS automation restoration and 1.2.8 upgrade hardening hotfix
 
-Status: `Approved—queued for next point release`
+Status: `Released in public FreqInOut 2.0.1`
 
 Private hotfix commit: `8ea27181f42a24eb5433bfebf7d2c77f58bf688b`.
 Implementation and focused regression qualification are complete. The runtime
@@ -11445,7 +11445,7 @@ processes.
 
 ## 2026-09-25 — MeshCore/Meshtastic canonical Inbox hotfix
 
-Status: **Approved—queued for next point release**.
+Status: **Released in public FreqInOut 2.0.1**.
 
 Maintainer operator testing passed on 2026-09-25. The fix is now eligible for
 the next accumulated hotfix bundle, but this approval does not authorize an
@@ -11494,7 +11494,7 @@ does not enter Inbox. Approval moves this item only to
 
 ## 2026-09-28 — Minimal source-install and existing-station upgrade hotfix
 
-Status: `Approved for 2.0.1 with native Windows qualification deferred`
+Status: `Released in public FreqInOut 2.0.1; native Windows qualification deferred`
 
 Private hotfix commit: `865bd61c8be46f6eb89943bc7e22df0a636769a0` on
 `wip/private-testing-multi-rig-1.2.3-not-ready`. Automated qualification is
@@ -11556,7 +11556,7 @@ claim that native Windows qualification occurred.
 
 ## 2026-09-28 — Visible Local Mesh outbound permission hotfix
 
-Status: `Approved—queued for next point release`
+Status: `Released in public FreqInOut 2.0.1`
 
 The default-off **Allow Send** permission now appears directly in the selected
 saved-device area under Configuration > Main > Local Mesh. Operators no longer

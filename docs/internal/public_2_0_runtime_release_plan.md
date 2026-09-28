@@ -459,15 +459,15 @@ was found. Both trees declare version `2.0.1`.
 
 The hotfix inclusion matrix is:
 
-| Hotfix | Private implementation | Current 2.0.1 candidate | Approval state |
+| Hotfix | Private implementation | Public 2.0.1 | Release state |
 | --- | --- | --- | --- |
-| BBS automation restoration, Radio Service initialization, and 1.2.8 JS8 schema ordering | `8ea27181f42a24eb5433bfebf7d2c77f58bf688b` | Included | Approved—queued for next point release |
-| Canonical Mesh Inbox projection | `9f022118a6f38cd9abc83db0bbc5d7d0f85a6de5` | Missing | Approved—queued for next point release |
-| Guarded Local Mesh outbound Compose | `3501e021b1d03d8b2f637cf0591a1e27ddd4f22b` | Missing | Approved—queued for next point release |
-| Verified common installer and mandatory existing-station upgrade gate | `865bd61c8be46f6eb89943bc7e22df0a636769a0` | Missing | Approved for 2.0.1; native Windows qualification explicitly deferred |
-| Visible saved-device `Allow Send` permission | `fd2b543b92d2948bc23f9beee2097a3119f7895d` | Missing | Approved—queued for next point release |
-| MeshCore BLE outbound, saved-device/schema repair, and dependency receipt enforcement | `53238486741d467abfec5c7691b4baae2810d00c` | Missing | Approved—queued for next point release |
-| In-FIO MeshCore Linux authentication | `1d8cc9d9eb2163b36f6abdb480f4c379741db97f` | Missing | Approved—queued for next point release |
+| BBS automation restoration, Radio Service initialization, and 1.2.8 JS8 schema ordering | `8ea27181f42a24eb5433bfebf7d2c77f58bf688b` | Included | Released |
+| Canonical Mesh Inbox projection | `9f022118a6f38cd9abc83db0bbc5d7d0f85a6de5` | Included | Released |
+| Guarded Local Mesh outbound Compose | `3501e021b1d03d8b2f637cf0591a1e27ddd4f22b` | Included | Released |
+| Verified common installer and mandatory existing-station upgrade gate | `865bd61c8be46f6eb89943bc7e22df0a636769a0` | Included | Released; native Windows qualification explicitly deferred |
+| Visible saved-device `Allow Send` permission | `fd2b543b92d2948bc23f9beee2097a3119f7895d` | Included | Released |
+| MeshCore BLE outbound, saved-device/schema repair, and dependency receipt enforcement | `53238486741d467abfec5c7691b4baae2810d00c` | Included | Released |
+| In-FIO MeshCore Linux authentication | `1d8cc9d9eb2163b36f6abdb480f4c379741db97f` | Included | Released |
 
 Private tracking-only commits such as the Inbox approval record and installer
 tracking update remain excluded by the public runtime allowlist. The current
@@ -477,16 +477,26 @@ public 2.0.1 installation-and-upgrade guide. The remaining candidate
 differences are the reviewed runtime, public documentation, manifest, and
 compatibility-launcher changes owned by the six post-candidate hotfixes above.
 
-The intended 2.0.1 release scope includes all seven rows. This scope decision is
-not maintainer pass approval. Before rebuilding the public candidate, every
-row still marked awaiting approval must pass its work-log operator gate and be
-changed to `Approved—queued for next point release`. The next candidate must be
-regenerated from one reviewed private WIP commit through the allowlisted export,
-replace the existing candidate tree in one auditable commit, retain version
-`2.0.1`, and pass public-export, install/upgrade, Mesh Inbox/send, BBS,
-documentation, smoke, and clean-tree checks. Public `main`, tags, and release
-artifacts remain unchanged until the maintainer separately authorizes final
-promotion.
+All seven rows were regenerated from reviewed private source commit
+`ddf65434695f10766e5529f3dc03f1e805c497b7` through the allowlisted export and
+released together. The explicit Windows qualification deferral remains visible
+in the work log and release notes; no native Windows pass is claimed.
+
+### Public 2.0.1 release completion (2026-09-28)
+
+- Public `main` and `release/public-2.0.1-candidate`:
+  `dbe96d2260c788699de995b79971bf123693c80e`
+- Annotated tag: `v2.0.1` (`a8362a0822df382fb39fd90ff478d10537dff976`),
+  dereferencing to the public release commit above.
+- Public Git tree: `78436fd08f41d1f294e16ee8d90111aa53da6a56`.
+- Allowlisted runtime inventory: 414 files; manifest SHA-256:
+  `deb5f31c2ad8c7151c0efdf3993d3753cd6f7176ca75a95ab6686d240d482d8c`.
+- Final focused installer, BBS, Mesh Inbox, outbound, Settings, lifecycle, and
+  reconnect partition: 85 passed.
+- Release preflight, Python compilation, shell syntax, diff hygiene, private-
+  marker scan, DOCX package/render review, exact export-manifest comparison,
+  verified fresh install, neutral-launcher receipt validation, packaged startup
+  smoke, and clean shutdown: pass.
 
 ## Promotion And Rollback
 
