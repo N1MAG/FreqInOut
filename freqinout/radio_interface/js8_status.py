@@ -16,7 +16,11 @@ from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.varac_log_parser import parse_varac_event_timestamp
 from freqinout.core.dependency_health import get_dependency_health_registry
 from freqinout.radio_interface.js8_api_client import JS8ApiClientRegistry, JS8ApiEndpoint
-from freqinout.radio_interface.js8_rx_hub import JS8RxHub, ensure_js8net_started
+from freqinout.radio_interface.js8_rx_hub import (
+    JS8RxHub,
+    ensure_js8net_started,
+    js8net_started_endpoint,
+)
 
 log = logging.getLogger(__name__)
 
@@ -138,9 +142,29 @@ class JS8ControlClient(JS8StatusClient):
             return False
         if not self._net_started:
             try:
+                requested_endpoint = (self.host, self._get_port())
+                fallback_endpoint = js8net_started_endpoint()
+                if fallback_endpoint is not None and fallback_endpoint != requested_endpoint:
+                    # js8net is process-global and cannot represent two JS8
+                    # endpoints. The endpoint-scoped native client above is
+                    # authoritative; never credit or warn about another
+                    # radio's legacy fallback connection.
+                    log.debug(
+                        "JS8ControlClient: native endpoint %s:%s is unavailable; "
+                        "legacy js8net fallback belongs to %s:%s",
+                        requested_endpoint[0],
+                        requested_endpoint[1],
+                        fallback_endpoint[0],
+                        fallback_endpoint[1],
+                    )
+                    return False
                 self._net_started = ensure_js8net_started(self.host, self._get_port())
                 if not self._net_started:
-                    log.warning("JS8ControlClient: shared js8net connection is using a different endpoint.")
+                    log.debug(
+                        "JS8ControlClient: legacy js8net fallback could not start for %s:%s",
+                        self.host,
+                        self._get_port(),
+                    )
                     return False
                 log.info("JS8ControlClient: js8net started on %s:%s", self.host, self._get_port())
             except Exception as e:

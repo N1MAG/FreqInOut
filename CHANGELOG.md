@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.0.3]
+- Fixed: On Windows, installation no longer fails when security or indexing software denies only the final rename of an otherwise complete and verified station backup. FIO retries the rename, retains and reports the verified temporary backup path when necessary, and still blocks installation for every copy, hash, database, manifest, missing-data, or other filesystem failure.
+- Fixed: The native-default JS8Call identity now specifically means the configured executable running without `-r` or `--rig-name`, so a named sibling process can no longer suppress launch of the upgraded station's default JS8Call instance.
+- Fixed: JS8Call status and fallback control remain scoped to their configured endpoint, preventing a process or shared connection on port `2442` from being reported as the instance on port `2443`.
+- Changed: The installation and upgrade guide now covers 1.2.8 through 2.0.2 starting points, uses the immutable `v2.0.3` release tag, and explains the Windows verified-backup naming fallback.
+
 ## [2.0.2]
 - Fixed: JS8Call launches for an upgraded single-radio station now preserve the native default profile when that is the configured instance, so an existing FT-DX10 installation does not silently open an invalid FIO-generated profile.
 - Fixed: If an obsolete FIO-generated JS8Call profile is still running during the transition, Launch Control stops safely and tells the operator to close that process before retrying instead of starting a duplicate instance.

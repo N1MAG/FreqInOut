@@ -59,6 +59,13 @@ def ensure_js8net_started(host: str, port: int) -> bool:
         return True
 
 
+def js8net_started_endpoint() -> Optional[Tuple[str, int]]:
+    """Return the endpoint owned by the legacy process-global fallback."""
+
+    with _JS8NET_START_LOCK:
+        return _JS8NET_STARTED_ENDPOINT
+
+
 def _safe_js8_hub_text(value: object, *, limit: int = _JS8_HUB_TEXT_LIMIT) -> str:
     try:
         if value is None:

@@ -23,6 +23,15 @@ profile backup, verifies every copied file and database, and records the backup
 location. If any step fails, it prints `Installation failed. Do not launch
 FreqInOut.` and the launcher remains blocked.
 
+On Windows, security or indexing software may prevent the verified backup
+directory from receiving its preferred timestamped name. FIO retries that
+rename. If Windows continues to deny only the rename, the installer retains the
+already verified backup under the exact temporary name it reports and continues;
+the installation receipt records that actual path. This warning is safe only
+when it is followed by `Verified pre-install station backup:` and the final
+`Installation verified` message. Database, copy, hash, and manifest failures
+still stop the installation.
+
 If database validation fails, do not delete, replace, or edit the named
 database. The installer made no changes; preserve the database and contact
 FreqInOut support before attempting the upgrade again.
