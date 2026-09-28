@@ -133,9 +133,12 @@ The qualified outbound matrix is intentionally narrower than receive support:
 | Meshtastic | Channel and direct send | Channel and direct send | Channel and direct send |
 | MeshCore | Channel and direct send through the official client | Channel and direct send through the official client | Receive-only until FIO's raw Companion transmit completion path is qualified |
 
-Settings exposes `Allow Send` only for those qualified rows, defaults it off,
-and preserves unsupported legacy values without activating them. Compose lists
-only enabled, send-enabled connections; requires a connected live session; uses
+Settings exposes the default-off `Allow Send` permission in the always-visible
+saved-device area for qualified rows, rather than hiding the primary outbound
+authorization inside Advanced connection details. It preserves unsupported
+legacy values without activating them and shows MeshCore BLE as receive-only.
+Compose lists only enabled, send-enabled connections; requires a connected
+live session; uses
 accepted channel policy rows or known node identities; previews the exact UTF-8
 payload and destination; and requires operator confirmation before queueing one
 single-flight request to the worker that already owns the connection.
@@ -833,9 +836,10 @@ Implemented now:
 - explicit off-thread BLE discovery with immediate progress, elapsed/remaining
   state, cancellable operation ownership, and scan results that do not require a
   second checkbox interaction
-- explicit receive/map policy controls plus default-off `Allow Send` for the
-  qualified outbound matrix; Settings keeps MeshCore BLE and unsupported
-  legacy transports truthfully receive-only
+- explicit receive/map policy controls plus always-visible, default-off
+  `Allow Send` in the saved-device area for the qualified outbound matrix;
+  Settings keeps MeshCore BLE and unsupported legacy transports truthfully
+  receive-only
 - lazy USB serial-port discovery that does not require PySerial at startup
 - validation-driven setup guidance in Settings
 - non-Qt mesh connection manager for adapter lifecycle, health snapshots, and event publication
@@ -942,10 +946,11 @@ Implemented now:
   non-destructively before runtime selection; only the explicit active endpoint
   in a protocol/transport family may start.
 - Saved-device selection and exact status are the first Local Mesh controls,
-  Scan/Use Device is the next first-class workflow, and transport plus raw BLE
-  fields live under collapsed Advanced details. Channel administration shows
-  the saved connection label and retains the internal adapter id only as
-  diagnostic metadata.
+  with outbound permission visible alongside them. Scan/Use Device is the next
+  first-class workflow, while transport plus raw BLE fields live under
+  collapsed Advanced details. Channel administration shows the saved
+  connection label and retains the internal adapter id only as diagnostic
+  metadata.
 - Health matching must reject a contradictory advertised name even when a
   legacy adapter id matches. A pre-connection health row carrying the raw saved
   BLE id may still match that exact endpoint so connection failures remain

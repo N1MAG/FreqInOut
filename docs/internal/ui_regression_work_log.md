@@ -11422,3 +11422,41 @@ one healthy closed 1.2.8 station upgrade and verify the two backup locations,
 manufacturer/model selection, software assignments, schedules, BBS, and
 restart persistence. A database-integrity failure is a support stop, not an
 automatic repair or permission to discard operator data.
+
+## 2026-09-28 — Visible Local Mesh outbound permission hotfix
+
+Status: `Awaiting maintainer pass approval`
+
+The default-off **Allow Send** permission now appears directly in the selected
+saved-device area under Configuration > Main > Local Mesh. Operators no longer
+need to open Advanced connection details to find the primary outbound safety
+control. The same capability matrix remains authoritative: Meshtastic
+TCP/USB/BLE and MeshCore TCP/USB expose **Allow Send**, while MeshCore BLE and
+unsupported legacy transports remain visibly receive-only. Persistence,
+connection ownership, destination policy, confirmation, and audit behavior are
+unchanged.
+
+Acceptance evidence:
+
+- Local Mesh settings layout, protocol/transport selection, saved-device
+  behavior, and send-control regression partition — 14 passed;
+- guarded outbound adapter/worker/audit partition — 11 passed;
+- Local Mesh Compose preview, confirmation, and request emission — 1 passed;
+- channel administration and settings integration partition — 12 passed;
+- contextual Help regression partition — 13 passed;
+- public runtime export boundary — 2 passed;
+- offscreen visual inspection confirmed **Allow Send** is visible above the
+  collapsed Advanced connection details panel;
+- changed-file compilation and `git diff --check` — pass.
+
+Test-harness note: the complete Compose acceptance file still encounters the
+existing macOS Qt native crash in its layout-coalescing test when run as one
+process. The isolated Local Mesh Compose acceptance test passes; this hotfix
+does not change Compose layout or lifecycle code.
+
+Maintainer pass gate: select a saved qualified device and confirm **Allow
+Send** is visible without expanding Advanced details, remains off by default,
+saves and reloads, and permits a confirmed Local Mesh Compose send only while
+connected. Select a MeshCore BLE device and confirm the same visible row says
+receive-only and cannot be enabled. Approval changes only this entry to
+`Approved—queued for next point release`.

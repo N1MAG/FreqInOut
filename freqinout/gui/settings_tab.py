@@ -6394,6 +6394,21 @@ class SettingsTab(QWidget):
         self.mesh_status_label.setObjectName("localMeshStatus")
         self.mesh_status_label.setWordWrap(True)
         saved_devices_layout.addWidget(self.mesh_status_label)
+        self.mesh_send_permission_row = QWidget()
+        self.mesh_send_permission_row.setObjectName("meshOutboundPermissionRow")
+        mesh_send_permission_layout = QHBoxLayout(self.mesh_send_permission_row)
+        mesh_send_permission_layout.setContentsMargins(0, 0, 0, 0)
+        mesh_send_permission_layout.setSpacing(8)
+        mesh_send_permission_layout.addWidget(QLabel("Outbound messages:"))
+        self.mesh_send_enabled_chk = QCheckBox("Allow Send")
+        self.mesh_send_enabled_chk.setToolTip(
+            "Allow explicit operator sends from Message Compose through this connection. Automatic relays remain unavailable."
+        )
+        self.mesh_send_enabled_chk.setChecked(False)
+        self.mesh_send_enabled_chk.setEnabled(False)
+        mesh_send_permission_layout.addWidget(self.mesh_send_enabled_chk)
+        mesh_send_permission_layout.addStretch(1)
+        saved_devices_layout.addWidget(self.mesh_send_permission_row)
         mesh_layout.addWidget(saved_devices_group)
 
         self.mesh_discovery_group = QGroupBox("Find a MeshCore device")
@@ -6599,18 +6614,11 @@ class SettingsTab(QWidget):
         self.mesh_store_messages_chk.setToolTip("Store received mesh text in FIO's message pipeline.")
         self.mesh_map_positions_chk = QCheckBox("Map")
         self.mesh_map_positions_chk.setToolTip("Use node position data for map context when available.")
-        self.mesh_send_enabled_chk = QCheckBox("Allow Send")
-        self.mesh_send_enabled_chk.setToolTip(
-            "Allow explicit operator sends from Message Compose through this connection. Automatic relays remain unavailable."
-        )
-        self.mesh_send_enabled_chk.setChecked(False)
-        self.mesh_send_enabled_chk.setEnabled(False)
         self.mesh_reticulum_bridge_chk = QCheckBox("Reticulum Bridge")
         self.mesh_reticulum_bridge_chk.setToolTip("Future bridge policy placeholder. Off by default.")
         for checkbox in (
             self.mesh_store_messages_chk,
             self.mesh_map_positions_chk,
-            self.mesh_send_enabled_chk,
             self.mesh_reticulum_bridge_chk,
         ):
             mesh_policy_layout.addWidget(checkbox)

@@ -71,6 +71,10 @@ def test_mesh_transport_choices_and_send_controls_are_protocol_aware(monkeypatch
 
     app, tab = _settings_tab_or_skip(monkeypatch, tmp_path)
     try:
+        assert tab.mesh_send_enabled_chk.parentWidget() is tab.mesh_send_permission_row
+        assert not tab.mesh_details_content.isAncestorOf(tab.mesh_send_enabled_chk)
+        assert tab.mesh_send_permission_row.objectName() == "meshOutboundPermissionRow"
+
         def choices():
             return tuple(
                 tab.mesh_connection_type_combo.itemData(index)
