@@ -38,7 +38,7 @@ def test_message_compose_exposes_spotter_as_guarded_form_family() -> None:
     assert "_compose_radio_short_label(target.profile) or target.label" in source
     assert "_on_compose_mode_tab_changed" in source
     assert '"spotter" if idx == 2' in source
-    assert "nbems_mode = not (js8_mode or spotter_mode or commstat_mode)" in source
+    assert "nbems_mode = not (js8_mode or spotter_mode or commstat_mode or mesh_mode)" in source
     assert "compose_nbems_dest_row_widget.setVisible(nbems_mode)" in source
     assert "compose_send_js8_btn.setVisible(js8_mode or spotter_mode or commstat_mode)" in source
     assert '"spotter_form"' in source

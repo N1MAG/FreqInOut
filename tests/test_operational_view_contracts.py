@@ -29,6 +29,21 @@ def test_compose_intent_normalizes_source_specific_modes() -> None:
     assert intent.age_filter_seconds == 3600
 
 
+def test_compose_intent_preserves_local_mesh_mode() -> None:
+    intent = compose_intent_from_mapping(
+        {
+            "transport": "meshcore",
+            "source_family": "meshcore",
+            "target": "001122334455",
+            "body": "status",
+        }
+    )
+
+    assert intent.mode == "mesh"
+    assert intent.transport == "mesh"
+    assert intent.body == "status"
+
+
 def test_map_context_preserves_operational_filters_for_handoffs() -> None:
     context = map_context_from_mapping(
         {

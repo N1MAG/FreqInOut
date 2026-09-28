@@ -19,6 +19,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QDialog
 from pathlib import Path
 
+from freqinout.core.mesh import MeshChannelPolicy, MeshConnectionConfig, MeshConnectionType
+from freqinout.gui import message_viewer_tab as message_viewer_ui
 from freqinout.gui.message_viewer_tab import MessageViewerTab
 from freqinout.gui.main_window import MainWindow
 
@@ -360,3 +362,70 @@ def test_compose_source_keeps_bbs_controls_nbems_only_and_preserves_signed_paths
     assert "FLAmp signing failed; no unsigned FLAmp fallback was staged." in stage_service
     assert "upsert_bbs_artifact_path" in stage_service
     assert "set_bbs_artifact_locations" in stage_service
+
+
+def test_local_mesh_compose_previews_and_emits_one_confirmed_request(monkeypatch, tmp_path) -> None:
+    app = _app()
+    config = MeshConnectionConfig(
+        adapter_id="meshcore-ops",
+        protocol="meshcore",
+        connection_name="Operations Mesh",
+        connection_name_auto=False,
+        enabled=True,
+        send_enabled=True,
+        connection_type=MeshConnectionType.TCP,
+        tcp_host="127.0.0.1",
+    )
+    policy = MeshChannelPolicy(
+        adapter_id=config.adapter_id,
+        transport="meshcore",
+        channel_id="2",
+        channel_name="Ops",
+        channel_role="private",
+        channel_privacy="encrypted",
+        review_state="accepted",
+        key_state="device_configured",
+    )
+    monkeypatch.setattr(message_viewer_ui, "load_saved_mesh_connection_configs", lambda _settings: (config,))
+    monkeypatch.setattr(
+        message_viewer_ui,
+        "list_mesh_health",
+        lambda _path: [{"adapter_id": config.adapter_id, "connected": True}],
+    )
+    monkeypatch.setattr(
+        message_viewer_ui,
+        "list_mesh_channel_policies",
+        lambda _path, *, adapter_id: [policy] if adapter_id == config.adapter_id else [],
+    )
+    monkeypatch.setattr(message_viewer_ui, "list_mesh_nodes", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(message_viewer_ui, "default_mesh_db_path", lambda: tmp_path / "mesh.db")
+    monkeypatch.setattr(
+        message_viewer_ui.QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: message_viewer_ui.QMessageBox.Yes,
+    )
+
+    tab = _tab(monkeypatch, tmp_path)
+    try:
+        tab.compose_mode_selector.setCurrentRow(4)
+        tab.compose_mesh_text_edit.setPlainText("OPS STATUS GREEN")
+        app.processEvents()
+
+        assert tab._compose_mode == "mesh"
+        assert tab.compose_mesh_source_combo.currentData() == config
+        assert tab.compose_mesh_channel_combo.currentData() == "2"
+        assert "OPS STATUS GREEN" in tab.compose_preview.toPlainText()
+        assert tab.compose_send_mesh_btn.isEnabled()
+
+        requests = []
+        tab.meshSendRequested.connect(requests.append)
+        tab._send_compose_mesh_message()
+        assert len(requests) == 1
+        assert requests[0].adapter_id == config.adapter_id
+        assert requests[0].destination_kind == "channel"
+        assert requests[0].channel_id == "2"
+        assert requests[0].text == "OPS STATUS GREEN"
+        assert tab._compose_mesh_send_inflight is True
+    finally:
+        tab.close()
+        tab.deleteLater()

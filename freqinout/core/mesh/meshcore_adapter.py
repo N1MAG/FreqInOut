@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import math
 import sys
 import threading
 import time
@@ -47,6 +48,10 @@ from freqinout.core.mesh.models import (
     MeshHealthSnapshot,
     MeshMessage,
     MeshNode,
+    MeshSendCapabilities,
+    MeshSendRequest,
+    MeshSendResult,
+    utc_now,
 )
 from freqinout.core.mesh.settings import MeshConnectionConfig, MeshConnectionType, validate_mesh_connection_config
 
@@ -360,6 +365,7 @@ class MeshCoreBleAdapter:
         self._session_gate_owned = False
         self._session_teardown_pending = False
         self._session_state_lock = threading.Lock()
+        self._send_lock = threading.Lock()
 
     def connect(self) -> None:
         if not self.config.enabled:
@@ -452,6 +458,18 @@ class MeshCoreBleAdapter:
         return MeshChannelCapabilities(
             guidance="Use the MeshCore companion application to configure or remove device channels.",
         )
+
+    def send_capabilities(self) -> MeshSendCapabilities:
+        return MeshSendCapabilities(
+            supported=False,
+            guidance=(
+                "MeshCore Bluetooth remains receive-only until the raw Companion transmit command and completion "
+                "evidence are qualified. Use a MeshCore USB serial or TCP Companion connection to send from FIO."
+            ),
+        )
+
+    def send_message(self, request: MeshSendRequest) -> MeshSendResult:
+        raise MeshConnectionError(self.send_capabilities().guidance)
 
     def _stop_ble_loop(self) -> tuple[_AsyncioLoopRunner | None, bool]:
         runner = self._ble_loop
@@ -1077,6 +1095,41 @@ class MeshCorePythonCompanionClient:
     def raw_frames_pending(self) -> tuple[bytes, ...]:
         return ()
 
+    async def send_channel_message(self, channel_index: int, text: str) -> object:
+        commands = getattr(self._client, "commands", None)
+        send = getattr(commands, "send_chan_msg", None)
+        if not callable(send):
+            raise MeshConnectionError("The installed MeshCore client cannot send channel messages.")
+        return await send(int(channel_index), str(text))
+
+    async def send_direct_message(
+        self,
+        destination: str,
+        text: str,
+        *,
+        require_ack: bool,
+        timeout_sec: float,
+    ) -> object:
+        commands = getattr(self._client, "commands", None)
+        if require_ack:
+            send = getattr(commands, "send_msg_with_retry", None)
+            if not callable(send):
+                raise MeshConnectionError("The installed MeshCore client cannot request direct-message acknowledgements.")
+            attempt_timeout = max(1.0, min(5.0, float(timeout_sec or 12.0) / 2.0))
+            return await send(
+                destination,
+                str(text),
+                max_attempts=2,
+                max_flood_attempts=1,
+                flood_after=1,
+                timeout=attempt_timeout,
+                min_timeout=1.0,
+            )
+        send = getattr(commands, "send_msg", None)
+        if not callable(send):
+            raise MeshConnectionError("The installed MeshCore client cannot send direct messages.")
+        return await send(destination, str(text))
+
     def _on_channel_message(self, event: object) -> None:
         payload = getattr(event, "payload", None)
         if isinstance(payload, Mapping):
@@ -1142,6 +1195,128 @@ class MeshCorePythonAdapter(MeshCoreBleAdapter):
         if runner is not None:
             runner.cancel_current()
 
+    def send_capabilities(self) -> MeshSendCapabilities:
+        return MeshSendCapabilities(
+            supported=True,
+            channel_send=True,
+            direct_send=True,
+            max_text_bytes=160,
+            guidance=(
+                "MeshCore channel sends prove Companion acceptance. Direct sends request a MeshCore acknowledgement; "
+                "that acknowledgement proves node receipt, not that a person read the message."
+            ),
+        )
+
+    def send_message(self, request: MeshSendRequest) -> MeshSendResult:
+        with self._send_lock:
+            return self._send_message_locked(request)
+
+    def _send_message_locked(self, request: MeshSendRequest) -> MeshSendResult:
+        client = self._client
+        runner = self._ble_loop
+        if client is None or runner is None or not bool(getattr(client, "is_connected", False)):
+            raise MeshConnectionError("MeshCore is not connected.")
+        text = str(request.text or "")
+        if not text.strip():
+            raise MeshConnectionError("Enter a mesh message before sending.")
+        if len(text.encode("utf-8")) > 160:
+            raise MeshConnectionError("MeshCore message is longer than FIO's qualified 160-byte text limit.")
+        kind = str(request.destination_kind or "").strip().lower()
+        accepted_at = utc_now()
+        try:
+            requested_timeout = float(request.timeout_sec or 12.0)
+        except (TypeError, ValueError) as exc:
+            raise MeshConnectionError("MeshCore send timeout is invalid.") from exc
+        if not math.isfinite(requested_timeout):
+            raise MeshConnectionError("MeshCore send timeout must be finite.")
+        timeout_sec = max(1.0, min(30.0, requested_timeout))
+        if kind == "channel":
+            try:
+                channel_index = int(str(request.channel_id or "").strip())
+            except ValueError as exc:
+                raise MeshConnectionError("Choose a numeric MeshCore channel before sending.") from exc
+            if channel_index < 0 or channel_index > 7:
+                raise MeshConnectionError("MeshCore channel must be between 0 and 7.")
+            event = runner.run(
+                client.send_channel_message(channel_index, text),
+                timeout_sec=timeout_sec,
+            )
+            if _meshcore_event_is_error(event):
+                return _meshcore_failed_send_result(request, detail=_meshcore_event_detail(event), retryable=True)
+            completed_at = utc_now()
+            return MeshSendResult(
+                request_id=request.request_id,
+                adapter_id=self.adapter_id,
+                transport=self.transport_name,
+                destination_kind=kind,
+                channel_id=str(channel_index),
+                state="sent",
+                requested_at=request.requested_at,
+                accepted_at=accepted_at,
+                completed_at=completed_at,
+                detail="MeshCore Companion confirmed the channel message command.",
+                evidence="companion_command_complete",
+                raw=_meshcore_event_payload(event),
+            )
+        if kind != "direct":
+            raise MeshConnectionError("Choose a MeshCore channel or direct-node destination.")
+        destination = str(request.destination_id or "").strip()
+        if not destination:
+            raise MeshConnectionError("Choose a MeshCore node for a direct message.")
+        try:
+            event = runner.run(
+                client.send_direct_message(
+                    destination,
+                    text,
+                    require_ack=bool(request.require_ack),
+                    timeout_sec=timeout_sec,
+                ),
+                timeout_sec=timeout_sec + 1.0,
+            )
+        except ValueError as exc:
+            raise MeshConnectionError("MeshCore direct destination must be a valid public-key hex prefix.") from exc
+        if event is None:
+            return MeshSendResult(
+                request_id=request.request_id,
+                adapter_id=self.adapter_id,
+                transport=self.transport_name,
+                destination_kind=kind,
+                destination_id=destination,
+                state="failed",
+                requested_at=request.requested_at,
+                accepted_at=accepted_at,
+                completed_at=utc_now(),
+                detail="MeshCore did not return the requested node acknowledgement before the bounded retry limit.",
+                retryable=True,
+                evidence="ack_timeout",
+            )
+        if _meshcore_event_is_error(event):
+            return _meshcore_failed_send_result(request, detail=_meshcore_event_detail(event), retryable=True)
+        completed_at = utc_now()
+        payload = _meshcore_event_payload(event)
+        native_id = str(payload.get("expected_ack") or payload.get("code") or "")
+        state = "acked" if request.require_ack else "sent"
+        return MeshSendResult(
+            request_id=request.request_id,
+            adapter_id=self.adapter_id,
+            transport=self.transport_name,
+            destination_kind=kind,
+            destination_id=destination,
+            state=state,
+            native_message_id=native_id,
+            requested_at=request.requested_at,
+            accepted_at=accepted_at,
+            completed_at=completed_at,
+            acknowledged_at=completed_at if request.require_ack else None,
+            detail=(
+                "MeshCore returned a matching node acknowledgement for the direct message."
+                if request.require_ack
+                else "MeshCore Companion confirmed the direct-message command."
+            ),
+            evidence="node_ack" if request.require_ack else "companion_command_complete",
+            raw=payload,
+        )
+
     async def _connect_python_client(self) -> None:
         module = import_module("meshcore")
         meshcore_class = getattr(module, "MeshCore", None)
@@ -1180,6 +1355,48 @@ class MeshCorePythonAdapter(MeshCoreBleAdapter):
 def _meshcore_event_is_error(event: object) -> bool:
     event_type = getattr(event, "type", None)
     return str(getattr(event_type, "name", event_type) or "").strip().upper() == "ERROR"
+
+
+def _meshcore_event_payload(event: object) -> dict[str, object]:
+    payload = getattr(event, "payload", None)
+    if not isinstance(payload, Mapping):
+        return {}
+    result: dict[str, object] = {}
+    for key, value in payload.items():
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            result[str(key)] = bytes(value).hex()
+        elif isinstance(value, (str, int, float, bool)) or value is None:
+            result[str(key)] = value
+        else:
+            result[str(key)] = str(value)
+    return result
+
+
+def _meshcore_event_detail(event: object) -> str:
+    payload = _meshcore_event_payload(event)
+    return str(payload.get("reason") or payload.get("error") or "MeshCore Companion rejected the send command.")
+
+
+def _meshcore_failed_send_result(
+    request: MeshSendRequest,
+    *,
+    detail: str,
+    retryable: bool,
+) -> MeshSendResult:
+    return MeshSendResult(
+        request_id=request.request_id,
+        adapter_id=request.adapter_id,
+        transport="meshcore",
+        destination_kind=request.destination_kind,
+        destination_id=request.destination_id,
+        channel_id=request.channel_id,
+        state="failed",
+        requested_at=request.requested_at,
+        completed_at=utc_now(),
+        detail=detail,
+        retryable=retryable,
+        evidence="companion_error",
+    )
 
 
 def _meshcore_no_handshake_message(config: MeshConnectionConfig) -> str:

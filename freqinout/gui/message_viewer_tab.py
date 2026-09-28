@@ -173,6 +173,13 @@ from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.logger import log
 from freqinout.core.perf_metrics import emit_span, span as perf_span
 from freqinout.core.plan_context_service import PlanContextService
+from freqinout.core.mesh.models import MeshSendRequest, MeshSendResult
+from freqinout.core.mesh.settings import (
+    default_mesh_db_path,
+    load_saved_mesh_connection_configs,
+    mesh_outbound_capability,
+)
+from freqinout.core.mesh.store import list_mesh_channel_policies, list_mesh_health, list_mesh_nodes
 from freqinout.core.regional_intelligence import STATE_TO_FEMA_REGION, US_STATE_ABBR_FROM_NAME
 from freqinout.core.sqlite_utils import connect_sqlite, connect_sqlite_readonly, fetch_all, table_exists
 from freqinout.core.sqlite_fingerprint import sqlite_identifier, sqlite_table_fingerprint
@@ -3744,6 +3751,7 @@ class MessageHeaderWithCheckbox(QHeaderView):
 
 class MessageViewerTab(QWidget):
     busyStateChanged = Signal(bool)
+    meshSendRequested = Signal(object)
     # The endpoint worker is primary-owned.  The Compose UI only emits a
     # snapshot request and accepts a matching completed result; it never makes
     # a JS8 API call from a paint, preview, or editing path.
@@ -3912,6 +3920,10 @@ class MessageViewerTab(QWidget):
         self._compose_stage_inflight: bool = False
         self._compose_send_thread: QThread | None = None
         self._compose_send_worker: _ComposeJs8SendWorker | None = None
+        self._compose_mesh_configs: list[object] = []
+        self._compose_mesh_health_by_adapter: dict[str, dict[str, object]] = {}
+        self._compose_mesh_send_inflight = False
+        self._compose_mesh_request_id = ""
         self._compose_send_inflight: bool = False
         self._compose_send_context: Dict[str, object] = {}
         self._compose_send_retry_pending: Dict[str, object] = {}
@@ -6735,7 +6747,7 @@ class MessageViewerTab(QWidget):
         self.compose_mode_selector.setTextElideMode(Qt.ElideNone)
         self.compose_mode_selector.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.compose_mode_selector.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        for label in ("FLMsg / FLAmp", "JS8Call", "FIOSpotter", "CommStat RF"):
+        for label in ("FLMsg / FLAmp", "JS8Call", "FIOSpotter", "CommStat RF", "Local Mesh"):
             item = QListWidgetItem(label)
             item.setTextAlignment(Qt.AlignCenter)
             self.compose_mode_selector.addItem(item)
@@ -6944,6 +6956,49 @@ class MessageViewerTab(QWidget):
         self.compose_js8_auth_row_widget.setVisible(False)
         setup_layout.addWidget(self.compose_js8_auth_row_widget)
 
+        self.compose_mesh_setup_widget = QWidget()
+        mesh_setup_layout = QGridLayout(self.compose_mesh_setup_widget)
+        mesh_setup_layout.setContentsMargins(0, 0, 0, 0)
+        mesh_setup_layout.setHorizontalSpacing(8)
+        mesh_setup_layout.setVerticalSpacing(6)
+        self.compose_mesh_source_combo = QComboBox()
+        self.compose_mesh_source_combo.setMinimumWidth(220)
+        self.compose_mesh_source_combo.currentIndexChanged.connect(self._on_compose_mesh_source_changed)
+        self.compose_mesh_refresh_btn = QPushButton("Refresh")
+        self.compose_mesh_refresh_btn.setToolTip("Refresh connected, send-enabled Local Mesh destinations.")
+        self.compose_mesh_refresh_btn.clicked.connect(lambda: self._refresh_compose_mesh_targets(force=True))
+        self.compose_mesh_destination_kind_combo = QComboBox()
+        self.compose_mesh_destination_kind_combo.addItem("Channel", "channel")
+        self.compose_mesh_destination_kind_combo.addItem("Direct node", "direct")
+        self.compose_mesh_destination_kind_combo.currentIndexChanged.connect(self._on_compose_mesh_destination_changed)
+        self.compose_mesh_channel_combo = QComboBox()
+        self.compose_mesh_channel_combo.setMinimumWidth(180)
+        self.compose_mesh_channel_combo.currentIndexChanged.connect(self._update_compose_preview)
+        self.compose_mesh_node_combo = QComboBox()
+        self.compose_mesh_node_combo.setMinimumWidth(220)
+        self.compose_mesh_node_combo.currentIndexChanged.connect(self._update_compose_preview)
+        self.compose_mesh_ack_chk = QCheckBox("Request node acknowledgement")
+        self.compose_mesh_ack_chk.setChecked(True)
+        self.compose_mesh_ack_chk.setToolTip(
+            "Request protocol acknowledgement for a direct node message. This does not mean a person read it."
+        )
+        self.compose_mesh_ack_chk.stateChanged.connect(self._update_compose_preview)
+        self.compose_mesh_hint_label = QLabel("")
+        self.compose_mesh_hint_label.setWordWrap(True)
+        self.compose_mesh_hint_label.setStyleSheet(label_style("muted", resolve_theme(self.settings), weight=600))
+        mesh_setup_layout.addWidget(QLabel("Connection"), 0, 0)
+        mesh_setup_layout.addWidget(self.compose_mesh_source_combo, 0, 1)
+        mesh_setup_layout.addWidget(self.compose_mesh_refresh_btn, 0, 2)
+        mesh_setup_layout.addWidget(QLabel("Destination"), 1, 0)
+        mesh_setup_layout.addWidget(self.compose_mesh_destination_kind_combo, 1, 1)
+        mesh_setup_layout.addWidget(self.compose_mesh_channel_combo, 2, 1, 1, 2)
+        mesh_setup_layout.addWidget(self.compose_mesh_node_combo, 3, 1, 1, 2)
+        mesh_setup_layout.addWidget(self.compose_mesh_ack_chk, 4, 1, 1, 2)
+        mesh_setup_layout.addWidget(self.compose_mesh_hint_label, 5, 0, 1, 3)
+        mesh_setup_layout.setColumnStretch(1, 1)
+        self.compose_mesh_setup_widget.setVisible(False)
+        setup_layout.addWidget(self.compose_mesh_setup_widget)
+
         self.compose_js8_plain_row_widget = QWidget()
         # The former fixed floor (self.compose_js8_plain_row_widget.setMinimumHeight(120))
         # is intentionally replaced by the active grid/font-derived floor.
@@ -7141,6 +7196,22 @@ class MessageViewerTab(QWidget):
         self.compose_commstat_scroll.setFrameShape(QFrame.NoFrame)
         self.compose_commstat_scroll.setWidget(self.compose_commstat_row_widget)
         self._refresh_compose_commstat_content_geometry()
+
+        self.compose_mesh_message_widget = QWidget()
+        mesh_message_layout = QVBoxLayout(self.compose_mesh_message_widget)
+        mesh_message_layout.setContentsMargins(0, 0, 0, 0)
+        mesh_message_layout.setSpacing(6)
+        self.compose_mesh_text_edit = QTextEdit()
+        self.compose_mesh_text_edit.setAcceptRichText(False)
+        self.compose_mesh_text_edit.setPlaceholderText("Short local mesh message")
+        self.compose_mesh_text_edit.setToolTip("The exact UTF-8 payload shown in Preview is sent to the selected mesh destination.")
+        self.compose_mesh_text_edit.textChanged.connect(self._update_compose_preview)
+        mesh_message_layout.addWidget(self.compose_mesh_text_edit)
+        self.compose_mesh_message_widget.setVisible(False)
+        self.compose_mesh_scroll = QScrollArea()
+        self.compose_mesh_scroll.setWidgetResizable(True)
+        self.compose_mesh_scroll.setFrameShape(QFrame.NoFrame)
+        self.compose_mesh_scroll.setWidget(self.compose_mesh_message_widget)
 
         self.compose_expect_row_widget = QWidget()
         # Spotter's help text is intentionally allowed to wrap.  A fixed
@@ -7435,6 +7506,7 @@ class MessageViewerTab(QWidget):
         self.compose_rf_fields_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.compose_rf_fields_stack.addWidget(self.compose_js8_plain_scroll)
         self.compose_rf_fields_stack.addWidget(self.compose_commstat_scroll)
+        self.compose_rf_fields_stack.addWidget(self.compose_mesh_scroll)
         self.compose_rf_fields_stack.setVisible(False)
         field_layout.addWidget(self.compose_rf_fields_stack)
         splitter.addWidget(field_box)
@@ -7478,6 +7550,11 @@ class MessageViewerTab(QWidget):
         self.compose_send_js8_btn.clicked.connect(self._send_compose_js8_spotter)
         self.compose_send_js8_btn.setVisible(False)
         action_row.addWidget(self.compose_send_js8_btn)
+        self.compose_send_mesh_btn = QPushButton("Send Mesh Message")
+        self.compose_send_mesh_btn.setToolTip("Send the exact preview through the selected connected Local Mesh device.")
+        self.compose_send_mesh_btn.clicked.connect(self._send_compose_mesh_message)
+        self.compose_send_mesh_btn.setVisible(False)
+        action_row.addWidget(self.compose_send_mesh_btn)
         self.compose_open_flmsg_btn = QPushButton("Open FLMsg")
         self.compose_open_flmsg_btn.clicked.connect(lambda: self._launch_compose_app("FLMsg"))
         action_row.addWidget(self.compose_open_flmsg_btn)
@@ -7593,7 +7670,7 @@ class MessageViewerTab(QWidget):
         mode = str(mode or "nbems")
         width = max(1, int(viewport_width or 0))
         compact_threshold = 920 if in_workbench else int(self._responsive_compact_width)
-        if width < compact_threshold or mode not in {"nbems", "js8", "spotter", "commstat_rf"}:
+        if width < compact_threshold or mode not in {"nbems", "js8", "spotter", "commstat_rf", "mesh"}:
             return False
         rail_minimum = self._compose_sidebar_readable_minimum_width(
             mode,
@@ -7616,6 +7693,7 @@ class MessageViewerTab(QWidget):
             "commstat_rf": 440 if in_workbench else 420,
             "js8": 440 if in_workbench else 420,
             "nbems": 430 if in_workbench else 400,
+            "mesh": 430 if in_workbench else 400,
         }.get(mode, 400)
         # The JS8 selection cue owns two actions on its second row.  Derive
         # their required width from the active theme/font rather than assuming
@@ -9171,7 +9249,13 @@ class MessageViewerTab(QWidget):
         self._store_compose_form_draft()
         self._store_compose_mode_draft(previous_mode)
         idx = int(index or 0)
-        self._compose_mode = "js8" if idx == 1 else "spotter" if idx == 2 else "commstat_rf" if idx == 3 else "nbems"
+        self._compose_mode = (
+            "js8" if idx == 1 else
+            "spotter" if idx == 2 else
+            "commstat_rf" if idx == 3 else
+            "mesh" if idx == 4 else
+            "nbems"
+        )
         self._compose_active_form_key = ""
         self._compose_last_stage_paths = []
         self._compose_radio_targets_loaded = False
@@ -9190,6 +9274,236 @@ class MessageViewerTab(QWidget):
         self._queue_compose_spotter_scroll_reset()
         self._refresh_compose_js8_selected_target_cue()
         self.request_compose_js8_selected_target_refresh()
+
+    def _refresh_compose_mesh_targets(self, *, force: bool = False) -> None:
+        combo = getattr(self, "compose_mesh_source_combo", None)
+        if not isinstance(combo, QComboBox):
+            return
+        previous_id = ""
+        current = combo.currentData()
+        if current is not None:
+            previous_id = str(getattr(current, "adapter_id", "") or "")
+        try:
+            configs = [
+                config
+                for config in load_saved_mesh_connection_configs(self.settings)
+                if config.enabled
+                and config.send_enabled
+                and mesh_outbound_capability(config.protocol, config.connection_type).supported
+            ]
+        except Exception as exc:
+            configs = []
+            log.debug("MessageViewer: failed loading mesh compose connections: %s", exc)
+        health_by_adapter: dict[str, dict[str, object]] = {}
+        try:
+            health_by_adapter = {
+                str(row.get("adapter_id") or ""): dict(row)
+                for row in list_mesh_health(default_mesh_db_path())
+                if str(row.get("adapter_id") or "")
+            }
+        except Exception:
+            health_by_adapter = {}
+        self._compose_mesh_configs = list(configs)
+        self._compose_mesh_health_by_adapter = health_by_adapter
+        blocked = combo.blockSignals(True)
+        try:
+            combo.clear()
+            if not configs:
+                combo.addItem("No send-enabled mesh connection", None)
+            for config in configs:
+                health = health_by_adapter.get(config.adapter_id, {})
+                state = "Connected" if bool(health.get("connected")) else "Offline"
+                label = f"{config.display_name} · {config.protocol.title()} · {state}"
+                combo.addItem(label, config)
+            selected_index = 0
+            for index in range(combo.count()):
+                item = combo.itemData(index)
+                if previous_id and str(getattr(item, "adapter_id", "") or "") == previous_id:
+                    selected_index = index
+                    break
+            combo.setCurrentIndex(selected_index)
+        finally:
+            combo.blockSignals(blocked)
+        self._on_compose_mesh_source_changed()
+
+    def _selected_compose_mesh_config(self):
+        combo = getattr(self, "compose_mesh_source_combo", None)
+        return combo.currentData() if isinstance(combo, QComboBox) else None
+
+    def _on_compose_mesh_source_changed(self, *_args) -> None:
+        config = self._selected_compose_mesh_config()
+        channel_combo = getattr(self, "compose_mesh_channel_combo", None)
+        node_combo = getattr(self, "compose_mesh_node_combo", None)
+        if not isinstance(channel_combo, QComboBox) or not isinstance(node_combo, QComboBox):
+            return
+        channel_combo.blockSignals(True)
+        node_combo.blockSignals(True)
+        try:
+            channel_combo.clear()
+            node_combo.clear()
+            if config is None:
+                channel_combo.addItem("No reviewed channel available", None)
+                node_combo.addItem("No known node available", None)
+            else:
+                try:
+                    policies = list_mesh_channel_policies(default_mesh_db_path(), adapter_id=config.adapter_id)
+                except Exception:
+                    policies = []
+                for policy in policies:
+                    if str(policy.review_state or "").lower() != "accepted":
+                        continue
+                    if str(policy.channel_role or "").lower() == "direct":
+                        continue
+                    if str(policy.key_state or "").lower() in {"missing", "needed", "unknown"} and str(policy.channel_privacy or "").lower() not in {"public", "open"}:
+                        continue
+                    channel_combo.addItem(f"{policy.channel_name} · channel {policy.channel_id}", str(policy.channel_id))
+                if not channel_combo.count():
+                    channel_combo.addItem("No reviewed channel available", None)
+                try:
+                    nodes = list_mesh_nodes(default_mesh_db_path(), adapter_id=config.adapter_id, limit=200)
+                except Exception:
+                    nodes = []
+                for node in nodes:
+                    node_id = str(node.get("node_id") or "").strip()
+                    public_key = str(node.get("public_key_or_hash") or "").strip()
+                    destination_id = public_key if str(config.protocol).lower() == "meshcore" else node_id
+                    if not destination_id:
+                        continue
+                    display = str(node.get("callsign") or node.get("short_name") or node.get("long_name") or node_id).strip()
+                    suffix = destination_id[:12]
+                    node_combo.addItem(f"{display} · {suffix}", destination_id)
+                if not node_combo.count():
+                    node_combo.addItem("No known node available", None)
+        finally:
+            channel_combo.blockSignals(False)
+            node_combo.blockSignals(False)
+        self._on_compose_mesh_destination_changed()
+
+    def _on_compose_mesh_destination_changed(self, *_args) -> None:
+        kind = str(self._compose_combo_data(getattr(self, "compose_mesh_destination_kind_combo", None)) or "channel")
+        config = self._selected_compose_mesh_config()
+        meshtastic_direct = bool(
+            kind == "direct" and str(getattr(config, "protocol", "") or "").strip().lower() == "meshtastic"
+        )
+        channel = getattr(self, "compose_mesh_channel_combo", None)
+        node = getattr(self, "compose_mesh_node_combo", None)
+        ack = getattr(self, "compose_mesh_ack_chk", None)
+        if isinstance(channel, QComboBox):
+            channel.setVisible(kind == "channel" or meshtastic_direct)
+        if isinstance(node, QComboBox):
+            node.setVisible(kind == "direct")
+        if isinstance(ack, QCheckBox):
+            ack.setVisible(kind == "direct")
+        self._update_compose_preview()
+
+    def _compose_mesh_request(self) -> MeshSendRequest | None:
+        config = self._selected_compose_mesh_config()
+        if config is None:
+            return None
+        kind = str(self._compose_combo_data(getattr(self, "compose_mesh_destination_kind_combo", None)) or "channel")
+        channel_id = str(self._compose_combo_data(getattr(self, "compose_mesh_channel_combo", None)) or "")
+        destination_id = str(self._compose_combo_data(getattr(self, "compose_mesh_node_combo", None)) or "")
+        text_widget = getattr(self, "compose_mesh_text_edit", None)
+        text = text_widget.toPlainText() if isinstance(text_widget, QTextEdit) else ""
+        protocol = str(getattr(config, "protocol", "") or "").strip().lower()
+        if (
+            not text.strip()
+            or (kind == "channel" and not channel_id)
+            or (kind == "direct" and not destination_id)
+            or (kind == "direct" and protocol == "meshtastic" and not channel_id)
+        ):
+            return None
+        return MeshSendRequest(
+            adapter_id=config.adapter_id,
+            text=text,
+            destination_kind=kind,
+            destination_id=destination_id if kind == "direct" else "",
+            channel_id=channel_id if kind == "channel" or protocol == "meshtastic" else "0",
+            require_ack=bool(kind == "direct" and getattr(self, "compose_mesh_ack_chk", None).isChecked()),
+        )
+
+    def _send_compose_mesh_message(self) -> None:
+        if self._compose_mesh_send_inflight:
+            self._set_compose_status("A mesh send is already in progress.", role="info")
+            return
+        request = self._compose_mesh_request()
+        config = self._selected_compose_mesh_config()
+        if request is None or config is None:
+            self._set_compose_status("Choose a connected mesh connection, destination, and message before sending.", role="warning")
+            return
+        health = self._compose_mesh_health_by_adapter.get(config.adapter_id, {})
+        if not bool(health.get("connected")):
+            self._set_compose_status("Connect the selected Local Mesh device before sending.", role="warning")
+            return
+        destination = (
+            self.compose_mesh_node_combo.currentText()
+            if request.destination_kind == "direct"
+            else self.compose_mesh_channel_combo.currentText()
+        )
+        if request.destination_kind == "direct" and str(config.protocol).lower() == "meshtastic":
+            destination = f"{destination} via {self.compose_mesh_channel_combo.currentText()}"
+        answer = QMessageBox.question(
+            self,
+            "Send Mesh Message",
+            f"Send through {config.display_name} to {destination}?\n\n{request.text}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            self._set_compose_status("Mesh send cancelled.", role="info")
+            return
+        self._compose_mesh_send_inflight = True
+        self._compose_mesh_request_id = request.request_id
+        self._set_compose_status("Sending through the selected mesh connection…", role="info")
+        self._update_compose_preview()
+        self.meshSendRequested.emit(request)
+
+    def on_mesh_send_result(self, result: object) -> None:
+        if not isinstance(result, MeshSendResult):
+            return
+        if self._compose_mesh_request_id and result.request_id != self._compose_mesh_request_id:
+            return
+        self._compose_mesh_send_inflight = False
+        self._compose_mesh_request_id = ""
+        if result.accepted:
+            evidence = {
+                "acked": "Acknowledged by the destination node",
+                "sent": "Completed by the mesh Companion",
+                "accepted": "Accepted by the local mesh API",
+            }.get(result.state, "Accepted")
+            self._set_compose_status(f"{evidence}. {result.detail}".strip(), role="success")
+        elif result.state == "cancelled":
+            self._set_compose_status(f"Mesh send cancelled: {result.detail}", role="warning")
+        else:
+            self._set_compose_status(f"Mesh send failed: {result.detail}", role="warning")
+        self._update_compose_preview()
+
+    def on_mesh_health_ready(self, health: object) -> None:
+        """Refresh Compose gating from the live worker without polling during render."""
+
+        adapter_id = str(getattr(health, "adapter_id", "") or "").strip()
+        if not adapter_id:
+            return
+        self._compose_mesh_health_by_adapter[adapter_id] = {
+            "adapter_id": adapter_id,
+            "connected": bool(getattr(health, "connected", False)),
+            "transport": str(getattr(health, "transport", "") or ""),
+            "last_error": str(getattr(health, "last_error", "") or ""),
+        }
+        combo = getattr(self, "compose_mesh_source_combo", None)
+        if isinstance(combo, QComboBox):
+            for index in range(combo.count()):
+                config = combo.itemData(index)
+                if str(getattr(config, "adapter_id", "") or "") != adapter_id:
+                    continue
+                state = "Connected" if bool(getattr(health, "connected", False)) else "Offline"
+                combo.setItemText(
+                    index,
+                    f"{config.display_name} · {str(config.protocol).title()} · {state}",
+                )
+                break
+        if str(getattr(self, "_compose_mode", "") or "") == "mesh":
+            self._update_compose_preview()
 
     @staticmethod
     def _compose_combo_text(combo: object) -> str:
@@ -9317,6 +9631,16 @@ class MessageViewerTab(QWidget):
                     )
                 },
             }
+        elif mode == "mesh":
+            config = self._selected_compose_mesh_config()
+            draft = {
+                "adapter_id": str(getattr(config, "adapter_id", "") or ""),
+                "destination_kind": self._compose_combo_data(getattr(self, "compose_mesh_destination_kind_combo", None)),
+                "channel_id": self._compose_combo_data(getattr(self, "compose_mesh_channel_combo", None)),
+                "destination_id": self._compose_combo_data(getattr(self, "compose_mesh_node_combo", None)),
+                "require_ack": bool(getattr(getattr(self, "compose_mesh_ack_chk", None), "isChecked", lambda: False)()),
+                "text": getattr(getattr(self, "compose_mesh_text_edit", None), "toPlainText", lambda: "")(),
+            }
         self._compose_mode_drafts[mode] = draft
 
     def _restore_compose_form_identity(self, identity: object) -> None:
@@ -9422,6 +9746,30 @@ class MessageViewerTab(QWidget):
                 self._compose_set_combo_text((getattr(self, "compose_commstat_status_widgets", {}) or {}).get(key), value)
             for name, value in dict(draft.get("brevity_builder", {}) or {}).items():
                 self._compose_set_combo_data(getattr(self, name, None), value)
+        elif mode == "mesh":
+            source_combo = getattr(self, "compose_mesh_source_combo", None)
+            adapter_id = str(draft.get("adapter_id") or "")
+            if isinstance(source_combo, QComboBox) and adapter_id:
+                for index in range(source_combo.count()):
+                    config = source_combo.itemData(index)
+                    if str(getattr(config, "adapter_id", "") or "") == adapter_id:
+                        source_combo.setCurrentIndex(index)
+                        break
+            self._compose_set_combo_data(
+                getattr(self, "compose_mesh_destination_kind_combo", None),
+                draft.get("destination_kind"),
+            )
+            self._on_compose_mesh_source_changed()
+            self._compose_set_combo_data(getattr(self, "compose_mesh_channel_combo", None), draft.get("channel_id"))
+            self._compose_set_combo_data(getattr(self, "compose_mesh_node_combo", None), draft.get("destination_id"))
+            self._compose_set_checked(getattr(self, "compose_mesh_ack_chk", None), draft.get("require_ack"))
+            widget = getattr(self, "compose_mesh_text_edit", None)
+            if isinstance(widget, QTextEdit):
+                blocked = widget.blockSignals(True)
+                try:
+                    widget.setPlainText(str(draft.get("text") or ""))
+                finally:
+                    widget.blockSignals(blocked)
 
     def _refresh_compose_setup_discovery(self, *, force: bool = False) -> None:
         """Refresh setup-only sources outside local payload preview updates.
@@ -9431,11 +9779,14 @@ class MessageViewerTab(QWidget):
         responsiveness layer can replace these calls with cached worker results
         without changing payload rendering or action behavior.
         """
+        mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
+        if mode == "mesh":
+            self._refresh_compose_mesh_targets(force=force)
+            return
         self._refresh_compose_radio_targets(force=force)
         self._refresh_compose_message_folder_options(force=force)
         self._refresh_compose_destination_plans()
         self._install_compose_target_completers()
-        mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
         bbs_selected = bool(
             mode == "nbems"
             and hasattr(self, "compose_publish_bbs_chk")
@@ -11642,7 +11993,9 @@ class MessageViewerTab(QWidget):
             self._compose_spotter_requested_form_code = requested_spotter_form
         if hasattr(self, "compose_mode_selector"):
             row = (
-                3
+                4
+                if mode in {"mesh", "meshcore", "meshtastic"}
+                else 3
                 if mode in {"commstat", "commstat_rf"}
                 else 2
                 if mode in {"spotter", "js8spotter", "fiospotter"}
@@ -11661,6 +12014,24 @@ class MessageViewerTab(QWidget):
         body = str(data.get("body") or data.get("message") or "").strip()
         if body and hasattr(self, "compose_js8_plain_text_edit"):
             self.compose_js8_plain_text_edit.setPlainText(body)
+        if mode in {"mesh", "meshcore", "meshtastic"}:
+            self._refresh_compose_mesh_targets(force=True)
+            adapter_id = str(data.get("adapter_id") or "")
+            source_combo = getattr(self, "compose_mesh_source_combo", None)
+            if isinstance(source_combo, QComboBox) and adapter_id:
+                for index in range(source_combo.count()):
+                    config = source_combo.itemData(index)
+                    if str(getattr(config, "adapter_id", "") or "") == adapter_id:
+                        source_combo.setCurrentIndex(index)
+                        break
+            destination_kind = str(data.get("destination_kind") or ("direct" if data.get("destination_id") else "channel"))
+            self._compose_set_combo_data(getattr(self, "compose_mesh_destination_kind_combo", None), destination_kind)
+            self._on_compose_mesh_source_changed()
+            self._compose_set_combo_data(getattr(self, "compose_mesh_channel_combo", None), str(data.get("channel_id") or ""))
+            self._compose_set_combo_data(getattr(self, "compose_mesh_node_combo", None), str(data.get("destination_id") or data.get("node_id") or ""))
+            if body and hasattr(self, "compose_mesh_text_edit"):
+                self.compose_mesh_text_edit.setPlainText(body)
+            self._on_compose_mesh_destination_changed()
         expect_entry_id = int(data.get("expect_entry_id", 0) or 0)
         if mode in {"spotter", "js8spotter", "fiospotter"} and expect_entry_id > 0:
             self._refresh_compose_spotter_expect_entries()
@@ -13115,6 +13486,17 @@ class MessageViewerTab(QWidget):
                 for combo in (getattr(self, "compose_commstat_status_widgets", {}) or {}).values():
                     self._compose_set_combo_text(combo, "Unknown")
                 self._refresh_compose_commstat_defaults()
+            elif mode == "mesh":
+                self._compose_set_combo_data(getattr(self, "compose_mesh_destination_kind_combo", None), "channel")
+                self._compose_set_checked(getattr(self, "compose_mesh_ack_chk", None), True)
+                widget = getattr(self, "compose_mesh_text_edit", None)
+                if isinstance(widget, QTextEdit):
+                    blocked = widget.blockSignals(True)
+                    try:
+                        widget.clear()
+                    finally:
+                        widget.blockSignals(blocked)
+                self._on_compose_mesh_destination_changed()
         finally:
             self._compose_restoring_mode_draft = False
         self._update_compose_preview()
@@ -13364,7 +13746,8 @@ class MessageViewerTab(QWidget):
         early_js8_mode = current_compose_mode == "js8"
         early_spotter_mode = current_compose_mode == "spotter"
         early_commstat_mode = current_compose_mode == "commstat_rf"
-        early_nbems_mode = not (early_js8_mode or early_spotter_mode or early_commstat_mode)
+        early_mesh_mode = current_compose_mode == "mesh"
+        early_nbems_mode = not (early_js8_mode or early_spotter_mode or early_commstat_mode or early_mesh_mode)
         bbs_selected = bool(
             early_nbems_mode
             and hasattr(self, "compose_publish_bbs_chk")
@@ -13416,6 +13799,7 @@ class MessageViewerTab(QWidget):
         js8_mode = str(getattr(self, "_compose_mode", "nbems") or "nbems") == "js8"
         spotter_mode = str(getattr(self, "_compose_mode", "nbems") or "nbems") == "spotter"
         commstat_mode = str(getattr(self, "_compose_mode", "nbems") or "nbems") == "commstat_rf"
+        mesh_mode = str(getattr(self, "_compose_mode", "nbems") or "nbems") == "mesh"
         spotter_saved_selected = bool(
             int(getattr(self, "_compose_spotter_expect_active_id", 0) or 0) > 0
             and str(getattr(self, "_compose_spotter_working_response", "") or "").strip()
@@ -13451,6 +13835,15 @@ class MessageViewerTab(QWidget):
             self.compose_summary_label.setToolTip(
                 "FIOSpotter compose drafts an MCForm command for JS8Call. FIO sends only after JS8Call target-state preflight passes."
             )
+        mesh_request = self._compose_mesh_request() if mesh_mode else None
+        mesh_config = self._selected_compose_mesh_config() if mesh_mode else None
+        if mesh_mode:
+            source_label = str(getattr(mesh_config, "display_name", "") or "No send-enabled mesh connection")
+            protocol_label = str(getattr(mesh_config, "protocol", "mesh") or "mesh").title()
+            self.compose_summary_label.setText(f"Send From: {source_label}  |  {protocol_label}")
+            self.compose_summary_label.setToolTip(
+                "Local Mesh sends use the selected connected adapter and preserve protocol-specific channel or node addressing."
+            )
         if hasattr(self, "compose_radio_label"):
             self.compose_radio_label.setText("Send From" if (js8_mode or spotter_mode or commstat_mode) else "Compose For")
         if hasattr(self, "compose_radio_combo"):
@@ -13458,13 +13851,15 @@ class MessageViewerTab(QWidget):
             self.compose_radio_combo.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             self.compose_radio_combo.setVisible(False)
         if hasattr(self, "compose_radio_chip_container"):
-            self.compose_radio_chip_container.setVisible(bool(self._compose_radio_targets))
+            self.compose_radio_chip_container.setVisible(bool(self._compose_radio_targets) and not mesh_mode)
         if hasattr(self, "compose_radio_row_widget"):
-            self.compose_radio_row_widget.setVisible(bool(self._compose_radio_targets))
+            self.compose_radio_row_widget.setVisible(bool(self._compose_radio_targets) and not mesh_mode)
         self._refresh_compose_context_label()
         if hasattr(self, "compose_refresh_radios_btn"):
             self.compose_refresh_radios_btn.setVisible(bool(getattr(self, "_compose_in_workbench", False)))
-        nbems_mode = not (js8_mode or spotter_mode or commstat_mode)
+        nbems_mode = not (js8_mode or spotter_mode or commstat_mode or mesh_mode)
+        if hasattr(self, "compose_mesh_setup_widget"):
+            self.compose_mesh_setup_widget.setVisible(mesh_mode)
         if hasattr(self, "compose_form_row_widget"):
             self.compose_form_row_widget.setVisible(nbems_mode or spotter_mode)
         if hasattr(self, "compose_header_row_widget"):
@@ -13483,9 +13878,9 @@ class MessageViewerTab(QWidget):
             self.compose_spotter_category_combo.setVisible(spotter_mode)
         if hasattr(self, "compose_form_label"):
             self.compose_form_label.setText("Spotter Form" if spotter_mode else "Form")
-            self.compose_form_label.setVisible(not (js8_mode or commstat_mode))
+            self.compose_form_label.setVisible(not (js8_mode or commstat_mode or mesh_mode))
         if hasattr(self, "compose_form_combo"):
-            self.compose_form_combo.setVisible(not (js8_mode or commstat_mode))
+            self.compose_form_combo.setVisible(not (js8_mode or commstat_mode or mesh_mode))
         brevity_enabled = bool(getattr(getattr(self, "compose_commstat_brevity_chk", None), "isChecked", lambda: False)())
         if hasattr(self, "compose_js8_plain_row_widget"):
             self.compose_js8_plain_row_widget.setVisible(js8_mode)
@@ -13497,6 +13892,10 @@ class MessageViewerTab(QWidget):
         if hasattr(self, "compose_commstat_scroll"):
             self.compose_commstat_scroll.setVisible(commstat_mode)
             self.compose_commstat_scroll.setMinimumHeight(0)
+        if hasattr(self, "compose_mesh_message_widget"):
+            self.compose_mesh_message_widget.setVisible(mesh_mode)
+        if hasattr(self, "compose_mesh_scroll"):
+            self.compose_mesh_scroll.setVisible(mesh_mode)
         if hasattr(self, "compose_commstat_grid_edit"):
             self.compose_commstat_grid_edit.setVisible(commstat_mode)
         if hasattr(self, "compose_commstat_grid_label"):
@@ -13544,7 +13943,12 @@ class MessageViewerTab(QWidget):
         if hasattr(self, "compose_operator_row_widget"):
             self.compose_operator_row_widget.setVisible(nbems_mode and bool(getattr(self, "_compose_in_workbench", False)))
         if hasattr(self, "compose_output_box"):
-            self.compose_output_box.setTitle("RF Send" if commstat_mode else "JS8 Send" if (js8_mode or spotter_mode) else "Staging Output")
+            self.compose_output_box.setTitle(
+                "Mesh Send" if mesh_mode else
+                "RF Send" if commstat_mode else
+                "JS8 Send" if (js8_mode or spotter_mode) else
+                "Staging Output"
+            )
             self.compose_output_box.setMaximumHeight(16777215)
             self._refresh_compose_content_floor(self.compose_output_box)
         if hasattr(self, "compose_field_box"):
@@ -13553,6 +13957,8 @@ class MessageViewerTab(QWidget):
                 self.compose_field_box.setTitle("JS8 Message")
             elif commstat_mode:
                 self.compose_field_box.setTitle("CommStat StatRep")
+            elif mesh_mode:
+                self.compose_field_box.setTitle("Mesh Message")
             else:
                 self.compose_field_box.setTitle("FIOSpotter Form Fields" if spotter_mode else "Form Fields")
             self.compose_field_box.setMinimumHeight(0)
@@ -13560,14 +13966,16 @@ class MessageViewerTab(QWidget):
             # was replaced by _refresh_compose_content_floor above.
             self._refresh_compose_content_floor(self.compose_field_box)
         if hasattr(self, "compose_field_scroll"):
-            self.compose_field_scroll.setVisible(not (js8_mode or commstat_mode))
+            self.compose_field_scroll.setVisible(not (js8_mode or commstat_mode or mesh_mode))
             self.compose_field_scroll.setMinimumHeight(0)
         if hasattr(self, "compose_rf_fields_stack"):
-            self.compose_rf_fields_stack.setVisible(js8_mode or commstat_mode)
+            self.compose_rf_fields_stack.setVisible(js8_mode or commstat_mode or mesh_mode)
             if js8_mode and hasattr(self, "compose_js8_plain_scroll"):
                 self.compose_rf_fields_stack.setCurrentWidget(self.compose_js8_plain_scroll)
             elif commstat_mode and hasattr(self, "compose_commstat_scroll"):
                 self.compose_rf_fields_stack.setCurrentWidget(self.compose_commstat_scroll)
+            elif mesh_mode and hasattr(self, "compose_mesh_scroll"):
+                self.compose_rf_fields_stack.setCurrentWidget(self.compose_mesh_scroll)
         if hasattr(self, "compose_preview_box"):
             self.compose_preview_box.setMinimumHeight(0)
             self._refresh_compose_content_floor(self.compose_preview_box)
@@ -13650,7 +14058,7 @@ class MessageViewerTab(QWidget):
             else ComposeSendRecommendation()
         )
         metadata = []
-        if not (js8_mode or spotter_mode or commstat_mode):
+        if not (js8_mode or spotter_mode or commstat_mode or mesh_mode):
             metadata.append(f"<div><b>Compose For:</b> {html.escape(radio_label)}</div>")
             metadata.extend(
                 [
@@ -13697,6 +14105,38 @@ class MessageViewerTab(QWidget):
                     f"<div><b>RF Payload:</b> {html.escape(commstat_command or commstat_issue or 'Complete required fields to build payload.')}</div>",
                 ]
             )
+        if mesh_mode:
+            destination_kind = str(
+                self._compose_combo_data(getattr(self, "compose_mesh_destination_kind_combo", None)) or "channel"
+            )
+            destination_label = (
+                self.compose_mesh_node_combo.currentText()
+                if destination_kind == "direct" and hasattr(self, "compose_mesh_node_combo")
+                else self.compose_mesh_channel_combo.currentText()
+                if hasattr(self, "compose_mesh_channel_combo")
+                else ""
+            )
+            if (
+                destination_kind == "direct"
+                and str(getattr(mesh_config, "protocol", "") or "").lower() == "meshtastic"
+                and hasattr(self, "compose_mesh_channel_combo")
+            ):
+                destination_label = f"{destination_label} via {self.compose_mesh_channel_combo.currentText()}"
+            adapter_label = str(getattr(mesh_config, "display_name", "") or "Not selected")
+            protocol_label = str(getattr(mesh_config, "protocol", "mesh") or "mesh").title()
+            evidence_label = (
+                "Node acknowledgement requested" if destination_kind == "direct" and bool(
+                    getattr(getattr(self, "compose_mesh_ack_chk", None), "isChecked", lambda: False)()
+                ) else "Local transport acceptance"
+            )
+            metadata.extend(
+                [
+                    f"<div><b>Connection:</b> {html.escape(adapter_label)}</div>",
+                    f"<div><b>Protocol:</b> {html.escape(protocol_label)}</div>",
+                    f"<div><b>Destination:</b> {html.escape(destination_label or 'Choose a destination')}</div>",
+                    f"<div><b>Evidence:</b> {html.escape(evidence_label)}</div>",
+                ]
+            )
         if (js8_mode or spotter_mode or commstat_mode) and recommendation.reason:
             metadata.append(f"<div><b>Send Guidance:</b> {html.escape(recommendation.reason)}</div>")
         if bbs_selected:
@@ -13722,7 +14162,16 @@ class MessageViewerTab(QWidget):
                 metadata.append("<div><b>Signing Key:</b> No private signing keys found.</div>")
             else:
                 metadata.append("<div><b>Signing Key:</b> Select a private signing key.</div>")
-        if js8_mode:
+        if mesh_mode:
+            mesh_text = (
+                self.compose_mesh_text_edit.toPlainText()
+                if hasattr(self, "compose_mesh_text_edit") else ""
+            )
+            preview_body_html = (
+                "<div><b>Exact Mesh Payload Preview</b></div>"
+                f"<pre style='white-space: pre-wrap; margin-top: 6px;'>{html.escape(mesh_text or 'Enter a short mesh message.')}</pre>"
+            )
+        elif js8_mode:
             preview_body_html = (
                 "<div><b>RF Payload Preview</b></div>"
                 f"<pre style='white-space: pre-wrap; margin-top: 6px;'>{html.escape(js8_plain_command or 'Enter short JS8 text to build the payload.')}</pre>"
@@ -13737,7 +14186,7 @@ class MessageViewerTab(QWidget):
         self.compose_preview.setHtml("".join(metadata) + "<hr/>" + preview_body_html)
         self._refresh_compose_layout_geometry_if_needed()
 
-        if (js8_mode or spotter_mode or commstat_mode) and hasattr(self, "compose_destinations_label"):
+        if (js8_mode or spotter_mode or commstat_mode or mesh_mode) and hasattr(self, "compose_destinations_label"):
             self.compose_destinations_label.setText("")
         ready_plans = [plan for plan in plans if plan.ready]
         signing_ready = (not sign_flamp_selected) or bool(self._selected_compose_signing_fingerprint())
@@ -13748,11 +14197,11 @@ class MessageViewerTab(QWidget):
             and radio_target is not None
             and (not bbs_selected or bool(self._selected_compose_bbs_targets()))
             and not bool(getattr(self, "_compose_stage_inflight", False))
-            and not (js8_mode or spotter_mode or commstat_mode)
+            and not (js8_mode or spotter_mode or commstat_mode or mesh_mode)
         )
         self.compose_stage_btn.setEnabled(can_stage)
         theme = resolve_theme(self.settings)
-        self.compose_stage_btn.setVisible(not (js8_mode or spotter_mode or commstat_mode))
+        self.compose_stage_btn.setVisible(not (js8_mode or spotter_mode or commstat_mode or mesh_mode))
         self.compose_stage_btn.setStyleSheet(button_style("primary" if can_stage else "muted", theme))
         can_send_js8 = bool(
             ((js8_mode and js8_plain_command) or (spotter_selected and spotter_command) or (commstat_mode and commstat_command))
@@ -13787,6 +14236,33 @@ class MessageViewerTab(QWidget):
                     "Send the selected saved response or FIOSpotter form now through JS8Call after safety preflight."
                 )
             self.compose_send_js8_btn.setStyleSheet(button_style("primary" if can_send_js8 else "muted", theme))
+        if hasattr(self, "compose_send_mesh_btn"):
+            mesh_health = (
+                self._compose_mesh_health_by_adapter.get(str(getattr(mesh_config, "adapter_id", "") or ""), {})
+                if mesh_config is not None else {}
+            )
+            max_bytes = 160 if str(getattr(mesh_config, "protocol", "")).lower() == "meshcore" else 220
+            payload_bytes = len(str(getattr(mesh_request, "text", "") or "").encode("utf-8")) if mesh_request else 0
+            can_send_mesh = bool(
+                mesh_mode
+                and mesh_request is not None
+                and bool(mesh_health.get("connected"))
+                and payload_bytes <= max_bytes
+                and not self._compose_mesh_send_inflight
+            )
+            self.compose_send_mesh_btn.setVisible(mesh_mode)
+            self.compose_send_mesh_btn.setEnabled(can_send_mesh)
+            self.compose_send_mesh_btn.setStyleSheet(button_style("primary" if can_send_mesh else "muted", theme))
+            if hasattr(self, "compose_mesh_hint_label") and mesh_mode:
+                if mesh_config is None:
+                    hint = "Enable sending for a qualified Local Mesh connection in Settings."
+                elif not bool(mesh_health.get("connected")):
+                    hint = "This connection is offline. Connect it before sending."
+                elif payload_bytes > max_bytes:
+                    hint = f"Payload is {payload_bytes} bytes; {getattr(mesh_config, 'protocol', 'mesh').title()} is limited to {max_bytes} bytes in FIO."
+                else:
+                    hint = f"Connected · {payload_bytes}/{max_bytes} UTF-8 bytes · automatic relays remain off."
+                self.compose_mesh_hint_label.setText(hint)
         if hasattr(self, "compose_save_expect_btn"):
             self.compose_save_expect_btn.setEnabled(bool(
                 spotter_selected
@@ -13831,7 +14307,7 @@ class MessageViewerTab(QWidget):
             self.compose_open_folder_btn,
             self.compose_copy_paths_btn,
         ):
-            btn.setVisible(not (js8_mode or spotter_mode or commstat_mode))
+            btn.setVisible(not (js8_mode or spotter_mode or commstat_mode or mesh_mode))
 
     def _send_compose_js8_spotter(self) -> None:
         if self._compose_send_inflight:

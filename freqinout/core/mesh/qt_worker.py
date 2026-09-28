@@ -20,9 +20,9 @@ from freqinout.core.mesh.lifecycle import (
     take_mesh_retry_handoff,
     try_acquire_mesh_connect_attempt,
 )
-from freqinout.core.mesh.models import MeshAdapterEvent, MeshHealthSnapshot
+from freqinout.core.mesh.models import MeshAdapterEvent, MeshHealthSnapshot, MeshSendRequest, MeshSendResult, utc_now
 from freqinout.core.mesh.settings import MeshConnectionConfig
-from freqinout.core.mesh.store import MeshEventStoreSink
+from freqinout.core.mesh.store import MeshEventStoreSink, append_mesh_send_audit, mesh_send_policy_issue
 
 
 class MeshConnectionWorker(QObject):
@@ -35,6 +35,7 @@ class MeshConnectionWorker(QObject):
     channels_ready = Signal(str, tuple)
     channel_capabilities_ready = Signal(str, object)
     operation_ready = Signal(object)
+    send_ready = Signal(object)
 
     RETRY_EXHAUSTED_GUIDANCE = (
         "Reconnect paused after 3 failed attempts - select Connect to try again."
@@ -86,7 +87,8 @@ class MeshConnectionWorker(QObject):
         self._operation_cancel_events: dict[tuple[str, str], tuple[str, threading.Event]] = {}
         self._operation_lock = threading.RLock()
         self._stopped_emitted = False
-        self._store_sink = MeshEventStoreSink(db_path) if db_path is not None else None
+        self._db_path = Path(db_path) if db_path is not None else None
+        self._store_sink = MeshEventStoreSink(self._db_path) if self._db_path is not None else None
         self._manager.add_listener(self._handle_manager_event)
 
     @Slot()
@@ -239,6 +241,128 @@ class MeshConnectionWorker(QObject):
             self.refresh_channels(adapter_id)
         except Exception as exc:
             self.error_ready.emit(str(exc))
+
+    @Slot(object)
+    def send_message(self, request: object) -> None:
+        if not isinstance(request, MeshSendRequest):
+            return
+        if self._stop_event.is_set() or not self._running:
+            self.send_ready.emit(
+                MeshSendResult(
+                    request_id=request.request_id,
+                    adapter_id=request.adapter_id,
+                    transport="",
+                    destination_kind=request.destination_kind,
+                    destination_id=request.destination_id,
+                    channel_id=request.channel_id,
+                    state="failed",
+                    requested_at=request.requested_at,
+                    completed_at=utc_now(),
+                    detail="Local Mesh runtime stopped before the send could begin.",
+                    retryable=True,
+                    evidence="runtime_stopped",
+                )
+            )
+            return
+        operation = self._begin_operation(request.adapter_id, "mesh-send")
+        transport = ""
+        try:
+            transport = str(self._manager.health(request.adapter_id).transport or "")
+        except Exception:
+            pass
+        try:
+            if self._db_path is None:
+                raise RuntimeError("Mesh send audit storage is unavailable.")
+            append_mesh_send_audit(
+                self._db_path,
+                request,
+                transport=transport,
+                state="requested",
+                detail="Operator requested an outbound mesh message.",
+            )
+        except Exception as exc:
+            result = MeshSendResult(
+                request_id=request.request_id,
+                adapter_id=request.adapter_id,
+                transport=transport,
+                destination_kind=request.destination_kind,
+                destination_id=request.destination_id,
+                channel_id=request.channel_id,
+                state="failed",
+                requested_at=request.requested_at,
+                completed_at=utc_now(),
+                detail=f"Mesh send was blocked because its audit record could not be created: {exc}",
+                retryable=True,
+                evidence="audit_unavailable",
+            )
+            self._publish_operation(operation, "error", detail=result.detail)
+            self.send_ready.emit(result)
+            return
+        try:
+            policy_issue = mesh_send_policy_issue(self._db_path, request, transport=transport)
+            if policy_issue:
+                result = MeshSendResult(
+                    request_id=request.request_id,
+                    adapter_id=request.adapter_id,
+                    transport=transport,
+                    destination_kind=request.destination_kind,
+                    destination_id=request.destination_id,
+                    channel_id=request.channel_id,
+                    state="failed",
+                    requested_at=request.requested_at,
+                    completed_at=utc_now(),
+                    detail=policy_issue,
+                    retryable=False,
+                    evidence="policy_denied",
+                )
+            else:
+                result = self._manager.send_message(request)
+        except MeshOperationCancelled as exc:
+            result = MeshSendResult(
+                request_id=request.request_id,
+                adapter_id=request.adapter_id,
+                transport=transport,
+                destination_kind=request.destination_kind,
+                destination_id=request.destination_id,
+                channel_id=request.channel_id,
+                state="cancelled",
+                requested_at=request.requested_at,
+                completed_at=utc_now(),
+                detail=str(exc) or "Mesh send was cancelled.",
+                retryable=True,
+                evidence="cancelled",
+            )
+        except Exception as exc:
+            result = MeshSendResult(
+                request_id=request.request_id,
+                adapter_id=request.adapter_id,
+                transport=transport,
+                destination_kind=request.destination_kind,
+                destination_id=request.destination_id,
+                channel_id=request.channel_id,
+                state="failed",
+                requested_at=request.requested_at,
+                completed_at=utc_now(),
+                detail=str(exc),
+                retryable=True,
+                evidence="adapter_error",
+            )
+        try:
+            append_mesh_send_audit(self._db_path, request, transport=transport, result=result)
+        except Exception as exc:
+            self.error_ready.emit(f"Mesh send result audit failed: {exc}")
+            result = replace(
+                result,
+                detail=f"{result.detail} Final audit persistence failed: {exc}".strip(),
+            )
+        self._publish_operation(
+            operation,
+            "complete" if result.accepted else "cancelled" if result.state == "cancelled" else "error",
+            current=1,
+            total=1,
+            detail=result.detail,
+        )
+        self.send_ready.emit(result)
 
     @Slot()
     def poll_once(self) -> None:

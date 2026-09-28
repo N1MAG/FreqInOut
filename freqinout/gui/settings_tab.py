@@ -299,6 +299,7 @@ from freqinout.core.mesh import (
     validate_mesh_connection_config,
 )
 from freqinout.core.mesh.settings import (
+    mesh_outbound_capability,
     mesh_transport_capability,
     supported_mesh_connection_types,
 )
@@ -6598,9 +6599,9 @@ class SettingsTab(QWidget):
         self.mesh_store_messages_chk.setToolTip("Store received mesh text in FIO's message pipeline.")
         self.mesh_map_positions_chk = QCheckBox("Map")
         self.mesh_map_positions_chk.setToolTip("Use node position data for map context when available.")
-        self.mesh_send_enabled_chk = QCheckBox("Receive only (sending is not available)")
+        self.mesh_send_enabled_chk = QCheckBox("Allow Send")
         self.mesh_send_enabled_chk.setToolTip(
-            "This FIO release receives mesh traffic only. Sending remains unavailable until its completion, policy, and audit contract is implemented."
+            "Allow explicit operator sends from Message Compose through this connection. Automatic relays remain unavailable."
         )
         self.mesh_send_enabled_chk.setChecked(False)
         self.mesh_send_enabled_chk.setEnabled(False)
@@ -13003,10 +13004,11 @@ class SettingsTab(QWidget):
                 if hasattr(self, "mesh_mqtt_topic_root_edit")
                 else ""
             ),
-            # Outbound mesh has no completion-aware implementation yet.  Keep a
-            # historical value round-trippable but never treat it as live UI
-            # authority or let it enable sending.
-            send_enabled=bool(getattr(self, "_mesh_legacy_send_enabled", False)),
+            send_enabled=(
+                bool(self.mesh_send_enabled_chk.isChecked())
+                if mesh_outbound_capability(protocol, MeshConnectionType.from_value(connection_type)).supported
+                else bool(getattr(self, "_mesh_legacy_send_enabled", False))
+            ),
             store_messages_enabled=bool(
                 hasattr(self, "mesh_store_messages_chk") and self.mesh_store_messages_chk.isChecked()
             ),
@@ -13726,16 +13728,29 @@ class SettingsTab(QWidget):
         del blocker
 
     def _set_mesh_receive_only_ui(self, config: MeshConnectionConfig | None = None) -> None:
-        """Keep the retired send setting inert without erasing a legacy value."""
+        """Expose send policy only for connections with a qualified adapter path."""
 
         checkbox = getattr(self, "mesh_send_enabled_chk", None)
         if not isinstance(checkbox, QCheckBox):
             return
         if config is not None:
             self._mesh_legacy_send_enabled = bool(config.send_enabled)
+        current = config or self._mesh_config_from_ui()
+        capability = mesh_outbound_capability(current.protocol, current.connection_type)
         checkbox_blocker = QSignalBlocker(checkbox)
-        checkbox.setChecked(False)
-        checkbox.setEnabled(False)
+        if capability.supported:
+            checkbox.setText("Allow Send")
+            checkbox.setToolTip(
+                "Allow explicit operator sends from Message Compose through this connection. "
+                "Automatic relays and unattended mesh sending remain unavailable."
+            )
+            checkbox.setChecked(bool(current.send_enabled))
+            checkbox.setEnabled(True)
+        else:
+            checkbox.setText("Receive only (sending is not available)")
+            checkbox.setToolTip(capability.reason)
+            checkbox.setChecked(False)
+            checkbox.setEnabled(False)
         del checkbox_blocker
 
     def _on_mesh_connection_name_edited(self, _text: str) -> None:
@@ -13766,6 +13781,7 @@ class SettingsTab(QWidget):
         self._mesh_connection_name_auto = is_auto
         self._refresh_mesh_connection_name_state()
         self._refresh_mesh_connection_visibility()
+        self._set_mesh_receive_only_ui()
         self._refresh_mesh_config_status()
         self._queue_mesh_section_fit_refresh()
 
@@ -13774,6 +13790,7 @@ class SettingsTab(QWidget):
         # legacy value remains reviewable after load, but choosing Serial again
         # is an explicit operator decision to use the qualified default.
         self._mesh_preserve_legacy_serial_baud = False
+        self._set_mesh_receive_only_ui()
 
     def _queue_mesh_section_fit_refresh(self) -> None:
         if bool(getattr(self, "_mesh_section_fit_refresh_pending", False)):
@@ -14368,15 +14385,17 @@ class SettingsTab(QWidget):
         if config.map_positions_enabled:
             data_targets.append("Map")
         target_text = ", ".join(data_targets) if data_targets else "no data views"
-        if config.protocol.strip().lower() == "meshcore" and config.connection_type is MeshConnectionType.BLE:
+        outbound = mesh_outbound_capability(config.protocol, config.connection_type)
+        if not outbound.supported:
             label.setText(
                 f"Receives: {target_text} · Receive only · "
-                "Pairing is requested only when the computer and device require it."
+                f"{outbound.reason}"
             )
             return
+        send_status = "operator sending enabled" if config.send_enabled else "operator sending off"
         label.setText(
             f"Ready to configure {config.protocol.title()} over {config.connection_type.value.upper()} "
-            f"for {target_text}; receive only."
+            f"for {target_text}; {send_status}."
         )
 
     def _refresh_mesh_connection_indicator(self, config: MeshConnectionConfig) -> None:
@@ -14557,7 +14576,15 @@ class SettingsTab(QWidget):
         issues = validate_mesh_connection_config(config)
         if issues:
             return f"{config.protocol.title()} needs setup"
-        return f"{config.protocol.title()} {config.connection_type.value.upper()} receive only"
+        outbound = mesh_outbound_capability(config.protocol, config.connection_type)
+        send_label = (
+            "send enabled"
+            if outbound.supported and config.send_enabled
+            else "send off"
+            if outbound.supported
+            else "receive only"
+        )
+        return f"{config.protocol.title()} {config.connection_type.value.upper()} {send_label}"
 
     def _summary_js8_settings(self) -> str:
         profile = "set" if hasattr(self, "js8_profile_edit") and self.js8_profile_edit.text().strip() else "missing"

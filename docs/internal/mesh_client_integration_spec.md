@@ -1,7 +1,7 @@
 # Mesh Client Integration Spec
 
-Status: runtime foundation, responsive lifecycle, channel administration, and local BLE/serial/TCP transport slice implemented; live Linux/macOS/Windows device QA pending
-Scope: local mesh connection configuration, Meshtastic/MeshCore source contracts, passive message/node ingest, future UI routing
+Status: runtime foundation, responsive lifecycle, channel administration, local BLE/serial/TCP transport, and guarded outbound Compose slice implemented; live Linux/macOS/Windows device QA pending
+Scope: local mesh connection configuration, Meshtastic/MeshCore source contracts, passive message/node ingest, explicit operator send, and future UI routing
 
 Production remediation for connection naming, responsive BLE fields,
 cancellable scan/reconnect/channel work, channel administration, platform-neutral
@@ -118,17 +118,35 @@ and event snapshots cross back to Qt.
 
 ### Capability truthfulness and outbound boundary
 
-This slice is receive, topology, channel-discovery, Inbox, Map, and Ops ingest.
-Neither current adapter family implements FIO's audited outbound completion
-contract. Therefore Settings must show `Receive only`; it must not offer an
-enabled `Allow Send` control or describe a saved `send_enabled` value as an
-operational capability. Legacy values remain stored but inert.
+FIO now implements a guarded protocol-neutral outbound request/result contract
+for explicitly qualified local connections. Requests preserve adapter identity,
+destination kind, channel index or node/public-key identity, exact text,
+request id, timeout, and acknowledgement policy. Results distinguish local API
+acceptance, Companion command completion, node/routing acknowledgement,
+acknowledgement timeout, cancellation, and failure without describing any of
+those states as human delivery or reading.
 
-A later outbound slice must add a protocol-neutral request/result contract with
-destination kind, channel index or MeshCore public-key identity, text, request
-id, acceptance time, completion or acknowledgement evidence, timeout, failure,
-retry classification, policy check, and audit record. Meshtastic broadcast and
-direct send and MeshCore channel and direct send remain distinct operations.
+The qualified outbound matrix is intentionally narrower than receive support:
+
+| Protocol | TCP / WiFi | USB serial | Bluetooth LE |
+| --- | --- | --- | --- |
+| Meshtastic | Channel and direct send | Channel and direct send | Channel and direct send |
+| MeshCore | Channel and direct send through the official client | Channel and direct send through the official client | Receive-only until FIO's raw Companion transmit completion path is qualified |
+
+Settings exposes `Allow Send` only for those qualified rows, defaults it off,
+and preserves unsupported legacy values without activating them. Compose lists
+only enabled, send-enabled connections; requires a connected live session; uses
+accepted channel policy rows or known node identities; previews the exact UTF-8
+payload and destination; and requires operator confirmation before queueing one
+single-flight request to the worker that already owns the connection.
+
+Each outbound operation appends a requested event and a final evidence event to
+`mesh_send_audit`. The audit stores the request id, endpoint/destination,
+payload length and SHA-256, state, evidence, and bounded detail, but not message
+plaintext. MeshCore node persistence retains the public-key identity needed for
+direct Compose. Meshtastic channel/broadcast and direct send and MeshCore
+channel and direct send remain distinct operations.
+
 Device channel create/update/remove is a separate, higher-risk capability and
 stays in the companion application until firmware-version qualification and
 secret handling are complete.
@@ -151,11 +169,14 @@ Automated release evidence must cover:
    automatic waiting-message fetch, event normalization, cancellation, and
    disconnect on one persistent event loop;
 4. missing/incompatible dependency guidance without application-startup failure;
-5. protocol-aware Settings choices, field visibility, receive-only wording, and
-   no false send state;
+5. protocol-aware Settings choices, field visibility, qualified `Allow Send`
+   controls, MeshCore BLE receive-only wording, and no false send state;
 6. the existing MeshCore BLE scan, pairing, stale-bond, session-gate, reconnect,
    channel, ingest, persistence, and shutdown suite with no regressions; and
-7. compile, diff hygiene, and the full focused mesh regression partition.
+7. send-disabled, disconnected, overlapping, oversize, invalid-destination,
+   acceptance, completion, acknowledgement, timeout, audit-redaction, and
+   public-key persistence cases for the outbound path; and
+8. compile, diff hygiene, and the full focused mesh regression partition.
 
 Physical release evidence remains required for Meshtastic serial/BLE/TCP and
 MeshCore serial/TCP on representative Linux and Windows hosts, plus existing
@@ -812,12 +833,16 @@ Implemented now:
 - explicit off-thread BLE discovery with immediate progress, elapsed/remaining
   state, cancellable operation ownership, and scan results that do not require a
   second checkbox interaction
-- explicit receive/map policy controls; outbound mesh send remains unavailable
-  and Settings presents the current adapters truthfully as receive-only
+- explicit receive/map policy controls plus default-off `Allow Send` for the
+  qualified outbound matrix; Settings keeps MeshCore BLE and unsupported
+  legacy transports truthfully receive-only
 - lazy USB serial-port discovery that does not require PySerial at startup
 - validation-driven setup guidance in Settings
 - non-Qt mesh connection manager for adapter lifecycle, health snapshots, and event publication
 - Qt-safe mesh connection worker wrapper for future threaded passive receive
+- immutable protocol-neutral send requests/results, worker-owned single-flight
+  execution, accepted-channel/known-node policy checks, redacted append-only
+  audit evidence, and Local Mesh Compose for explicit operator sends
 - immutable operation snapshots, capped exponential reconnect backoff, manual
   retry, cross-thread cancellation, and ordered worker replacement
 - Meshtastic pub-sub receive subscription with queued event draining
@@ -1061,8 +1086,9 @@ Not implemented yet:
 - Meshtastic HTTP and MQTT adapters and MeshCore MQTT broker adapters; saved
   legacy records remain preserved but cannot be activated as supported local
   transports
-- protocol-neutral, completion-aware outbound send for Meshtastic or MeshCore;
-  legacy `send_enabled` settings remain inert until that contract is delivered
+- MeshCore raw BLE outbound transmit; that transport remains explicitly
+  receive-only while official MeshCore serial/TCP and all supported
+  Meshtastic local transports use the guarded outbound contract
 - Message Relay Queue and JS8/Mesh cross-transport bridging; both remain
   deferred by `message_relay_queue_and_cross_transport_bridge_spec.md`
 - native channel write/remove support for MeshCore and Meshtastic adapters;
@@ -1082,8 +1108,8 @@ The runtime foundation is now present: `MeshConnectionWorker` is started from
 `MainWindow` only when Local Mesh is enabled, moved to a `QThread`, restarted
 when mesh settings change, and stopped during shutdown. It publishes normalized
 passive messages, node snapshots, and health into the mesh store and observation
-pipeline. Live send remains disabled until the user explicitly enables it per
-adapter.
+pipeline. Explicit sends use that same worker/session and remain disabled until
+the user enables them per qualified adapter.
 
 After the Slice 1 physical gate is exercised against real hardware, add:
 
@@ -1095,5 +1121,6 @@ After the Slice 1 physical gate is exercised against real hardware, add:
 - per-adapter Settings tabs or chips for multiple local mesh devices
 - test connection button that runs in the background
 - guided MeshCore BLE pairing/test-connection workflow in Settings
-- MeshCore Companion command queue and send support only after receive identity
-  and channel behavior are validated
+- physical outbound qualification for Meshtastic TCP/serial/BLE and MeshCore
+  TCP/serial, including real acknowledgement/error behavior and disconnect
+  cancellation

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import sys
+import math
+import threading
 from datetime import datetime, timezone
 from importlib import import_module, util
 from typing import Iterator, Mapping, Sequence
 
+from freqinout.core.mesh.lifecycle import MeshOperationCancelled
 from freqinout.core.mesh.models import (
     MeshAdapterEvent,
     MeshChannel,
@@ -12,6 +15,10 @@ from freqinout.core.mesh.models import (
     MeshHealthSnapshot,
     MeshMessage,
     MeshNode,
+    MeshSendCapabilities,
+    MeshSendRequest,
+    MeshSendResult,
+    utc_now,
 )
 from freqinout.core.mesh.settings import MeshConnectionConfig, MeshConnectionType, validate_mesh_connection_config
 
@@ -41,6 +48,8 @@ class MeshtasticLocalAdapter:
         self._events: list[MeshAdapterEvent] = []
         self._pub_module: object | None = None
         self._subscribed_topics: tuple[str, ...] = ()
+        self._send_lock = threading.Lock()
+        self._send_cancel_event = threading.Event()
 
     def connect(self) -> None:
         if not self.config.enabled:
@@ -59,9 +68,11 @@ class MeshtasticLocalAdapter:
         except TypeError:
             self._interface = factory(*positional)
         self._subscribe_receive_events()
+        self._send_cancel_event.clear()
         self._last_error = ""
 
     def disconnect(self) -> None:
+        self._send_cancel_event.set()
         interface = self._interface
         self._unsubscribe_receive_events()
         self._interface = None
@@ -75,12 +86,168 @@ class MeshtasticLocalAdapter:
         # Meshtastic constructors are synchronous. Closing a partially-created
         # interface is the only safe cross-version cancellation hook.
         interface = self._interface
+        self._send_cancel_event.set()
         close = getattr(interface, "close", None)
         if callable(close):
             try:
                 close()
             except Exception:
                 pass
+
+    def send_capabilities(self) -> MeshSendCapabilities:
+        return MeshSendCapabilities(
+            supported=True,
+            channel_send=True,
+            direct_send=True,
+            max_text_bytes=220,
+            guidance=(
+                "Meshtastic channel sends prove local API acceptance. Direct sends request a routing acknowledgement; "
+                "an acknowledgement proves mesh receipt, not that a person read the message."
+            ),
+        )
+
+    def send_message(self, request: MeshSendRequest) -> MeshSendResult:
+        with self._send_lock:
+            return self._send_message_locked(request)
+
+    def _send_message_locked(self, request: MeshSendRequest) -> MeshSendResult:
+        interface = self._interface
+        if interface is None:
+            raise MeshConnectionError("Meshtastic is not connected.")
+        text = str(request.text or "")
+        if not text.strip():
+            raise MeshConnectionError("Enter a mesh message before sending.")
+        if len(text.encode("utf-8")) > 220:
+            raise MeshConnectionError("Meshtastic message is longer than FIO's qualified 220-byte text limit.")
+        try:
+            channel_index = int(str(request.channel_id or "0").strip() or "0")
+        except ValueError as exc:
+            raise MeshConnectionError("Meshtastic channel must be a numeric channel index.") from exc
+        if channel_index < 0 or channel_index > 7:
+            raise MeshConnectionError("Meshtastic channel index must be between 0 and 7.")
+        kind = str(request.destination_kind or "").strip().lower()
+        if kind not in {"channel", "direct", "broadcast"}:
+            raise MeshConnectionError("Choose a Meshtastic channel, broadcast, or direct-node destination.")
+        destination = "^all" if kind in {"channel", "broadcast"} else str(request.destination_id or "").strip()
+        if kind == "direct" and not destination:
+            raise MeshConnectionError("Choose a Meshtastic node for a direct message.")
+
+        self._send_cancel_event.clear()
+        response_event = threading.Event()
+        response_holder: dict[str, object] = {}
+
+        def _on_response(packet: object) -> None:
+            response_holder["packet"] = packet
+            response_event.set()
+
+        send_data = getattr(interface, "sendData", None)
+        if not callable(send_data):
+            raise MeshConnectionError("The installed Meshtastic client does not expose text-message sending.")
+        want_ack = bool(kind == "direct" and request.require_ack)
+        response_handlers = getattr(interface, "responseHandlers", None)
+        handler_keys_before = set(response_handlers) if isinstance(response_handlers, dict) else set()
+        try:
+            packet = send_data(
+                text.encode("utf-8"),
+                destinationId=destination,
+                portNum=1,
+                wantAck=want_ack,
+                wantResponse=False,
+                onResponse=_on_response if want_ack else None,
+                onResponseAckPermitted=want_ack,
+                channelIndex=channel_index,
+            )
+        except Exception as exc:
+            if isinstance(response_handlers, dict):
+                for key in set(response_handlers) - handler_keys_before:
+                    response_handlers.pop(key, None)
+            raise MeshConnectionError(f"Meshtastic did not accept the send request: {exc}") from exc
+
+        accepted_at = utc_now()
+        native_id = str(getattr(packet, "id", "") or "")
+        if not want_ack:
+            return MeshSendResult(
+                request_id=request.request_id,
+                adapter_id=self.adapter_id,
+                transport=self.transport_name,
+                destination_kind=kind,
+                destination_id=destination if kind == "direct" else "",
+                channel_id=str(channel_index),
+                state="accepted",
+                native_message_id=native_id,
+                requested_at=request.requested_at,
+                accepted_at=accepted_at,
+                detail="Meshtastic accepted the message for local radio transmission.",
+                evidence="api_accepted",
+            )
+
+        try:
+            requested_timeout = float(request.timeout_sec or 12.0)
+        except (TypeError, ValueError) as exc:
+            raise MeshConnectionError("Meshtastic acknowledgement timeout is invalid.") from exc
+        if not math.isfinite(requested_timeout):
+            raise MeshConnectionError("Meshtastic acknowledgement timeout must be finite.")
+        deadline = max(0.1, min(30.0, requested_timeout))
+        response_event.wait(timeout=deadline)
+        handlers = getattr(interface, "responseHandlers", None)
+        if isinstance(handlers, dict) and native_id:
+            for key in (native_id, _optional_int(native_id)):
+                if key is not None:
+                    handlers.pop(key, None)
+        if self._send_cancel_event.is_set() and not response_event.is_set():
+            raise MeshOperationCancelled("Meshtastic send was cancelled before acknowledgement.")
+        if not response_event.is_set():
+            return MeshSendResult(
+                request_id=request.request_id,
+                adapter_id=self.adapter_id,
+                transport=self.transport_name,
+                destination_kind=kind,
+                destination_id=destination,
+                channel_id=str(channel_index),
+                state="accepted",
+                native_message_id=native_id,
+                requested_at=request.requested_at,
+                accepted_at=accepted_at,
+                detail="Meshtastic accepted the direct message, but no routing acknowledgement arrived before timeout.",
+                retryable=False,
+                evidence="api_accepted_ack_timeout",
+            )
+        response = response_holder.get("packet")
+        error_reason = _meshtastic_response_error(response)
+        if error_reason:
+            return MeshSendResult(
+                request_id=request.request_id,
+                adapter_id=self.adapter_id,
+                transport=self.transport_name,
+                destination_kind=kind,
+                destination_id=destination,
+                channel_id=str(channel_index),
+                state="failed",
+                native_message_id=native_id,
+                requested_at=request.requested_at,
+                accepted_at=accepted_at,
+                completed_at=utc_now(),
+                detail=f"Meshtastic routing failed: {error_reason}",
+                retryable=True,
+                evidence="routing_error",
+            )
+        acknowledged_at = utc_now()
+        return MeshSendResult(
+            request_id=request.request_id,
+            adapter_id=self.adapter_id,
+            transport=self.transport_name,
+            destination_kind=kind,
+            destination_id=destination,
+            channel_id=str(channel_index),
+            state="acked",
+            native_message_id=native_id,
+            requested_at=request.requested_at,
+            accepted_at=accepted_at,
+            completed_at=acknowledged_at,
+            acknowledged_at=acknowledged_at,
+            detail="Meshtastic returned a routing acknowledgement for the direct message.",
+            evidence="routing_ack",
+        )
 
     def channel_capabilities(self) -> MeshChannelCapabilities:
         return MeshChannelCapabilities(
@@ -616,3 +783,13 @@ def _generated_channel_sort(name: str) -> int:
     if normalized.startswith("channel "):
         return 2
     return 1
+
+
+def _meshtastic_response_error(packet: object) -> str:
+    data = _packet_mapping(packet)
+    decoded = _object_mapping(data.get("decoded"))
+    routing = _object_mapping(decoded.get("routing") or data.get("routing"))
+    value = routing.get("errorReason") or routing.get("error_reason")
+    if value in (None, "", 0, "0", "NONE", "ROUTING_ERROR_NONE"):
+        return ""
+    return _enum_name(value) or "unknown routing error"

@@ -191,14 +191,14 @@ def test_fast_light_compose_preview_explains_delimiter_and_blank_suffix() -> Non
     assert "def _compose_fastlight_delimiter_guidance" in source
     assert "Standard blank form uses .b2s" in source
     assert "Fast Light Format" in source
-    assert "if not (js8_mode or spotter_mode or commstat_mode):" in source
+    assert "if not (js8_mode or spotter_mode or commstat_mode or mesh_mode):" in source
 
 
 def test_plain_js8_compose_is_first_class_guarded_send_mode() -> None:
     source = open("freqinout/gui/message_viewer_tab.py", encoding="utf-8").read()
 
     assert '"JS8Call"' in source
-    assert 'self._compose_mode = "js8"' in source
+    assert '"js8" if idx == 1' in source
     assert "def _compose_plain_js8_command" in source
     assert "Directed Message" in source
     assert "FIO will not send a message to your own callsign" in source
@@ -428,7 +428,7 @@ def test_nbems_compose_uses_sidebar_and_popout_body_splitter() -> None:
     assert "desired_body = Qt.Horizontal if compose_sidebar else Qt.Vertical" in source
     assert "self.compose_body_splitter.orientation() != desired_body" in source
     assert "self.compose_body_splitter.setOrientation(desired_body)" in source
-    assert 'mode not in {"nbems", "js8", "spotter", "commstat_rf"}' in source
+    assert 'mode not in {"nbems", "js8", "spotter", "commstat_rf", "mesh"}' in source
     assert 'if mode == "spotter":' in source
     assert 'elif mode == "commstat_rf":' in source
 
@@ -445,7 +445,7 @@ def test_rf_compose_modes_do_not_render_nbems_form_preview() -> None:
     assert 'spotter_selected = spotter_mode and self._compose_template_kind == "spotter"' in source
     assert "self.compose_rf_fields_stack.setCurrentWidget(self.compose_js8_plain_scroll)" in source
     assert "self.compose_rf_fields_stack.setCurrentWidget(self.compose_commstat_scroll)" in source
-    assert "self.compose_field_scroll.setVisible(not (js8_mode or commstat_mode))" in source
+    assert "self.compose_field_scroll.setVisible(not (js8_mode or commstat_mode or mesh_mode))" in source
     assert "self._refresh_compose_layout_geometry_if_needed()" in source
 
 

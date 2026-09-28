@@ -118,8 +118,8 @@ def test_compose_all_modes_have_bounded_surfaces_and_preserve_draft_on_resize(mo
     """Each compose mode remains usable at desktop, medium, and compact sizes."""
     tab = _open_compose(monkeypatch, tmp_path)
     try:
-        assert tab.compose_mode_selector.count() == 4
-        for row in range(4):
+        assert tab.compose_mode_selector.count() == 5
+        for row in range(tab.compose_mode_selector.count()):
             tab.compose_mode_selector.setCurrentRow(row)
             _app().processEvents()
             assert tab.compose_body_splitter.count() == 2

@@ -1,5 +1,64 @@
 # UI Regression Work Log
 
+## 2026-09-28 — Guarded Local Mesh outbound Compose
+
+Status: implementation and focused automated gate complete; representative
+Meshtastic and MeshCore hardware/operator qualification remains pending. No
+public or private branch push is authorized by this entry.
+
+FIO now sends explicit operator-authored Local Mesh messages through the same
+worker and adapter session that owns receive and connection lifecycle. The
+protocol-neutral request/result contract preserves adapter identity,
+channel-versus-direct addressing, exact text, request identity, timeout, and
+acknowledgement policy. Results distinguish API acceptance, Companion command
+completion, node/routing acknowledgement, acknowledgement timeout,
+cancellation, and failure without claiming that a person read the message.
+
+Settings exposes default-off `Allow Send` only for Meshtastic TCP/USB/BLE and
+MeshCore TCP/USB. MeshCore's raw BLE Companion path remains explicitly
+receive-only. Message Compose adds a Local Mesh mode with a connected source,
+accepted channel or known direct-node destination, byte limit, exact payload
+preview, and final operator confirmation. The worker rechecks channel/node
+policy, serializes each adapter send, and appends requested plus final evidence
+events to `mesh_send_audit`; audit rows retain only payload length and SHA-256,
+not plaintext. MeshCore node persistence now retains the public-key identity
+required for direct messages. Automatic relays and JS8/Mesh bridging remain
+deferred.
+
+Work-package ownership:
+
+- Primary `gpt-6-astra` owned architecture, concurrency and safety decisions,
+  implementation, integration, tests, specification, user guide, and exit
+  review. No reliable primary reasoning-effort label was exposed.
+- `gpt-5.6-terra` at `low` performed the read-only adapter/API and persistence
+  audit. It identified the official Meshtastic acknowledgement callback,
+  MeshCore Companion send/retry surfaces, evidence semantics, session
+  serialization requirement, and unqualified raw MeshCore BLE transmit path.
+- `gpt-5.6-luna` at `low` performed the read-only Compose/Settings workflow
+  audit. It identified the explicit Local Mesh mode, exact preview and
+  confirmation, connected/send-enabled gating, and evidence-specific operator
+  status requirements. Delegates changed no files; the primary reviewed and
+  implemented their findings.
+
+Automated acceptance evidence:
+
+- complete focused MeshCore/Meshtastic settings, lifecycle, reconnect, channel,
+  projection, persistence, and outbound partition — 193 passed;
+- Settings UI, responsive Compose geometry, and operational view contracts —
+  27 passed;
+- Local Mesh Compose preview/confirmation/request acceptance — 1 passed;
+- Compose guidance, FIOSpotter compatibility, and wide/compact/Large Text UI
+  audit — 52 passed;
+- contextual Help and guide integration regression — 23 passed;
+- changed-file compilation and `git diff --check` — pass.
+
+Exit gate: automated behavior is complete. Before release, exercise
+Meshtastic TCP, USB serial, and BLE plus MeshCore TCP and USB serial against
+representative devices. Verify channel acceptance, direct ACK, ACK timeout,
+device disconnect during send, reconnect, and the audit result on each
+platform. MeshCore BLE must still show receive-only. Successful hardware QA
+qualifies this slice for maintainer review; it does not authorize a public push.
+
 ## 2026-09-25 — BBS automation restoration and 1.2.8 upgrade hardening
 
 Status: implementation and focused regression gate complete; live operator

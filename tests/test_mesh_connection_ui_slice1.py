@@ -65,7 +65,7 @@ def test_mesh_connection_editor_persists_name_and_optional_source(monkeypatch, t
         app.processEvents()
 
 
-def test_mesh_transport_choices_are_protocol_aware_and_receive_only(monkeypatch, tmp_path):
+def test_mesh_transport_choices_and_send_controls_are_protocol_aware(monkeypatch, tmp_path):
     from freqinout.core.mesh import MeshConnectionType
     from freqinout.core.mesh.settings import supported_mesh_connection_types
 
@@ -90,8 +90,17 @@ def test_mesh_transport_choices_are_protocol_aware_and_receive_only(monkeypatch,
         tab.mesh_enabled_chk.setChecked(True)
         tab.mesh_tcp_host_edit.setText("192.0.2.20")
         app.processEvents()
-        assert tab.mesh_send_enabled_chk.isEnabled() is False
+        assert tab.mesh_send_enabled_chk.isEnabled() is True
         assert tab.mesh_send_enabled_chk.isChecked() is False
+        assert "allow send" in tab.mesh_send_enabled_chk.text().casefold()
+        assert "send off" in tab._summary_mesh_settings().casefold()
+        tab.mesh_send_enabled_chk.setChecked(True)
+        assert "send enabled" in tab._summary_mesh_settings().casefold()
+
+        tab._set_combo_data_if_present(tab.mesh_connection_type_combo, MeshConnectionType.BLE.value)
+        tab.mesh_ble_device_id_edit.setText("test-device")
+        app.processEvents()
+        assert tab.mesh_send_enabled_chk.isEnabled() is False
         assert "receive only" in tab.mesh_send_enabled_chk.text().casefold()
         assert "receive only" in tab._summary_mesh_settings().casefold()
     finally:

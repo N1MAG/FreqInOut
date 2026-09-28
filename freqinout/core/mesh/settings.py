@@ -36,6 +36,52 @@ class MeshTransportCapability:
     reason: str = ""
 
 
+@dataclass(frozen=True)
+class MeshOutboundCapability:
+    protocol: str
+    connection_type: MeshConnectionType
+    supported: bool
+    reason: str = ""
+
+
+def mesh_outbound_capability(
+    protocol: object,
+    connection_type: MeshConnectionType | object,
+) -> MeshOutboundCapability:
+    """Return the qualified outbound contract for one local connection."""
+
+    normalized_protocol = str(protocol or "").strip().lower()
+    kind = (
+        connection_type
+        if isinstance(connection_type, MeshConnectionType)
+        else MeshConnectionType.from_value(connection_type)
+    )
+    if normalized_protocol == "meshtastic" and kind in {
+        MeshConnectionType.TCP,
+        MeshConnectionType.SERIAL,
+        MeshConnectionType.BLE,
+    }:
+        return MeshOutboundCapability(normalized_protocol, kind, True)
+    if normalized_protocol == "meshcore" and kind in {
+        MeshConnectionType.TCP,
+        MeshConnectionType.SERIAL,
+    }:
+        return MeshOutboundCapability(normalized_protocol, kind, True)
+    if normalized_protocol == "meshcore" and kind is MeshConnectionType.BLE:
+        return MeshOutboundCapability(
+            normalized_protocol,
+            kind,
+            False,
+            "MeshCore Bluetooth remains receive-only until its raw Companion transmit completion path is qualified.",
+        )
+    return MeshOutboundCapability(
+        normalized_protocol or "mesh",
+        kind,
+        False,
+        f"{normalized_protocol.title() or 'Mesh'} {kind.value.upper()} sending is not implemented.",
+    )
+
+
 def mesh_transport_capability(
     protocol: object,
     connection_type: MeshConnectionType | object,
