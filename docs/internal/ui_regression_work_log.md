@@ -7,6 +7,9 @@ Status: `Awaiting maintainer pass approval`
 Governing specification:
 `windows_verified_backup_finalization_hotfix_spec.md`.
 
+Private implementation commit: `f075c593f9d00770c4ff7c1b6c972f93c1307ce8`
+on `wip/private-testing-multi-rig-1.2.3-not-ready`.
+
 The affected Windows station repeatedly completed database validation, backup
 copying, hash comparison, copied-database validation, and manifest creation,
 then received `[WinError 5] Access is denied` only when the verified
