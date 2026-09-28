@@ -1,6 +1,8 @@
 # Changelog
 
 ## [2.0.1]
+- Added: Message Compose now provides guarded Local Mesh sending through qualified Meshtastic and MeshCore connections, with explicit destination selection, exact payload preview, final confirmation, and evidence-specific results.
+- Fixed: MeshCore and Meshtastic traffic accepted for Inbox presentation now enters the canonical Messages read model while remaining available to Ops Center and Map according to channel policy.
 - Changed: Local Mesh now shows the default-off **Allow Send** permission with the selected saved device instead of hiding it inside Advanced connection details; MeshCore Bluetooth remains visibly receive-only.
 - Changed: New installations and upgrades now use the same verified source installer and neutral `start-freqinout` launcher. The installer validates and backs up an existing closed profile, repairs incomplete environments, verifies the runtime, and prevents launch after an incomplete installation.
 - Changed: Existing single-radio profiles now complete the mandatory **Upgrade Existing Station** review before runtime services start. The review preserves manufacturer and model and offers only **Back Up and Upgrade Station** or **Exit FIO**.

@@ -1,10 +1,13 @@
 # UI Regression Work Log
 
-## 2026-09-28 — Guarded Local Mesh outbound Compose
+## 2026-09-28 — Guarded Local Mesh outbound Compose hotfix
 
-Status: implementation and focused automated gate complete; representative
-Meshtastic and MeshCore hardware/operator qualification remains pending. No
-public or private branch push is authorized by this entry.
+Status: `Awaiting maintainer pass approval`
+
+Private hotfix commit: `3501e021b1d03d8b2f637cf0591a1e27ddd4f22b` on
+`wip/private-testing-multi-rig-1.2.3-not-ready`. Implementation and focused
+automated qualification are complete; representative Meshtastic and MeshCore
+hardware/operator qualification remains pending.
 
 FIO now sends explicit operator-authored Local Mesh messages through the same
 worker and adapter session that owns receive and connection lifecycle. The
@@ -59,10 +62,15 @@ device disconnect during send, reconnect, and the audit result on each
 platform. MeshCore BLE must still show receive-only. Successful hardware QA
 qualifies this slice for maintainer review; it does not authorize a public push.
 
-## 2026-09-25 — BBS automation restoration and 1.2.8 upgrade hardening
+## 2026-09-25 — BBS automation restoration and 1.2.8 upgrade hardening hotfix
 
-Status: implementation and focused regression gate complete; live operator
-qualification remains pending.
+Status: `Awaiting maintainer pass approval`
+
+Private hotfix commit: `8ea27181f42a24eb5433bfebf7d2c77f58bf688b`.
+Implementation and focused regression qualification are complete; live
+operator qualification remains pending. The runtime slice is already present
+in the current 2.0.1 tester candidate, but public-release approval remains
+blocked on the maintainer pass gate below.
 
 The top-level FIO BBS workspace now restores station-owned Automation Rules as
 a first-class page between Publishing and Visitor Preview. Operators can stage,

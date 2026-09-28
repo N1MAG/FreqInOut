@@ -448,6 +448,44 @@ No executable, installer binary, or signed application bundle was published.
 The promotion branch remains as an audit trail. Remote-ref verification and the
 local candidate worktree cleanliness check passed immediately after promotion.
 
+### FreqInOut 2.0.1 hotfix inclusion audit (2026-09-28)
+
+The public `release/public-2.0.1-candidate` branch currently resolves to
+`47f030839899d8afd6e24abf5ff6eac3eed37c53`, directly on public 2.0.0
+`2f03e5f72c8d5dc27d0666b8444849d282079809`. Its tree exactly matches the
+411-file allowlisted runtime export from private commit
+`f9ab0e6d3d6a34684b9d3d6bc8bcd273a1300bd1`; no unexplained candidate drift
+was found. Both trees declare version `2.0.1`.
+
+The hotfix inclusion matrix is:
+
+| Hotfix | Private implementation | Current 2.0.1 candidate | Approval state |
+| --- | --- | --- | --- |
+| BBS automation restoration, Radio Service initialization, and 1.2.8 JS8 schema ordering | `8ea27181f42a24eb5433bfebf7d2c77f58bf688b` | Included | Awaiting maintainer pass approval |
+| Canonical Mesh Inbox projection | `9f022118a6f38cd9abc83db0bbc5d7d0f85a6de5` | Missing | Approved—queued for next point release |
+| Guarded Local Mesh outbound Compose | `3501e021b1d03d8b2f637cf0591a1e27ddd4f22b` | Missing | Awaiting maintainer pass approval |
+| Verified common installer and mandatory existing-station upgrade gate | `865bd61c8be46f6eb89943bc7e22df0a636769a0` | Missing | Awaiting maintainer pass approval |
+| Visible saved-device `Allow Send` permission | `fd2b543b92d2948bc23f9beee2097a3119f7895d` | Missing | Awaiting maintainer pass approval |
+
+Private tracking-only commits such as the Inbox approval record and installer
+tracking update remain excluded by the public runtime allowlist. The current
+private WIP export contains 413 allowlisted files; the two additional files are
+the neutral `start-freqinout.sh` and `start-freqinout.cmd` launchers introduced
+by the installer hotfix. The remaining candidate differences are the reviewed
+runtime, public documentation, manifest, and compatibility-launcher changes
+owned by the four post-candidate hotfixes above.
+
+The intended 2.0.1 release scope includes all five rows. This scope decision is
+not maintainer pass approval. Before rebuilding the public candidate, every
+row still marked awaiting approval must pass its work-log operator gate and be
+changed to `Approved—queued for next point release`. The next candidate must be
+regenerated from one reviewed private WIP commit through the allowlisted export,
+replace the existing candidate tree in one auditable commit, retain version
+`2.0.1`, and pass public-export, install/upgrade, Mesh Inbox/send, BBS,
+documentation, smoke, and clean-tree checks. Public `main`, tags, and release
+artifacts remain unchanged until the maintainer separately authorizes final
+promotion.
+
 ## Promotion And Rollback
 
 After every gate closes, push the curated runtime branch to the public
