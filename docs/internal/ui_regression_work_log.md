@@ -11367,10 +11367,13 @@ Inbox while remaining visible in Ops Center. Also verify an Ops-only channel
 does not enter Inbox. Approval moves this item only to
 `Approved—queued for next point release`; it does not authorize a public push.
 
-## 2026-09-28 — Minimal source install and existing-station upgrade gate
+## 2026-09-28 — Minimal source-install and existing-station upgrade hotfix
 
-Status: automated gate complete; native Windows and operator upgrade
-qualification remain pending.
+Status: `Awaiting maintainer pass approval`
+
+Private hotfix commit: `865bd61c8be46f6eb89943bc7e22df0a636769a0` on
+`wip/private-testing-multi-rig-1.2.3-not-ready`. Automated qualification is
+complete; native Windows and operator upgrade qualification remain pending.
 
 The source-install path now uses neutral `start-freqinout` launchers, with the
 old multi-rig names retained as wrappers. `install_freqinout.py` validates the
