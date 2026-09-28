@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
+import sys
 
 import PySide6
 
@@ -107,7 +108,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='assets/FreqInOut.ico',
+    icon='assets/FreqInOut.ico' if sys.platform == 'win32' else None,
 )
 coll = COLLECT(
     exe,

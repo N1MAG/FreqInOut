@@ -23,7 +23,14 @@ def main() -> int:
         print(f"[build_executable] ERROR: Spec file not found: {SPEC_FILE}")
         return 1
 
-    pyinstaller_cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", str(SPEC_FILE)]
+    pyinstaller_cmd = [
+        sys.executable,
+        "-m",
+        "PyInstaller",
+        "--noconfirm",
+        "--clean",
+        str(SPEC_FILE),
+    ]
     rc = run(pyinstaller_cmd)
     if rc != 0:
         print("[build_executable] ERROR: PyInstaller build failed.")

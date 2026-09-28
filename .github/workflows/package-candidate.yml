@@ -1,0 +1,227 @@
+name: Package Candidates
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - wip/private-testing-multi-rig-1.2.3-not-ready
+    paths:
+      - ".github/workflows/package-candidate.yml"
+      - "FreqInOut.spec"
+      - "installer.iss"
+      - "requirements.txt"
+      - "pyproject.toml"
+      - "build_executable.py"
+      - "packaging/**"
+      - "freqinout/**"
+      - "assets/**"
+      - "config/**"
+      - "docs/guide.html"
+      - "third_party/js8net/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-candidate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify package inputs
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Validate metadata and compile runtime
+        run: |
+          python packaging/verify_release_inputs.py
+          python -m compileall -q freqinout packaging
+
+  windows:
+    name: Windows x86-64 installer candidate
+    needs: verify
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install pinned build and runtime dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r packaging/build-requirements.txt
+          python -m pip freeze --all | Set-Content windows-dependencies.txt -Encoding utf8
+
+      - name: Validate and build frozen application
+        shell: pwsh
+        run: |
+          python packaging/verify_release_inputs.py
+          python -m compileall -q freqinout packaging
+          python build_executable.py
+
+      - name: Smoke-test unpacked application
+        shell: pwsh
+        env:
+          FREQINOUT_CONFIG_DIR: ${{ runner.temp }}\fio-unpacked-smoke
+          FREQINOUT_ALLOW_EXTERNAL_RUNTIME_ENV: "1"
+          QT_QPA_PLATFORM: offscreen
+          FREQINOUT_HARD_EXIT: "0"
+        run: |
+          $exe = Resolve-Path ".\dist\FreqInOut\FreqInOut.exe"
+          $process = Start-Process -FilePath $exe -ArgumentList "--smoke-test" -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            Get-ChildItem "$env:FREQINOUT_CONFIG_DIR" -Filter "*.log" -ErrorAction SilentlyContinue |
+              ForEach-Object { Get-Content $_.FullName }
+            throw "Unpacked FreqInOut smoke test failed with exit code $($process.ExitCode)"
+          }
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          choco install innosetup --yes --no-progress
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "Inno Setup compiler not found at $iscc" }
+          & $iscc installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+          $version = python packaging/verify_release_inputs.py --print-version
+          Copy-Item ".\Output\FreqInOut-Setup.exe" ".\FreqInOut-$version-windows-x86_64-setup.exe"
+
+      - name: Install and smoke-test completed installer
+        shell: pwsh
+        env:
+          FREQINOUT_CONFIG_DIR: ${{ runner.temp }}\fio-installed-smoke
+          FREQINOUT_ALLOW_EXTERNAL_RUNTIME_ENV: "1"
+          QT_QPA_PLATFORM: offscreen
+          FREQINOUT_HARD_EXIT: "0"
+        run: |
+          $version = python packaging/verify_release_inputs.py --print-version
+          $installer = Resolve-Path ".\FreqInOut-$version-windows-x86_64-setup.exe"
+          $installDir = Join-Path "${{ runner.temp }}" "FreqInOutInstalled"
+          $install = Start-Process -FilePath $installer -ArgumentList @(
+            "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$installDir"
+          ) -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Installer failed with exit code $($install.ExitCode)" }
+          $exe = Join-Path $installDir "FreqInOut.exe"
+          if (-not (Test-Path $exe)) { throw "Installed executable is missing: $exe" }
+          New-Item -ItemType Directory -Force -Path $env:FREQINOUT_CONFIG_DIR | Out-Null
+          Set-Content -Path (Join-Path $env:FREQINOUT_CONFIG_DIR "retain-after-uninstall.txt") -Value "retain"
+          $smoke = Start-Process -FilePath $exe -ArgumentList "--smoke-test" -Wait -PassThru
+          if ($smoke.ExitCode -ne 0) { throw "Installed application smoke test failed: $($smoke.ExitCode)" }
+          $uninstaller = Join-Path $installDir "unins000.exe"
+          if (-not (Test-Path $uninstaller)) { throw "Uninstaller is missing: $uninstaller" }
+          $uninstall = Start-Process -FilePath $uninstaller -ArgumentList @(
+            "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"
+          ) -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) { throw "Uninstall failed: $($uninstall.ExitCode)" }
+          if (-not (Test-Path (Join-Path $env:FREQINOUT_CONFIG_DIR "retain-after-uninstall.txt"))) {
+            throw "Windows uninstall removed operator profile data"
+          }
+
+      - name: Generate Windows checksum
+        shell: pwsh
+        run: |
+          $version = python packaging/verify_release_inputs.py --print-version
+          $asset = "FreqInOut-$version-windows-x86_64-setup.exe"
+          $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $asset" | Set-Content "$asset.sha256" -Encoding ascii
+
+      - name: Retain Windows candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: freqinout-windows-x86_64-candidate
+          path: |
+            FreqInOut-*-windows-x86_64-setup.exe
+            FreqInOut-*-windows-x86_64-setup.exe.sha256
+            windows-dependencies.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  linux:
+    name: Linux amd64 Debian candidate
+    needs: verify
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            desktop-file-utils dpkg-dev libdbus-1-3 libegl1 libgl1 libglib2.0-0 \
+            libxkbcommon-x11-0 libxcb-cursor0 xvfb
+
+      - name: Install pinned build and runtime dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r packaging/build-requirements.txt
+          python -m pip freeze --all > linux-dependencies.txt
+
+      - name: Validate and build frozen application
+        run: |
+          python packaging/verify_release_inputs.py
+          python -m compileall -q freqinout packaging
+          python -m PyInstaller --noconfirm --clean FreqInOut.spec
+
+      - name: Smoke-test unpacked application
+        run: |
+          profile="${{ runner.temp }}/fio-unpacked-smoke"
+          mkdir -p "$profile"
+          env FREQINOUT_CONFIG_DIR="$profile" FREQINOUT_ALLOW_EXTERNAL_RUNTIME_ENV=1 \
+            QT_QPA_PLATFORM=offscreen FREQINOUT_HARD_EXIT=0 \
+            xvfb-run -a ./dist/FreqInOut/FreqInOut --smoke-test
+
+      - name: Build and validate Debian package
+        run: |
+          desktop-file-validate packaging/linux/freqinout.desktop
+          python packaging/build_linux_deb.py --output-dir Output
+          dpkg-deb --info Output/FreqInOut-*-linux-amd64.deb
+          dpkg-deb --contents Output/FreqInOut-*-linux-amd64.deb | grep -F './usr/bin/freqinout'
+
+      - name: Install and smoke-test completed Debian package
+        run: |
+          sudo apt-get install --yes ./Output/FreqInOut-*-linux-amd64.deb
+          profile="${{ runner.temp }}/fio-installed-smoke"
+          mkdir -p "$profile"
+          printf 'retain\n' > "$profile/retain-after-uninstall.txt"
+          env FREQINOUT_CONFIG_DIR="$profile" FREQINOUT_ALLOW_EXTERNAL_RUNTIME_ENV=1 \
+            QT_QPA_PLATFORM=offscreen FREQINOUT_HARD_EXIT=0 \
+            xvfb-run -a /usr/bin/freqinout --smoke-test
+          sudo apt-get remove --yes freqinout
+          test -f "$profile/retain-after-uninstall.txt"
+          test ! -e /usr/bin/freqinout
+
+      - name: Generate Linux checksum
+        run: |
+          cd Output
+          sha256sum FreqInOut-*-linux-amd64.deb > "$(basename "$(ls FreqInOut-*-linux-amd64.deb)").sha256"
+
+      - name: Retain Linux candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: freqinout-linux-amd64-candidate
+          path: |
+            Output/FreqInOut-*-linux-amd64.deb
+            Output/FreqInOut-*-linux-amd64.deb.sha256
+            linux-dependencies.txt
+          if-no-files-found: error
+          retention-days: 14

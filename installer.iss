@@ -6,12 +6,20 @@
 [Setup]
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
+AppPublisher=N1MAG
+AppPublisherURL=https://github.com/N1MAG/FreqInOut
+AppSupportURL=https://github.com/N1MAG/FreqInOut/issues
+AppUpdatesURL=https://github.com/N1MAG/FreqInOut/releases
 DefaultDirName={autopf}\FreqInOut
 DisableDirPage=yes
 DisableProgramGroupPage=yes
 OutputBaseFilename=FreqInOut-Setup
 Compression=lzma
 SolidCompression=yes
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+UninstallDisplayIcon={app}\{#MyAppExeName}
+VersionInfoVersion={#MyAppVersion}
 
 ; Use a custom installer icon
 SetupIconFile="assets\FreqInOut.ico"

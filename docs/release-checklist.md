@@ -29,6 +29,17 @@ the release candidate ready.
 
 ## 3) Installer / Packaging
 
+- Run the internal `Package Candidates` workflow for the exact candidate
+  commit. Candidate artifacts are test evidence only and must not create a
+  public GitHub Release.
+- Require both jobs to build the frozen application, smoke the unpacked
+  application, install the completed `.exe`/`.deb`, smoke the installed
+  application, uninstall it, and prove operator profile data remains.
+- Download each candidate artifact and verify its adjacent SHA-256 file before
+  native field qualification.
+- Do not create a public tag until the Windows and Linux installed-package gates
+  and the packaged-upgrade safety gate in
+  `docs/internal/cross_platform_release_packaging_spec.md` pass.
 - Linux: run installer in at least one fresh scenario and one update scenario against `git@github.com:N1MAG/FreqInOut-internal-testing.git` branch `wip/private-testing-multi-rig-1.2.3-not-ready`.
 - Linux: verify desktop launcher/icon behavior and logs.
 - Linux multi-rig WIP: install into a separate test directory before any in-place production upgrade test, then run one explicit in-place upgrade from the current single-rig install.
@@ -77,13 +88,18 @@ python tools/perf_benchmark.py summarize --name "^(main_window|messages|map|oper
 
 ## 7) Final release flow
 
-1. Run preflight.
+1. Run preflight and the required private regression partitions.
 2. Run compile verification and SOP-focused perf smoke.
-3. Build and smoke-test app.
-4. Confirm the SOP workflow docs in `docs/guide.html` match the shipped behavior.
-5. Commit release changes.
-6. Tag release.
-7. Publish release notes from `CHANGELOG.md`.
+3. Run the internal Windows/Linux package-candidate workflow.
+4. Complete real Windows and Linux fresh-install and upgrade qualification.
+5. Confirm the SOP workflow docs in `docs/guide.html` match the shipped behavior.
+6. Freeze and promote the exact reviewed public runtime and packaging inputs.
+7. Tag the approved public commit once; never move or replace the tag.
+8. Let the public workflow rebuild from that tag and publish only after every
+   required package, installed-package smoke, checksum, and provenance gate
+   succeeds.
+9. Confirm the GitHub Release contains the complete expected asset set and
+   release notes from `CHANGELOG.md` before notifying users.
 
 ## 8) Multi-rig Test Readiness
 

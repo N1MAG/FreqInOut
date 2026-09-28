@@ -1,5 +1,45 @@
 # UI Regression Work Log
 
+## 2026-09-28 — Cross-platform release packaging RP-1
+
+Status: `Internal package candidate pending GitHub-hosted qualification`
+
+Governing specification:
+`cross_platform_release_packaging_spec.md`.
+
+The first packaging slice adds a non-publishing internal workflow for Windows
+x86-64 and Linux amd64. Both jobs build a PyInstaller one-folder application,
+smoke it from a fresh profile, build the native installer/package, install that
+artifact, smoke the installed application, uninstall it, verify profile
+retention, and retain the artifact, checksum, and resolved dependency inventory
+for 14 days. All GitHub-maintained actions are pinned to immutable commit SHAs.
+
+The reviewed public allowlist now carries the narrow set of package-build
+inputs needed to reproduce future public artifacts, while the internal
+candidate workflow, private tests, tools, specifications, and work logs remain
+excluded. Public release publication and signing are intentionally not part of
+RP-1.
+
+Work-package ownership: primary `gpt-6-astra` (high reasoning) owns release
+architecture, build scripts, workflow security, integration, specification,
+and exit-gate review. No sub-agent was used under the active agent constraint.
+
+Local acceptance evidence:
+
+- packaging and public-export contract — 10 passed;
+- combined packaging, export, source-installer, launcher, and application-icon
+  partition — 43 passed;
+- release preflight, metadata validator, Python compilation, workflow YAML
+  parse, and `git diff --check` — pass;
+- PyInstaller 6.22.3 with hooks 2026.7 built a 487 MB macOS ARM64 one-folder
+  diagnostic artifact from the shared spec, and that frozen application
+  completed the packaged `--smoke-test` with a fresh isolated profile.
+
+RP-1 remains open until both GitHub-hosted Windows and Linux jobs pass and their
+downloaded artifacts complete native fresh-install checks. RP-2 packaged-upgrade
+safety, complete platform dependency constraints, Windows signing, and public
+release publication remain separately gated.
+
 ## 2026-09-28 — Public FreqInOut 2.0.3 hotfix release
 
 Status: `Released in public FreqInOut 2.0.3`

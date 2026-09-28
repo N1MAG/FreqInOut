@@ -24,8 +24,11 @@ ROOT_FILES: tuple[str, ...] = (
     "LICENSE.md",
     "MANIFEST.in",
     "SECURITY.md",
+    "FreqInOut.spec",
+    "build_executable.py",
     "install_FreqInOut_linux.sh",
     "install_freqinout.py",
+    "installer.iss",
     "pyproject.toml",
     "requirements.txt",
     "start-freqinout.cmd",
@@ -33,6 +36,14 @@ ROOT_FILES: tuple[str, ...] = (
     "start-multi-rig.cmd",
     "start-multi-rig.sh",
     "uninstall_FreqInOut_linux.sh",
+)
+
+PUBLIC_PACKAGING_FILES: tuple[str, ...] = (
+    "packaging/build-requirements.txt",
+    "packaging/build_linux_deb.py",
+    "packaging/linux/freqinout.desktop",
+    "packaging/pyinstaller_runtime_qt.py",
+    "packaging/verify_release_inputs.py",
 )
 
 # Sources may live in the private evidence tree while the public destination
@@ -108,7 +119,7 @@ def iter_public_sources(source_root: Path) -> Iterator[tuple[Path, Path]]:
     """Yield ``(source, public-relative-destination)`` pairs."""
 
     root = Path(source_root).resolve()
-    for relative in ROOT_FILES + PUBLIC_DOCS + JS8NET_FILES:
+    for relative in ROOT_FILES + PUBLIC_DOCS + JS8NET_FILES + PUBLIC_PACKAGING_FILES:
         yield root / relative, Path(relative)
     for source, destination in RENAMED_FILES:
         yield root / source, Path(destination)
@@ -154,6 +165,11 @@ def validate_public_projection(root: Path) -> tuple[Path, ...]:
         raise ValueError("Public runtime projection is empty.")
     required = {
         Path("README.md"),
+        Path("FreqInOut.spec"),
+        Path("installer.iss"),
+        Path("packaging/build_linux_deb.py"),
+        Path("packaging/pyinstaller_runtime_qt.py"),
+        Path("packaging/verify_release_inputs.py"),
         Path("freqinout/main.py"),
         Path("docs/guide.html"),
         Path("config/net_resources/sitrepnets-winter.json"),
