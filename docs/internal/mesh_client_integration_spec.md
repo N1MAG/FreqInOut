@@ -53,7 +53,7 @@ disconnect behavior, health evidence, and receive-path tests for it.
 | Protocol | TCP / WiFi | USB serial | Bluetooth LE | HTTP API | MQTT bridge |
 | --- | --- | --- | --- | --- | --- |
 | Meshtastic | Supported through the official Python client, including the configured host **and port** | Supported through the official Python client | Supported through the official Python client; platform pairing remains OS-owned | Planned; not selectable | Planned, opt-in, and provenance-distinct; not selectable |
-| MeshCore | Supported through the official `meshcore` Python client | Supported through the official `meshcore` Python client | Supported by FIO's qualified Bleak Companion/NUS implementation | Not applicable to the local Companion service; not selectable | Planned as a distinct broker connection, not a local Companion substitute; not selectable |
+| MeshCore | Supported through the official `meshcore` Python client | Supported through the official `meshcore` Python client | Supported through the official `meshcore` Python client; FIO retains bounded scan/select and serialized BLE session ownership | Not applicable to the local Companion service; not selectable | Planned as a distinct broker connection, not a local Companion substitute; not selectable |
 
 The transport list is protocol-aware. Existing saved HTTP or MQTT records are
 retained for forward compatibility, but Settings must label them unsupported and
@@ -131,12 +131,13 @@ The qualified outbound matrix is intentionally narrower than receive support:
 | Protocol | TCP / WiFi | USB serial | Bluetooth LE |
 | --- | --- | --- | --- |
 | Meshtastic | Channel and direct send | Channel and direct send | Channel and direct send |
-| MeshCore | Channel and direct send through the official client | Channel and direct send through the official client | Receive-only until FIO's raw Companion transmit completion path is qualified |
+| MeshCore | Channel and direct send through the official client | Channel and direct send through the official client | Channel and direct send through the official client |
 
 Settings exposes the default-off `Allow Send` permission in the always-visible
 saved-device area for qualified rows, rather than hiding the primary outbound
 authorization inside Advanced connection details. It preserves unsupported
-legacy values without activating them and shows MeshCore BLE as receive-only.
+legacy values without activating them. MeshCore BLE uses the same official
+client request/result and audit contract as MeshCore serial and TCP.
 Compose lists only enabled, send-enabled connections; requires a connected
 live session; uses
 accepted channel policy rows or known node identities; previews the exact UTF-8
@@ -168,12 +169,12 @@ Automated release evidence must cover:
    preservation;
 2. Meshtastic serial, BLE, and TCP constructor dispatch, including the configured
    TCP port;
-3. MeshCore serial and TCP factory dispatch, handshake failure, subscription,
+3. MeshCore BLE, serial, and TCP factory dispatch, handshake failure, subscription,
    automatic waiting-message fetch, event normalization, cancellation, and
    disconnect on one persistent event loop;
 4. missing/incompatible dependency guidance without application-startup failure;
 5. protocol-aware Settings choices, field visibility, qualified `Allow Send`
-   controls, MeshCore BLE receive-only wording, and no false send state;
+   controls for MeshCore BLE, and no false send state;
 6. the existing MeshCore BLE scan, pairing, stale-bond, session-gate, reconnect,
    channel, ingest, persistence, and shutdown suite with no regressions; and
 7. send-disabled, disconnected, overlapping, oversize, invalid-destination,
@@ -182,8 +183,8 @@ Automated release evidence must cover:
 8. compile, diff hygiene, and the full focused mesh regression partition.
 
 Physical release evidence remains required for Meshtastic serial/BLE/TCP and
-MeshCore serial/TCP on representative Linux and Windows hosts, plus existing
-MeshCore BLE qualification on Linux/macOS/Windows. An automated mock proves the
+MeshCore serial/TCP on representative Linux and Windows hosts, plus MeshCore
+BLE receive and outbound qualification on Linux/macOS/Windows. An automated mock proves the
 adapter contract, not radio/driver/firmware compatibility; unexercised platform
 rows remain visibly unqualified rather than being reported as verified.
 
@@ -823,11 +824,11 @@ Implemented now:
   those unimplemented modes are not offered for new connections
 - packaged, lazy-loaded official Meshtastic client support for TCP/USB
   serial/BLE, including exact configured TCP-port propagation
-- packaged, lazy-loaded official MeshCore client support for Companion TCP/USB
+- packaged, lazy-loaded official MeshCore client support for Companion BLE/TCP/USB
   serial on Python 3.10+, with one persistent adapter event loop, application
   handshake, automatic waiting-message fetching, normalized receive events,
-  and bounded teardown; the qualified FIO Bleak path remains authoritative for
-  MeshCore BLE
+  and bounded teardown; FIO's scan/select workflow and serialized session gate
+  remain authoritative for MeshCore BLE discovery and lifecycle ownership
 - protocol-derived saved connection names that preserve operator edits, with
   stable adapter/device id, advertised name, and optional source radio/role kept
   as separate fields
@@ -838,8 +839,8 @@ Implemented now:
   second checkbox interaction
 - explicit receive/map policy controls plus always-visible, default-off
   `Allow Send` in the saved-device area for the qualified outbound matrix;
-  Settings keeps MeshCore BLE and unsupported legacy transports truthfully
-  receive-only
+  Settings permits MeshCore BLE through the official client and keeps
+  unsupported legacy transports truthfully unavailable
 - lazy USB serial-port discovery that does not require PySerial at startup
 - validation-driven setup guidance in Settings
 - non-Qt mesh connection manager for adapter lifecycle, health snapshots, and event publication
@@ -1091,9 +1092,9 @@ Not implemented yet:
 - Meshtastic HTTP and MQTT adapters and MeshCore MQTT broker adapters; saved
   legacy records remain preserved but cannot be activated as supported local
   transports
-- MeshCore raw BLE outbound transmit; that transport remains explicitly
-  receive-only while official MeshCore serial/TCP and all supported
-  Meshtastic local transports use the guarded outbound contract
+- a separate FIO-maintained raw BLE outbound implementation; production
+  MeshCore BLE sending intentionally uses the official MeshCore client and the
+  guarded outbound contract rather than duplicating Companion transmit framing
 - Message Relay Queue and JS8/Mesh cross-transport bridging; both remain
   deferred by `message_relay_queue_and_cross_transport_bridge_spec.md`
 - native channel write/remove support for MeshCore and Meshtastic adapters;

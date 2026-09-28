@@ -120,6 +120,7 @@ def ensure_mesh_schema(conn: sqlite3.Connection) -> None:
         conn,
         "mesh_nodes",
         {
+            "public_key_or_hash": "TEXT NOT NULL DEFAULT ''",
             "route_type": "TEXT",
             "direct_receive": "INTEGER",
             "via_node": "TEXT",

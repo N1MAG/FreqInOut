@@ -5,7 +5,7 @@ import math
 import threading
 
 from freqinout.core.mesh.adapter_base import MeshAdapter
-from freqinout.core.mesh.meshcore_adapter import MeshCoreBleAdapter, MeshCorePythonAdapter
+from freqinout.core.mesh.meshcore_adapter import MeshCorePythonAdapter
 from freqinout.core.mesh.meshtastic_adapter import MeshConnectionError, MeshtasticLocalAdapter
 from freqinout.core.mesh.models import (
     MeshAdapterEvent,
@@ -32,8 +32,6 @@ def default_mesh_adapter_factory(config: MeshConnectionConfig) -> MeshAdapter:
     if protocol == "meshtastic":
         return MeshtasticLocalAdapter(config)
     if protocol == "meshcore":
-        if config.connection_type is MeshConnectionType.BLE:
-            return MeshCoreBleAdapter(config)
         return MeshCorePythonAdapter(config)
     raise MeshConnectionError(f"{config.protocol or 'Mesh'} adapters are configured for a later implementation slice.")
 

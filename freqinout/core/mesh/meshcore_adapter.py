@@ -1144,13 +1144,17 @@ class MeshCorePythonCompanionClient:
 
 
 class MeshCorePythonAdapter(MeshCoreBleAdapter):
-    """MeshCore Companion adapter for official meshcore_py serial/TCP clients."""
+    """MeshCore Companion adapter for official meshcore_py BLE/serial/TCP clients."""
 
     def connect(self) -> None:
         if not self.config.enabled:
             raise MeshConnectionError("MeshCore adapter is disabled.")
-        if self.config.connection_type not in {MeshConnectionType.SERIAL, MeshConnectionType.TCP}:
-            raise MeshConnectionError("The official MeshCore client adapter supports USB serial and TCP only.")
+        if self.config.connection_type not in {
+            MeshConnectionType.BLE,
+            MeshConnectionType.SERIAL,
+            MeshConnectionType.TCP,
+        }:
+            raise MeshConnectionError("The official MeshCore client adapter supports Bluetooth, USB serial, and TCP.")
         issues = tuple(issue for issue in validate_mesh_connection_config(self.config) if issue.severity == "error")
         if issues:
             raise MeshConnectionError("; ".join(issue.message for issue in issues))
@@ -1158,10 +1162,24 @@ class MeshCorePythonAdapter(MeshCoreBleAdapter):
             raise MeshConnectionError(
                 "The Python package 'meshcore' is not installed. Install the supported FIO mesh dependencies first."
             )
+        with self._session_state_lock:
+            teardown_pending = self._session_teardown_pending
+        if teardown_pending:
+            self._last_error = MESHCORE_BLE_DISCONNECTING_MESSAGE
+            raise MeshConnectionError(self._last_error)
         if self._client is not None and bool(getattr(self._client, "is_connected", False)):
             return
         if self._client is not None:
             self.disconnect()
+            with self._session_state_lock:
+                teardown_pending = self._session_teardown_pending
+            if teardown_pending:
+                raise MeshConnectionError(MESHCORE_BLE_DISCONNECTING_MESSAGE)
+        if self.config.connection_type is MeshConnectionType.BLE and not self._session_gate_owned:
+            if not _MESHCORE_BLE_SESSION_GATE.acquire(self._session_token, timeout_sec=6.0):
+                self._last_error = MESHCORE_BLE_DISCONNECTING_MESSAGE
+                raise MeshConnectionError(self._last_error)
+            self._session_gate_owned = True
         label = f"MeshCore {self.config.connection_type.value.upper()}"
         self._ble_loop = _AsyncioLoopRunner(label)
         try:
@@ -1169,11 +1187,15 @@ class MeshCorePythonAdapter(MeshCoreBleAdapter):
             self._last_error = ""
         except (MeshOperationCancelled, MeshConnectionError) as exc:
             self._last_error = str(exc)
-            self._stop_python_loop()
+            self._finish_python_session()
             raise
         except Exception as exc:
-            self._last_error = _meshcore_python_error_message(self.config, exc)
-            self._stop_python_loop()
+            self._last_error = (
+                _pairing_error_message(exc)
+                if self.config.connection_type is MeshConnectionType.BLE
+                else _meshcore_python_error_message(self.config, exc)
+            )
+            self._finish_python_session()
             raise MeshConnectionError(self._last_error) from exc
 
     def disconnect(self) -> None:
@@ -1188,7 +1210,7 @@ class MeshCorePythonAdapter(MeshCoreBleAdapter):
         except Exception as exc:
             self._last_error = str(exc)
         finally:
-            self._stop_python_loop()
+            self._finish_python_session()
 
     def cancel_pending_operation(self) -> None:
         runner = self._ble_loop
@@ -1323,7 +1345,10 @@ class MeshCorePythonAdapter(MeshCoreBleAdapter):
         event_type = getattr(module, "EventType", None)
         if meshcore_class is None or event_type is None:
             raise MeshConnectionError("The installed meshcore package does not expose MeshCore and EventType.")
-        if self.config.connection_type is MeshConnectionType.SERIAL:
+        if self.config.connection_type is MeshConnectionType.BLE:
+            factory = getattr(meshcore_class, "create_ble", None)
+            args = (self.config.ble_device_id or self.config.ble_device_name,)
+        elif self.config.connection_type is MeshConnectionType.SERIAL:
             factory = getattr(meshcore_class, "create_serial", None)
             args = (self.config.serial_port, self.config.serial_baud)
         else:
@@ -1345,11 +1370,26 @@ class MeshCorePythonAdapter(MeshCoreBleAdapter):
         self._client = wrapper
         self._device_name = self.config.display_name
 
-    def _stop_python_loop(self) -> None:
+    def _finish_python_session(self) -> None:
         runner = self._ble_loop
         self._ble_loop = None
-        if runner is not None:
-            runner.stop()
+        stopped = True if runner is None else runner.stop()
+        if self.config.connection_type is not MeshConnectionType.BLE:
+            return
+        if stopped:
+            with self._session_state_lock:
+                self._session_teardown_pending = False
+            self._release_session_gate()
+            return
+        self._last_error = MESHCORE_BLE_DISCONNECTING_MESSAGE
+        with self._session_state_lock:
+            self._session_teardown_pending = True
+        threading.Thread(
+            target=self._release_session_gate_after_runner,
+            args=(runner,),
+            name="FIO MeshCore BLE teardown",
+            daemon=True,
+        ).start()
 
 
 def _meshcore_event_is_error(event: object) -> bool:
@@ -1400,6 +1440,11 @@ def _meshcore_failed_send_result(
 
 
 def _meshcore_no_handshake_message(config: MeshConnectionConfig) -> str:
+    if config.connection_type is MeshConnectionType.BLE:
+        return (
+            "MeshCore connected over Bluetooth but the device did not complete the Companion handshake. "
+            f"{COMPANION_SERVICE_RECOVERY_GUIDANCE}"
+        )
     if config.connection_type is MeshConnectionType.SERIAL:
         return (
             "MeshCore opened the serial port but the device did not complete the Companion handshake. "

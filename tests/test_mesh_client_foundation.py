@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import os
+import sqlite3
 import sys
 import threading
 import types
@@ -31,9 +32,11 @@ from freqinout.core.mesh import (
     MeshChannelPolicy,
     MeshCoreBleAdvertisement,
     MeshEventStoreSink,
+    ensure_mesh_schema,
     list_mesh_channel_policies,
     load_mesh_connection_configs,
     load_saved_mesh_connection_configs,
+    merge_mesh_connection_library,
     list_mesh_health,
     list_mesh_messages,
     list_mesh_nodes,
@@ -311,6 +314,62 @@ def test_saved_mesh_library_repairs_duplicate_adapter_ids_without_dropping_endpo
         mesh_connection_config_key(first),
         mesh_connection_config_key(second),
     }
+
+
+def test_mesh_loaders_prune_incomplete_transport_copies_of_same_ble_device() -> None:
+    ble = MeshConnectionConfig(
+        adapter_id="meshcore-main",
+        protocol="meshcore",
+        connection_name="MeshCore-N1MAG MOBL1",
+        enabled=True,
+        send_enabled=True,
+        connection_type=MeshConnectionType.BLE,
+        ble_device_id="FE:BC:04:8F:50:E3",
+        ble_device_name="MeshCore-N1MAG MOBL1",
+    )
+    stale_tcp = replace(
+        ble,
+        adapter_id="meshcore-n1mag-mobl1",
+        connection_type=MeshConnectionType.TCP,
+        tcp_host="",
+    )
+    second_stale_tcp = replace(stale_tcp, adapter_id="meshcore-n1mag-mobl1-2")
+    values = {
+        # Preserve the production failure shape instead of passing through the
+        # serializer, which now repairs it as well.
+        "mesh_connection_library": json.dumps(
+            [ble.to_mapping(), stale_tcp.to_mapping(), second_stale_tcp.to_mapping()]
+        ),
+        **{f"meshcore_{key}": value for key, value in ble.to_mapping().items()},
+    }
+
+    assert load_mesh_connection_configs(values) == (ble,)
+    assert load_saved_mesh_connection_configs(values) == (ble,)
+
+
+def test_mesh_library_edit_replaces_previous_record_in_place() -> None:
+    original = MeshConnectionConfig(
+        adapter_id="meshcore-field",
+        protocol="meshcore",
+        enabled=True,
+        connection_type=MeshConnectionType.BLE,
+        ble_device_id="FE:BC:04:8F:50:E3",
+        ble_device_name="MeshCore Field",
+    )
+    edited = replace(
+        original,
+        connection_type=MeshConnectionType.TCP,
+        tcp_host="192.0.2.44",
+    )
+    values = {"mesh_connection_library": serialize_mesh_connection_library((original,))}
+
+    merged = merge_mesh_connection_library(
+        values,
+        edited,
+        previous_key=mesh_connection_config_key(original),
+    )
+
+    assert merged == (edited,)
 
 
 def test_runtime_loader_suppresses_stale_enabled_same_family_sibling() -> None:
@@ -1828,9 +1887,71 @@ def test_meshcore_factory_routes_ble_serial_and_tcp_to_qualified_adapters() -> N
         )
     )
 
-    assert isinstance(ble, MeshCoreBleAdapter)
+    assert type(ble) is MeshCorePythonAdapter
     assert isinstance(serial, MeshCorePythonAdapter)
     assert isinstance(tcp, MeshCorePythonAdapter)
+
+
+def test_meshcore_python_ble_uses_official_client_factory(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = types.ModuleType("meshcore")
+    captured: dict[str, object] = {}
+
+    class FakeEventType:
+        CHANNEL_MSG_RECV = object()
+        CONTACT_MSG_RECV = object()
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.is_connected = True
+
+        def subscribe(self, event_type: object, callback: object) -> object:
+            del callback
+            return event_type
+
+        def unsubscribe(self, subscription: object) -> None:
+            del subscription
+
+        async def start_auto_message_fetching(self) -> None:
+            captured["auto_fetch_started"] = True
+
+        async def stop_auto_message_fetching(self) -> None:
+            captured["auto_fetch_stopped"] = True
+
+        async def disconnect(self) -> None:
+            self.is_connected = False
+            captured["disconnected"] = True
+
+    class FakeMeshCore:
+        @classmethod
+        async def create_ble(cls, *args: object, **kwargs: object) -> object:
+            captured["factory_args"] = args
+            captured["factory_kwargs"] = kwargs
+            return FakeClient()
+
+    module.MeshCore = FakeMeshCore
+    module.EventType = FakeEventType
+    monkeypatch.setitem(sys.modules, "meshcore", module)
+    adapter = MeshCorePythonAdapter(
+        MeshConnectionConfig(
+            adapter_id="meshcore-field",
+            protocol="meshcore",
+            enabled=True,
+            send_enabled=True,
+            connection_type=MeshConnectionType.BLE,
+            ble_device_id="FE:BC:04:8F:50:E3",
+            ble_device_name="MeshCore Field",
+        )
+    )
+
+    adapter.connect()
+    assert adapter.send_capabilities().supported
+    adapter.disconnect()
+
+    assert captured["factory_args"] == ("FE:BC:04:8F:50:E3",)
+    assert captured["factory_kwargs"] == {"auto_reconnect": False, "default_timeout": 5}
+    assert captured["auto_fetch_started"] is True
+    assert captured["auto_fetch_stopped"] is True
+    assert captured["disconnected"] is True
 
 
 def test_meshcore_python_adapter_reports_missing_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3530,6 +3651,45 @@ def test_mesh_node_store_projects_location_observation(tmp_path) -> None:
     assert list_observations(db_path, source_family="meshtastic")[0].summary == "K7MESH | DM79 | 1 hop"
 
 
+def test_mesh_schema_adds_public_key_identity_to_existing_node_table(tmp_path) -> None:
+    db_path = tmp_path / "legacy-mesh.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE mesh_nodes (
+            source_ref TEXT PRIMARY KEY,
+            adapter_id TEXT NOT NULL,
+            transport TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            long_name TEXT,
+            short_name TEXT,
+            callsign TEXT,
+            role TEXT,
+            last_heard_utc TEXT,
+            hop_count INTEGER,
+            route_type TEXT,
+            direct_receive INTEGER,
+            via_node TEXT,
+            path_hops_json TEXT NOT NULL DEFAULT '[]',
+            snr REAL,
+            rssi REAL,
+            battery_percent REAL,
+            lat REAL,
+            lon REAL,
+            grid TEXT,
+            raw_payload_json TEXT NOT NULL DEFAULT '{}',
+            updated_utc TEXT NOT NULL
+        )
+        """
+    )
+
+    ensure_mesh_schema(conn)
+
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(mesh_nodes)")}
+    conn.close()
+    assert "public_key_or_hash" in columns
+
+
 def test_mesh_node_upsert_preserves_location_when_refresh_is_sparse(tmp_path) -> None:
     db_path = tmp_path / "mesh-node-preserve-location.db"
     upsert_mesh_node(
@@ -3660,53 +3820,54 @@ def test_mesh_worker_explicit_refresh_stages_discovered_channels_for_review(tmp_
 
 
 def test_meshcore_ble_worker_exposes_connect_disconnect_status_hooks(monkeypatch: pytest.MonkeyPatch) -> None:
-    import freqinout.core.mesh.meshcore_adapter as meshcore_adapter
-
     app = QApplication.instance() or QApplication([])
-    bleak_module = types.ModuleType("bleak")
+    meshcore_module = types.ModuleType("meshcore")
     health_snapshots: list[MeshHealthSnapshot] = []
     operation_states: list[tuple[str, str, int]] = []
     started_events: list[str] = []
     stopped_events: list[str] = []
 
-    class FakeCharacteristic:
-        def __init__(self, uuid: str) -> None:
-            self.uuid = uuid
+    class FakeEventType:
+        CHANNEL_MSG_RECV = object()
+        CONTACT_MSG_RECV = object()
 
-    class FakeService:
-        uuid = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
-        characteristics = (
-            FakeCharacteristic("6e400002-b5a3-f393-e0a9-e50e24dcca9e"),
-            FakeCharacteristic("6e400003-b5a3-f393-e0a9-e50e24dcca9e"),
-        )
+    class FakeCommands:
+        async def get_channel(self, _channel_idx: int) -> object:
+            return types.SimpleNamespace(type=types.SimpleNamespace(name="ERROR"), payload={})
 
-    class FakeBleakClient:
-        def __init__(self, address: object, timeout: int = 20) -> None:
-            self.address = address
-            self.timeout = timeout
-            self.is_connected = False
-
-        async def connect(self) -> None:
+    class FakeClient:
+        def __init__(self) -> None:
             self.is_connected = True
+            self.commands = FakeCommands()
+            self.contacts: dict[str, object] = {}
+
+        def subscribe(self, event_type: object, _callback: object) -> object:
+            return event_type
+
+        def unsubscribe(self, _subscription: object) -> None:
+            pass
+
+        async def start_auto_message_fetching(self) -> None:
+            pass
+
+        async def stop_auto_message_fetching(self) -> None:
+            pass
+
+        async def ensure_contacts(self, follow: bool = False) -> bool:
+            del follow
+            return True
 
         async def disconnect(self) -> None:
             self.is_connected = False
 
-        async def get_services(self) -> list[FakeService]:
-            return [FakeService()]
+    class FakeMeshCore:
+        @classmethod
+        async def create_ble(cls, *_args: object, **_kwargs: object) -> object:
+            return FakeClient()
 
-        async def start_notify(self, _uuid: str, _callback: object) -> None:
-            pass
-
-        async def stop_notify(self, _uuid: str) -> None:
-            pass
-
-        async def write_gatt_char(self, _uuid: str, _payload: bytes, response: bool = False) -> None:
-            pass
-
-    bleak_module.BleakClient = FakeBleakClient
-    monkeypatch.setitem(sys.modules, "bleak", bleak_module)
-    monkeypatch.setattr(meshcore_adapter, "meshcore_ble_available", lambda: True)
+    meshcore_module.MeshCore = FakeMeshCore
+    meshcore_module.EventType = FakeEventType
+    monkeypatch.setitem(sys.modules, "meshcore", meshcore_module)
 
     worker = MeshConnectionWorker(
         [

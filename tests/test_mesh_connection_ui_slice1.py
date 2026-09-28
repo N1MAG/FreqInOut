@@ -104,9 +104,10 @@ def test_mesh_transport_choices_and_send_controls_are_protocol_aware(monkeypatch
         tab._set_combo_data_if_present(tab.mesh_connection_type_combo, MeshConnectionType.BLE.value)
         tab.mesh_ble_device_id_edit.setText("test-device")
         app.processEvents()
-        assert tab.mesh_send_enabled_chk.isEnabled() is False
-        assert "receive only" in tab.mesh_send_enabled_chk.text().casefold()
-        assert "receive only" in tab._summary_mesh_settings().casefold()
+        assert tab.mesh_send_enabled_chk.isEnabled() is True
+        assert tab.mesh_send_enabled_chk.isChecked() is True
+        assert "allow send" in tab.mesh_send_enabled_chk.text().casefold()
+        assert "send enabled" in tab._summary_mesh_settings().casefold()
     finally:
         tab.close()
         tab.deleteLater()
@@ -136,7 +137,7 @@ def test_saved_unsupported_mesh_transport_stays_visible_but_inert(monkeypatch, t
         assert "not implemented" in tab.mesh_connection_type_combo.itemData(current, 3).casefold()
         assert tab.mesh_send_enabled_chk.isEnabled() is False
         assert tab.mesh_send_enabled_chk.isChecked() is False
-        assert tab._mesh_config_from_ui().send_enabled is True
+        assert tab._mesh_config_from_ui().send_enabled is False
         assert "Needs setup:" in tab.mesh_status_label.text()
     finally:
         tab.close()

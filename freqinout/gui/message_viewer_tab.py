@@ -176,7 +176,7 @@ from freqinout.core.plan_context_service import PlanContextService
 from freqinout.core.mesh.models import MeshSendRequest, MeshSendResult
 from freqinout.core.mesh.settings import (
     default_mesh_db_path,
-    load_saved_mesh_connection_configs,
+    load_mesh_connection_configs,
     mesh_outbound_capability,
 )
 from freqinout.core.mesh.store import list_mesh_channel_policies, list_mesh_health, list_mesh_nodes
@@ -9286,7 +9286,7 @@ class MessageViewerTab(QWidget):
         try:
             configs = [
                 config
-                for config in load_saved_mesh_connection_configs(self.settings)
+                for config in load_mesh_connection_configs(self.settings)
                 if config.enabled
                 and config.send_enabled
                 and mesh_outbound_capability(config.protocol, config.connection_type).supported

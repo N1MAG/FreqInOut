@@ -13015,7 +13015,7 @@ class SettingsTab(QWidget):
             send_enabled=(
                 bool(self.mesh_send_enabled_chk.isChecked())
                 if mesh_outbound_capability(protocol, MeshConnectionType.from_value(connection_type)).supported
-                else bool(getattr(self, "_mesh_legacy_send_enabled", False))
+                else False
             ),
             store_messages_enabled=bool(
                 hasattr(self, "mesh_store_messages_chk") and self.mesh_store_messages_chk.isChecked()
@@ -13034,11 +13034,32 @@ class SettingsTab(QWidget):
             existing_values = self.settings.all()
         except Exception:
             existing_values = {}
-        library = merge_mesh_connection_library(existing_values, config)
+        previous_key = (
+            ""
+            if bool(getattr(self, "_mesh_adding_new_connection", False))
+            else str(getattr(self, "_mesh_selected_connection_key", "") or "").strip()
+        )
+        previous_config = next(
+            (
+                candidate
+                for candidate in load_saved_mesh_connection_configs(existing_values)
+                if previous_key and mesh_connection_config_key(candidate) == previous_key
+            ),
+            None,
+        )
+        library = merge_mesh_connection_library(
+            existing_values,
+            config,
+            previous_key=previous_key,
+        )
         prefix = str(config.protocol or "meshtastic").strip().lower()
         if prefix not in {"meshcore", "meshtastic"}:
             prefix = "meshtastic"
         payload = mesh_connection_active_settings_payload(config, prefix=prefix)
+        if previous_config is not None:
+            previous_prefix = str(previous_config.protocol or "").strip().lower()
+            if previous_prefix in {"meshcore", "meshtastic"} and previous_prefix != prefix:
+                payload[f"{previous_prefix}_enabled"] = False
         payload["mesh_connection_library"] = serialize_mesh_connection_library(library)
         return payload
 
@@ -13741,8 +13762,6 @@ class SettingsTab(QWidget):
         checkbox = getattr(self, "mesh_send_enabled_chk", None)
         if not isinstance(checkbox, QCheckBox):
             return
-        if config is not None:
-            self._mesh_legacy_send_enabled = bool(config.send_enabled)
         current = config or self._mesh_config_from_ui()
         capability = mesh_outbound_capability(current.protocol, current.connection_type)
         checkbox_blocker = QSignalBlocker(checkbox)

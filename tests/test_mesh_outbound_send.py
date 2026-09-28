@@ -144,15 +144,13 @@ def _config(
     )
 
 
-def test_outbound_capability_matrix_keeps_unqualified_meshcore_ble_receive_only() -> None:
+def test_outbound_capability_matrix_includes_official_meshcore_ble_client() -> None:
     assert mesh_outbound_capability("meshtastic", MeshConnectionType.TCP).supported
     assert mesh_outbound_capability("meshtastic", MeshConnectionType.SERIAL).supported
     assert mesh_outbound_capability("meshtastic", MeshConnectionType.BLE).supported
     assert mesh_outbound_capability("meshcore", MeshConnectionType.TCP).supported
     assert mesh_outbound_capability("meshcore", MeshConnectionType.SERIAL).supported
-    blocked = mesh_outbound_capability("meshcore", MeshConnectionType.BLE)
-    assert not blocked.supported
-    assert "receive-only" in blocked.reason
+    assert mesh_outbound_capability("meshcore", MeshConnectionType.BLE).supported
 
 
 def test_manager_enforces_operator_send_enable_and_connected_session() -> None:
@@ -318,7 +316,7 @@ def test_meshcore_python_send_reports_command_completion_and_node_ack() -> None:
     assert direct_result.evidence == "node_ack"
 
 
-def test_meshcore_raw_ble_send_is_explicitly_blocked() -> None:
+def test_legacy_raw_meshcore_ble_adapter_send_is_explicitly_blocked() -> None:
     adapter = MeshCoreBleAdapter(_config(protocol="meshcore", connection_type=MeshConnectionType.BLE))
     assert not adapter.send_capabilities().supported
     with pytest.raises(MeshConnectionError, match="receive-only"):
