@@ -60,8 +60,8 @@ MESHCORE_NUS_RX_UUID = "6e400002b5a3f393e0a9e50e24dcca9e"
 MESHCORE_NUS_TX_UUID = "6e400003b5a3f393e0a9e50e24dcca9e"
 
 PAIRING_GUIDANCE = (
-    "Open Bluetooth settings for this computer if pairing is requested, use the PIN shown on the device, "
-    "then retry Local Mesh."
+    "Keep FIO open, choose Connect, and accept the operating-system Bluetooth prompt using the PIN shown on "
+    "the device. FIO requests pairing when needed but does not store the PIN."
 )
 STALE_BOND_GUIDANCE = (
     "Disconnect phone/tablet clients, restart the card, and retry the saved device once. "
@@ -78,6 +78,7 @@ MESHCORE_RECEIVE_PENDING_WARNING = MESHCORE_COMPANION_DECODER_WARNING
 MESHCORE_BLE_DISCONNECTING_MESSAGE = (
     "MeshCore Bluetooth is still disconnecting. Wait for it to finish before reconnecting."
 )
+MESHCORE_LINUX_PAIRING_TIMEOUT_SEC = 75.0
 
 
 class _MeshCoreBleSessionGate:
@@ -1358,7 +1359,23 @@ class MeshCorePythonAdapter(MeshCoreBleAdapter):
             raise MeshConnectionError(
                 f"The installed meshcore package does not support {self.config.connection_type.value.upper()}."
             )
-        client = await factory(*args, auto_reconnect=False, default_timeout=5)
+        factory_kwargs = {"auto_reconnect": False, "default_timeout": 5}
+        try:
+            client = await factory(*args, **factory_kwargs)
+        except Exception as exc:
+            if not _linux_ble_pair_retry_recommended(self.config, exc):
+                raise
+            log.info(
+                "MeshCore BLE initial connection requires Linux pairing adapter=%s device=%s.",
+                self.adapter_id,
+                self.config.ble_device_name or self.config.ble_device_id,
+            )
+            await self._pair_linux_ble_target()
+            log.info(
+                "MeshCore BLE Linux pairing completed; retrying Companion connection adapter=%s.",
+                self.adapter_id,
+            )
+            client = await factory(*args, **factory_kwargs)
         if client is None:
             raise MeshConnectionError(_meshcore_no_handshake_message(self.config))
         wrapper = MeshCorePythonCompanionClient(client, event_type)
@@ -1369,6 +1386,57 @@ class MeshCorePythonAdapter(MeshCoreBleAdapter):
             raise
         self._client = wrapper
         self._device_name = self.config.display_name
+
+    async def _pair_linux_ble_target(self) -> None:
+        """Ask BlueZ to pair before GATT discovery, without taking PIN custody.
+
+        MeshCore's current ``pin=`` factory option calls ``BleakClient.pair()``
+        only after ``connect()``. BlueZ service discovery can fail before that
+        point on an unpaired secured device. Bleak 1.0 added ``pair=True`` so
+        BlueZ performs the PIN exchange first and the desktop's registered
+        Bluetooth agent owns the prompt. The temporary connection is closed
+        before the official MeshCore client takes over the durable session.
+        """
+
+        bleak = import_module("bleak")
+        client_cls = getattr(bleak, "BleakClient", None)
+        if client_cls is None:
+            raise MeshConnectionError("The installed Python BLE package does not provide BleakClient.")
+        target = self.config.ble_device_id or self.config.ble_device_name
+        try:
+            pairing_client = client_cls(
+                target,
+                timeout=MESHCORE_LINUX_PAIRING_TIMEOUT_SEC,
+                pair=True,
+            )
+        except TypeError as exc:
+            raise MeshConnectionError(
+                "The installed Python BLE package is too old for secure in-FIO pairing. "
+                "Run the supported FIO installer or repair, then choose Connect again."
+            ) from exc
+        try:
+            await pairing_client.connect()
+            if not bool(getattr(pairing_client, "is_connected", False)):
+                raise MeshConnectionError(
+                    f"Linux did not complete MeshCore Bluetooth pairing. {PAIRING_GUIDANCE}"
+                )
+        except MeshConnectionError:
+            raise
+        except Exception as exc:
+            raise MeshConnectionError(
+                f"Linux could not complete MeshCore Bluetooth pairing: {exc}. {PAIRING_GUIDANCE}"
+            ) from exc
+        finally:
+            disconnect = getattr(pairing_client, "disconnect", None)
+            if callable(disconnect) and bool(getattr(pairing_client, "is_connected", False)):
+                try:
+                    await disconnect()
+                except Exception as exc:
+                    log.warning(
+                        "MeshCore BLE temporary pairing connection did not close cleanly adapter=%s raw=%s",
+                        self.adapter_id,
+                        str(exc),
+                    )
 
     def _finish_python_session(self) -> None:
         runner = self._ble_loop
@@ -1607,6 +1675,31 @@ def _pairing_error_message(exc: object) -> str:
     if any(term in lowered for term in ("characteristic", "service", "gatt", "subscribe", "notify")):
         return f"MeshCore BLE connected but Companion service setup failed. {COMPANION_SERVICE_RECOVERY_GUIDANCE}"
     return f"MeshCore BLE connection failed: {text}. {PAIRING_GUIDANCE}"
+
+
+def _linux_ble_pair_retry_recommended(config: MeshConnectionConfig, exc: object) -> bool:
+    """Return whether one BlueZ pair-before-discovery attempt is appropriate."""
+
+    if not sys.platform.startswith("linux") or config.connection_type is not MeshConnectionType.BLE:
+        return False
+    if _peer_removed_pairing_information(exc):
+        # Replacing a known stale bond is an explicit recovery decision. Never
+        # mutate it automatically from an ordinary Connect attempt.
+        return False
+    text = str(exc or "").casefold()
+    return any(
+        marker in text
+        for marker in (
+            "failed to discover services",
+            "authentication",
+            "authenticate",
+            "not authorized",
+            "not paired",
+            "pairing",
+            "passkey",
+            "pin",
+        )
+    )
 
 
 def _peer_removed_pairing_information(exc: object) -> bool:

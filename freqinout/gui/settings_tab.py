@@ -6449,7 +6449,8 @@ class SettingsTab(QWidget):
         mesh_ble_results_layout.addWidget(self.mesh_ble_use_selected_btn)
         discovery_layout.addWidget(self.mesh_ble_results_row)
         self.mesh_ble_guidance_label = QLabel(
-            "MeshCore may not appear in Bluetooth settings for this computer until a connection requests pairing. Use Scan, then enter the PIN shown on the device if prompted."
+            "Use Scan, select the MeshCore device, then Connect. Keep FIO open: when authentication is needed, "
+            "FIO requests pairing and the operating system asks for the PIN shown on the device. FIO does not store the PIN."
         )
         self.mesh_ble_guidance_label.setWordWrap(True)
         self.mesh_ble_guidance_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)

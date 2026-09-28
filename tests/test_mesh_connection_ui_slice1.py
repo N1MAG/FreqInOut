@@ -242,7 +242,8 @@ def test_mesh_ble_results_visibility_follows_scan_or_results(monkeypatch, tmp_pa
         tab._refresh_mesh_connection_visibility()
         assert tab.mesh_ble_results_row.isHidden()
 
-        assert "Bluetooth settings for this computer" in tab.mesh_ble_guidance_label.text()
+        assert "Keep FIO open" in tab.mesh_ble_guidance_label.text()
+        assert "does not store the PIN" in tab.mesh_ble_guidance_label.text()
         assert tab.mesh_ble_use_selected_btn.text() == "Use Device"
         assert "save this discovered device" in tab.mesh_ble_use_selected_btn.toolTip().lower()
         assert "advertised ble name" in tab.mesh_ble_device_name_edit.toolTip().lower()

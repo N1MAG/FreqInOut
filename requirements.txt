@@ -1,7 +1,7 @@
 PySide6==6.8.1.1
 PySide6-Essentials==6.8.1.1
 PySide6-Addons==6.8.1.1
-bleak>=0.22.0
+bleak>=1.0.0
 meshtastic>=2.7.11,<3
 meshcore>=2.3.14,<3
 psutil>=5.9.0

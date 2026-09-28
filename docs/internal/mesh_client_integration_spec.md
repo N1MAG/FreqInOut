@@ -283,8 +283,14 @@ Validation must be specific:
   MeshCore Companion devices even when the laptop can see their advertisements.
   FIO therefore provides an in-app MeshCore BLE scan that lists nearby
   MeshCore/Nordic UART advertisements and lets the user save the device id/name.
-  If pairing is required during connect, the user enters the PIN shown on the
-  MeshCore device in the macOS prompt or Bluetooth Settings, then retries.
+  Connect first reuses any existing operating-system bond. On Linux, an
+  authentication or secured-service-discovery failure triggers one bounded
+  Bleak pair-before-connect attempt in the same FIO worker; the desktop's
+  registered BlueZ agent owns the PIN prompt and FIO automatically resumes the
+  official MeshCore Companion connection after pairing. The user keeps FIO
+  open and enters the PIN shown on the MeshCore device in the operating-system
+  prompt. FIO never persists or logs the PIN. macOS continues to use the
+  CoreBluetooth prompt triggered by secured characteristic access.
 - HTTP needs a base URL.
 - MQTT needs a broker and must be explicitly enabled.
 

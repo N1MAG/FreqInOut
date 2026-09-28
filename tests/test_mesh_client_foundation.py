@@ -1954,6 +1954,136 @@ def test_meshcore_python_ble_uses_official_client_factory(monkeypatch: pytest.Mo
     assert captured["disconnected"] is True
 
 
+def test_meshcore_python_ble_linux_pairs_before_retry_without_closing_fio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import freqinout.core.mesh.meshcore_adapter as meshcore_adapter
+
+    meshcore_module = types.ModuleType("meshcore")
+    bleak_module = types.ModuleType("bleak")
+    events: list[str] = []
+    factory_calls = 0
+
+    class FakeEventType:
+        CHANNEL_MSG_RECV = object()
+        CONTACT_MSG_RECV = object()
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.is_connected = True
+
+        def subscribe(self, event_type: object, callback: object) -> object:
+            del callback
+            return event_type
+
+        def unsubscribe(self, subscription: object) -> None:
+            del subscription
+
+        async def start_auto_message_fetching(self) -> None:
+            events.append("auto_fetch_started")
+
+        async def stop_auto_message_fetching(self) -> None:
+            pass
+
+        async def disconnect(self) -> None:
+            self.is_connected = False
+
+    class FakeMeshCore:
+        @classmethod
+        async def create_ble(cls, *args: object, **kwargs: object) -> object:
+            nonlocal factory_calls
+            del args, kwargs
+            factory_calls += 1
+            events.append(f"factory_{factory_calls}")
+            if factory_calls == 1:
+                raise RuntimeError("failed to discover services, device disconnected")
+            return FakeClient()
+
+    class FakePairingClient:
+        def __init__(self, target: object, *, timeout: float, pair: bool) -> None:
+            assert target == "FE:BC:04:8F:50:E3"
+            assert timeout == meshcore_adapter.MESHCORE_LINUX_PAIRING_TIMEOUT_SEC
+            assert pair is True
+            self.is_connected = False
+
+        async def connect(self) -> None:
+            events.append("pair_connect")
+            self.is_connected = True
+
+        async def disconnect(self) -> None:
+            events.append("pair_disconnect")
+            self.is_connected = False
+
+    meshcore_module.MeshCore = FakeMeshCore
+    meshcore_module.EventType = FakeEventType
+    bleak_module.BleakClient = FakePairingClient
+    monkeypatch.setitem(sys.modules, "meshcore", meshcore_module)
+    monkeypatch.setitem(sys.modules, "bleak", bleak_module)
+    monkeypatch.setattr(meshcore_adapter.sys, "platform", "linux")
+
+    adapter = MeshCorePythonAdapter(
+        MeshConnectionConfig(
+            adapter_id="meshcore-field",
+            protocol="meshcore",
+            enabled=True,
+            connection_type=MeshConnectionType.BLE,
+            ble_device_id="FE:BC:04:8F:50:E3",
+            ble_device_name="MeshCore Field",
+        )
+    )
+
+    adapter.connect()
+
+    assert events[:4] == ["factory_1", "pair_connect", "pair_disconnect", "factory_2"]
+    assert events[4] == "auto_fetch_started"
+    assert adapter.health().connected is True
+    adapter.disconnect()
+
+
+def test_meshcore_python_ble_linux_does_not_replace_stale_bond_automatically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import freqinout.core.mesh.meshcore_adapter as meshcore_adapter
+
+    meshcore_module = types.ModuleType("meshcore")
+    bleak_module = types.ModuleType("bleak")
+
+    class FakeEventType:
+        CHANNEL_MSG_RECV = object()
+        CONTACT_MSG_RECV = object()
+
+    class FakeMeshCore:
+        @classmethod
+        async def create_ble(cls, *args: object, **kwargs: object) -> object:
+            del args, kwargs
+            raise RuntimeError('CBErrorDomain Code=14 "Peer removed pairing information"')
+
+    class UnexpectedPairingClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+            raise AssertionError("a stale saved bond must not be replaced automatically")
+
+    meshcore_module.MeshCore = FakeMeshCore
+    meshcore_module.EventType = FakeEventType
+    bleak_module.BleakClient = UnexpectedPairingClient
+    monkeypatch.setitem(sys.modules, "meshcore", meshcore_module)
+    monkeypatch.setitem(sys.modules, "bleak", bleak_module)
+    monkeypatch.setattr(meshcore_adapter.sys, "platform", "linux")
+
+    adapter = MeshCorePythonAdapter(
+        MeshConnectionConfig(
+            adapter_id="meshcore-field",
+            protocol="meshcore",
+            enabled=True,
+            connection_type=MeshConnectionType.BLE,
+            ble_device_id="FE:BC:04:8F:50:E3",
+        )
+    )
+
+    with pytest.raises(MeshConnectionError, match="saved Bluetooth pairing information"):
+        adapter.connect()
+
+
 def test_meshcore_python_adapter_reports_missing_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
     import freqinout.core.mesh.meshcore_adapter as meshcore_adapter
 
