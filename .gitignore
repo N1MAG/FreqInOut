@@ -77,3 +77,4 @@ freqinout-review.zip
 # Local README screenshot staging (use GitHub release assets instead)
 docs/internal/ScreenShots/
 docs/rendered-single-rig-upgrade/
+.freqinout-install-verified.json

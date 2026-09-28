@@ -50,7 +50,7 @@ This profile starts with legacy single-rig settings already present. FIO should 
 FIO is using your current station setup.
 ```
 
-Then use `Settings -> Multi-Rig Setup -> Set up Multi-Rig` to confirm the first radio.
+Then use `Settings -> Upgrade Existing Station -> Back Up and Upgrade Station` to confirm the first radio.
 
 ### Fresh Install
 
@@ -305,7 +305,7 @@ migration_current=False
 .venv/bin/python tools/multirig_test_lab.py run prod-upgrade
 ```
 
-5. In FIO, go to Settings and choose `Set up Multi-Rig`. Confirm the first radio.
+5. In FIO, complete `Upgrade Existing Station`. Confirm the first radio.
 
 6. Close FIO, then restart the emulator lab with three radios:
 
@@ -400,9 +400,9 @@ Then prepare them again:
 For upgrade testing:
 
 - Settings should say FIO is using the current station setup.
-- `Set up Multi-Rig` should open the guided setup.
+- `Upgrade Existing Station` should open the guided upgrade.
 - The radio model should prefer the supported catalog.
-- `Not Now` should pause setup and preserve the single-rig path.
+- `Exit FIO` should close without migration writes and require the upgrade again next launch.
 - After setup, Settings should show `Multi-Rig is ready`.
 
 For fresh install testing:

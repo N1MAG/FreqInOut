@@ -37,8 +37,9 @@ The final allowlist is reviewed before the first export. It normally includes:
 - Python/runtime dependency metadata;
 - user-facing install, update, uninstall, launcher, Windows packaging, and
   source-package metadata required to obtain or run FIO.
-- the root `start-multi-rig.sh` and `start-multi-rig.cmd` operator launchers.
-  Both use FIO's standard OS profile by default, preserve an explicit
+- the root `start-freqinout.sh` and `start-freqinout.cmd` operator launchers,
+  plus the prior `start-multi-rig` names as compatibility wrappers. Both neutral
+  launchers use FIO's standard OS profile by default, preserve an explicit
   `FREQINOUT_CONFIG_DIR`, and accept either the `.venv` source layout or the
   Linux installer's `venv` layout without inventing a parallel multi-rig root.
 
@@ -107,10 +108,14 @@ not an exceptional test route.
 - Close FIO and affected companion applications before backup or migration.
 - Create and verify a complete, restorable pre-upgrade backup before changing
   the checkout, environment, database, profile, launcher, or desktop entry.
-- The installer/migration contract is now resolved: installers prepare the
-  application and launcher but do not finalize multi-rig configuration.
-  Migration waits for explicit informed confirmation in FIO after backup
-  review. Cancel or Defer causes zero production-profile migration writes.
+- The installer/migration contract is now resolved: the common source installer
+  validates the release, repairs an incomplete environment recoverably, checks
+  and backs up an existing closed profile, installs dependencies, and writes a
+  launch receipt only after an isolated smoke check. It does not finalize
+  multi-rig configuration. Migration waits for explicit informed confirmation
+  in **Upgrade Existing Station**. Exit or window-close causes zero
+  production-profile migration writes and ends FIO; the upgrade is required on
+  the next launch.
 - Preserve all existing operator data and application configuration. Convert
   the existing station into a clearly identified default radio and carry its
   software identity, schedule assignment, launch/monitor/startup choices, and
@@ -123,7 +128,7 @@ not an exceptional test route.
 - Prove rollback from the verified backup, including checkout/launcher state
   and both FIO databases. Document which OS keyring and external application
   files are intentionally outside the backup.
-- Test fresh install, in-place update, interrupted/failed update, Cancel/Defer,
+- Test fresh install, in-place update, interrupted/failed update, Exit/close,
   retry, restart, and rollback on supported Linux and Windows paths. macOS
   source update remains supported and documented even when no signed bundle is
   published.

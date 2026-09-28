@@ -156,15 +156,15 @@ Do not set `FREQINOUT_CONFIG_DIR` unless production already used a custom config
 
 ## 8. Expected First Launch Behavior
 
-On first launch, the multi-rig build should detect existing single-rig FIO usage and defer conversion. It should not silently create a first radio from production settings until you confirm Multi-Rig setup.
+On first launch, FIO detects the existing single-radio station before runtime
+services start and opens **Upgrade Existing Station**.
 
-In Settings, run the Multi-Rig setup flow:
+1. Review the detected manufacturer and model.
+2. Confirm the first radio display name, operating plan, and detected software.
+3. Click **Back Up and Upgrade Station**.
 
-1. Open Settings.
-2. Review the Multi-Rig setup prompt/card.
-3. Preview Configure Automatically if available.
-4. Confirm the first radio display name, radio model, operating plan, and detected software roles.
-5. Click Set up Multi-Rig.
+Choosing **Exit FIO** or closing the window exits without migration writes. The
+upgrade is required again on the next launch.
 
 Before database migration, FIO creates an in-app pre-migration backup under:
 

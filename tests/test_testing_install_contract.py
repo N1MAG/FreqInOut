@@ -66,7 +66,7 @@ def test_linux_installer_honors_explicit_repo_for_existing_checkout() -> None:
 
 
 def test_repo_launcher_accepts_source_and_installer_virtualenv_layouts() -> None:
-    source = _text("start-multi-rig.sh")
+    source = _text("start-freqinout.sh")
 
     assert 'WORKTREE="${FREQINOUT_INSTALL_DIR:-$SCRIPT_WORKTREE}"' in source
     assert '$WORKTREE/.venv/bin/python' in source
@@ -74,10 +74,15 @@ def test_repo_launcher_accepts_source_and_installer_virtualenv_layouts() -> None
     assert 'DEFAULT_RUNTIME_ROOT=' not in source
     assert 'LEGACY_RUNTIME_ROOT=' not in source
     assert 'export FREQINOUT_CONFIG_DIR="$RUNTIME_ROOT"' not in source
+    assert ".freqinout-install-verified.json" in source
+    assert 'if [[ -d "$WORKTREE/.venv" ]]' in source
+
+    wrapper = _text("start-multi-rig.sh")
+    assert 'exec "$SCRIPT_WORKTREE/start-freqinout.sh" "$@"' in wrapper
 
 
 def test_windows_repo_launcher_matches_profile_and_virtualenv_contract() -> None:
-    source = _text("start-multi-rig.cmd")
+    source = _text("start-freqinout.cmd")
 
     assert "%FREQINOUT_INSTALL_DIR%" in source
     assert ".venv\\Scripts\\python.exe" in source
@@ -85,6 +90,10 @@ def test_windows_repo_launcher_matches_profile_and_virtualenv_contract() -> None
     assert "-m freqinout.main %*" in source
     assert "LOCALAPPDATA" in source
     assert "runtime\\multi-rig" not in source
+    assert ".freqinout-install-verified.json" in source
+
+    wrapper = _text("start-multi-rig.cmd")
+    assert 'call "%~dp0start-freqinout.cmd" %*' in wrapper
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX launcher execution contract")
@@ -96,6 +105,7 @@ def test_posix_launcher_preserves_default_and_explicit_profile_environment(tmp_p
     package.mkdir()
     python_path.symlink_to(sys.executable)
     (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "version.py").write_text('__version__ = "2.0.1"\n', encoding="utf-8")
     (package / "main.py").write_text(
         "import json, os, sys\n"
         "from pathlib import Path\n"
@@ -103,6 +113,11 @@ def test_posix_launcher_preserves_default_and_explicit_profile_environment(tmp_p
         "    'config': os.environ.get('FREQINOUT_CONFIG_DIR'),\n"
         "    'args': sys.argv[1:],\n"
         "}), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    (worktree / "PySide6.py").write_text("", encoding="utf-8")
+    (worktree / ".freqinout-install-verified.json").write_text(
+        json.dumps({"version": "2.0.1", "python": str(Path(sys.executable).resolve())}),
         encoding="utf-8",
     )
 
@@ -113,7 +128,7 @@ def test_posix_launcher_preserves_default_and_explicit_profile_environment(tmp_p
     env["FREQINOUT_INSTALL_DIR"] = str(worktree)
     env["FIO_LAUNCH_PROBE"] = str(probe)
     subprocess.run(
-        ["bash", str(ROOT / "start-multi-rig.sh"), "alpha", "two words"],
+        ["bash", str(ROOT / "start-freqinout.sh"), "alpha", "two words"],
         check=True,
         env=env,
     )
@@ -125,7 +140,7 @@ def test_posix_launcher_preserves_default_and_explicit_profile_environment(tmp_p
     explicit = tmp_path / "explicit profile"
     env["FREQINOUT_CONFIG_DIR"] = str(explicit)
     subprocess.run(
-        ["bash", str(ROOT / "start-multi-rig.sh")],
+        ["bash", str(ROOT / "start-freqinout.sh")],
         check=True,
         env=env,
     )
@@ -166,8 +181,8 @@ def test_install_helper_declares_supported_python_range() -> None:
     assert "3.10 through 3.13" in source
     assert 'requires-python = ">=3.10,<3.14"' in _text("pyproject.toml")
     assert "MIN_PYTHON_MINOR=10" in _text("install_FreqInOut_linux.sh")
-    assert 'run_hint = r".\\start-multi-rig.cmd"' in source
-    assert 'run_hint = "./start-multi-rig.sh"' in source
+    assert 'run_hint = r".\\start-freqinout.cmd"' in source
+    assert 'run_hint = "./start-freqinout.sh"' in source
 
 
 def test_ci_exercises_wip_on_all_supported_desktop_os_families() -> None:

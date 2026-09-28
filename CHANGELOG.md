@@ -1,6 +1,8 @@
 # Changelog
 
 ## [2.0.1]
+- Changed: New installations and upgrades now use the same verified source installer and neutral `start-freqinout` launcher. The installer validates and backs up an existing closed profile, repairs incomplete environments, verifies the runtime, and prevents launch after an incomplete installation.
+- Changed: Existing single-radio profiles now complete the mandatory **Upgrade Existing Station** review before runtime services start. The review preserves manufacturer and model and offers only **Back Up and Upgrade Station** or **Exit FIO**.
 - Fixed: Managed VarAC cluster nodes now retain their radio-specific VarAC and VARA configuration paths, launch the intended node, and correctly attribute a shared VarAC executable without blocking the second radio.
 - Fixed: Launch Control now discards and reaps exited child processes before evaluating a new start, allowing a failed VarAC or companion-app launch to be retried without a restart.
 - Added: BBS Automation Rules are available again from the BBS workspace, with radio-aware VarAC, FLMsg, and FLAmp routing and a durable delivery ledger that prevents unchanged files from being copied repeatedly.

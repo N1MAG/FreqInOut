@@ -1437,9 +1437,9 @@ def test_settings_scoped_changes_do_not_broadcast_global_settings_saved() -> Non
     assert theme_block.count("self._emit_appearance_changed()") == 2
     assert "settings_saved.emit" not in theme_block
 
-    defer_block = source[source.index("def _defer_multi_rig_setup") : source.index("def _copy_multi_rig_status_summary")]
-    assert "self._emit_device_profiles_changed()" in defer_block
-    assert "settings_saved.emit" not in defer_block
+    assert "def _defer_multi_rig_setup" not in source
+    upgrade_block = source[source.index("def _start_multi_rig_setup") : source.index("def _set_multi_rig_setup_preview_text")]
+    assert "settings_saved.emit" not in upgrade_block
 
     projection_block = source[
         source.index("def _refresh_runtime_projection_ui") : source.index("def _persist_device_profile")
@@ -1589,7 +1589,7 @@ def test_radio_profile_status_card_uses_selected_radio_not_station_default() -> 
     tab.multi_rig_status_actions_widget = QWidget()
     tab.multi_rig_preview_autoconfig_btn = QPushButton()
     tab.multi_rig_setup_btn = QPushButton()
-    tab.multi_rig_not_now_btn = QPushButton()
+    tab.multi_rig_exit_btn = QPushButton()
     tab.multi_rig_copy_summary_btn = QPushButton()
     tab._multi_rig_runtime_status = MultiRigRuntimeStatus(
         startup_mode=STARTUP_MIGRATED,
@@ -2276,6 +2276,7 @@ def test_settings_multirig_setup_apply_blocks_when_backup_item_fails(monkeypatch
         raise AssertionError("migration should not run when the primary backup fails")
 
     monkeypatch.setattr(settings_tab_module, "ensure_multi_rig_migration", _fail_if_migrated)
+    monkeypatch.setattr(settings_tab_module.QMessageBox, "warning", lambda *_args, **_kwargs: None)
 
     result = tab._run_backup_backed_multi_rig_setup_apply(
         migration_settings={"control_via": "FLRig"},
@@ -2290,7 +2291,7 @@ def test_settings_multirig_setup_apply_blocks_when_backup_item_fails(monkeypatch
     assert result is False
     assert migration_called is False
     assert events[0].status == "blocked"
-    assert events[0].summary == "Multi-Rig setup blocked: backup did not complete."
+    assert events[0].summary == "Station upgrade blocked: backup did not complete."
     assert events[0].source_surface == "settings.configure_automatically.multirig.apply"
     assert "Primary FIO configuration backup did not complete." in events[0].detail
     assert "copy failed" in tab.multi_rig_autoconfig_preview_label.text()
@@ -2355,7 +2356,7 @@ def test_settings_multirig_setup_apply_publishes_failed_feedback_when_migration_
     events = service.recent(scope="settings")
     assert result is False
     assert events[0].status == "failed"
-    assert events[0].summary == "Multi-Rig setup failed after backup."
+    assert events[0].summary == "Station upgrade failed after backup."
     assert events[0].detail == "database locked"
     assert events[0].source_surface == "settings.configure_automatically.multirig.apply"
     assert "database locked" in tab.multi_rig_autoconfig_preview_label.text()

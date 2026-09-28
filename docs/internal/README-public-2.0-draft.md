@@ -125,7 +125,7 @@ Install Git and 64-bit Python 3.11 first:
 git clone https://github.com/N1MAG/FreqInOut.git "$HOME\FreqInOut"
 Set-Location "$HOME\FreqInOut"
 py -3.11 install_freqinout.py
-.\start-multi-rig.cmd
+.\start-freqinout.cmd
 ```
 
 ### macOS
@@ -136,7 +136,7 @@ Install Git and Python 3.11 from Python.org or Homebrew:
 git clone https://github.com/N1MAG/FreqInOut.git "$HOME/FreqInOut"
 cd "$HOME/FreqInOut"
 python3.11 install_freqinout.py
-./start-multi-rig.sh
+./start-freqinout.sh
 ```
 
 ### Linux

@@ -33,8 +33,9 @@ source .venv/bin/activate
 - `release_builder.py`: release preflight + optional EXE build helper.
 - `install_FreqInOut_linux.sh`: Linux installer (guided, repair, dry-run, update flows).
 - `uninstall_FreqInOut_linux.sh`: Linux uninstaller.
-- `start-multi-rig.sh`: Linux/macOS source launcher for the standard FIO profile.
-- `start-multi-rig.cmd`: Windows source launcher for the standard FIO profile.
+- `start-freqinout.sh`: Linux/macOS source launcher for the standard FIO profile.
+- `start-freqinout.cmd`: Windows source launcher for the standard FIO profile.
+- `start-multi-rig.sh` / `.cmd`: compatibility wrappers for the prior launcher name.
 
 Safe starter commands (run the Windows-only build command only on Windows):
 
@@ -43,20 +44,20 @@ python install_freqinout.py
 python release_builder.py
 bash install_FreqInOut_linux.sh --help
 bash uninstall_FreqInOut_linux.sh --help
-./start-multi-rig.sh
+./start-freqinout.sh
 ```
 
 Windows source launch:
 
 ```bat
-.\start-multi-rig.cmd
+.\start-freqinout.cmd
 ```
 
 Notes:
 
 - `view_logs.py` prints the entire log; use only when you intentionally want full output.
 - `install_freqinout.py` does not have `-h`; running it executes installation immediately.
-- `install_freqinout.py` creates `.venv`; the Linux guided installer creates `venv`. `start-multi-rig.sh` accepts either layout.
+- `install_freqinout.py` creates and verifies `.venv`; the Linux guided installer creates `venv`. `start-freqinout.sh` accepts either layout but never bypasses an incomplete `.venv`.
 - Both launchers accept `FREQINOUT_INSTALL_DIR` and use `.venv` or `venv`.
   They leave the profile location to FIO, so an upgrade opens the existing
   standard profile (`~/.freqinout` on Linux/macOS and the FreqInOut folder

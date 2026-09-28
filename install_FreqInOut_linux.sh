@@ -1158,6 +1158,7 @@ configure_runtime_sparse_checkout() {
     LICENSE.md \
     CREDITS.md \
     SECURITY.md \
+    start-freqinout.sh \
     start-multi-rig.sh \
     install_FreqInOut_linux.sh \
     uninstall_FreqInOut_linux.sh

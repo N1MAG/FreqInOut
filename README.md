@@ -39,9 +39,9 @@ git clone --branch "wip/private-testing-multi-rig-1.2.3-not-ready" `
   https://github.com/N1MAG/FreqInOut-internal-testing.git `
   "$HOME\FreqInOut-multi-rig-test"
 Set-Location "$HOME\FreqInOut-multi-rig-test"
-py -3.11 install_freqinout.py
 $env:FREQINOUT_CONFIG_DIR = "$env:LOCALAPPDATA\FreqInOut-MultiRig-Test"
-.\.venv\Scripts\python.exe -m freqinout.main
+py -3.11 install_freqinout.py
+.\start-freqinout.cmd
 ```
 
 Keep that PowerShell window open while testing so the isolated profile setting remains in effect.
@@ -55,9 +55,9 @@ git clone --branch "wip/private-testing-multi-rig-1.2.3-not-ready" \
   https://github.com/N1MAG/FreqInOut-internal-testing.git \
   "$HOME/FreqInOut-multi-rig-test"
 cd "$HOME/FreqInOut-multi-rig-test"
+export FREQINOUT_CONFIG_DIR="$HOME/.freqinout-multi-rig-test"
 python3.11 install_freqinout.py
-FREQINOUT_CONFIG_DIR="$HOME/.freqinout-multi-rig-test" \
-  ./.venv/bin/python -m freqinout.main
+./start-freqinout.sh
 ```
 
 macOS may ask for permission when FIO first opens files or launches companion applications. Grant only the access needed by the configured paths.
@@ -71,9 +71,9 @@ git clone --branch "wip/private-testing-multi-rig-1.2.3-not-ready" \
   https://github.com/N1MAG/FreqInOut-internal-testing.git \
   "$HOME/FreqInOut-multi-rig-test"
 cd "$HOME/FreqInOut-multi-rig-test"
+export FREQINOUT_CONFIG_DIR="$HOME/.freqinout-multi-rig-test"
 python3.11 install_freqinout.py
-FREQINOUT_CONFIG_DIR="$HOME/.freqinout-multi-rig-test" \
-  ./.venv/bin/python -m freqinout.main
+./start-freqinout.sh
 ```
 
 The guided installer supports Debian/Ubuntu/Mint, Fedora/RHEL-family, Arch-family, and openSUSE-family package managers. It installs required system packages and preserves an isolated `--config-root`, but it also refreshes the account's standard `freqinout` launcher/menu entry. Use it on a dedicated test account, or only when replacing that launcher target is acceptable. See the full installation guide for its command and dry-run option.

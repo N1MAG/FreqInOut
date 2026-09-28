@@ -59,7 +59,7 @@ The repository helper can also launch a source install and accepts both location
 ```bash
 FREQINOUT_INSTALL_DIR="$HOME/FreqInOut-multi-rig-test" \
 FREQINOUT_CONFIG_DIR="$HOME/.freqinout-multi-rig-test" \
-  "$HOME/FreqInOut-multi-rig-test/start-multi-rig.sh"
+  "$HOME/FreqInOut-multi-rig-test/start-freqinout.sh"
 ```
 
 ## Acceptance checks

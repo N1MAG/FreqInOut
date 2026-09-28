@@ -11366,3 +11366,56 @@ accepted MeshCore or Meshtastic operator message, and verify it appears once in
 Inbox while remaining visible in Ops Center. Also verify an Ops-only channel
 does not enter Inbox. Approval moves this item only to
 `Approved—queued for next point release`; it does not authorize a public push.
+
+## 2026-09-28 — Minimal source install and existing-station upgrade gate
+
+Status: automated gate complete; native Windows and operator upgrade
+qualification remain pending.
+
+The source-install path now uses neutral `start-freqinout` launchers, with the
+old multi-rig names retained as wrappers. `install_freqinout.py` validates the
+release and interpreter, preserves and replaces an incomplete `.venv`, checks
+and cold-backs up an existing FIO profile, verifies copied hashes and SQLite
+integrity, installs requirements, runs an isolated application/database check,
+and writes the receipt required by the launcher only after all checks pass.
+
+Existing single-radio and previously deferred profiles now reach **Upgrade
+Existing Station** before post-shell runtime services start. Manufacturer,
+model, display name, plan, and detected software remain part of the review.
+The available actions are **Back Up and Upgrade Station** and **Exit FIO**;
+closing the dialog also exits without migration writes and requires the review
+again on the next launch. Fresh and already-migrated profiles bypass the gate.
+
+Ownership:
+
+- The primary Codex model owned installer/migration safety, UI lifecycle,
+  documentation, integration, and final gate review. The runtime did not expose
+  a trustworthy exact model identifier or reasoning-effort label, so neither is
+  invented.
+- `upgrade_test_review`: `gpt-6-luna`, low reasoning, read-only focused audit of
+  launcher, installer, migration UI, test, and specification scope.
+
+Acceptance evidence:
+
+- installer, launcher, 1.2.8 migration, runtime-status, radio-scoped settings,
+  BBS-upgrade, public-export, and startup-shell regression partition — 235
+  passed;
+- end-to-end macOS source installation against an isolated profile, including
+  repair of a virtual environment that lacked pip, isolated runtime/database
+  verification, receipt creation, neutral-launcher validation, and startup
+  smoke test — pass;
+- supplied tester databases were exercised from temporary copies: the primary
+  settings database passed integrity checking, while the supplied nets
+  database correctly failed closed before install or migration because SQLite
+  reported a malformed `observation_projection` table;
+- Python compilation, shell syntax, DOCX terminology checks, and
+  `git diff --check` — pass;
+- the 11-page current-single-radio upgrade guide was rendered and every page
+  was inspected after the final edit — pass.
+
+Exit gate: automated qualification passes. Before release, run the documented
+PowerShell installer and neutral `.cmd` launcher on native Windows, then perform
+one healthy closed 1.2.8 station upgrade and verify the two backup locations,
+manufacturer/model selection, software assignments, schedules, BBS, and
+restart persistence. A database-integrity failure is a support stop, not an
+automatic repair or permission to discard operator data.

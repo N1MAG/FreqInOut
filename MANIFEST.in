@@ -8,6 +8,8 @@ include requirements.txt
 include install_freqinout.py
 include install_FreqInOut_linux.sh
 include uninstall_FreqInOut_linux.sh
+include start-freqinout.sh
+include start-freqinout.cmd
 include start-multi-rig.sh
 include start-multi-rig.cmd
 include docs/guide.html

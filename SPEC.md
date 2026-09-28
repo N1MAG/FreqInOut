@@ -11444,16 +11444,18 @@ This keeps protocol-specific stability and safety intact while supporting the
 local -> county -> state -> regional -> national flow for groups whose members
 have different communication capabilities.
 
-## Addendum: Public 2.0 Source Launcher And Installer Contract (2026-09-23)
+## Addendum: Public 2.0 Source Launcher And Installer Contract (updated 2026-09-28)
 
 FreqInOut 2.0 source launches must preserve the operator's established profile.
-The Linux/macOS `start-multi-rig.sh` and Windows `start-multi-rig.cmd` launchers
+The Linux/macOS `start-freqinout.sh` and Windows `start-freqinout.cmd` launchers
 therefore use FIO's platform default profile unless the operator explicitly
 sets `FREQINOUT_CONFIG_DIR`. They must never infer or create a sibling
 `runtime/multi-rig` profile. `FREQINOUT_INSTALL_DIR` may select the source tree,
 and both `.venv` and `venv` virtual-environment layouts are supported. The
 legacy `FREQINOUT_RUNTIME_ROOT` variable is accepted only as a deprecated,
 explicit compatibility alias when `FREQINOUT_CONFIG_DIR` is absent.
+The prior `start-multi-rig.sh` and `start-multi-rig.cmd` names remain thin
+compatibility wrappers around the neutral launchers.
 
 The Linux installer defaults to the anonymous public HTTPS repository
 `https://github.com/N1MAG/FreqInOut.git` and stable `main` branch. Private
@@ -11467,18 +11469,21 @@ When `--repo` is supplied for an existing checkout, the installer must update
 target branch that is not yet local is created from the fetched remote-tracking
 branch; an existing local target branch is reused and fast-forwarded only.
 
-Installers may back up data, install dependencies, create launchers, and run a
-self-test against a disposable profile. They must not finalize the
-single-rig-to-multi-rig migration. The application owns the informed migration
-review and confirmation after backup review; Cancel or Defer produces no
-production-profile migration writes. Uninstall removes every launcher, desktop
+Installers validate and back up existing FIO databases while FIO is closed,
+repair incomplete virtual environments recoverably, install dependencies,
+create launchers, and run a self-test against a disposable profile. They must
+not finalize the single-rig-to-multi-rig migration. The application owns the
+informed **Upgrade Existing Station** review and confirmation. Exiting or
+closing that required review produces no production-profile migration writes
+and ends the launch; the review appears again next time. Uninstall removes every launcher, desktop
 entry, and icon installed by the paired installer while retaining operator
 profile data unless a separate, explicit data-removal action is requested.
 
 Acceptance:
 
-- POSIX and Windows source launchers select `.venv` before `venv`, forward all
-  arguments, and leave the default profile environment unset.
+- POSIX and Windows source launchers select `.venv` before `venv`, never bypass
+  an incomplete `.venv`, require a current successful installation receipt,
+  forward all arguments, and leave the default profile environment unset.
 - An explicit `FREQINOUT_CONFIG_DIR` reaches the application unchanged.
 - The Linux installer contains no automatic migration finalizer and reports
   that migration review occurs on first launch.

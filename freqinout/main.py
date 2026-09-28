@@ -15,6 +15,13 @@ from freqinout.core.logger import log
 from freqinout.core.perf_metrics import emit_span, shutdown_perf_metrics
 from freqinout.core import updater
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.multi_radio_store import MultiRadioStore
+from freqinout.core.multi_rig_runtime_status import (
+    STARTUP_DEFERRED,
+    STARTUP_EXISTING_UNMIGRATED,
+    STARTUP_MIGRATION_ERROR,
+    build_multi_rig_runtime_status,
+)
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.startup_lock import try_acquire_single_instance_lock
 from freqinout.gui.dialog_notifications import install_auto_closing_information_dialogs
@@ -118,6 +125,48 @@ def _emit_startup_stage(name: str, start: float, *, app_start: float | None = No
     return now
 
 
+def _requires_existing_station_upgrade(startup_mode: str) -> bool:
+    return startup_mode in {
+        STARTUP_EXISTING_UNMIGRATED,
+        STARTUP_DEFERRED,
+        STARTUP_MIGRATION_ERROR,
+    }
+
+
+def _run_existing_station_upgrade_gate(*, before_dialog=None) -> bool:
+    """Finish or decline a legacy station upgrade before MainWindow exists."""
+
+    settings = SettingsManager()
+    try:
+        status = build_multi_rig_runtime_status(
+            MultiRadioStore(),
+            settings_values=dict(settings.all()),
+        )
+    finally:
+        settings.close()
+    if not _requires_existing_station_upgrade(status.startup_mode):
+        return True
+    if callable(before_dialog):
+        before_dialog()
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    gate = SettingsTab(None, defer_initial_load=True)
+    gate.set_multi_rig_runtime_status(status)
+    try:
+        upgraded = bool(gate._start_multi_rig_setup())
+    finally:
+        gate.shutdown()
+        try:
+            gate.settings.close()
+        except Exception:
+            pass
+        gate.deleteLater()
+    if not upgraded:
+        log.info("Existing station upgrade was not completed; FIO will exit.")
+    return upgraded
+
+
 def main():
     startup_started = time.perf_counter()
     parser = argparse.ArgumentParser(description="FreqInOut HF controller")
@@ -177,6 +226,30 @@ def main():
     install_auto_closing_information_dialogs()
     app._single_instance = lockfile  # type: ignore[attr-defined]
 
+    try:
+        upgrade_ready = _run_existing_station_upgrade_gate(
+            before_dialog=(splash.close if splash is not None else None),
+        )
+    except Exception as exc:
+        log.exception("Unable to run the existing-station upgrade gate.")
+        if splash is not None:
+            splash.close()
+        QMessageBox.critical(
+            None,
+            "Upgrade Existing Station",
+            "FIO could not verify the station upgrade state. No runtime services were started.\n\n"
+            f"{exc}",
+        )
+        lockfile.unlock()
+        return
+    if not upgrade_ready:
+        if splash is not None:
+            splash.close()
+        lockfile.unlock()
+        return
+    if splash is not None:
+        splash.show("Preparing main window...")
+
     win = None
     try:
         if splash is not None:
@@ -205,8 +278,8 @@ def main():
             splash.finish(win)
         _emit_startup_stage("startup_complete", startup_started)
         # Source listeners and projection catch-up deliberately begin only
-        # after the first usable shell has been painted.  Queuing the call
-        # also prevents post-shell work from extending startup metrics.
+        # after the first usable shell has been painted. The required legacy
+        # station upgrade gate ran before MainWindow construction.
         if hasattr(win, "start_post_shell_services"):
             QTimer.singleShot(0, win.start_post_shell_services)
         log.info("FreqInOut started.")

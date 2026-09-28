@@ -28,6 +28,8 @@ ROOT_FILES: tuple[str, ...] = (
     "install_freqinout.py",
     "pyproject.toml",
     "requirements.txt",
+    "start-freqinout.cmd",
+    "start-freqinout.sh",
     "start-multi-rig.cmd",
     "start-multi-rig.sh",
     "uninstall_FreqInOut_linux.sh",
