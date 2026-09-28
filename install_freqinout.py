@@ -293,7 +293,7 @@ def _verify_runtime(python: Path, root: Path) -> None:
             "from freqinout.core import db_initializer; "
             "from freqinout.core.radio_catalog import load_radio_catalog; "
             "from freqinout.version import __version__; "
-            "import freqinout.main, PySide6; "
+            "import bleak, freqinout.main, meshcore, meshtastic, PySide6; "
             "db_initializer.ensure_all_tables(); "
             "assert load_radio_catalog().get('entries'); "
             "print(__version__)"
@@ -312,6 +312,7 @@ def _write_install_receipt(root: Path, python: Path, version: str, backup: Path 
         "verified_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "version": version,
         "python": str(python.resolve()),
+        "requirements_sha256": _hash_file(root / "requirements.txt"),
         "profile_root": str(_default_profile_root()),
         "pre_install_backup": str(backup) if backup is not None else "",
     }

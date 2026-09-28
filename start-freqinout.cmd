@@ -32,7 +32,7 @@ if defined FREQINOUT_RUNTIME_ROOT if not defined FREQINOUT_CONFIG_DIR (
 
 pushd "%WORKTREE%" >nul || exit /b 1
 set "FIO_LAUNCH_WORKTREE=%WORKTREE%"
-"%PYTHON%" -c "import json, os, pathlib, sys; from freqinout.version import __version__; import freqinout.main, PySide6; r=json.loads((pathlib.Path(os.environ['FIO_LAUNCH_WORKTREE'])/'.freqinout-install-verified.json').read_text()); assert r.get('version') == __version__; assert pathlib.Path(r.get('python','')).resolve() == pathlib.Path(sys.executable).resolve()" >nul 2>&1
+"%PYTHON%" -c "import hashlib, json, os, pathlib, sys; from freqinout.version import __version__; import freqinout.main, PySide6; root=pathlib.Path(os.environ['FIO_LAUNCH_WORKTREE']); r=json.loads((root/'.freqinout-install-verified.json').read_text()); assert r.get('version') == __version__; assert pathlib.Path(r.get('python','')).resolve() == pathlib.Path(sys.executable).resolve(); assert r.get('requirements_sha256') == hashlib.sha256((root/'requirements.txt').read_bytes()).hexdigest()" >nul 2>&1
 if errorlevel 1 (
   >&2 echo FreqInOut installation validation failed.
   >&2 echo Run: py -3.11 install_freqinout.py

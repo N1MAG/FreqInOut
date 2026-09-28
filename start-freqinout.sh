@@ -28,7 +28,7 @@ fi
 
 cd "$WORKTREE"
 export FIO_LAUNCH_WORKTREE="$WORKTREE"
-if ! "$PYTHON" -c "import json, os, pathlib, sys; from freqinout.version import __version__; import freqinout.main, PySide6; r=json.loads((pathlib.Path(os.environ['FIO_LAUNCH_WORKTREE'])/'.freqinout-install-verified.json').read_text()); assert r.get('version') == __version__; assert pathlib.Path(r.get('python','')).resolve() == pathlib.Path(sys.executable).resolve()" >/dev/null 2>&1; then
+if ! "$PYTHON" -c "import hashlib, json, os, pathlib, sys; from freqinout.version import __version__; import freqinout.main, PySide6; root=pathlib.Path(os.environ['FIO_LAUNCH_WORKTREE']); r=json.loads((root/'.freqinout-install-verified.json').read_text()); assert r.get('version') == __version__; assert pathlib.Path(r.get('python','')).resolve() == pathlib.Path(sys.executable).resolve(); assert r.get('requirements_sha256') == hashlib.sha256((root/'requirements.txt').read_bytes()).hexdigest()" >/dev/null 2>&1; then
   echo "FreqInOut installation validation failed." >&2
   echo "Run: python3.11 install_freqinout.py" >&2
   exit 1

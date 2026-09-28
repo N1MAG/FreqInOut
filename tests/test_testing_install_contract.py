@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import json
 import os
@@ -116,8 +117,16 @@ def test_posix_launcher_preserves_default_and_explicit_profile_environment(tmp_p
         encoding="utf-8",
     )
     (worktree / "PySide6.py").write_text("", encoding="utf-8")
+    requirements = worktree / "requirements.txt"
+    requirements.write_text("PySide6\n", encoding="utf-8")
     (worktree / ".freqinout-install-verified.json").write_text(
-        json.dumps({"version": "2.0.1", "python": str(Path(sys.executable).resolve())}),
+        json.dumps(
+            {
+                "version": "2.0.1",
+                "python": str(Path(sys.executable).resolve()),
+                "requirements_sha256": hashlib.sha256(requirements.read_bytes()).hexdigest(),
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -145,6 +154,44 @@ def test_posix_launcher_preserves_default_and_explicit_profile_environment(tmp_p
         env=env,
     )
     assert json.loads(probe.read_text(encoding="utf-8"))["config"] == str(explicit)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX launcher execution contract")
+def test_posix_launcher_rejects_stale_dependency_receipt(tmp_path: Path) -> None:
+    worktree = tmp_path / "source"
+    python_path = worktree / ".venv" / "bin" / "python"
+    package = worktree / "freqinout"
+    python_path.parent.mkdir(parents=True)
+    package.mkdir()
+    python_path.symlink_to(sys.executable)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "version.py").write_text('__version__ = "2.0.1"\n', encoding="utf-8")
+    (package / "main.py").write_text("", encoding="utf-8")
+    (worktree / "PySide6.py").write_text("", encoding="utf-8")
+    (worktree / "requirements.txt").write_text("meshcore>=2.3.14,<3\n", encoding="utf-8")
+    (worktree / ".freqinout-install-verified.json").write_text(
+        json.dumps(
+            {
+                "version": "2.0.1",
+                "python": str(Path(sys.executable).resolve()),
+                "requirements_sha256": "stale",
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["FREQINOUT_INSTALL_DIR"] = str(worktree)
+
+    completed = subprocess.run(
+        ["bash", str(ROOT / "start-freqinout.sh")],
+        check=False,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 1
+    assert "Run: python3.11 install_freqinout.py" in completed.stderr
 
 
 def test_runtime_requirements_exclude_internal_tool_dependencies() -> None:
