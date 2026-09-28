@@ -1,6 +1,6 @@
 # JS8 Native-Default Identity And Multi-Endpoint Status Hotfix
 
-Status: `Awaiting maintainer pass approval`
+Status: `Approved—queued for next point release`
 
 Governing contracts:
 

@@ -45,7 +45,7 @@ PUBLIC_DOCS: tuple[str, ...] = (
     "docs/guide.html",
     "docs/Installation.md",
     "docs/FreqInOut-linux-installer.md",
-    "docs/FreqInOut 2.0.2 Installation and Upgrade Guide.docx",
+    "docs/FreqInOut 2.0.3 Installation and Upgrade Guide.docx",
     "docs/FreqInOut Version 2 Upgrade Guide for Current Single Radio Users.docx",
 )
 

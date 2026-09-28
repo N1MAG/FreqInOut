@@ -1,8 +1,43 @@
 # UI Regression Work Log
 
+## 2026-09-28 — Public FreqInOut 2.0.3 hotfix release
+
+Status: `Release authorized; public projection pending`
+
+This point release is intentionally limited to the two approved runtime
+hotfixes below: Windows verified-backup finalization and JS8 native-default
+identity with endpoint isolation. It includes the matching 2.0.3 version,
+changelog, public installation documentation, and rendered upgrade guide. It
+does not add packaging automation or unrelated runtime behavior.
+
+Work-package ownership: primary `gpt-6-astra` (high reasoning) owns release
+reconciliation, versioning, documentation, runtime export, exact public-diff
+review, validation, tagging, and publication. The underlying hotfixes retain
+their recorded independent `gpt-6-luna` (high reasoning) read-only audits.
+
+Release-candidate evidence:
+
+- release preflight — pass;
+- installer and launcher compatibility partition — 80 passed;
+- JS8 launch, status, and native-client partition — 139 passed, 2 skipped;
+- public runtime export contract — 2 passed;
+- isolated full-suite accounting — 382 modules accounted for: 380 passing and
+  2 intentionally skip-only; the two Qt real-widget modules were verified as
+  33 individually isolated passing nodes;
+- the one timing-sensitive Local Nets measurement passed three immediate
+  reruns after one 62.8 ms outlier against its 50 ms threshold;
+- changed-file compilation, full-package compile, and `git diff --check` —
+  pass; and
+- the six-page 2.0.3 DOCX guide rendered and passed visual inspection.
+
+The monolithic in-process pytest invocation remains unsuitable as a release
+oracle because Qt teardown left a JS8 reader thread alive and caused a native
+segmentation fault at 3%. The isolated accounting above covers the same test
+modules without that cross-test native-state contamination.
+
 ## 2026-09-28 — Windows verified-backup finalization hotfix
 
-Status: `Awaiting maintainer pass approval`
+Status: `Approved—queued for next point release`
 
 Governing specification:
 `windows_verified_backup_finalization_hotfix_spec.md`.
@@ -48,7 +83,7 @@ release; it does not authorize a public push by itself.
 
 ## 2026-09-28 — JS8 native-default identity and endpoint isolation hotfix
 
-Status: `Awaiting maintainer pass approval`
+Status: `Approved—queued for next point release`
 
 Private implementation commit: `18ca8d2f98586e9a390ab91639a0604a5bb7bff5`
 on `wip/private-testing-multi-rig-1.2.3-not-ready`.

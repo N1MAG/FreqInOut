@@ -1,6 +1,6 @@
 # Windows Verified-Backup Finalization Hotfix
 
-Status: `Awaiting maintainer pass approval`
+Status: `Approved—queued for next point release`
 
 Governing contract: `project_delivery_rules.md`
 

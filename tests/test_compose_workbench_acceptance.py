@@ -386,7 +386,7 @@ def test_local_mesh_compose_previews_and_emits_one_confirmed_request(monkeypatch
         review_state="accepted",
         key_state="device_configured",
     )
-    monkeypatch.setattr(message_viewer_ui, "load_saved_mesh_connection_configs", lambda _settings: (config,))
+    monkeypatch.setattr(message_viewer_ui, "load_mesh_connection_configs", lambda _settings: (config,))
     monkeypatch.setattr(
         message_viewer_ui,
         "list_mesh_health",

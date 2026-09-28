@@ -26,6 +26,7 @@ from freqinout.core.varac_bbs_config import (
     varac_ini_sync_state_to_json,
     write_varac_bbs_config,
 )
+from freqinout.core.varac_bbs_automation import apply_station_bbs_automation
 from freqinout.gui.settings_tab import SettingsTab
 from freqinout.gui.message_viewer_tab import MessageViewerTab
 
@@ -156,50 +157,41 @@ def test_messages_bbs_sweeper_applies_live_bbs_file_to_managed_location(tmp_path
     src.write_text("Regional weather alert", encoding="utf-8")
     stat = src.stat()
 
-    tab = MessageViewerTab.__new__(MessageViewerTab)
-    tab.settings = _DictSettings(
-        {
-            "varac_bbs_vault_enabled": True,
-            "varac_bbs_archive_dir": str(tmp_path / "archive"),
-            "varac_bbs_sweeper_rules_v1": [
-                {
-                    "id": "weather",
-                    "name": "Weather",
-                    "enabled": True,
-                    "source_families": ["varac_bbs"],
-                    "subject_contains": ["weather"],
-                    "target_location_ids": ["intel"],
-                    "copy_mode": "copy_once",
-                }
-            ],
-            "varac_bbs_vault_locations_v1": [
-                {
-                    "id": "intel",
-                    "name": "Intel",
-                    "source_dir": str(managed),
-                    "enabled": True,
-                }
-            ],
-        }
-    )
-
-    MessageViewerTab._apply_bbs_sweeper_rules_after_file_scan(
-        tab,
-        {
-            "bbs": [
-                FileRecord(
-                    path=src,
-                    origin="bbs",
-                    size=stat.st_size,
-                    mtime=stat.st_mtime,
-                )
-            ],
-            "flmsg": [],
-            "flamp": [],
-        },
+    result = apply_station_bbs_automation(
+        tmp_path / "freqinout_nets.db",
+        [
+            FileRecord(
+                path=src,
+                origin="bbs",
+                size=stat.st_size,
+                mtime=stat.st_mtime,
+            )
+        ],
+        legacy_enabled=True,
+        legacy_rules=[
+            {
+                "id": "weather",
+                "name": "Weather",
+                "enabled": True,
+                "source_families": ["varac_bbs"],
+                "subject_contains": ["weather"],
+                "target_location_ids": ["intel"],
+                "copy_mode": "copy_once",
+            }
+        ],
+        legacy_locations=[
+            {
+                "id": "intel",
+                "name": "Intel",
+                "source_dir": str(managed),
+                "enabled": True,
+            }
+        ],
     )
 
     copied = managed / src.name
+    assert result.error == ""
+    assert result.copied == 1
     assert copied.exists()
     assert copied.read_text(encoding="utf-8") == "Regional weather alert"
 
