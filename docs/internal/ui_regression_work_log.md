@@ -1,5 +1,86 @@
 # UI Regression Work Log
 
+## 2026-09-28 — Surviving generated-profile JS8 transition hotfix
+
+Status: `Awaiting maintainer pass approval`
+
+Private implementation commit: `96a98a2` on
+`wip/private-testing-multi-rig-1.2.3-not-ready`.
+
+The production pull/restart log showed that the JS8Call process launched before
+the default-profile correction remained alive after FIO exited. Its command line
+still carried `--rig-name fio-default_js8_instance-50f8a9bb`. The corrected
+native-default launch has no selector arguments, so the generic executable match
+credited the surviving generated-profile process and suppressed the intended
+default-profile launch.
+
+Launch Control now inspects only the fresh launch-owned process inventory and
+only for a legacy-default JS8 item. If the matching configured executable still
+has an obsolete `fio-default_js8_instance-*` selector, FIO fails closed with an
+instruction to close that JS8Call window/process and choose Launch again. FIO
+does not terminate the process or risk a duplicate endpoint. A genuine
+argument-free default process and every explicit/non-default rig name keep their
+prior behavior.
+
+Work-package ownership: primary `gpt-6-astra` owned the transition-safety design,
+implementation, integration review, tests, specification, guide update, and exit
+gate. The runtime did not expose a trustworthy reasoning-effort label. No
+delegation was used for this process-lifecycle-sensitive correction.
+
+Acceptance evidence:
+
+- launch-bundle, GRS-4, JS8 identity, and process-title partition — 107 passed;
+- focused regressions prove the generated-selector conflict, actionable result,
+  no-spawn boundary, and native-default non-conflict case;
+- changed-file compilation and `git diff --check` — pass.
+
+Maintainer pass gate: with the old generated-profile JS8Call still running,
+choose Launch and confirm FIO identifies the specific transition conflict. Close
+that JS8Call, choose Launch again, and confirm the installed default station
+profile opens. Approval queues this hotfix for the next public point release; it
+does not authorize a public push by itself.
+
+## 2026-09-28 — MeshCore hard BlueZ failure retry-containment hotfix
+
+Status: `Awaiting maintainer pass approval`
+
+Private implementation commit: `6b70667` on
+`wip/private-testing-multi-rig-1.2.3-not-ready`.
+
+The production log showed repeated in-FIO Linux pairing/service attempts
+progressing through `failed to discover services`,
+`br-connection-canceled`, and finally `No powered Bluetooth adapters found`.
+Later attempts consumed the full 30-second BLE timeout. The installed MeshCore
+Python dependency was present; the failure was BlueZ/device availability, not
+the earlier dependency-receipt problem.
+
+FIO now treats a powered-off Bluetooth adapter, a BlueZ-cancelled connection,
+and a failed in-FIO Linux pairing attempt as immediate operator-attention states.
+The worker publishes `needs-attention` after one attempt and waits for an
+explicit Connect instead of continuing automatic reconnects. Ordinary timeouts
+retain the existing bounded retry budget. Powered-off and cancelled errors now
+give recovery-specific wording instead of always appending PIN guidance. FIO
+does not toggle Bluetooth, remove a bond, store a PIN, or modify the card.
+
+Work-package ownership: primary `gpt-6-astra` owned BLE lifecycle/safety design,
+implementation, integration review, tests, specification, guide update, and exit
+gate. The runtime did not expose a trustworthy reasoning-effort label. No
+delegation was used for this concurrency-sensitive correction.
+
+Acceptance evidence:
+
+- Mesh lifecycle, foundation, and reconnect partition — 162 passed;
+- focused regressions prove hard-error classification, immediate worker pause,
+  no automatic second attempt, powered-off guidance, and unchanged timeout
+  backoff;
+- changed-file compilation and `git diff --check` — pass.
+
+Maintainer pass gate: restore Linux Bluetooth, power-cycle the T1000-E, wait for
+advertising, choose Connect once, and accept the PIN prompt if presented. Confirm
+FIO either reaches Companion-ready or pauses after one actionable failure with
+no reconnect churn. Approval queues this hotfix for the next public point
+release; it does not authorize a public push by itself.
+
 ## 2026-09-28 — Legacy JS8Call default-profile launch hotfix
 
 Status: `Awaiting maintainer pass approval`
