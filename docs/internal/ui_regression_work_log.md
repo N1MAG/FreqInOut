@@ -2,7 +2,7 @@
 
 ## 2026-09-28 — Surviving generated-profile JS8 transition hotfix
 
-Status: `Awaiting maintainer pass approval`
+Status: `Approved for public FreqInOut 2.0.2`
 
 Private implementation commit: `96a98a2` on
 `wip/private-testing-multi-rig-1.2.3-not-ready`.
@@ -42,7 +42,7 @@ does not authorize a public push by itself.
 
 ## 2026-09-28 — MeshCore hard BlueZ failure retry-containment hotfix
 
-Status: `Awaiting maintainer pass approval`
+Status: `Approved for public FreqInOut 2.0.2`
 
 Private implementation commit: `6b70667` on
 `wip/private-testing-multi-rig-1.2.3-not-ready`.
@@ -83,7 +83,7 @@ release; it does not authorize a public push by itself.
 
 ## 2026-09-28 — Legacy JS8Call default-profile launch hotfix
 
-Status: `Awaiting maintainer pass approval`
+Status: `Approved for public FreqInOut 2.0.2`
 
 Private implementation commit: `b8070e43c52c7a6a5be3493e2822f4837cdc30f4` on
 `wip/private-testing-multi-rig-1.2.3-not-ready`.
