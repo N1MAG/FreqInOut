@@ -1,8 +1,13 @@
 # Per-Radio Launch Control Gate Hotfix Specification
 
-Status: `Awaiting maintainer pass approval`
+Status: `Approved—queued for next point release`
 
 Date: 2026-09-29
+
+Maintainer approval: accepted on 2026-09-29 after native production testing
+confirmed that the per-radio gate logic worked as expected. This queues the
+hotfix for the next accumulated point release and does not independently
+authorize a public push.
 
 ## Purpose
 

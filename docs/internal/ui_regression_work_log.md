@@ -78,10 +78,14 @@ only its own radio stage through the separate physical-radio gate.
 
 ## 2026-09-29 — Per-radio launch control gate
 
-Status: `Awaiting maintainer pass approval`
+Status: `Approved—queued for next point release`
 
 Governing specification:
 `per_radio_launch_control_gate_hotfix_spec.md`.
+
+Maintainer approval: accepted on 2026-09-29 after native production testing;
+the operator confirmed the gate logic worked as expected. The maintainer then
+explicitly authorized inclusion in public FreqInOut 2.0.4.
 
 Private implementation commits on
 `wip/private-testing-multi-rig-1.2.3-not-ready`:
