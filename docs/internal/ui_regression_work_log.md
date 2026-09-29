@@ -12407,7 +12407,7 @@ the current unsigned release path while preserving it for future signed mode.
 
 ## 2026-09-29 — Transitional unsigned public-package mode
 
-Status: `Maintainer approved; hosted requalification pending`
+Status: `Maintainer approved; active on public main; environment protection pending`
 
 The maintainer confirmed that no Windows code-signing certificate, Azure
 subscription, or Apple Developer Program membership is currently available and
@@ -12435,8 +12435,20 @@ Ownership: primary `gpt-6-astra`, high reasoning, for workflow security,
 release-policy reconciliation, tests, and integration. No sub-agent was used
 under the active no-delegation constraint.
 
-Implementation acceptance so far: focused workflow/export tests, metadata
-validation, YAML parse, immutable action-reference checks, and `git diff
---check`. Public Windows, Linux, macOS Intel, and macOS Apple Silicon candidate
-jobs must all pass again with the explicit unsigned filenames before this
-workflow revision reaches public `main`.
+Implementation acceptance:
+
+- focused workflow tests: 13 passed;
+- public runtime export, metadata validation, YAML parse, immutable
+  action-reference checks, and `git diff --check`: pass;
+- public GitHub Actions run `36645986110` at exact commit `49fbbc6`: Windows
+  x86-64 unsigned installer, Linux amd64 DEB, macOS Intel unsigned DMG, and
+  macOS Apple Silicon unsigned DMG jobs all passed;
+- both credential-backed signing jobs skipped as designed because signing is
+  not enabled;
+- all four three-day candidate artifacts were retained; and
+- exact validated commit `49fbbc6db758fd1ee920eebb257262dcbd3900fe` was
+  fast-forwarded to public `main`.
+
+The remaining release-control gate is GitHub environment configuration:
+`production-release` must require the maintainer reviewer and permit only
+`v*` tags before the 2.0.4 tag is created.

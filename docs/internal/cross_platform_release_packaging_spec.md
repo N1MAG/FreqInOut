@@ -1,6 +1,6 @@
 # Cross-Platform Release Packaging Specification
 
-Status: `Transitional unsigned release mode approved; hosted requalification pending`
+Status: `Transitional unsigned release mode active on public main; environment protection pending`
 
 Governing contracts:
 
@@ -181,6 +181,15 @@ maintainer explicitly configures them. A future SignPath integration is a
 separate reviewed signing adapter. Previously published unsigned assets remain
 immutable; signed naming begins with a later release rather than replacing
 historical files.
+
+Public GitHub Actions run `36645986110` passed this transitional path at exact
+public commit `49fbbc6db758fd1ee920eebb257262dcbd3900fe`. The Windows x86-64,
+Linux amd64, macOS Intel, and macOS Apple Silicon jobs all completed
+successfully; the credential-backed signing jobs were skipped by default; and
+all four three-day candidate artifacts were retained. The exact validated
+commit was then fast-forwarded to public `main`. Creating `v2.0.4` remains
+blocked until the `production-release` reviewer and tag protections are
+verified and the approved 2.0.4 runtime bundle is ready.
 
 ## RP-6 — Later platforms
 
