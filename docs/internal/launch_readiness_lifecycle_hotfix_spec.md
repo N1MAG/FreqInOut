@@ -120,7 +120,8 @@ for the radio-control gate, but it remains in the general application path.
 ## Implementation and acceptance evidence
 
 Implemented on private branch
-`wip/private-testing-multi-rig-1.2.3-not-ready` for maintainer qualification.
+`wip/private-testing-multi-rig-1.2.3-not-ready` in commit `2d4f374` for
+maintainer qualification.
 
 - `.venv/bin/python -m pytest -q
   tests/test_launch_readiness_lifecycle_hotfix.py

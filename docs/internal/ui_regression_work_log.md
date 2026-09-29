@@ -1,5 +1,76 @@
 # UI Regression Work Log
 
+## 2026-09-29 — Launch-owned application readiness lifecycle
+
+Status: `Awaiting maintainer pass approval`
+
+Governing specification:
+`launch_readiness_lifecycle_hotfix_spec.md`.
+
+Private implementation commit: `2d4f374` on
+`wip/private-testing-multi-rig-1.2.3-not-ready`.
+
+The production startup in `freqinout (89).log` proved the per-radio control
+gate was working, then exposed the same preflight/post-launch lifecycle boundary
+in ordinary application readiness. FLDigi accepted commands before being
+reported timed out, JS8Call's API was active about twelve seconds after launch,
+FLAmp and VarAC visibly started, and a custom command exited with code 1 after
+one second. All were nevertheless held for the older saved thirty-second
+timeout, and the false JS8Call timeout caused CommStat to be skipped.
+
+The hotfix keeps the launch-safety process inventory immutable and authoritative
+for duplicate prevention. It separately retains the exact `Popen` child for the
+current row. A newly launched FLDigi or JS8Call now completes from fresh,
+worker-owned evidence for its exact configured endpoint without asking the
+pre-launch inventory to contain the new process. Process-only applications
+complete after their owned child remains alive for three seconds; VarAC keeps
+its existing twelve-second post-ready delay and JS8Call keeps its existing
+four-second dependent delay.
+
+A nonzero child exit is now an immediate `failed` result with its return code
+instead of a full timeout. Direct applications that exit successfully before
+readiness also fail closed. Only explicit custom tools and qualified platform
+launchers (`open`/`xdg-open`) may use a zero exit as successful launch handoff,
+and endpoint-backed rows must still prove their endpoint. The exact legacy
+saved timeout value `30` is normalized in memory to the current ninety-second
+ordinary-app default. Other explicit timeout values remain unchanged and the
+radio-control gate remains capped at thirty seconds.
+
+No schema, database value, launch recipe, endpoint configuration, radio
+profile, process scan, or UI structure changed. Endpoint refreshes remain
+asynchronous through the dependency-status worker with station-wide process
+refresh disabled. Child checks use nonblocking `poll()` only.
+
+Work-package ownership:
+
+- primary `gpt-6-astra` (high reasoning) owned lifecycle design, the
+  orchestrator implementation, focused tests, integration review,
+  specification/work-log reconciliation, and the exit-gate decision;
+- no delegated package was used because this is a tightly coupled process and
+  endpoint lifecycle correction and the active execution environment did not
+  authorize sub-agent delegation for this turn.
+
+Acceptance evidence:
+
+- focused readiness lifecycle and per-radio gate tests: **22 passed**;
+- launch bundle, identity, endpoint, VarAC, guided setup, Windows subprocess,
+  receiver, status, startup-surface, and Settings regression partition:
+  **283 passed, 2 expected platform skips**;
+- changed Python compilation and `git diff --check`: pass;
+- primary diff review confirmed that preflight duplicate evidence remains
+  immutable, no GUI-thread process scan or endpoint call was introduced, and
+  launch-owned state is cleared on success, failure, timeout, cancellation,
+  and sequence completion.
+
+Maintainer pass gate: on the production station, launch the FTDX-10 application
+stack and confirm FLDigi advances as soon as port 7362 responds, FLAmp advances
+after a brief stability period, JS8Call advances once port 2442 responds, and
+CommStat launches after the four-second JS8 settling delay. Confirm VarAC gets
+its existing settling period rather than a timeout. Retain the failing
+`rigctl-dx10` test command once and confirm its return code 1 is reported within
+the next readiness poll. Finally confirm the powered-off FT-710 still blocks
+only its own radio stage through the separate physical-radio gate.
+
 ## 2026-09-29 — Per-radio launch control gate
 
 Status: `Awaiting maintainer pass approval`
