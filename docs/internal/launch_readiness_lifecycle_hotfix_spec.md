@@ -1,6 +1,6 @@
 # Launch Readiness Lifecycle Hotfix Specification
 
-Status: `Awaiting maintainer pass approval`
+Status: `Approved—queued for next point release`
 
 Date: 2026-09-29
 
@@ -134,7 +134,7 @@ maintainer qualification.
 
 Automated implementation gate: **passed**.
 
-External qualification gate: **open**. Native production testing must confirm
-FLDigi and JS8Call advance from their live endpoints, FLAmp and VarAC advance
-from launch-owned child stability, CommStat follows ready JS8Call after the
-existing delay, and a failing custom tool reports its return code promptly.
+External qualification gate: **passed by the maintainer on 2026-09-29** after
+native production testing confirmed the corrected launch sequence was much
+cleaner. This approval queues the hotfix for the next accumulated point release
+and does not authorize an individual public push.

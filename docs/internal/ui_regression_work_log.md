@@ -2,13 +2,18 @@
 
 ## 2026-09-29 — Launch-owned application readiness lifecycle
 
-Status: `Awaiting maintainer pass approval`
+Status: `Approved—queued for next point release`
 
 Governing specification:
 `launch_readiness_lifecycle_hotfix_spec.md`.
 
 Private implementation commit: `2d4f374` on
 `wip/private-testing-multi-rig-1.2.3-not-ready`.
+
+Maintainer approval: accepted on 2026-09-29 after native production testing;
+the operator reported the resulting launch behavior was much cleaner. This
+queues the correction for the next accumulated point release and does not
+authorize an individual public push.
 
 The production startup in `freqinout (89).log` proved the per-radio control
 gate was working, then exposed the same preflight/post-launch lifecycle boundary
