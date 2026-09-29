@@ -73,11 +73,15 @@ jobs:
           }
 
   windows-candidate:
-    name: Windows x86-64 candidate
-    if: needs.verify.outputs.production == 'false'
+    name: Windows x86-64 unsigned package
+    if: needs.verify.outputs.production == 'false' || vars.FIO_ENABLE_PFX_SIGNING != 'true'
     needs: verify
     runs-on: windows-2022
     timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - name: Check out exact source revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -119,7 +123,7 @@ jobs:
           if (-not (Test-Path $iscc)) { throw "Inno Setup compiler not found at $iscc" }
           & $iscc installer.iss
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed: $LASTEXITCODE" }
-          Copy-Item ".\Output\FreqInOut-Setup.exe" ".\FreqInOut-${{ needs.verify.outputs.version }}-windows-x86_64-setup.exe"
+          Copy-Item ".\Output\FreqInOut-Setup.exe" ".\FreqInOut-${{ needs.verify.outputs.version }}-windows-x86_64-setup-unsigned.exe"
 
       - name: Install, launch, and uninstall completed installer
         shell: pwsh
@@ -129,7 +133,7 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           FREQINOUT_HARD_EXIT: "0"
         run: |
-          $installer = Resolve-Path ".\FreqInOut-${{ needs.verify.outputs.version }}-windows-x86_64-setup.exe"
+          $installer = Resolve-Path ".\FreqInOut-${{ needs.verify.outputs.version }}-windows-x86_64-setup-unsigned.exe"
           $installDir = Join-Path "${{ runner.temp }}" "FreqInOutInstalled"
           $install = Start-Process -FilePath $installer -ArgumentList @(
             "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$installDir"
@@ -150,24 +154,43 @@ jobs:
       - name: Generate checksum
         shell: pwsh
         run: |
-          $asset = "FreqInOut-${{ needs.verify.outputs.version }}-windows-x86_64-setup.exe"
+          $asset = "FreqInOut-${{ needs.verify.outputs.version }}-windows-x86_64-setup-unsigned.exe"
           $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $asset" | Set-Content "$asset.sha256" -Encoding ascii
 
       - name: Retain Windows candidate for three days
+        if: needs.verify.outputs.production == 'false'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: FreqInOut-${{ needs.verify.outputs.version }}-windows-x86_64-candidate
           path: |
-            FreqInOut-*-windows-x86_64-setup.exe
-            FreqInOut-*-windows-x86_64-setup.exe.sha256
+            FreqInOut-*-windows-x86_64-setup-unsigned.exe
+            FreqInOut-*-windows-x86_64-setup-unsigned.exe.sha256
             windows-dependencies.txt
           if-no-files-found: error
           retention-days: 3
 
+      - name: Attest unsigned Windows installer provenance
+        if: needs.verify.outputs.production == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: FreqInOut-${{ needs.verify.outputs.version }}-windows-x86_64-setup-unsigned.exe
+
+      - name: Upload unsigned Windows release assets
+        if: needs.verify.outputs.production == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: freqinout-release-windows-x86_64
+          path: |
+            FreqInOut-*-windows-x86_64-setup-unsigned.exe
+            FreqInOut-*-windows-x86_64-setup-unsigned.exe.sha256
+            windows-dependencies.txt
+          if-no-files-found: error
+          retention-days: 90
+
   windows-release:
     name: Windows x86-64 signed release
-    if: needs.verify.outputs.production == 'true'
+    if: needs.verify.outputs.production == 'true' && vars.FIO_ENABLE_PFX_SIGNING == 'true'
     needs: verify
     runs-on: windows-2022
     timeout-minutes: 45
@@ -415,8 +438,8 @@ jobs:
           retention-days: 90
 
   macos-candidate:
-    name: macOS ${{ matrix.arch }} candidate
-    if: needs.verify.outputs.production == 'false'
+    name: macOS ${{ matrix.arch }} unsigned package
+    if: needs.verify.outputs.production == 'false' || vars.FIO_ENABLE_APPLE_SIGNING != 'true'
     needs: verify
     strategy:
       fail-fast: false
@@ -428,6 +451,10 @@ jobs:
             arch: arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - name: Check out exact source revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -470,7 +497,9 @@ jobs:
       - name: Build and verify disk image
         run: |
           python packaging/build_macos_dmg.py --output-dir Output
-          hdiutil verify "Output/FreqInOut-${{ needs.verify.outputs.version }}-macos-${{ matrix.arch }}.dmg"
+          mv "Output/FreqInOut-${{ needs.verify.outputs.version }}-macos-${{ matrix.arch }}.dmg" \
+            "Output/FreqInOut-${{ needs.verify.outputs.version }}-macos-${{ matrix.arch }}-unsigned.dmg"
+          hdiutil verify "Output/FreqInOut-${{ needs.verify.outputs.version }}-macos-${{ matrix.arch }}-unsigned.dmg"
 
       - name: Install and launch completed disk image
         env:
@@ -479,7 +508,7 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           FREQINOUT_HARD_EXIT: "0"
         run: |
-          dmg="Output/FreqInOut-${{ needs.verify.outputs.version }}-macos-${{ matrix.arch }}.dmg"
+          dmg="Output/FreqInOut-${{ needs.verify.outputs.version }}-macos-${{ matrix.arch }}-unsigned.dmg"
           mount="$RUNNER_TEMP/freqinout-volume-${{ matrix.arch }}"
           install_root="$RUNNER_TEMP/freqinout-applications-${{ matrix.arch }}"
           mkdir -p "$mount" "$install_root" "$FREQINOUT_CONFIG_DIR"
@@ -496,23 +525,42 @@ jobs:
       - name: Generate checksum
         run: |
           cd Output
-          asset="FreqInOut-${{ needs.verify.outputs.version }}-macos-${{ matrix.arch }}.dmg"
+          asset="FreqInOut-${{ needs.verify.outputs.version }}-macos-${{ matrix.arch }}-unsigned.dmg"
           shasum -a 256 "$asset" > "$asset.sha256"
 
       - name: Retain macOS candidate for three days
+        if: needs.verify.outputs.production == 'false'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: FreqInOut-${{ needs.verify.outputs.version }}-macos-${{ matrix.arch }}-candidate
           path: |
-            Output/FreqInOut-*-macos-${{ matrix.arch }}.dmg
-            Output/FreqInOut-*-macos-${{ matrix.arch }}.dmg.sha256
+            Output/FreqInOut-*-macos-${{ matrix.arch }}-unsigned.dmg
+            Output/FreqInOut-*-macos-${{ matrix.arch }}-unsigned.dmg.sha256
             macos-${{ matrix.arch }}-dependencies.txt
           if-no-files-found: error
           retention-days: 3
 
+      - name: Attest unsigned macOS disk image provenance
+        if: needs.verify.outputs.production == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: Output/FreqInOut-${{ needs.verify.outputs.version }}-macos-${{ matrix.arch }}-unsigned.dmg
+
+      - name: Upload unsigned macOS release assets
+        if: needs.verify.outputs.production == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: freqinout-release-macos-${{ matrix.arch }}
+          path: |
+            Output/FreqInOut-*-macos-${{ matrix.arch }}-unsigned.dmg
+            Output/FreqInOut-*-macos-${{ matrix.arch }}-unsigned.dmg.sha256
+            macos-${{ matrix.arch }}-dependencies.txt
+          if-no-files-found: error
+          retention-days: 90
+
   macos-release:
     name: macOS ${{ matrix.arch }} signed and notarized release
-    if: needs.verify.outputs.production == 'true'
+    if: needs.verify.outputs.production == 'true' && vars.FIO_ENABLE_APPLE_SIGNING == 'true'
     needs: verify
     strategy:
       fail-fast: false
@@ -685,13 +733,15 @@ jobs:
       always() &&
       needs.verify.outputs.production == 'true' &&
       needs.verify.result == 'success' &&
-      needs.windows-release.result == 'success' &&
+      (needs.windows-candidate.result == 'success' || needs.windows-release.result == 'success') &&
       needs.linux.result == 'success' &&
-      needs.macos-release.result == 'success'
+      (needs.macos-candidate.result == 'success' || needs.macos-release.result == 'success')
     needs:
       - verify
+      - windows-candidate
       - windows-release
       - linux
+      - macos-candidate
       - macos-release
     runs-on: ubuntu-22.04
     environment:
@@ -722,13 +772,28 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+          WINDOWS_SIGNED: ${{ vars.FIO_ENABLE_PFX_SIGNING }}
+          MACOS_SIGNED: ${{ vars.FIO_ENABLE_APPLE_SIGNING }}
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             echo "Release $RELEASE_TAG already exists; refusing to overwrite it." >&2
             exit 1
           fi
+
+          release_notice=""
+          if [[ "$WINDOWS_SIGNED" != "true" || "$MACOS_SIGNED" != "true" ]]; then
+            release_notice=$'### Package signing notice\n\n'
+            if [[ "$WINDOWS_SIGNED" != "true" ]]; then
+              release_notice+=$'- The Windows installer is unsigned and is identified by `-unsigned` in its filename. Windows may display **Unknown publisher** or a Microsoft Defender SmartScreen prompt.\n'
+            fi
+            if [[ "$MACOS_SIGNED" != "true" ]]; then
+              release_notice+=$'- The macOS disk images are not Developer ID signed or notarized and are identified by `-unsigned` in their filenames. macOS may require **Open Anyway** in Privacy & Security.\n'
+            fi
+            release_notice+=$'- Verify the downloaded package against `SHA256SUMS.txt` and the GitHub build-provenance attestation. The installed application name remains **FreqInOut**.\n'
+          fi
+
           gh release create "$RELEASE_TAG" --verify-tag --draft \
-            --title "FreqInOut $RELEASE_VERSION" --generate-notes
+            --title "FreqInOut $RELEASE_VERSION" --generate-notes --notes "$release_notice"
           gh release upload "$RELEASE_TAG" \
             release-assets/FreqInOut-*.exe \
             release-assets/FreqInOut-*.deb \
