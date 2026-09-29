@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=FreqInOut
+Comment=HF radio operations console
+Exec=freqinout
+Icon=freqinout
+Terminal=false
+Categories=Network;HamRadio;
+StartupWMClass=FreqInOut

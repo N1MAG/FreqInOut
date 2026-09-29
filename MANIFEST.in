@@ -5,6 +5,9 @@ include CREDITS.md
 include CHANGELOG.md
 include SECURITY.md
 include requirements.txt
+include FreqInOut.spec
+include build_executable.py
+include installer.iss
 include install_freqinout.py
 include install_FreqInOut_linux.sh
 include uninstall_FreqInOut_linux.sh
@@ -15,6 +18,13 @@ include start-multi-rig.cmd
 include docs/guide.html
 include docs/Installation.md
 include docs/FreqInOut-linux-installer.md
+include packaging/build-requirements.txt
+include packaging/build_linux_deb.py
+include packaging/build_macos_dmg.py
+include packaging/linux/freqinout.desktop
+include packaging/macos/entitlements.plist
+include packaging/pyinstaller_runtime_qt.py
+include packaging/verify_release_inputs.py
 recursive-include docs/images/readme-2.0 *.jpg
 recursive-include freqinout *.py *.qml
 recursive-include freqinout/resources/spotter_forms *.txt
