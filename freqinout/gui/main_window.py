@@ -12938,7 +12938,8 @@ class MainWindow(QMainWindow):
         name = str(data.get("name", "")).strip() or "Application"
         status = str(data.get("status", "")).strip() or "status"
         detail = str(data.get("detail", "")).strip()
-        self._launch_progress_done = min(self._launch_progress_total, self._launch_progress_done + 1)
+        if bool(data.get("counts_toward_total", True)):
+            self._launch_progress_done = min(self._launch_progress_total, self._launch_progress_done + 1)
         try:
             self.statusBar().showMessage(f"Launch: {name} {status}" + (f" ({detail})" if detail else ""))
         except Exception:
@@ -12962,10 +12963,12 @@ class MainWindow(QMainWindow):
             failed = int(data.get("failed", 0) or 0)
             timeout = int(data.get("timeout", 0) or 0)
             blocked_self = int(data.get("blocked_self", 0) or 0)
+            blocked_radio_control = int(data.get("blocked_radio_control", 0) or 0)
             cancelled = bool(data.get("cancelled", False))
             summary = (
                 f"Launch {trigger or 'sequence'} complete: "
-                f"launched={launched}, running={running}, failed={failed}, timeout={timeout}, blocked={blocked_self}"
+                f"launched={launched}, running={running}, failed={failed}, timeout={timeout}, "
+                f"blocked={blocked_self}, radio-control-skipped={blocked_radio_control}"
             )
             if cancelled:
                 summary = f"{summary}, cancelled=true"
@@ -12981,12 +12984,14 @@ class MainWindow(QMainWindow):
                     pass
                 self._launch_progress_dialog = None
             log.info(
-                "LaunchControl summary (%s): launched=%s running=%s failed=%s timeout=%s cancelled=%s",
+                "LaunchControl summary (%s): launched=%s running=%s failed=%s timeout=%s "
+                "radio_control_skipped=%s cancelled=%s",
                 trigger or "unknown",
                 launched,
                 running,
                 failed,
                 timeout,
+                blocked_radio_control,
                 cancelled,
             )
         except Exception:

@@ -110,6 +110,11 @@ class PlannedInstance:
     bundle_enabled: bool = False
     operator_starts: bool = False
     monitor_health: bool = True
+    radio_control_backend: str = "manual"
+    radio_control_host: str = ""
+    radio_control_port: int = 0
+    radio_control_app: str = ""
+    radio_control_gate_required: bool = False
 
     def as_queue_item(self) -> Dict[str, Any]:
         return {
@@ -139,6 +144,11 @@ class PlannedInstance:
             "bundle_enabled": self.bundle_enabled,
             "operator_starts": self.operator_starts,
             "monitor_health": self.monitor_health,
+            "radio_control_backend": self.radio_control_backend,
+            "radio_control_host": self.radio_control_host,
+            "radio_control_port": self.radio_control_port,
+            "radio_control_app": self.radio_control_app,
+            "radio_control_gate_required": self.radio_control_gate_required,
         }
 
 
@@ -228,6 +238,32 @@ class StationLaunchPlanner:
             if not review_all and not bundle_enabled:
                 continue
             normalized_items = normalize_launch_items(bundle.get("items", []))
+            control_backend = str(
+                profile.get("control_backend", profile.get("control_via", "manual"))
+                or "manual"
+            ).strip().lower()
+            if control_backend == "hamlib":
+                control_backend = "rigctld"
+            control_app = {
+                "flrig": "FLRig",
+                "js8call": "JS8Call",
+            }.get(control_backend, "")
+            if control_backend == "flrig":
+                control_host = str(profile.get("flrig_host", "127.0.0.1") or "127.0.0.1")
+                control_port = int(profile.get("flrig_port", 12345) or 12345)
+            elif control_backend == "rigctld":
+                control_host = str(profile.get("rig_host", "127.0.0.1") or "127.0.0.1")
+                control_port = int(profile.get("rig_port", 4532) or 4532)
+            elif control_backend == "js8call":
+                control_host = str(profile.get("js8_host", "127.0.0.1") or "127.0.0.1")
+                control_port = int(profile.get("js8_port", 2442) or 2442)
+            else:
+                control_host = ""
+                control_port = 0
+            control_gate_required = bool(
+                not is_observer_profile(profile)
+                and control_backend not in {"", "manual", "none"}
+            )
             if review_all:
                 normalized_items = self._with_configured_review_components(profile, normalized_items)
             if is_observer_profile(profile):
@@ -329,10 +365,28 @@ class StationLaunchPlanner:
                     bundle_enabled=bundle_enabled,
                     operator_starts=operator_starts,
                     monitor_health=bool(item.get("monitor_health", True)),
+                    radio_control_backend=control_backend,
+                    radio_control_host=control_host,
+                    radio_control_port=control_port,
+                    radio_control_app=control_app,
+                    radio_control_gate_required=control_gate_required,
                 )
-                candidates.append((int(profile.get("display_order", 0) or 0), order, instance))
+                effective_order = -1 if control_app and name == control_app else order
+                candidates.append((int(profile.get("display_order", 0) or 0), effective_order, instance))
+
+        # Resolve dependencies inside each radio transaction.  A FLRig emitted
+        # for radio A must never satisfy FLDigi planning for radio B.
+        radio_groups: Dict[Tuple[int, int], List[Tuple[int, int, PlannedInstance]]] = {}
+        for value in candidates:
+            instance = value[2]
+            radio_id = int(instance.radio_ids[0]) if instance.radio_ids else 0
+            radio_groups.setdefault((value[0], radio_id), []).append(value)
+        radio_ordered_candidates: List[Tuple[int, int, PlannedInstance]] = []
+        for group_key in sorted(radio_groups):
+            radio_ordered_candidates.extend(self._dependency_order(radio_groups[group_key]))
+
         deduped: Dict[str, Tuple[int, int, PlannedInstance]] = {}
-        for profile_order, item_order, instance in candidates:
+        for profile_order, item_order, instance in radio_ordered_candidates:
             prior = deduped.get(instance.instance_identity)
             if prior is None:
                 deduped[instance.instance_identity] = (profile_order, item_order, instance)
@@ -365,9 +419,14 @@ class StationLaunchPlanner:
                 bundle_enabled=existing.bundle_enabled,
                 operator_starts=existing.operator_starts,
                 monitor_health=existing.monitor_health,
+                radio_control_backend=existing.radio_control_backend,
+                radio_control_host=existing.radio_control_host,
+                radio_control_port=existing.radio_control_port,
+                radio_control_app=existing.radio_control_app,
+                radio_control_gate_required=existing.radio_control_gate_required,
             )
             deduped[instance.instance_identity] = (prior[0], prior[1], merged)
-        ordered = self._dependency_order(list(deduped.values()))
+        ordered = list(deduped.values())
         instances = tuple(value[2] for value in ordered)
         self._validate_js8_launch_collisions(instances)
         issues = validate_multi_instance_launch_records([instance.as_queue_item() for instance in instances])

@@ -1407,6 +1407,8 @@ class SoftwareStatusService:
         fldigi_port_override: Optional[int] = None,
         fldigi_host_override: Optional[str] = None,
         instance_identities: Optional[Mapping[str, Mapping[str, object]]] = None,
+        verify_control_readback: bool = False,
+        control_backend: str = "",
     ) -> Dict[str, Dict[str, object]]:
         identities = instance_identities if isinstance(instance_identities, Mapping) else {}
 
@@ -1467,7 +1469,10 @@ class SoftwareStatusService:
             host_override=flrig_host_override,
             force=force,
         )
-        active_control_via = self._settings_text("control_via", "FLRig").strip().upper()
+        active_control_via = (
+            str(control_backend or "").strip().upper()
+            or self._settings_text("control_via", "FLRig").strip().upper()
+        )
         rigctld_active = active_control_via == "RIGCTLD" or rigctld_host_override is not None or rigctld_port_override is not None
         running_rigctld = _running("RigCtlD") if rigctld_active else False
         rigctld_host = (
@@ -1574,4 +1579,60 @@ class SoftwareStatusService:
                 "tooltip": tooltip,
                 "running": bool(running),
             }
+
+        if verify_control_readback:
+            readback_key = {
+                "FLRIG": "FLRig",
+                "RIGCTLD": "RigCtlD",
+                "HAMLIB": "RigCtlD",
+                "JS8CALL": "JS8Call_API",
+            }.get(active_control_via, "")
+            frequency_hz: Optional[int] = None
+            try:
+                if readback_key == "FLRig" and flrig_api_ok:
+                    from freqinout.radio_interface.rigctl_client import FLRigClient
+
+                    frequency_hz = FLRigClient(
+                        host=flrig_host,
+                        port=flrig_port,
+                        timeout=0.8,
+                    ).get_vfo_frequency()
+                elif readback_key == "RigCtlD" and rigctld_api_ok:
+                    from freqinout.radio_interface.rigctl_client import RigctldClient
+
+                    frequency_hz = RigctldClient(
+                        host=rigctld_host,
+                        port=rigctld_port,
+                        timeout=0.8,
+                    ).get_vfo_frequency()
+                elif readback_key == "JS8Call_API" and js8_api_ok:
+                    from freqinout.radio_interface.js8_status import JS8ControlClient
+
+                    frequency_hz = JS8ControlClient(
+                        host=js8_host,
+                        port=js8_port,
+                        settings=self.settings,
+                    ).get_frequency()
+            except Exception as exc:
+                log.debug(
+                    "Radio-control launch readback failed for %s: %s",
+                    active_control_via or "unknown",
+                    exc,
+                )
+                frequency_hz = None
+            try:
+                normalized_frequency_hz = int(frequency_hz) if frequency_hz is not None else None
+            except (TypeError, ValueError):
+                normalized_frequency_hz = None
+            ready = bool(normalized_frequency_hz is not None and normalized_frequency_hz > 0)
+            if readback_key and readback_key in out:
+                row = out[readback_key]
+                row["radio_readback_ready"] = ready
+                row["frequency_hz"] = normalized_frequency_hz if ready else None
+                row["control_backend"] = active_control_via.lower()
+                if bool(row.get("reachable")) and not ready:
+                    row["tooltip"] = (
+                        str(row.get("tooltip", "") or "").rstrip(". ")
+                        + ". Radio frequency readback is unavailable."
+                    )
         return out
