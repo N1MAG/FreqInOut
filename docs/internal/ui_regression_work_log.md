@@ -16,6 +16,9 @@ Follow-up startup-surface commit:
 Startup-surface diagnostic commit:
 `3517ba3cc1cbc5d2610ec1287be2b11da43ca0e3` on the same branch.
 
+Transient-widget lifecycle correction commit:
+`cb226c26f950ed6e11a4e54cb7967f0b3af81622` on the same branch.
+
 The supplied Windows recording showed a blank process frame before the FIO
 splash and additional blank process frames behind the otherwise stable splash.
 This was not screen warming: the packaged FIO executable is already windowed,
@@ -54,12 +57,28 @@ identify or safely control multiple independent surfaces.
 
 The next private diagnostic is intentionally observational. A Windows-only,
 startup-bounded application event filter writes `STARTUP_SURFACE_TRACE` records
-to `freqinout.log` for top-level Qt show/hide/native-surface events, including
-elapsed time, current startup stage, class, object name, title, geometry,
-visibility, native-display shield state, and parent. It stops at the usable
-shell and is not installed on Linux or macOS. One maintainer launch log is the
-gate before another visibility correction. The diagnostic itself does not
-hide, resize, reparent, or otherwise change any surface.
+to `freqinout.log` for top-level Qt show events, including elapsed time, current
+startup stage, class, object name, title, geometry, visibility, native-display
+shield state, and parent. It stops at the usable shell and is not installed on
+Linux or macOS. The diagnostic itself does not hide, resize, reparent, or
+otherwise change any surface.
+
+The resulting `freqinout (83).log` is decisive. Settings construction showed
+28 parentless widgets between 3.188 and 6.888 seconds: the Settings navigation
+scroll area and 27 content containers. Qt reparented each immediately afterward,
+but Windows had already mapped each visible parentless widget as a native
+top-level window. After the main shell was deliberately shown, Station Control
+twice unparented still-visible `stationCommandSourceRail` and
+`stationCommandPrimaryContext` widgets before deferred deletion, producing the
+remaining small late flashes.
+
+The surgical correction parents Settings content before applying visible
+state, waits until the nested Settings row belongs to the page before showing
+its navigation scroll area, and hides retiring Station Control widgets before
+the existing unparent/delete sequence. It does not globally suppress windows,
+delay startup, or change upgrade, splash, main-window, or companion-application
+lifecycle. The confirmation trace now records only show events to avoid the
+hundreds of irrelevant child hide/reparent lines from the first diagnostic.
 
 Work-package ownership:
 
@@ -82,6 +101,12 @@ partition passed **26 tests** across isolated invocations. A combined macOS UI
 run again encountered the repository's existing native Qt abort in the
 unrelated Help-layout case after 25 prior passes; isolating the splash audit
 passed.
+
+Correction-pass evidence: **24 focused tests passed**; isolated Settings
+construction produced zero top-level show events; an isolated complete main
+shell produced zero pre-show top-level events and only the expected MainWindow
+QWidget/QWindow pair after deliberate presentation; changed-file compilation
+and `git diff --check` pass.
 
 Maintainer pass gate: install the next Windows candidate, fully exit any
 running FIO process, and record a cold launch from the candidate executable.

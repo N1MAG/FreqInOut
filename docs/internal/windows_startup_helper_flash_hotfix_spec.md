@@ -12,6 +12,9 @@ Follow-up startup-surface commit:
 Startup-surface diagnostic commit:
 `3517ba3cc1cbc5d2610ec1287be2b11da43ca0e3` on the same branch.
 
+Transient-widget lifecycle correction commit:
+`cb226c26f950ed6e11a4e54cb7967f0b3af81622` on the same branch.
+
 Governing contracts:
 
 - `project_delivery_rules.md`
@@ -82,18 +85,46 @@ runs before `MainWindow` construction and is therefore outside the shield.
 
 The next private diagnostic adds a Windows-only `QApplication` event filter
 during the startup gate. It writes `STARTUP_SURFACE_TRACE` lines to the normal
-FIO log for every top-level Qt widget or window receiving show, hide, close,
-native-ID, or platform-surface events. Each record includes elapsed time,
-startup status, event, Qt class, object name, title, geometry, visibility,
-`WA_DontShowOnScreen` state, and parent class. The filter is removed as soon as
-the usable shell replaces the splash. It is observational: it never hides,
-reparents, resizes, or changes flags on a surface, and it is not installed on
-Linux or macOS.
+FIO log for every top-level Qt widget or window receiving a show event. Each
+record includes elapsed time, startup status, Qt class, object name, title,
+geometry, visibility, `WA_DontShowOnScreen` state, and parent class. The filter
+is removed as soon as the usable shell replaces the splash. It is
+observational: it never hides, reparents, resizes, or changes flags on a
+surface, and it is not installed on Linux or macOS.
 
 One Windows launch and its `freqinout.log` should therefore identify whether
 the flashes are unparented Qt construction widgets, additional native windows
 for the main shell, or a non-Qt process outside the event stream. No additional
 visibility suppression is authorized until that evidence is reviewed.
+
+## Field diagnostic result and surgical correction
+
+The supplied `freqinout (83).log` identifies the full sequence. During
+`Loading application settings...`, Settings construction showed **28**
+parentless widgets between 3.188 and 6.888 seconds: the Settings navigation
+scroll area plus 27 anonymous content containers. Qt then reparented each one
+into its intended section. On Windows, every visible parentless `QWidget` is a
+native top-level window, matching the sizes and cadence in `IMG_0937.MOV`.
+
+Immediately after the deliberate main-window show, the Station Control refresh
+also removed `stationCommandSourceRail` and `stationCommandPrimaryContext`
+from their parent while they were still visible. Each was promoted to a native
+top-level window, deleted, and then repeated by the next refresh.
+
+The correction preserves the existing controls and layout behavior:
+
+- Settings builders add content to its real layout/parent before applying the
+  requested visible state;
+- the Settings navigation scroll area is not made visible until its nested
+  layout belongs to the Settings page; and
+- Station Control hides retiring widgets before its existing
+  unparent-and-deferred-delete sequence.
+
+No window is globally hidden, no startup delay is added, and upgrade dialogs,
+the splash, main window, and companion applications retain their existing
+lifecycle. The diagnostic is narrowed to show events for the confirmation run,
+avoiding the hundreds of irrelevant child hide/reparent records from the first
+trace.
 
 ## First-launch boundary
 
@@ -140,6 +171,18 @@ Diagnostic-pass evidence:
 - changed Python files compile successfully; and
 - `git diff --check` passes.
 
+Correction-pass evidence:
+
+- startup surface, Settings construction, splash ordering, deferred UI,
+  subprocess policy, and deferred-screen partition — **24 passed**;
+- an isolated offscreen Settings construction produced zero top-level show
+  events;
+- an isolated complete main-shell construction produced zero pre-show
+  top-level events and, after deliberate presentation, only the expected
+  `MainWindow` QWidget/QWindow pair;
+- changed Python files compile successfully; and
+- `git diff --check` passes.
+
 Maintainer pass gate: install the next Windows candidate, close any existing
 FIO process, and record one cold launch from the FreqInOut shortcut. The pass
 condition is one fully painted splash followed by one fully constructed main
@@ -147,6 +190,11 @@ window, with no untitled or blank FIO window before or behind the splash. For a
 legacy profile, `Upgrade Existing Station` must still appear and retain its
 existing behavior. A configured companion application must still open normally
 when its Launch Control startup choice is restored.
+
+For the next diagnostic log, the expected show records are the splash and the
+main FIO window only (each may have a QWidget and QWindow record). Settings
+content, `settingsSectionNavScroll`, `stationCommandSourceRail`, and
+`stationCommandPrimaryContext` must not appear as top-level show events.
 
 Approval queues this hotfix for the next point release. It does not authorize
 an immediate public push.
