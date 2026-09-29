@@ -1,8 +1,12 @@
 # Radio Operational Health / Cache Hotfix Specification
 
-Status: `Awaiting maintainer pass approval`
+Status: `Approved—queued for next point release`
 
 Date: 2026-09-29
+
+Maintainer approval: approved on 2026-09-29 after private WIP testing. The
+approval queues this hotfix for the next accumulated point release; it does not
+authorize a standalone public release or public-branch push.
 
 ## Purpose
 

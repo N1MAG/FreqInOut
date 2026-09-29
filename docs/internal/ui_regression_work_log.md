@@ -2,13 +2,17 @@
 
 ## 2026-09-29 — Radio operational health/cache correction
 
-Status: `Awaiting maintainer pass approval`
+Status: `Approved—queued for next point release`
 
 Governing specification:
 `radio_operational_health_cache_hotfix_spec.md`.
 
 Private implementation commit: `7ad67f1` on
 `wip/private-testing-multi-rig-1.2.3-not-ready`.
+
+Maintainer approval: approved on 2026-09-29 after private WIP testing. This
+queues the correction for the next accumulated point release and does not
+authorize an individual public push.
 
 The Station Control Bar and Station Overview now use the scheduler's existing
 immutable, endpoint-scoped operational summaries as their shared source of
