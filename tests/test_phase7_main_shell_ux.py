@@ -1848,8 +1848,8 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert "self.station_command_now_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)" in source
     assert "self.station_command_state_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)" in source
     assert 'self.station_command_health_label = QLabel("Health:")' in source
-    assert 'label_text="Healthy"' in source
-    assert 'summary_label = "Setup" if summary_state == "error" else "Review"' in source
+    assert 'summary_label = "Operational"' in source
+    assert 'summary_label = "Checking"' in source
     assert "self._apply_station_command_bar_layout(force=True)" in source
     assert "right_layout.addWidget(self.station_command_bar, 0)" in source
     assert "right_layout.addWidget(self.stack, stretch=1)" in source
@@ -2123,11 +2123,25 @@ def test_phase7_station_command_health_collapses_all_green(monkeypatch, tmp_path
     )
 
     try:
-        MainWindow._refresh_station_command_health(window, {"id": 1}, 1)
+        MainWindow._refresh_station_command_health(
+            window,
+            {
+                "id": 1,
+                "control_backend": "flrig",
+                "control_ready": True,
+                "operational_state": "on_schedule_verified",
+                "operational_detail": "Current endpoint readback matches the active schedule intent.",
+                "service_states": {
+                    "FLRig": {"state": "ok", "tooltip": "FLRig OK"},
+                    "FLDigi": {"state": "ok", "tooltip": "FLDigi OK"},
+                },
+            },
+            1,
+        )
         app.processEvents()
 
         assert set(window.station_command_health_text_labels) == {"__summary__"}
-        assert window.station_command_health_text_labels["__summary__"].text() == "Healthy"
+        assert window.station_command_health_text_labels["__summary__"].text() == "Operational"
     finally:
         window.station_command_health_widget.deleteLater()
         app.processEvents()
@@ -2183,6 +2197,47 @@ def test_phase7_station_command_health_snapshot_idle_configured_app_is_not_green
     assert ("FLRig", "FLRig", "warn", "FLRig is not running.") in summary["issues"]
 
     app.processEvents()
+
+
+def test_phase7_station_command_health_explicit_empty_radio_cache_never_uses_global_status() -> None:
+    from freqinout.gui.main_window import MainWindow
+
+    window = MainWindow.__new__(MainWindow)
+    window.dependency_status_service = SimpleNamespace(
+        software_status_snapshot=lambda: (_ for _ in ()).throw(
+            AssertionError("radio-scoped empty cache must not fall back to global status")
+        )
+    )
+
+    result = MainWindow._station_command_health_status_snapshot(
+        window,
+        SimpleNamespace(service_states={}),
+    )
+
+    assert result == {}
+
+
+def test_phase7_station_command_health_unknown_cached_evidence_is_neutral() -> None:
+    from freqinout.gui.main_window import MainWindow
+
+    window = MainWindow.__new__(MainWindow)
+    window._station_command_health_items = lambda _profile: [("FLRig", "FLRig")]
+    window._station_command_off_schedule_by_radio = {}
+    window._station_command_assignment_rf_guard_issues = lambda _profile: []
+    snapshot = SimpleNamespace(
+        device_profile_id=11,
+        control_backend="flrig",
+        control_ready=None,
+        operational_state="verification_unavailable",
+        operational_detail="No current endpoint readback is available.",
+        service_states={},
+    )
+
+    summary = MainWindow._station_command_health_summary_for_profile(window, snapshot)
+
+    assert summary["state"] == "idle"
+    assert summary["label"] == "Checking"
+    assert summary["operational_issues"] == []
 
 
 def test_phase7_station_command_health_monitor_flag_filters_unchecked_apps(monkeypatch, tmp_path) -> None:
@@ -2298,13 +2353,27 @@ def test_phase7_station_command_health_shows_only_unhealthy_components(monkeypat
     )
 
     try:
-        MainWindow._refresh_station_command_health(window, {"id": 1}, 1)
+        MainWindow._refresh_station_command_health(
+            window,
+            {
+                "id": 1,
+                "control_backend": "flrig",
+                "control_ready": True,
+                "operational_state": "on_schedule_verified",
+                "operational_detail": "Current endpoint readback matches the active schedule intent.",
+                "service_states": {
+                    "FLRig": {"state": "ok", "tooltip": "FLRig OK"},
+                    "FLDigi": {"state": "warn", "tooltip": "FLDigi not reachable"},
+                    "JS8Call_API": {"state": "error", "tooltip": "JS8 TCP failed"},
+                },
+            },
+            1,
+        )
         app.processEvents()
 
         labels = {key: label.text() for key, label in window.station_command_health_text_labels.items()}
-        assert labels == {
-            "__summary__": "Setup",
-        }
+        assert labels == {"__summary__": "Operational"}
+        assert "2 advisory item(s)" in window.station_command_health_text_labels["__summary__"].toolTip()
     finally:
         window.station_command_health_widget.deleteLater()
         app.processEvents()
@@ -2347,12 +2416,28 @@ def test_phase7_station_command_health_treats_idle_helper_tools_as_available(mon
     )
 
     try:
-        MainWindow._refresh_station_command_health(window, {"id": 1, "control_backend": "flrig"}, 1)
+        MainWindow._refresh_station_command_health(
+            window,
+            {
+                "id": 1,
+                "control_backend": "flrig",
+                "control_ready": True,
+                "operational_state": "on_schedule_verified",
+                "service_states": {
+                    "FLRig": {"state": "ok", "tooltip": "FLRig OK"},
+                    "FLMsg": {"state": "idle", "tooltip": "FLMsg not running"},
+                    "FLAmp": {"state": "idle", "tooltip": "FLAmp not running"},
+                    "JS8Spotter": {"state": "idle", "tooltip": "FIO Spotter not running"},
+                    "CommStat": {"state": "idle", "tooltip": "CommStat not running"},
+                },
+            },
+            1,
+        )
         app.processEvents()
 
         labels = {key: label.text() for key, label in window.station_command_health_text_labels.items()}
-        assert labels == {"__summary__": "Healthy"}
-        assert "available when needed" in window.station_command_health_text_labels["__summary__"].toolTip()
+        assert labels == {"__summary__": "Operational"}
+        assert "Radio control is operational" in window.station_command_health_text_labels["__summary__"].toolTip()
     finally:
         window.station_command_health_widget.deleteLater()
         app.processEvents()

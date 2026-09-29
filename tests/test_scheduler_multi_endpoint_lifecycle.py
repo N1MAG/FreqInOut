@@ -26,7 +26,7 @@ from freqinout.core.scheduler_endpoint_lane import EndpointLaneRegistry
 from freqinout.core.scheduler_endpoint_status import EndpointStatusRegistry
 from freqinout.core.scheduler_engine import SchedulerEngine, compute_next_change_time
 from freqinout.core.settings_manager import SettingsManager
-from freqinout.core.station_runtime_manager import DeviceRuntime
+from freqinout.core.station_runtime_manager import DeviceRuntime, endpoint_operational_health
 
 
 def _key(port: int, *, family: str = "rigctld", target: str = "") -> EndpointKey:
@@ -688,10 +688,56 @@ def test_mes5_runtime_card_snapshot_is_cache_only(monkeypatch, tmp_path) -> None
     try:
         snapshot = runtime.snapshot(force=True, cache_only=True)
         assert snapshot.name == "Cache Only Rig"
-        assert snapshot.control_ready is False
+        assert snapshot.control_ready is None
+        assert snapshot.overall_state == "idle"
+        assert snapshot.status_summary == "Checking control status"
         assert snapshot.current_frequency_hz is None
     finally:
         runtime.stop()
+
+
+@pytest.mark.parametrize(
+    ("state_code", "indicator_state", "control_ready"),
+    [
+        ("on_schedule_verified", "ok", True),
+        ("js8_verification_unavailable", "ok", True),
+        ("applying_schedule", "idle", None),
+        ("waiting_shared_resource", "idle", None),
+        ("verification_unavailable", "idle", None),
+        ("control_stalled", "warn", False),
+        ("endpoint_unavailable", "warn", False),
+        ("receiver_unavailable", "warn", False),
+        ("readback_mismatch", "warn", True),
+    ],
+)
+def test_mes5_operational_health_uses_operational_impact_boundary(
+    state_code: str,
+    indicator_state: str,
+    control_ready: bool | None,
+) -> None:
+    projection = endpoint_operational_health(
+        {
+            "state": state_code,
+            "label": state_code,
+            "detail": f"detail for {state_code}",
+            "endpoint_label": "FLRig 127.0.0.1:12345",
+        }
+    )
+
+    assert projection.indicator_state == indicator_state
+    assert projection.control_ready is control_ready
+
+
+def test_mes5_operational_health_classification_is_endpoint_isolated() -> None:
+    healthy = endpoint_operational_health(
+        {"state": "on_schedule_verified", "label": "On schedule · verified"}
+    )
+    stalled = endpoint_operational_health(
+        {"state": "control_stalled", "label": "Control stalled · other radios unaffected"}
+    )
+
+    assert (healthy.indicator_state, healthy.control_ready) == ("ok", True)
+    assert (stalled.indicator_state, stalled.control_ready) == ("warn", False)
 
 
 def test_mes5_operational_summary_never_labels_stale_readback_verified(monkeypatch, tmp_path) -> None:

@@ -22,7 +22,11 @@ from PySide6.QtWidgets import (
 from freqinout.core.busy_state_service import BusyStateService
 from freqinout.core.scheduler_manual_control_service import SchedulerManualControlService
 from freqinout.core.settings_manager import SettingsManager
-from freqinout.core.station_runtime_manager import DeviceRuntimeSnapshot, StationRuntimeManager
+from freqinout.core.station_runtime_manager import (
+    DeviceRuntimeSnapshot,
+    StationRuntimeManager,
+    apply_endpoint_operational_summary,
+)
 from freqinout.gui.bounded_snapshot_worker import SnapshotWorkerController
 from freqinout.gui.theme import active_app_theme, led_style, resolve_theme
 
@@ -256,24 +260,14 @@ class StationOverviewTab(QWidget):
             summary = summaries.get(int(snapshot.device_profile_id or 0))
             if not isinstance(summary, Mapping):
                 continue
-            label = str(summary.get("label") or "").strip()
             detail = str(summary.get("detail") or "").strip()
             recovery_action = str(summary.get("recovery_action") or "").strip()
             if recovery_action and recovery_action not in detail:
                 detail = f"{detail}\nRecovery: {recovery_action}" if detail else f"Recovery: {recovery_action}"
-            state_code = str(summary.get("state") or "").strip().lower()
-            if label:
-                snapshot.status_summary = label
-                snapshot.service_states["Scheduler"] = {
-                    "state": (
-                        "ok"
-                        if state_code == "on_schedule_verified"
-                        else ("warn" if state_code not in {"manual_tuning", "verification_unavailable"} else "idle")
-                    ),
-                    "tooltip": detail or label,
-                    "control_state": state_code,
-                    "label": label,
-                }
+            summary_row = dict(summary)
+            if detail:
+                summary_row["detail"] = detail
+            apply_endpoint_operational_summary(snapshot, summary_row)
             device_id = int(snapshot.device_profile_id or 0)
             aux_row: dict[str, object] = {}
             if manual_control_service is not None:
@@ -373,9 +367,11 @@ class StationOverviewTab(QWidget):
                     bool(snapshot.use_background_ingest),
                     bool(snapshot.use_launch_control),
                     bool(snapshot.use_net_control_tabs),
-                    bool(snapshot.control_ready),
+                    snapshot.control_ready,
                     str(snapshot.overall_state or ""),
                     str(snapshot.status_summary or ""),
+                    str(snapshot.operational_state or ""),
+                    str(snapshot.operational_detail or ""),
                     str(snapshot.warning_text or ""),
                     str(snapshot.ptt_group or ""),
                     bool(snapshot.ptt_active),

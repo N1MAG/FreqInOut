@@ -306,7 +306,9 @@ class DeviceRuntimeSnapshot:
     use_background_ingest: bool
     use_launch_control: bool
     use_net_control_tabs: bool
-    control_ready: bool
+    # None means the cache has no current operational evidence.  Cache-only
+    # consumers must not turn absence of evidence into an endpoint failure.
+    control_ready: Optional[bool]
     overall_state: str
     status_summary: str
     warning_text: str
@@ -333,6 +335,84 @@ class DeviceRuntimeSnapshot:
     swap_role: str
     swap_summary: str
     service_states: Dict[str, Dict[str, object]]
+    operational_state: str = ""
+    operational_detail: str = ""
+    operational_endpoint_label: str = ""
+
+
+@dataclass(frozen=True)
+class EndpointOperationalHealth:
+    """UI projection of one scheduler-owned, cache-only endpoint summary."""
+
+    state_code: str
+    indicator_state: str
+    control_ready: Optional[bool]
+    label: str
+    detail: str
+    endpoint_label: str
+
+
+def endpoint_operational_health(
+    summary: Mapping[str, object] | None,
+) -> EndpointOperationalHealth:
+    """Classify cached scheduler evidence by operational impact.
+
+    This function deliberately performs no endpoint, process, database, or
+    settings I/O.  It is shared by the command bar and Station Overview so a
+    radio cannot be green in one surface and yellow in another.
+    """
+
+    row = summary if isinstance(summary, Mapping) else {}
+    state_code = str(row.get("state") or "verification_unavailable").strip().lower()
+    label = str(row.get("label") or "Checking control status").strip()
+    detail = str(row.get("detail") or "No current endpoint readback is available.").strip()
+    endpoint_label = str(row.get("endpoint_label") or "").strip()
+
+    if state_code == "on_schedule_verified":
+        indicator_state, control_ready = "ok", True
+    elif state_code == "js8_verification_unavailable":
+        # RF control is verified; the missing JS8 offset is an advisory.
+        indicator_state, control_ready = "ok", True
+    elif state_code in {"control_stalled", "endpoint_unavailable", "receiver_unavailable"}:
+        indicator_state, control_ready = "warn", False
+    elif state_code == "readback_mismatch":
+        # The endpoint is reachable, but operating state is wrong.
+        indicator_state, control_ready = "warn", True
+    else:
+        # Applying, waiting, manual, and absent/stale evidence are neutral.
+        indicator_state, control_ready = "idle", None
+
+    return EndpointOperationalHealth(
+        state_code=state_code,
+        indicator_state=indicator_state,
+        control_ready=control_ready,
+        label=label,
+        detail=detail,
+        endpoint_label=endpoint_label,
+    )
+
+
+def apply_endpoint_operational_summary(
+    snapshot: DeviceRuntimeSnapshot,
+    summary: Mapping[str, object] | None,
+) -> DeviceRuntimeSnapshot:
+    """Overlay detached cache evidence onto a detached runtime snapshot."""
+
+    projection = endpoint_operational_health(summary)
+    snapshot.operational_state = projection.state_code
+    snapshot.operational_detail = projection.detail
+    snapshot.operational_endpoint_label = projection.endpoint_label
+    snapshot.control_ready = projection.control_ready
+    snapshot.overall_state = projection.indicator_state
+    snapshot.status_summary = projection.label
+    snapshot.service_states["Scheduler"] = {
+        "state": projection.indicator_state,
+        "tooltip": projection.detail or projection.label,
+        "control_state": projection.state_code,
+        "label": projection.label,
+        "endpoint": projection.endpoint_label,
+    }
+    return snapshot
 
 
 @dataclass
@@ -840,6 +920,10 @@ class DeviceRuntime:
                 control_ready = True
                 overall_state = "ok"
                 status_summary = "Manual control"
+            elif cache_only and not control_info:
+                control_ready = None
+                overall_state = "idle"
+                status_summary = "Checking control status"
             else:
                 control_ready = control_state == "ok"
                 overall_state = control_state if control_state in {"ok", "warn", "error"} else "idle"
@@ -900,7 +984,7 @@ class DeviceRuntime:
             use_background_ingest=bool(policy.get("use_background_ingest", True)),
             use_launch_control=bool(policy.get("use_launch_control", False)),
             use_net_control_tabs=bool(policy.get("use_net_control_tabs", True)),
-            control_ready=bool(control_ready),
+            control_ready=control_ready,
             overall_state=overall_state,
             status_summary=status_summary,
             warning_text=warning_text,

@@ -1,5 +1,55 @@
 # UI Regression Work Log
 
+## 2026-09-29 — Radio operational health/cache correction
+
+Status: `Awaiting maintainer pass approval`
+
+Governing specification:
+`radio_operational_health_cache_hotfix_spec.md`.
+
+The Station Control Bar and Station Overview now use the scheduler's existing
+immutable, endpoint-scoped operational summaries as their shared source of
+truth. Cache-only runtime snapshots preserve missing evidence as neutral
+`control_ready=None` instead of manufacturing an unavailable warning. Verified
+RF operation is green, stale or absent evidence is neutral, and only an actual
+operational impairment—such as endpoint backoff/unavailability or readback
+mismatch—turns the selected radio yellow.
+
+Application and setup imperfections remain visible as advisories in Health
+Details without changing a working radio's aggregate color. An explicit empty
+radio-scoped service cache no longer falls back to station-global process
+status, so one endpoint cannot inherit another endpoint's condition. Explicit
+operator radio selection is also stable and cannot be immediately displaced
+by another radio's attention score.
+
+No endpoint polling, process scanning, database access, settings access,
+schema, migration, or persistent-setting change was added. The command bar and
+overview remain cache-only. The separately proposed per-radio gated startup
+sequence is explicitly outside this hotfix.
+
+Acceptance evidence:
+
+- endpoint lifecycle/cache partition: **30 passed**;
+- command-bar and Station Overview regression partition: **48 passed**;
+- station-control cache-only source-contract partition: **2 passed**;
+- receiver-lane and multi-rig runtime compatibility partition: **17 passed**;
+- state-matrix coverage verifies green, neutral, yellow, endpoint isolation,
+  stale/unknown handling, and JS8 advisory behavior;
+- explicit empty radio-cache regression verifies no global fallback;
+- changed Python compilation and `git diff --check`: pass.
+
+Test-harness note: a combined run of several Qt-heavy files encountered the
+existing macOS native Qt abort in `NetScheduleTab` construction. The affected
+status/cache partitions pass independently and the abort occurs outside the
+changed surfaces.
+
+Maintainer pass gate: run two configured radios with one endpoint working and
+one endpoint offline or deliberately stalled. Confirm the working radio shows
+**Operational**/green, the failed radio alone shows **Review**/yellow, and an
+optional stopped helper remains an advisory without changing green. Then stop
+or invalidate current endpoint evidence and confirm the affected radio becomes
+neutral **Checking**, not green or yellow.
+
 ## 2026-09-29 — Consistent fresh-install first-run onboarding
 
 Status: `Awaiting maintainer pass approval`
