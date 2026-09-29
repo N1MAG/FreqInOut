@@ -2,7 +2,7 @@
 
 ## 2026-09-28 — Cross-platform release packaging RP-1
 
-Status: `Internal package candidate pending GitHub-hosted qualification`
+Status: `Hosted package candidates passed; native field qualification pending`
 
 Governing specification:
 `cross_platform_release_packaging_spec.md`.
@@ -12,7 +12,9 @@ x86-64 and Linux amd64. Both jobs build a PyInstaller one-folder application,
 smoke it from a fresh profile, build the native installer/package, install that
 artifact, smoke the installed application, uninstall it, verify profile
 retention, and retain the artifact, checksum, and resolved dependency inventory
-for 14 days. All GitHub-maintained actions are pinned to immutable commit SHAs.
+for three days. All GitHub-maintained actions are pinned to immutable commit
+SHAs. The short retention matches the repository policy and keeps repeatable
+private candidates from consuming long-lived Actions storage.
 
 The reviewed public allowlist now carries the narrow set of package-build
 inputs needed to reproduce future public artifacts, while the internal
@@ -22,7 +24,9 @@ RP-1.
 
 Work-package ownership: primary `gpt-6-astra` (high reasoning) owns release
 architecture, build scripts, workflow security, integration, specification,
-and exit-gate review. No sub-agent was used under the active agent constraint.
+and exit-gate review. The initial implementation used no sub-agent under the
+active constraint. Retention-policy reconciliation received an independent
+read-only audit from `gpt-6-astra` (high reasoning).
 
 Local acceptance evidence:
 
@@ -34,11 +38,15 @@ Local acceptance evidence:
 - PyInstaller 6.22.3 with hooks 2026.7 built a 487 MB macOS ARM64 one-folder
   diagnostic artifact from the shared spec, and that frozen application
   completed the packaged `--smoke-test` with a fresh isolated profile.
+- GitHub-hosted `Package Candidates #1` at commit `0b22e8c` passed input
+  verification, Windows x86-64 installer build/install/smoke/uninstall, and
+  Linux amd64 Debian build/install/smoke/uninstall in 10m22s; both artifacts
+  were available for download.
 
-RP-1 remains open until both GitHub-hosted Windows and Linux jobs pass and their
-downloaded artifacts complete native fresh-install checks. RP-2 packaged-upgrade
-safety, complete platform dependency constraints, Windows signing, and public
-release publication remain separately gated.
+RP-1 remains open until the downloaded artifacts complete native fresh-install
+checks on one real Windows system and one supported Linux system. RP-2
+packaged-upgrade safety, complete platform dependency constraints, Windows
+signing, and public release publication remain separately gated.
 
 ## 2026-09-28 — Public FreqInOut 2.0.3 hotfix release
 

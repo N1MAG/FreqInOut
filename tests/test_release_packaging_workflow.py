@@ -92,7 +92,8 @@ def test_candidate_workflow_builds_installs_smokes_and_never_publishes() -> None
     assert "Install and smoke-test completed installer" in source
     assert "Install and smoke-test completed Debian package" in source
     assert "retain-after-uninstall.txt" in source
-    assert "retention-days: 14" in source
+    assert source.count("retention-days: 3") == 2
+    assert "retention-days: 14" not in source
     assert "gh release" not in source
     assert "contents: write" not in source
     for line in source.splitlines():

@@ -147,7 +147,7 @@ jobs:
             FreqInOut-*-windows-x86_64-setup.exe.sha256
             windows-dependencies.txt
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 3
 
   linux:
     name: Linux amd64 Debian candidate
@@ -224,4 +224,4 @@ jobs:
             Output/FreqInOut-*-linux-amd64.deb.sha256
             linux-dependencies.txt
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 3

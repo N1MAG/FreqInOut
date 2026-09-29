@@ -1,6 +1,6 @@
 # Cross-Platform Release Packaging Specification
 
-Status: `Slice RP-1 candidate builders in progress`
+Status: `Slice RP-1 hosted builders passed; native field qualification pending`
 
 Governing contracts:
 
@@ -47,7 +47,13 @@ For both Windows and Linux it must:
 9. run the installed application with a separate fresh profile;
 10. uninstall it while proving that operator profile data remains; and
 11. retain the installer, checksum, and dependency inventory as Actions
-    artifacts without publishing a GitHub Release.
+    artifacts for three days without publishing a GitHub Release.
+
+Hosted qualification evidence: internal candidate run `Package Candidates #1`
+at commit `0b22e8c` passed input verification, the Windows x86-64 installer job,
+and the Linux amd64 Debian package job. The run produced both downloadable
+candidate artifacts. Candidate retention is capped at three days because these
+large, repeatable files are temporary test inputs rather than public releases.
 
 Exit gate: both GitHub-hosted jobs pass, their artifacts can be downloaded, and
 one real Windows and one supported Linux system complete fresh-install checks.
@@ -134,4 +140,6 @@ must pass signed-installed-app launch checks before the DMGs are public.
 
 Primary `gpt-6-astra` (high reasoning) owns release architecture, packaged
 upgrade safety, build scripts, workflow security, integration, specification,
-and exit-gate review. No sub-agent was used under the active agent constraint.
+and exit-gate review. The initial RP-1 implementation used no sub-agent under
+the active constraint; the later retention-policy reconciliation received an
+independent read-only audit from `gpt-6-astra` (high reasoning).
