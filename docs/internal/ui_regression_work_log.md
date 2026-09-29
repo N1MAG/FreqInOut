@@ -11,7 +11,8 @@ Private implementation commits on
 `wip/private-testing-multi-rig-1.2.3-not-ready`:
 
 - `a4cefb1` — initial per-radio control gate;
-- `67dfdf5` — post-launch readback/cache lifecycle correction.
+- `67dfdf5` — post-launch readback/cache lifecycle correction;
+- `dbc7352` — make exact readback authoritative after process preflight.
 
 Launch Control now treats each active radio as a bounded startup stage. Radios
 are ordered by their existing display order and stable ID, dependencies are
@@ -56,6 +57,16 @@ unrelated endpoints retain normal caching. A successful frequency readback
 replaces the cached failure, clears the endpoint cooldown, and immediately
 authorizes the rest of that radio's launch stage.
 
+The second native retest confirmed the new build but produced no
+`control_probe_only=True` request after FIO spawned FLRig. The remaining guard
+was the immutable launch-safety process inventory: because it is intentionally
+captured before any `Popen`, it correctly could not contain the FLRig process
+that FIO had just created. Readiness returned early on that old `False` and
+never reached the new control probe. The final correction preserves the
+immutable inventory for duplicate prevention but makes fresh positive
+frequency readback authoritative after launch. It neither performs nor
+requires another process walk.
+
 Work-package ownership:
 
 - primary `gpt-6-astra` (high reasoning) owned the specification, launch-plan
@@ -68,7 +79,9 @@ Acceptance evidence:
 
 - focused per-radio gate and exact FLRig/RigCtlD/JS8 endpoint-readback tests:
   **13 passed**, including pre-launch-negative/post-launch-success, exact-scope
-  isolation, retry rate limiting, and cached-failure replacement;
+  isolation, retry rate limiting, cached-failure replacement, and successful
+  post-launch readback while exact-process lookup retains its pre-launch
+  `False` value;
 - launch identity, bundle isolation, dependency, JS8/VarAC, guided launch,
   status/cache, Windows subprocess, and startup-surface partition:
   **235 passed, 4 platform skips**;
