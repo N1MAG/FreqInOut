@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Dict, Iterable, Optional
 from zoneinfo import ZoneInfo
 
+from freqinout.core.subprocess_utils import noninteractive_subprocess_kwargs
+
 SUPPORTED_TIMEZONE_CHOICES = (
     "UTC",
     "America/New_York",
@@ -140,6 +142,7 @@ def _command_output(args: list[str]) -> Optional[str]:
             capture_output=True,
             text=True,
             timeout=1.5,
+            **noninteractive_subprocess_kwargs(),
         )
     except Exception:
         return None

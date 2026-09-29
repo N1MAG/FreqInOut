@@ -9,6 +9,7 @@ from typing import Any, Dict, List
 
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.logger import log
+from freqinout.core.subprocess_utils import noninteractive_subprocess_kwargs
 
 
 _RIGCTL_TIMEOUT_SECONDS = 2.5
@@ -127,6 +128,7 @@ def _load_from_rigctl() -> List[Dict[str, Any]]:
             capture_output=True,
             text=True,
             timeout=_RIGCTL_TIMEOUT_SECONDS,
+            **noninteractive_subprocess_kwargs(),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         log.debug("Radio catalog: rigctl catalog unavailable: %s", exc)
