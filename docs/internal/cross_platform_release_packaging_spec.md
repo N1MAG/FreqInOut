@@ -1,6 +1,6 @@
 # Cross-Platform Release Packaging Specification
 
-Status: `Public workflow active; unsigned hosted package gates passed`
+Status: `Transitional unsigned release mode approved; hosted requalification pending`
 
 Governing contracts:
 
@@ -22,10 +22,16 @@ Release and therefore do not increase the user-visible release count.
 
 ## Release artifacts
 
-- Windows x86-64: `FreqInOut-<version>-windows-x86_64-setup.exe`
+- Windows x86-64 before signing is configured:
+  `FreqInOut-<version>-windows-x86_64-setup-unsigned.exe`
+- Windows x86-64 after signing is configured:
+  `FreqInOut-<version>-windows-x86_64-setup.exe`
 - Linux x86-64: `FreqInOut-<version>-linux-amd64.deb`
-- macOS Intel: `FreqInOut-<version>-macos-x86_64.dmg`
-- macOS Apple Silicon: `FreqInOut-<version>-macos-arm64.dmg`
+- macOS Intel before signing is configured:
+  `FreqInOut-<version>-macos-x86_64-unsigned.dmg`
+- macOS Apple Silicon before signing is configured:
+  `FreqInOut-<version>-macos-arm64-unsigned.dmg`
+- Signed/notarized macOS packages use the same names without `-unsigned`.
 - Per-artifact SHA-256 files during candidate qualification.
 - One combined `SHA256SUMS.txt` for a public release.
 - Resolved dependency inventories retained with candidate evidence.
@@ -151,6 +157,30 @@ package feed.
 
 macOS production packages require Developer ID signing and notarization; an
 unsigned DMG is not a supported non-technical-user release.
+
+### Maintainer-approved transitional exception (2026-09-29)
+
+The maintainer does not yet have a Windows signing certificate, Azure
+subscription, or Apple Developer Program membership and explicitly approved a
+temporary unsigned-package path so automated native packages do not block the
+2.0.4 release. This exception supersedes the preceding production-signing
+requirement only while the signing accounts are unavailable.
+
+Windows and macOS packages must carry `-unsigned` in the downloadable filename;
+the installed product name and title remain **FreqInOut**. Release notes must
+state that Windows can show **Unknown publisher** or SmartScreen and that macOS
+can require **Open Anyway**. Every package still passes its completed-package
+install/launch/remove or preservation checks, ships with SHA-256 verification,
+and receives GitHub build-provenance attestation. Linux remains an ordinary
+production package.
+
+The workflow defaults to unsigned packages and fails closed at the protected
+publication environment. Existing opt-in variables retain the credential-backed
+PFX and Developer ID/notarization paths, but they remain disabled unless the
+maintainer explicitly configures them. A future SignPath integration is a
+separate reviewed signing adapter. Previously published unsigned assets remain
+immutable; signed naming begins with a later release rather than replacing
+historical files.
 
 ## RP-6 — Later platforms
 

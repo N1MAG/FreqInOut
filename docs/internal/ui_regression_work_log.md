@@ -12401,6 +12401,42 @@ Acceptance evidence:
   **Build and Publish Release** workflow reports `active`;
 - changed-file compilation and `git diff --check`: pass.
 
-Open exit gate: configure the protected `production-release` environment and
-signing/notarization secrets before creating a production tag. The first signed
-production-tag run must pass before release assets may be treated as qualified.
+That entry originally left signing credentials as the production exit gate.
+The maintainer's explicit transitional exception below supersedes that gate for
+the current unsigned release path while preserving it for future signed mode.
+
+## 2026-09-29 — Transitional unsigned public-package mode
+
+Status: `Maintainer approved; hosted requalification pending`
+
+The maintainer confirmed that no Windows code-signing certificate, Azure
+subscription, or Apple Developer Program membership is currently available and
+approved proceeding with unsigned native packages while researching future
+signing. The public workflow now defaults to tested unsigned Windows and macOS
+release packages, makes their status explicit only in the download filenames,
+and keeps the installed application identity and title as **FreqInOut**.
+
+Unsigned release filenames are
+`FreqInOut-<version>-windows-x86_64-setup-unsigned.exe`,
+`FreqInOut-<version>-macos-x86_64-unsigned.dmg`, and
+`FreqInOut-<version>-macos-arm64-unsigned.dmg`. Linux retains the ordinary
+`FreqInOut-<version>-linux-amd64.deb` name. The GitHub Release receives a
+prominent signing notice, per-file and combined SHA-256 checksums, and build
+provenance. Publication still requires the protected `production-release`
+environment and refuses an existing release or asset.
+
+The credential-backed PFX and Developer ID/notarization jobs remain opt-in and
+disabled by default through repository variables. SignPath, if approved later,
+will be integrated as a separately reviewed Windows signing stage. Signed
+assets begin with a later version and do not overwrite an unsigned historical
+release.
+
+Ownership: primary `gpt-6-astra`, high reasoning, for workflow security,
+release-policy reconciliation, tests, and integration. No sub-agent was used
+under the active no-delegation constraint.
+
+Implementation acceptance so far: focused workflow/export tests, metadata
+validation, YAML parse, immutable action-reference checks, and `git diff
+--check`. Public Windows, Linux, macOS Intel, and macOS Apple Silicon candidate
+jobs must all pass again with the explicit unsigned filenames before this
+workflow revision reaches public `main`.

@@ -135,9 +135,14 @@ def test_public_release_workflow_has_separate_candidate_and_production_contracts
     assert "notarytool submit" in source
     assert "actions/attest@" in source
     assert "SHA256SUMS.txt" in source
-    assert 'FreqInOut-${{ needs.verify.outputs.version }}-windows-x86_64-setup.exe' in source
+    assert 'FreqInOut-${{ needs.verify.outputs.version }}-windows-x86_64-setup-unsigned.exe' in source
     assert 'FreqInOut-${{ needs.verify.outputs.version }}-linux-amd64.deb' in source
-    assert 'FreqInOut-${{ needs.verify.outputs.version }}-macos-${{ matrix.arch }}.dmg' in source
+    assert 'FreqInOut-${{ needs.verify.outputs.version }}-macos-${{ matrix.arch }}-unsigned.dmg' in source
+    assert "Package signing notice" in source
+    assert "Unknown publisher" in source
+    assert "Open Anyway" in source
+    assert "FIO_ENABLE_PFX_SIGNING" in source
+    assert "FIO_ENABLE_APPLE_SIGNING" in source
     assert "refusing to overwrite it" in source
     for line in source.splitlines():
         stripped = line.strip()
