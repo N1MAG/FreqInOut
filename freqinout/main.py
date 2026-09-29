@@ -26,6 +26,7 @@ from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.startup_lock import try_acquire_single_instance_lock
 from freqinout.gui.dialog_notifications import install_auto_closing_information_dialogs
 from freqinout.gui.startup_splash import StartupSplash
+from freqinout.gui.startup_surface_trace import install_windows_startup_surface_trace
 from freqinout.gui.theme import apply_app_theme, resolve_theme, resolve_ui_text_scale
 from freqinout.version import __version__
 
@@ -182,9 +183,16 @@ def main():
     stage_started = time.perf_counter()
     app = QApplication(sys.argv)
     _apply_application_identity(app)
+    surface_trace = install_windows_startup_surface_trace(
+        app,
+        started_at=startup_started,
+        platform=sys.platform,
+    )
     _emit_startup_stage("qt_app_created", stage_started, app_start=startup_started)
 
     stage_started = time.perf_counter()
+    if surface_trace is not None:
+        surface_trace.set_stage("apply_startup_theme")
     _apply_startup_theme(app)
     _emit_startup_stage("apply_startup_theme", stage_started, app_start=startup_started)
 
@@ -199,12 +207,16 @@ def main():
     if not try_acquire_single_instance_lock(lockfile):
         _emit_startup_stage("single_instance_lock", stage_started, app_start=startup_started)
         QMessageBox.information(None, "FreqInOut", "FreqInOut is already running.")
+        if surface_trace is not None:
+            surface_trace.stop(stage="already_running")
         return
     _emit_startup_stage("single_instance_lock", stage_started, app_start=startup_started)
 
     splash = None
     stage_started = time.perf_counter()
     try:
+        if surface_trace is not None:
+            surface_trace.set_stage("splash_show")
         splash = StartupSplash(app, version=f"v{__version__}")
         splash.show("Checking database...")
         _emit_startup_stage("splash_visible", stage_started, app_start=startup_started)
@@ -215,6 +227,8 @@ def main():
     # Ensure SQLite schema is present while the operator can see startup progress.
     stage_started = time.perf_counter()
     try:
+        if surface_trace is not None:
+            surface_trace.set_stage("database_init")
         db_initializer.ensure_all_tables()
     except Exception as e:
         log.error("Database initialization failed: %s", e)
@@ -227,11 +241,15 @@ def main():
     app._single_instance = lockfile  # type: ignore[attr-defined]
 
     try:
+        if surface_trace is not None:
+            surface_trace.set_stage("existing_station_upgrade_gate")
         upgrade_ready = _run_existing_station_upgrade_gate(
             before_dialog=(splash.close if splash is not None else None),
         )
     except Exception as exc:
         log.exception("Unable to run the existing-station upgrade gate.")
+        if surface_trace is not None:
+            surface_trace.stop(stage="upgrade_gate_failed")
         if splash is not None:
             splash.close()
         QMessageBox.critical(
@@ -246,6 +264,8 @@ def main():
         if splash is not None:
             splash.close()
         lockfile.unlock()
+        if surface_trace is not None:
+            surface_trace.stop(stage="upgrade_not_completed")
         return
     if splash is not None:
         splash.show("Preparing main window...")
@@ -260,15 +280,21 @@ def main():
         # MainWindow deliberately queues database/UI work for later event-loop
         # ticks.  Its progress callback must not pump the global event queue or
         # those timers run before the shell exists.
-        win = MainWindow(
-            startup_status=(
-                splash.update_status_without_event_pump if splash is not None else None
-            )
-        )
+        def _report_startup_status(message: str) -> None:
+            if surface_trace is not None:
+                surface_trace.set_stage(message)
+            if splash is not None:
+                splash.update_status_without_event_pump(message)
+
+        if surface_trace is not None:
+            surface_trace.set_stage("main_window_construct")
+        win = MainWindow(startup_status=_report_startup_status)
         _emit_startup_stage("main_window_construct", stage_started, app_start=startup_started)
 
         if splash is not None:
             splash.update_status("Opening FIO...")
+        if surface_trace is not None:
+            surface_trace.set_stage("main_window_show")
         stage_started = time.perf_counter()
         if hasattr(win, "release_startup_surface_shield"):
             win.release_startup_surface_shield()
@@ -278,6 +304,8 @@ def main():
         _emit_startup_stage("first_usable_shell", startup_started)
         if splash is not None:
             splash.finish(win)
+        if surface_trace is not None:
+            surface_trace.stop(stage="startup_complete")
         _emit_startup_stage("startup_complete", startup_started)
         # Source listeners and projection catch-up deliberately begin only
         # after the first usable shell has been painted. The required legacy
@@ -290,6 +318,8 @@ def main():
             QTimer.singleShot(1000, app.quit)
     except Exception as e:
         log.exception("FreqInOut failed during startup: %s", e)
+        if surface_trace is not None:
+            surface_trace.stop(stage="startup_failed")
         if splash is not None:
             try:
                 splash.update_status("FIO could not finish opening.")
