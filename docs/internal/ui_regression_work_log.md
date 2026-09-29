@@ -12366,7 +12366,7 @@ Compose guard. Approval does not authorize an immediate public push.
 
 ## 2026-09-29 — Public native-package release workflow
 
-Status: `Implemented privately; public hosted candidate qualification pending`
+Status: `Active on public main; unsigned hosted package gates passed`
 
 The reviewed public allowlist now carries one production workflow plus only the
 packaging inputs needed to reproduce its outputs. Candidate-branch and manual
@@ -12393,9 +12393,14 @@ Acceptance evidence:
 - fresh-profile bundled-app smoke test: pass;
 - native arm64 DMG creation and `hdiutil verify`: pass;
 - mounted-DMG copy/install smoke test and external-profile preservation: pass;
+- public GitHub Actions run `36641946095` at public commit `4732ea1`: Windows
+  x86-64, Linux amd64, macOS Intel, and macOS Apple Silicon jobs all passed and
+  produced four version-named candidate artifacts;
+- the validated workflow and packaging inputs were fast-forwarded unchanged to
+  public `main` at `4732ea13299cd4a06a6b9a139edffc4ce45bbc53`, and the public
+  **Build and Publish Release** workflow reports `active`;
 - changed-file compilation and `git diff --check`: pass.
 
-Open exit gates: push the allowlisted files to the public candidate branch,
-observe all four GitHub-hosted candidate package jobs, and configure the
-protected `production-release` environment and signing/notarization secrets
-before creating a production tag.
+Open exit gate: configure the protected `production-release` environment and
+signing/notarization secrets before creating a production tag. The first signed
+production-tag run must pass before release assets may be treated as qualified.

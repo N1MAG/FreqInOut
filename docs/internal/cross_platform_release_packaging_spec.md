@@ -1,6 +1,6 @@
 # Cross-Platform Release Packaging Specification
 
-Status: `Public workflow implemented; hosted public candidate qualification pending`
+Status: `Public workflow active; unsigned hosted package gates passed`
 
 Governing contracts:
 
@@ -129,9 +129,14 @@ draft only after all four packages upload successfully.
 The macOS bundle/DMG implementation passed a native Apple Silicon PyInstaller
 build, ad-hoc code-signature verification, fresh-profile smoke test, DMG
 verification, mounted-image copy/install smoke test, and profile-preservation
-check. Focused packaging/export tests pass. The public hosted candidate run and
-credential-backed signing/notarization jobs remain external exit gates; no
-production tag may be created until they pass.
+check. Focused packaging/export tests pass. Public GitHub Actions run
+`36641946095` at public commit `4732ea13299cd4a06a6b9a139edffc4ce45bbc53`
+then passed the Windows x86-64, Linux amd64, macOS Intel, and macOS Apple Silicon
+candidate package jobs and retained all four version-named artifacts. That exact
+commit was fast-forwarded to public `main`, where **Build and Publish Release**
+is active. Credential-backed signing/notarization remains the production exit
+gate; no production tag may be created until the protected environment and its
+secrets are configured and those jobs pass.
 
 ## RP-5 — Signing
 
