@@ -1,8 +1,83 @@
 # UI Regression Work Log
 
-## 2026-09-29 — Windows startup helper-window flash hotfix
+## 2026-09-29 — Consistent fresh-install first-run onboarding
 
 Status: `Awaiting maintainer pass approval`
+
+Governing specification: `first_run_onboarding_spec.md`.
+
+Private implementation commit:
+`dc5009ff422388f3db48ce20065d373f4c45795d` on
+`wip/private-testing-multi-rig-1.2.3-not-ready`.
+
+The existing behavior was state-driven but incomplete. A legacy single-rig
+profile correctly entered the mandatory pre-shell **Upgrade Existing Station**
+gate, while a fresh profile opened directly to Ops Center with no first-radio
+prompt. The generic readiness banner led first to callsign settings and could
+be dismissed, so a new user could lose the in-application route to the primary
+setup task.
+
+The private hotfix keeps upgrade and fresh setup separate. A station with
+authoritative `fresh_default_ready` status, the current fresh-blank-slate
+migration marker, no saved radio profile, and no prior welcome choice now sees
+one main-window-owned **Welcome to FreqInOut** message after the usable shell
+and splash have completed. **Set Up First Radio…** opens Settings > Radios and
+the existing Guided Add Radio workflow; **Set Up Later** records the choice and
+continues to Ops Center. Closing the welcome behaves as Set Up Later.
+
+While no radio profile exists, the existing Ops Center readiness card becomes
+a persistent **Set Up First Radio…** recovery action. Generic Dismiss and Do Not
+Remind controls are hidden only in that state. After any profile is saved, the
+ordinary readiness text, actions, and dismissal behavior return. This provides
+the easy in-application setup route requested by the maintainer and does not
+rely on documentation.
+
+The acknowledgement key is explicitly ignored by legacy-use detection. The
+fresh eligibility check fails quiet if authoritative state cannot be read,
+creates no default records, and does not change migration, backup, scheduler,
+radio, Mesh, or companion-application behavior. Packaged `--smoke-test` runs do
+not show or acknowledge the interactive welcome.
+
+Work-package ownership:
+
+- primary `gpt-6-astra` (high reasoning) owned state/lifecycle policy,
+  persistence safety, the bounded UI seams, tests, visual review,
+  specification, work-log reconciliation, and final integration review;
+- no delegated code package was used because the small change couples startup
+  lifecycle, fresh-versus-upgrade classification, and the sole UI route into
+  Guided Add Radio.
+
+Acceptance evidence:
+
+- focused onboarding, upgrade, runtime-status, readiness, startup-surface,
+  deferred-screen, projection-lifecycle, performance, and shell UX partition:
+  **267 passed, 4 platform skips**;
+- larger Guided Add Radio/settings partition: **216 passed**, plus one
+  unrelated baseline source-contract mismatch expecting a Settings-navigation
+  visibility line absent from the current branch; the onboarding diff does not
+  touch that construction block;
+- fresh-profile offscreen visual review: welcome hierarchy and persistent Ops
+  Center action passed at 1280×800;
+- fresh packaged startup smoke: passed without presenting or acknowledging the
+  interactive welcome;
+- changed Python compilation and `git diff --check`: pass.
+
+Maintainer pass gate: install or run this private commit with a clean temporary
+profile. Confirm the welcome appears only after the painted shell, **Set Up
+Later** leaves a persistent **Set Up First Radio…** action in Ops Center, and
+that action opens Settings > Radios > Guided Add Radio. Restart after deferring
+and confirm the modal does not repeat while the Ops Center action remains.
+Then save one radio and confirm the no-radio action transitions back to normal
+readiness guidance. A legacy single-rig profile must continue to show only the
+mandatory pre-shell Upgrade Existing Station gate.
+
+## 2026-09-29 — Windows startup helper-window flash hotfix
+
+Status: `Approved—queued for next point release`
+
+The maintainer confirmed on 2026-09-29 that the final correction fixed the
+Windows flashing behavior. The approval queues this item for the next
+accumulated point release and does not authorize an individual public push.
 
 Governing specification:
 `windows_startup_helper_flash_hotfix_spec.md`.

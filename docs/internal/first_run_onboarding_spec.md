@@ -5,6 +5,10 @@ Status: `Awaiting maintainer pass approval`
 The maintainer approved this bounded design on 2026-09-29. The private WIP
 implementation is complete and has not been authorized for public release.
 
+Private implementation commit:
+`dc5009ff422388f3db48ce20065d373f4c45795d` on
+`wip/private-testing-multi-rig-1.2.3-not-ready`.
+
 ## Purpose
 
 Give a non-technical user a consistent first-launch experience without making a

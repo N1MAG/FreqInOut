@@ -1,6 +1,11 @@
 # Windows Startup Helper Flash Hotfix Specification
 
-Status: `Awaiting maintainer pass approval`
+Status: `Approved—queued for next point release`
+
+The maintainer confirmed on 2026-09-29 that the final transient-widget
+lifecycle correction fixed the Windows flashing behavior. This approval queues
+the hotfix for the next accumulated point release; it does not authorize an
+individual public push.
 
 Private implementation commit:
 `7ab70df07f263b28c1f7ea253376626c761c202d` on
