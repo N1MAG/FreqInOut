@@ -10895,6 +10895,10 @@ class MainWindow(QMainWindow):
             item = layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                # Removing a visible widget's parent briefly promotes it to a
+                # native top-level window on Windows. Hide it before retaining
+                # the existing unparent-and-delete lifecycle.
+                widget.hide()
                 widget.setParent(None)
                 widget.deleteLater()
         self._station_command_radio_tile_controls = {}
@@ -11096,6 +11100,7 @@ class MainWindow(QMainWindow):
                 item = layout.takeAt(0)
                 widget = item.widget()
                 if widget is not None:
+                    widget.hide()
                     widget.setParent(None)
                     widget.deleteLater()
             empty = QLabel("No configured radios", getattr(self, "station_command_radio_summary_widget", None))
@@ -11155,6 +11160,7 @@ class MainWindow(QMainWindow):
             item = layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                widget.hide()
                 widget.setParent(None)
                 widget.deleteLater()
         self._station_command_radio_tile_controls = {}

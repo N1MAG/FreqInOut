@@ -61,3 +61,46 @@ def test_trace_factory_is_bounded_to_windows() -> None:
         )
         is None
     )
+
+
+def test_settings_construction_never_shows_parentless_content(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = _app()
+    messages: list[tuple[str, tuple[object, ...]]] = []
+    monkeypatch.setattr(
+        trace_module.log,
+        "info",
+        lambda message, *args: messages.append((message, args)),
+    )
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    trace = StartupSurfaceTrace(app, started_at=time.perf_counter())
+    tab = SettingsTab(defer_initial_load=True)
+    try:
+        trace.stop()
+        shown_surfaces = [
+            str(args[-1])
+            for message, args in messages
+            if "action=surface" in message and len(args) >= 2 and args[-2] == "show"
+        ]
+        assert shown_surfaces == []
+    finally:
+        trace.stop()
+        tab.shutdown()
+        tab.settings.close()
+        tab.deleteLater()
+        app.processEvents()
+
+
+def test_station_command_refresh_hides_widgets_before_unparenting() -> None:
+    from inspect import getsource
+
+    from freqinout.gui.main_window import MainWindow
+
+    for method in (
+        MainWindow._refresh_adaptive_station_command_shell,
+        MainWindow._refresh_station_command_radio_summary,
+    ):
+        source = getsource(method)
+        assert "widget.hide()\n                widget.setParent(None)" in source

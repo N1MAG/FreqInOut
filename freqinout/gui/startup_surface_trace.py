@@ -21,12 +21,6 @@ class StartupSurfaceTrace(QObject):
 
     _EVENT_NAMES = {
         QEvent.Type.Show: "show",
-        QEvent.Type.ShowToParent: "show_to_parent",
-        QEvent.Type.Hide: "hide",
-        QEvent.Type.HideToParent: "hide_to_parent",
-        QEvent.Type.Close: "close",
-        QEvent.Type.WinIdChange: "win_id_change",
-        QEvent.Type.PlatformSurface: "platform_surface",
     }
 
     def __init__(self, app: QApplication, *, started_at: float) -> None:
