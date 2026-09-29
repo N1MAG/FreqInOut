@@ -54,6 +54,8 @@ JS8_DEPENDENT_APPS = {"JS8Spotter", "CommStat"}
 DEFAULT_VARAC_SETTLE_DELAY_SEC = 12.0
 DEFAULT_JS8CALL_DEPENDENT_DELAY_SEC = 4.0
 DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC = 90
+LEGACY_LAUNCH_READINESS_TIMEOUT_SEC = 30
+DEFAULT_PROCESS_LAUNCH_STABILITY_SEC = 3.0
 LAUNCH_READINESS_INITIAL_POLL_MS = 2000
 LAUNCH_READINESS_RELAXED_POLL_MS = 5000
 LAUNCH_READINESS_RELAX_AFTER_SEC = 30.0
@@ -171,6 +173,8 @@ class LaunchOrchestrator(QObject):
         self._current_name: Optional[str] = None
         self._current_item: Any = None
         self._current_cmd: Optional[List[str]] = None
+        self._current_process: Any = None
+        self._current_launch_description = ""
         self._current_started_monotonic = 0.0
         self._current_phase = ""
         self._endpoint_preflight_verified: set[str] = set()
@@ -1178,19 +1182,107 @@ class LaunchOrchestrator(QObject):
                 item,
                 force=self._radio_control_probe_is_due(item),
             ) == "ready"
+        launched_here = self._current_launch_process_for_item(item) is not None
+        policy = item.get("readiness_policy", {}) if isinstance(item, Mapping) else {}
+        if name == "JS8Call":
+            if isinstance(policy, Mapping) and not bool(policy.get("require_api", True)):
+                return (
+                    self._current_launch_process_is_stable(item)
+                    if launched_here
+                    else self._program_running(item)
+                )
+            if not launched_here and not self._program_running(item):
+                return False
+            return bool(
+                self._cached_status_for_item(item, force=launched_here).get(
+                    "reachable", False
+                )
+            )
+        if name in {"FLRig", "FLDigi"} and isinstance(item, Mapping):
+            if isinstance(policy, Mapping) and bool(policy.get("require_service", False)):
+                if not launched_here and not self._program_running(item):
+                    return False
+                return bool(
+                    self._cached_status_for_item(item, force=launched_here).get(
+                        "reachable", False
+                    )
+                )
+        if launched_here:
+            return self._current_launch_process_is_stable(item)
         if not self._program_running(item):
             return False
-        info = self._cached_status_for_item(item)
-        if name == "JS8Call":
-            policy = item.get("readiness_policy", {}) if isinstance(item, Mapping) else {}
-            if isinstance(policy, Mapping) and not bool(policy.get("require_api", True)):
-                return True
-            return bool(info.get("reachable", False))
-        if name in {"FLRig", "FLDigi"} and isinstance(item, Mapping):
-            policy = item.get("readiness_policy", {})
-            if isinstance(policy, Mapping) and bool(policy.get("require_service", False)):
-                return bool(info.get("reachable", False))
         return True
+
+    def _current_launch_process_for_item(self, item: Any) -> Any:
+        if item is not getattr(self, "_current_item", None):
+            return None
+        return getattr(self, "_current_process", None)
+
+    def _current_launch_return_code(self, item: Any) -> Optional[int]:
+        process = self._current_launch_process_for_item(item)
+        poll = getattr(process, "poll", None)
+        if not callable(poll):
+            return None
+        try:
+            result = poll()
+        except (ChildProcessError, ProcessLookupError):
+            return -1
+        except Exception as exc:
+            log.warning("LaunchOrchestrator: could not poll current launch process: %s", exc)
+            return -1
+        if result is None:
+            return None
+        try:
+            return int(result)
+        except (TypeError, ValueError):
+            return -1
+
+    def _successful_launcher_exit_allowed(self) -> bool:
+        if str(getattr(self, "_current_launch_description", "") or "") == "configured custom tool":
+            return True
+        current_name = str(getattr(self, "_current_name", "") or "").strip()
+        if current_name and current_name not in LAUNCH_APP_META:
+            return True
+        command = getattr(self, "_current_cmd", None)
+        if not isinstance(command, (list, tuple)) or not command:
+            return False
+        executable = os.path.basename(str(command[0] or "")).strip().casefold()
+        return executable in {"open", "xdg-open"}
+
+    def _current_launch_process_is_stable(self, item: Any) -> bool:
+        if self._current_launch_process_for_item(item) is None:
+            return False
+        elapsed = max(
+            0.0,
+            time.monotonic()
+            - float(getattr(self, "_current_started_monotonic", 0.0) or 0.0),
+        )
+        if elapsed < DEFAULT_PROCESS_LAUNCH_STABILITY_SEC:
+            return False
+        return_code = self._current_launch_return_code(item)
+        return return_code is None or (
+            return_code == 0 and self._successful_launcher_exit_allowed()
+        )
+
+    def _current_launch_exit_failure(self, item: Any) -> str:
+        if self._current_launch_process_for_item(item) is None:
+            return ""
+        return_code = self._current_launch_return_code(item)
+        if return_code is None:
+            return ""
+        if return_code == 0 and self._successful_launcher_exit_allowed():
+            return ""
+        return f"launch process exited with code {return_code} before readiness"
+
+    @staticmethod
+    def _normalized_readiness_timeout(raw: Any) -> int:
+        try:
+            timeout = int(raw or DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC)
+        except (TypeError, ValueError):
+            timeout = DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
+        if timeout == LEGACY_LAUNCH_READINESS_TIMEOUT_SEC:
+            return DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
+        return timeout if timeout > 0 else DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
 
     @staticmethod
     def _has_persisted_endpoint_identity(item: Any) -> bool:
@@ -1467,6 +1559,8 @@ class LaunchOrchestrator(QObject):
         self._current_name = None
         self._current_item = None
         self._current_cmd = None
+        self._current_process = None
+        self._current_launch_description = ""
         self._current_started_monotonic = 0.0
         self._current_phase = ""
         self._endpoint_preflight_verified = set()
@@ -1496,12 +1590,13 @@ class LaunchOrchestrator(QObject):
             getattr(self, "_last_projection_warnings", {})
         )
         try:
-            self._wait_timeout_sec = int(
-                self.settings.get("launch_readiness_timeout_sec", DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC)
-                or DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
+            configured_timeout = self.settings.get(
+                "launch_readiness_timeout_sec",
+                DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC,
             )
         except Exception:
-            self._wait_timeout_sec = DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
+            configured_timeout = DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
+        self._wait_timeout_sec = self._normalized_readiness_timeout(configured_timeout)
         self.sequence_started.emit(
             {
                 "trigger": trigger,
@@ -1981,6 +2076,8 @@ class LaunchOrchestrator(QObject):
                 self._current_name = name
                 self._current_item = queue_item
                 self._current_cmd = None
+                self._current_process = None
+                self._current_launch_description = ""
                 self._current_phase = "readiness"
                 self._current_started_monotonic = time.monotonic()
                 self._poll_timer.setInterval(LAUNCH_READINESS_INITIAL_POLL_MS)
@@ -2052,6 +2149,8 @@ class LaunchOrchestrator(QObject):
             self._current_name = name
             self._current_item = queue_item
             self._current_cmd = cmd
+            self._current_process = process
+            self._current_launch_description = cmd_desc
             self._current_phase = "readiness"
             self._current_started_monotonic = time.monotonic()
             self._poll_timer.setInterval(LAUNCH_READINESS_INITIAL_POLL_MS)
@@ -2610,6 +2709,24 @@ class LaunchOrchestrator(QObject):
         )
         if self._poll_timer.interval() != desired_interval:
             self._poll_timer.setInterval(desired_interval)
+        exit_failure = self._current_launch_exit_failure(self._current_item or name)
+        if exit_failure:
+            self._poll_timer.stop()
+            result = self._result_for(
+                self._current_item or name,
+                status="failed",
+                detail=exit_failure,
+            )
+            self._results.append(result)
+            self.sequence_progress.emit(result)
+            self._current_name = None
+            self._current_item = None
+            self._current_cmd = None
+            self._current_process = None
+            self._current_launch_description = ""
+            self._current_phase = ""
+            self._schedule_advance_queue(0)
+            return
         if self._program_ready_for_sequence(self._current_item or name):
             self._poll_timer.stop()
             if name == "JS8Call":
@@ -2637,6 +2754,8 @@ class LaunchOrchestrator(QObject):
             self._current_name = None
             self._current_item = None
             self._current_cmd = None
+            self._current_process = None
+            self._current_launch_description = ""
             self._current_phase = ""
             self._schedule_advance_queue(int(delay_sec * 1000.0))
             return
@@ -2659,6 +2778,8 @@ class LaunchOrchestrator(QObject):
             self._current_name = None
             self._current_item = None
             self._current_cmd = None
+            self._current_process = None
+            self._current_launch_description = ""
             self._current_phase = ""
             self._schedule_advance_queue(0)
 
@@ -3314,6 +3435,8 @@ class LaunchOrchestrator(QObject):
         self._current_name = None
         self._current_item = None
         self._current_cmd = None
+        self._current_process = None
+        self._current_launch_description = ""
         self._current_started_monotonic = 0.0
         self._current_phase = ""
         self._endpoint_preflight_verified = set()
