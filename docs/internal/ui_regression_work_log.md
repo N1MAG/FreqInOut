@@ -12,7 +12,9 @@ Private implementation commits on
 
 - `a4cefb1` — initial per-radio control gate;
 - `67dfdf5` — post-launch readback/cache lifecycle correction;
-- `dbc7352` — make exact readback authoritative after process preflight.
+- `dbc7352` — make exact readback authoritative after process preflight;
+- `60c1472` — require live FLRig radio proof and preserve the bounded wait for
+  an exact control process whose endpoint is still starting.
 
 Launch Control now treats each active radio as a bounded startup stage. Radios
 are ordered by their existing display order and stable ID, dependencies are
@@ -23,9 +25,12 @@ without launching a duplicate.
 
 Before any remaining application for a radio starts, FIO requests fresh,
 endpoint-scoped control evidence through the existing dependency-status
-worker. The exact configured endpoint must return a positive read-only
-frequency: FLRig uses `rig.get_vfo`, RigCtlD uses Hamlib `f`, and JS8Call uses
-its native endpoint-scoped frequency request. A responsive application API by
+worker. The exact configured endpoint must prove a responding radio and return
+a positive read-only frequency. FLRig now requires its online transceiver
+identity plus `rig.get_vfo`; FTdx10 and FT710 additionally require a fresh,
+read-only Yaesu `ID;` response through FLRig's documented `rig.cat_string`
+method. RigCtlD uses Hamlib `f`, and JS8Call uses its native endpoint-scoped
+frequency request. A responsive application API or cached display frequency by
 itself is not sufficient evidence that the physical radio is available.
 
 If the control application or radio readback is unavailable within the bounded
@@ -67,6 +72,22 @@ immutable inventory for duplicate prevention but makes fresh positive
 frequency readback authoritative after launch. It neither performs nor
 requires another process walk.
 
+The third native retest showed that port attribution remained exact: FTDX-10
+was probed on 12345 and FT-710 on 12346. The FTDX-10 stage nevertheless failed
+immediately because its exact FLRig process was running while XML-RPC was still
+starting. The FT-710 stage then falsely passed because FLRig's `rig.get_vfo`
+returns its displayed/fallback frequency even when no current radio response
+exists. FLRig source explicitly returns `14070000` when offline, and its online
+flag may remain set after a previously initialized radio is powered off.
+
+The follow-up records an exact gated control process as already running and
+lets the separate bounded radio-control gate wait for it; non-control duplicate
+handling is unchanged. For FTdx10 and FT710, the gate now requires the same
+read-only `ID;` response their FLRig drivers use during initialization before it
+accepts the positive VFO value. An empty identity, `No response`, or missing
+frequency blocks only that radio stage. No write command or radio setting is
+changed.
+
 Work-package ownership:
 
 - primary `gpt-6-astra` (high reasoning) owned the specification, launch-plan
@@ -75,16 +96,16 @@ Work-package ownership:
 - no delegated code package was used because the change is a tightly coupled
   launch-state correction across the planner, worker snapshot, and executor.
 
-Acceptance evidence:
+Acceptance evidence for the latest follow-up:
 
-- focused per-radio gate and exact FLRig/RigCtlD/JS8 endpoint-readback tests:
-  **13 passed**, including pre-launch-negative/post-launch-success, exact-scope
-  isolation, retry rate limiting, cached-failure replacement, and successful
-  post-launch readback while exact-process lookup retains its pre-launch
-  `False` value;
+- focused per-radio gate and software-endpoint tests: **41 passed, 2 platform
+  skips**, including stale FT-710 fallback rejection, fresh FTdx10/FT710 CAT
+  identity proof, control-process startup grace, non-control duplicate-policy
+  preservation, exact-scope isolation, retry rate limiting, and cached-failure
+  replacement;
 - launch identity, bundle isolation, dependency, JS8/VarAC, guided launch,
   status/cache, Windows subprocess, and startup-surface partition:
-  **235 passed, 4 platform skips**;
+  **270 passed, 4 platform skips**;
 - changed Python compilation and `git diff --check`: pass;
 - the monolithic whole-suite run reached an existing macOS Qt/native test
   isolation crash in `test_compose_workbench_acceptance`; that individual test
@@ -100,7 +121,10 @@ remaining applications launch. Repeat once with both radios powered on and
 confirm heavy applications from the two radio stacks never start in parallel.
 Specifically confirm that a pre-launch **connection refused** followed by
 FLRig startup can become **control ready** within the timeout and that the
-UI/status indication settles to the updated healthy cache state.
+UI/status indication settles to the updated healthy cache state. With an
+already-running FT-710 FLRig endpoint, power the FT-710 off and confirm its
+cached/displayed frequency does not authorize that radio's remaining apps;
+the powered-on FTDX-10 must pass on port 12345 and continue its stage.
 
 ## 2026-09-29 — Radio operational health/cache correction
 

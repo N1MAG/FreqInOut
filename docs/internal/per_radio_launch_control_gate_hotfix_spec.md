@@ -46,6 +46,16 @@ preflight and started the selected control command, exact positive frequency
 readback is the authoritative readiness proof; it must not depend on refreshing
 or reinterpreting the pre-launch process inventory.
 
+The third native retest exposed two independent FLRig semantics. An exact
+FTDX-10 FLRig process whose XML-RPC endpoint was still starting was recorded as
+a terminal failure before the bounded radio gate could run. The already-running
+FT-710 endpoint then passed because FLRig's `rig.get_vfo` deliberately returns
+its displayed/fallback frequency even when no current hardware response exists.
+FLRig source confirms that an offline instance can return `14070000`, and that
+its internal online identity can remain set after a previously connected radio
+is powered off. A positive FLRig VFO value alone is therefore not physical-radio
+evidence.
+
 ## Required behavior
 
 1. Active radios are ordered by existing `display_order`, then stable radio ID.
@@ -58,9 +68,12 @@ or reinterpreting the pre-launch process inventory.
    startup. Existing exact-process and endpoint duplicate guards remain
    authoritative.
 5. Before any remaining app for the radio starts, a worker-owned, fresh,
-   read-only control check must return a positive frequency from the exact
-   configured endpoint:
-   - FLRig: XML-RPC `rig.get_vfo`;
+   read-only control check must prove the exact configured endpoint is backed by
+   a responding radio and return a positive frequency:
+   - FLRig: a nonempty XML-RPC `rig.get_xcvr` identity plus `rig.get_vfo`;
+     because FLRig can retain online identity after later hardware loss, the
+     FTdx10 and FT710 drivers additionally require a fresh read-only Yaesu
+     `ID;` response through `rig.cat_string`;
    - RigCtlD: Hamlib `f` readback;
    - JS8Call: endpoint-scoped `RIG.GET_FREQ`/compatible frequency readback.
    The pre-launch endpoint check remains authoritative only for duplicate
@@ -69,6 +82,10 @@ or reinterpreting the pre-launch process inventory.
    It must not reuse a negative result captured before the process started or
    require the immutable pre-launch process inventory to contain a process that
    FIO started afterward.
+   An exact gated control process whose endpoint is still starting is recorded
+   as already running and enters this bounded check; it is not treated as an
+   immediate terminal control-app failure. Non-control applications retain the
+   existing duplicate/unready-endpoint failure behavior.
 6. Manual-control and receive-only/manual observer profiles bypass the gate
    explicitly. No success is fabricated for an automated backend.
 7. If the control check succeeds, the remaining radio apps continue through
@@ -92,7 +109,8 @@ or reinterpreting the pre-launch process inventory.
   process identity, collision validation, self-launch guard, and cancellation
   behavior remain in force.
 - The radio check is read-only. It never changes frequency, VFO, mode, PTT, or
-  application configuration.
+  application configuration. The FTdx10/FT710 `ID;` query is the same
+  read-only identity command those FLRig drivers use for initialization.
 - A launch attempt requests fresh endpoint evidence and does not accept a prior
   cached success as proof for the current transaction.
 - Post-launch readback probes are rate-limited to no more than one request per
@@ -130,8 +148,10 @@ profile fields into the immutable launch plan.
 
 1. Two radios with heavy startup rows execute as complete, ordered radio
    stages rather than interleaving.
-2. A responsive FLRig process with no positive radio frequency does not
-   authorize FLDigi, VarAC, JS8Call, or helpers for that radio.
+2. A responsive FLRig process with only a cached/fallback frequency does not
+   authorize FLDigi, VarAC, JS8Call, or helpers for that radio. For FTdx10 and
+   FT710, an absent or `No response` CAT identity response is explicitly
+   offline even when XML-RPC remains reachable.
 3. An already-running exact control instance with fresh frequency readback
    authorizes its radio without launching a duplicate.
 4. A failed first radio produces `blocked_radio_control` for its remaining
@@ -151,3 +171,6 @@ profile fields into the immutable launch plan.
    Windows subprocess, cancellation, and settings preview tests remain green.
 11. No database or installer behavior changes.
 12. Native two-radio operator testing remains required before approval.
+13. A running exact FLRig process with a temporarily unavailable endpoint gets
+    the bounded radio-control wait, while an equivalent non-control application
+    retains the existing failure behavior.
