@@ -265,13 +265,16 @@ neutral **Checking**, not green or yellow.
 
 ## 2026-09-29 — Consistent fresh-install first-run onboarding
 
-Status: `Awaiting maintainer pass approval`
+Status: `Approved—queued for FreqInOut 2.0.4`
 
 Governing specification: `first_run_onboarding_spec.md`.
 
 Private implementation commit:
 `dc5009ff422388f3db48ce20065d373f4c45795d` on
 `wip/private-testing-multi-rig-1.2.3-not-ready`.
+
+Maintainer approval: accepted on 2026-09-29 and explicitly authorized for
+inclusion in public FreqInOut 2.0.4.
 
 The existing behavior was state-driven but incomplete. A legacy single-rig
 profile correctly entered the mandatory pre-shell **Upgrade Existing Station**

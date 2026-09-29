@@ -1,9 +1,9 @@
 # FreqInOut First-Run Onboarding Specification
 
-Status: `Awaiting maintainer pass approval`
+Status: `Approved—queued for FreqInOut 2.0.4`
 
-The maintainer approved this bounded design on 2026-09-29. The private WIP
-implementation is complete and has not been authorized for public release.
+The maintainer approved this bounded design and its private implementation on
+2026-09-29, then explicitly authorized inclusion in public FreqInOut 2.0.4.
 
 Private implementation commit:
 `dc5009ff422388f3db48ce20065d373f4c45795d` on
