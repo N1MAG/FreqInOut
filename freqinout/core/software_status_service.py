@@ -1409,8 +1409,14 @@ class SoftwareStatusService:
         instance_identities: Optional[Mapping[str, Mapping[str, object]]] = None,
         verify_control_readback: bool = False,
         control_backend: str = "",
+        control_probe_only: bool = False,
     ) -> Dict[str, Dict[str, object]]:
         identities = instance_identities if isinstance(instance_identities, Mapping) else {}
+        active_control_via = (
+            str(control_backend or "").strip().upper()
+            or self._settings_text("control_via", "FLRig").strip().upper()
+        )
+        exact_control_probe = bool(control_probe_only and verify_control_readback)
 
         def _running(program_name: str) -> bool:
             identity = identities.get(program_name, {})
@@ -1450,11 +1456,15 @@ class SoftwareStatusService:
         js8_health = self._health.snapshot(
             self._health_key(("JS8CALL", js8_cache_host or "loopback", int(js8_port), False))
         )
-        js8_api_ok = self.js8_api_reachable(
-            port_override=port_override,
-            host_override=host_override,
-            allow_fallback=False,
-            force=force,
+        js8_api_ok = (
+            self.js8_api_reachable(
+                port_override=port_override,
+                host_override=host_override,
+                allow_fallback=False,
+                force=force,
+            )
+            if not exact_control_probe or active_control_via == "JS8CALL"
+            else False
         )
         running_flrig = _running("FLRig")
         flrig_host = (flrig_host_override or "").strip() or self._settings_text("flrig_host", FLRIG_DEFAULT_HOST) or FLRIG_DEFAULT_HOST
@@ -1464,14 +1474,14 @@ class SoftwareStatusService:
             else self._settings_int("flrig_port", FLRIG_DEFAULT_PORT)
         )
         flrig_key = ("FLRIG", flrig_host.strip().lower(), str(int(flrig_port)))
-        flrig_api_ok = self.flrig_api_reachable(
-            port_override=flrig_port_override,
-            host_override=flrig_host_override,
-            force=force,
-        )
-        active_control_via = (
-            str(control_backend or "").strip().upper()
-            or self._settings_text("control_via", "FLRig").strip().upper()
+        flrig_api_ok = (
+            self.flrig_api_reachable(
+                port_override=flrig_port_override,
+                host_override=flrig_host_override,
+                force=force,
+            )
+            if not exact_control_probe or active_control_via == "FLRIG"
+            else False
         )
         rigctld_active = active_control_via == "RIGCTLD" or rigctld_host_override is not None or rigctld_port_override is not None
         running_rigctld = _running("RigCtlD") if rigctld_active else False
@@ -1509,12 +1519,16 @@ class SoftwareStatusService:
             flrig_host.strip().lower(),
             str(int(flrig_port)),
         )
-        fldigi_api_ok = self.fldigi_api_reachable(
-            port_override=fldigi_port_override,
-            host_override=fldigi_host_override,
-            flrig_port_override=flrig_port_override,
-            flrig_host_override=flrig_host_override,
-            force=force,
+        fldigi_api_ok = (
+            self.fldigi_api_reachable(
+                port_override=fldigi_port_override,
+                host_override=fldigi_host_override,
+                flrig_port_override=flrig_port_override,
+                flrig_host_override=flrig_host_override,
+                force=force,
+            )
+            if not exact_control_probe
+            else False
         )
 
         out: Dict[str, Dict[str, object]] = {}

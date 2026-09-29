@@ -61,6 +61,7 @@ LAUNCH_PROCESS_PREFLIGHT_TIMEOUT_SEC = 15.0
 LAUNCH_ENDPOINT_PREFLIGHT_TIMEOUT_SEC = 15.0
 LAUNCH_ENDPOINT_PREFLIGHT_POLL_MS = 250
 LAUNCH_RADIO_CONTROL_READY_TIMEOUT_SEC = 30.0
+LAUNCH_RADIO_CONTROL_PROBE_INTERVAL_SEC = 1.0
 LAUNCH_PROCESS_REAPER_INTERVAL_MS = 1000
 
 
@@ -177,7 +178,7 @@ class LaunchOrchestrator(QObject):
         self._endpoint_preflight_clear: set[str] = set()
         self._sequence_claimed_identities: set[str] = set()
         self._radio_control_gate_states: Dict[int, str] = {}
-        self._radio_control_gate_forced: set[int] = set()
+        self._radio_control_probe_due_monotonic: Dict[int, float] = {}
         self._sequence_attribution_candidates: tuple[Mapping[str, Any], ...] = ()
         self._sequence_process_records: tuple[Mapping[str, object], ...] = ()
         self._sequence_process_records_ready = False
@@ -1163,7 +1164,6 @@ class LaunchOrchestrator(QObject):
 
     def _program_ready_for_sequence(self, item: Any) -> bool:
         name = self._queue_item_name(item)
-        info = self._cached_status_for_item(item)
         if not self._program_running(item):
             return False
         if (
@@ -1171,9 +1171,11 @@ class LaunchOrchestrator(QObject):
             and bool(item.get("radio_control_gate_required", False))
             and name == str(item.get("radio_control_app", "") or "").strip()
         ):
-            return bool(info.get("reachable", False)) and bool(
-                info.get("radio_readback_ready", False)
-            )
+            return self._radio_control_evidence_state(
+                item,
+                force=self._radio_control_probe_is_due(item),
+            ) == "ready"
+        info = self._cached_status_for_item(item)
         if name == "JS8Call":
             policy = item.get("readiness_policy", {}) if isinstance(item, Mapping) else {}
             if isinstance(policy, Mapping) and not bool(policy.get("require_api", True)):
@@ -1225,13 +1227,6 @@ class LaunchOrchestrator(QObject):
             # endpoint now,” not “walk every process again.”
             "force_process_snapshot": False,
         }
-        if (
-            isinstance(item, Mapping)
-            and bool(item.get("radio_control_gate_required", False))
-            and name == str(item.get("radio_control_app", "") or "").strip()
-        ):
-            kwargs["verify_control_readback"] = True
-            kwargs["control_backend"] = str(item.get("radio_control_backend", "") or "")
         if name == "JS8Call" and isinstance(policy, Mapping):
             kwargs["host_override"] = str(policy.get("host", "") or "") or None
             try:
@@ -1324,6 +1319,7 @@ class LaunchOrchestrator(QObject):
             "force_process_snapshot": False,
             "verify_control_readback": True,
             "control_backend": backend,
+            "control_probe_only": True,
         }
         if backend == "flrig":
             kwargs.update(flrig_host_override=host, flrig_port_override=port or None)
@@ -1355,6 +1351,19 @@ class LaunchOrchestrator(QObject):
             return "pending"
         return "ready" if bool(info.get("radio_readback_ready", False)) else "unavailable"
 
+    def _radio_control_probe_is_due(self, item: Any, *, immediate: bool = False) -> bool:
+        radio_id = self._radio_id_for_item(item)
+        if radio_id <= 0:
+            return False
+        now = time.monotonic()
+        due_by_radio = getattr(self, "_radio_control_probe_due_monotonic", {})
+        due_at = float(due_by_radio.get(radio_id, 0.0) or 0.0)
+        if not immediate and now < due_at:
+            return False
+        due_by_radio[radio_id] = now + LAUNCH_RADIO_CONTROL_PROBE_INTERVAL_SEC
+        self._radio_control_probe_due_monotonic = due_by_radio
+        return True
+
     def _begin_radio_control_gate(self, item: Any) -> None:
         radio_id = self._radio_id_for_item(item)
         if radio_id <= 0:
@@ -1362,12 +1371,10 @@ class LaunchOrchestrator(QObject):
         states = getattr(self, "_radio_control_gate_states", {})
         states[radio_id] = "checking"
         self._radio_control_gate_states = states
-        forced = getattr(self, "_radio_control_gate_forced", set())
-        force = radio_id not in forced
-        if force:
-            forced.add(radio_id)
-            self._radio_control_gate_forced = forced
-        state = self._radio_control_evidence_state(item, force=force)
+        state = self._radio_control_evidence_state(
+            item,
+            force=self._radio_control_probe_is_due(item, immediate=True),
+        )
         if state == "ready":
             states[radio_id] = "ready"
             log.info(
@@ -1452,7 +1459,7 @@ class LaunchOrchestrator(QObject):
         self._endpoint_preflight_clear = set()
         self._sequence_claimed_identities = set()
         self._radio_control_gate_states = {}
-        self._radio_control_gate_forced = set()
+        self._radio_control_probe_due_monotonic = {}
         self._sequence_attribution_candidates = self._station_process_attribution_candidates(
             queue
         )
@@ -2364,7 +2371,10 @@ class LaunchOrchestrator(QObject):
         if self._current_phase == "radio_control_gate":
             item = self._current_item or {}
             radio_id = self._radio_id_for_item(item)
-            state = self._radio_control_evidence_state(item, force=False)
+            state = self._radio_control_evidence_state(
+                item,
+                force=self._radio_control_probe_is_due(item),
+            )
             if state == "ready":
                 self._poll_timer.stop()
                 self._radio_control_gate_states[radio_id] = "ready"
@@ -3249,7 +3259,7 @@ class LaunchOrchestrator(QObject):
         self._endpoint_preflight_clear = set()
         self._sequence_claimed_identities = set()
         self._radio_control_gate_states = {}
-        self._radio_control_gate_forced = set()
+        self._radio_control_probe_due_monotonic = {}
         self._sequence_attribution_candidates = ()
         self._sequence_preflight_started_wall = 0.0
         self._process_preflight_reason = ""

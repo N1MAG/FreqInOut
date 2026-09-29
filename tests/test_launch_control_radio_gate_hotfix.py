@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -8,6 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from freqinout.core.dependency_status_service import shutdown_dependency_status_service
+from freqinout.core import launch_orchestrator as launch_orchestrator_module
 from freqinout.core.launch_orchestrator import LaunchOrchestrator
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.software_status_service import SoftwareStatusService
@@ -82,23 +84,18 @@ def test_planner_builds_complete_radio_stages_with_control_first() -> None:
 def test_control_application_readiness_requires_physical_radio_readback() -> None:
     orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
     orchestrator._program_running = lambda _item: True
+    orchestrator._radio_control_probe_is_due = lambda _item: True
     item = {
         "name": "FLRig",
         "radio_ids": [1],
         "radio_control_gate_required": True,
         "radio_control_app": "FLRig",
     }
-    orchestrator._cached_status_for_item = lambda _item: {
-        "reachable": True,
-        "radio_readback_ready": False,
-    }
+    orchestrator._radio_control_evidence_state = lambda _item, force=False: "unavailable"
 
     assert orchestrator._program_ready_for_sequence(item) is False
 
-    orchestrator._cached_status_for_item = lambda _item: {
-        "reachable": True,
-        "radio_readback_ready": True,
-    }
+    orchestrator._radio_control_evidence_state = lambda _item, force=False: "ready"
     assert orchestrator._program_ready_for_sequence(item) is True
 
 
@@ -131,10 +128,88 @@ def test_radio_gate_requests_fresh_exact_endpoint_readback() -> None:
             "force_process_snapshot": False,
             "verify_control_readback": True,
             "control_backend": "flrig",
+            "control_probe_only": True,
             "flrig_host_override": "192.0.2.7",
             "flrig_port_override": 22345,
         }
     ]
+
+
+def test_post_launch_readiness_reprobes_after_prelaunch_negative(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+    responses = iter((False, True))
+
+    def _status_snapshot(**kwargs):
+        calls.append(dict(kwargs))
+        ready = next(responses)
+        return {
+            "FLRig": {
+                "source": "endpoint",
+                "checked_at": 101.0 if not ready else 102.0,
+                "reachable": ready,
+                "radio_readback_ready": ready,
+            }
+        }
+
+    times = iter((10.0, 11.1))
+    monkeypatch.setattr(launch_orchestrator_module.time, "monotonic", lambda: next(times))
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator._program_running = lambda _item: True
+    orchestrator._sequence_preflight_started_wall = 100.0
+    orchestrator._radio_control_probe_due_monotonic = {}
+    orchestrator.dependency_status = SimpleNamespace(status_snapshot=_status_snapshot)
+    item = {
+        "name": "FLRig",
+        "radio_ids": [7],
+        "radio_control_gate_required": True,
+        "radio_control_app": "FLRig",
+        "radio_control_backend": "flrig",
+        "radio_control_host": "127.0.0.1",
+        "radio_control_port": 12345,
+    }
+
+    assert orchestrator._program_ready_for_sequence(item) is False
+    assert orchestrator._program_ready_for_sequence(item) is True
+    assert [call["force"] for call in calls] == [True, True]
+    assert all(call["control_probe_only"] is True for call in calls)
+
+
+def test_launch_control_reprobe_is_rate_limited_per_radio(monkeypatch) -> None:
+    times = iter((20.0, 20.5, 21.1))
+    monkeypatch.setattr(launch_orchestrator_module.time, "monotonic", lambda: next(times))
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator._radio_control_probe_due_monotonic = {}
+    item = {"radio_ids": [7]}
+
+    assert orchestrator._radio_control_probe_is_due(item) is True
+    assert orchestrator._radio_control_probe_is_due(item) is False
+    assert orchestrator._radio_control_probe_is_due(item) is True
+
+
+def test_prelaunch_endpoint_check_does_not_share_control_readback_scope() -> None:
+    calls: list[dict[str, object]] = []
+    orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
+    orchestrator.dependency_status = SimpleNamespace(
+        status_snapshot=lambda **kwargs: calls.append(dict(kwargs)) or {"FLRig": {}}
+    )
+    item = {
+        "name": "FLRig",
+        "radio_ids": [7],
+        "radio_control_gate_required": True,
+        "radio_control_app": "FLRig",
+        "radio_control_backend": "flrig",
+        "radio_control_host": "127.0.0.1",
+        "radio_control_port": 12345,
+        "readiness_policy": {"host": "127.0.0.1", "port": 12345},
+    }
+
+    orchestrator._cached_status_for_item(item, force=True)
+    orchestrator._cached_radio_control_status(item, force=True)
+
+    assert calls[0].get("verify_control_readback") is None
+    assert calls[0].get("control_probe_only") is None
+    assert calls[1]["verify_control_readback"] is True
+    assert calls[1]["control_probe_only"] is True
 
 
 def test_blocked_radio_skips_its_apps_and_healthy_peer_continues(monkeypatch, tmp_path) -> None:
@@ -245,6 +320,79 @@ def test_flrig_control_readback_metadata_requires_positive_frequency(monkeypatch
     assert unavailable["reachable"] is True
     assert unavailable["radio_readback_ready"] is False
     assert unavailable["frequency_hz"] is None
+
+
+def test_launch_control_probe_forces_only_the_exact_backend(monkeypatch) -> None:
+    settings = SimpleNamespace(get=lambda _key, default=None: default)
+    service = SoftwareStatusService(settings)
+    calls: list[str] = []
+    monkeypatch.setattr(service, "program_is_running", lambda _name: False)
+    monkeypatch.setattr(
+        service,
+        "js8_api_reachable",
+        lambda **_kwargs: calls.append("js8") or False,
+    )
+    monkeypatch.setattr(
+        service,
+        "flrig_api_reachable",
+        lambda **_kwargs: calls.append("flrig") or True,
+    )
+    monkeypatch.setattr(
+        service,
+        "rigctld_api_reachable",
+        lambda **_kwargs: calls.append("rigctld") or False,
+    )
+    monkeypatch.setattr(
+        service,
+        "fldigi_api_reachable",
+        lambda **_kwargs: calls.append("fldigi") or False,
+    )
+
+    from freqinout.radio_interface.rigctl_client import FLRigClient
+
+    monkeypatch.setattr(FLRigClient, "get_vfo_frequency", lambda _self: 14_115_000)
+    row = service.status_snapshot(
+        force=True,
+        force_process_snapshot=False,
+        flrig_host_override="127.0.0.1",
+        flrig_port_override=12345,
+        verify_control_readback=True,
+        control_backend="flrig",
+        control_probe_only=True,
+    )["FLRig"]
+
+    assert calls == ["flrig"]
+    assert row["radio_readback_ready"] is True
+    assert row["frequency_hz"] == 14_115_000
+
+
+def test_successful_post_launch_probe_replaces_cached_endpoint_failure(monkeypatch) -> None:
+    settings = SimpleNamespace(get=lambda _key, default=None: default)
+    service = SoftwareStatusService(settings)
+    monkeypatch.setattr(service, "program_is_running", lambda _name: False)
+    cache_key = ("FLRIG", "127.0.0.1", "12999")
+    monkeypatch.setitem(
+        SoftwareStatusService._shared_service_probe_cache,
+        cache_key,
+        (time.monotonic(), False),
+    )
+
+    from freqinout.radio_interface.rigctl_client import FLRigClient
+
+    monkeypatch.setattr(FLRigClient, "is_available", lambda _self: True)
+    monkeypatch.setattr(FLRigClient, "get_vfo_frequency", lambda _self: 7_115_000)
+    row = service.status_snapshot(
+        force=True,
+        force_process_snapshot=False,
+        flrig_host_override="127.0.0.1",
+        flrig_port_override=12999,
+        verify_control_readback=True,
+        control_backend="flrig",
+        control_probe_only=True,
+    )["FLRig"]
+
+    assert row["radio_readback_ready"] is True
+    assert SoftwareStatusService._shared_service_probe_cache[cache_key][1] is True
 
 
 def test_rigctld_control_readback_uses_exact_configured_endpoint(monkeypatch) -> None:

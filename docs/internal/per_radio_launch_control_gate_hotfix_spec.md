@@ -26,6 +26,15 @@ the station. Although normal saved rows usually appear radio-by-radio, that is
 not a formal radio-stage guarantee and can allow one radio's emitted app name
 to satisfy another radio's planning dependency.
 
+The first private implementation exposed a second lifecycle boundary during
+native testing. The duplicate-prevention probe correctly observed FLRig
+offline immediately before FIO started it, but that negative service result
+had a 30-second cache lifetime—the same duration as the launch-readiness
+timeout. Readiness therefore reused the expected pre-launch failure until it
+timed out, even though the scheduler had already completed a successful FLRig
+frequency write and readback. Pre-launch occupancy evidence and post-launch
+radio-readiness evidence must not share that negative-cache lifecycle.
+
 ## Required behavior
 
 1. Active radios are ordered by existing `display_order`, then stable radio ID.
@@ -43,6 +52,10 @@ to satisfy another radio's planning dependency.
    - FLRig: XML-RPC `rig.get_vfo`;
    - RigCtlD: Hamlib `f` readback;
    - JS8Call: endpoint-scoped `RIG.GET_FREQ`/compatible frequency readback.
+   The pre-launch endpoint check remains authoritative only for duplicate
+   prevention. After a process is launched—or while an exact existing process
+   is becoming ready—the control gate uses a distinct launch-readback scope.
+   It must not reuse a negative result captured before the process started.
 6. Manual-control and receive-only/manual observer profiles bypass the gate
    explicitly. No success is fabricated for an automated backend.
 7. If the control check succeeds, the remaining radio apps continue through
@@ -69,6 +82,15 @@ to satisfy another radio's planning dependency.
   application configuration.
 - A launch attempt requests fresh endpoint evidence and does not accept a prior
   cached success as proof for the current transaction.
+- Post-launch readback probes are rate-limited to no more than one request per
+  radio per second and retain the dependency worker's single-flight behavior.
+  A forced launch probe bypasses only the exact configured control endpoint's
+  negative TTL/cooldown; it does not force JS8Call, FLDigi, another FLRig, or
+  another radio endpoint.
+- A successful launch readback replaces the exact endpoint's cached failure,
+  clears its in-memory health cooldown, publishes the launch-scoped success,
+  and becomes available to normal status refreshes. No persistent cache or
+  database state is introduced.
 - Control-app readiness is bounded to 30 seconds. A radio gate without a
   launchable control row is bounded to the existing 15-second endpoint
   preflight limit. No remaining row incurs another radio-control wait.
@@ -105,7 +127,12 @@ profile fields into the immutable launch plan.
    bypass.
 6. FLRig, RigCtlD, and JS8Call readback probes are exact-endpoint and worker
    owned.
-7. Existing launch identity, JS8 default identity, shared dependency, VarAC,
+7. A pre-launch connection refusal followed by a successful post-launch FLRig
+   readback authorizes the remaining radio applications before timeout and
+   replaces the cached endpoint failure.
+8. Repeated launch-readback polling remains exact-backend, rate-limited, and
+   single-flight; unrelated endpoints are not probed.
+9. Existing launch identity, JS8 default identity, shared dependency, VarAC,
    Windows subprocess, cancellation, and settings preview tests remain green.
-8. No database or installer behavior changes.
-9. Native two-radio operator testing remains required before approval.
+10. No database or installer behavior changes.
+11. Native two-radio operator testing remains required before approval.

@@ -226,6 +226,7 @@ class DependencyStatusService(QObject):
         instance_identities: Optional[Mapping[str, Mapping[str, object]]] = None,
         verify_control_readback: bool = False,
         control_backend: str = "",
+        control_probe_only: bool = False,
     ) -> Dict[str, Dict[str, object]]:
         """Return the latest endpoint-scoped snapshot and refresh it asynchronously.
 
@@ -245,6 +246,7 @@ class DependencyStatusService(QObject):
             "fldigi_host_override": fldigi_host_override,
             "verify_control_readback": bool(verify_control_readback),
             "control_backend": str(control_backend or "").strip().lower(),
+            "control_probe_only": bool(control_probe_only),
         }
         exact_identities = {
             str(name): dict(identity)
