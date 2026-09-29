@@ -7,8 +7,11 @@ Status: `Awaiting maintainer pass approval`
 Governing specification:
 `per_radio_launch_control_gate_hotfix_spec.md`.
 
-Private implementation commit: `a4cefb1` on
-`wip/private-testing-multi-rig-1.2.3-not-ready`.
+Private implementation commits on
+`wip/private-testing-multi-rig-1.2.3-not-ready`:
+
+- `a4cefb1` — initial per-radio control gate;
+- `67dfdf5` — post-launch readback/cache lifecycle correction.
 
 Launch Control now treats each active radio as a bounded startup stage. Radios
 are ordered by their existing display order and stable ID, dependencies are
@@ -37,6 +40,22 @@ change was made. Control metadata exists only in the transient launch plan.
 The UI continues to consume immutable cached status; the new radio readback is
 performed only by the existing endpoint worker and never on the Qt GUI thread.
 
+The first native retest correctly rejected the initial implementation. At
+15:15:03 the duplicate-prevention probe observed port 12345 offline immediately
+before FIO launched FLRig. The endpoint's 30-second negative cache then matched
+the complete readiness timeout, so no post-launch request reached that endpoint
+before FIO skipped the remaining applications at 15:15:33. Meanwhile, the
+scheduler completed its own FLRig frequency write/readback without error,
+confirming that this was stale launch evidence rather than a radio failure.
+
+The correction separates pre-launch occupancy and post-launch readback scopes.
+Once an exact control process is launched or still becoming ready, FIO requests
+a fresh worker-owned probe at most once per radio per second. That request
+bypasses only the exact control endpoint's negative TTL and health cooldown;
+unrelated endpoints retain normal caching. A successful frequency readback
+replaces the cached failure, clears the endpoint cooldown, and immediately
+authorizes the rest of that radio's launch stage.
+
 Work-package ownership:
 
 - primary `gpt-6-astra` (high reasoning) owned the specification, launch-plan
@@ -48,10 +67,11 @@ Work-package ownership:
 Acceptance evidence:
 
 - focused per-radio gate and exact FLRig/RigCtlD/JS8 endpoint-readback tests:
-  **8 passed**;
+  **13 passed**, including pre-launch-negative/post-launch-success, exact-scope
+  isolation, retry rate limiting, and cached-failure replacement;
 - launch identity, bundle isolation, dependency, JS8/VarAC, guided launch,
   status/cache, Windows subprocess, and startup-surface partition:
-  **229 passed, 4 platform skips**;
+  **235 passed, 4 platform skips**;
 - changed Python compilation and `git diff --check`: pass;
 - the monolithic whole-suite run reached an existing macOS Qt/native test
   isolation crash in `test_compose_workbench_acceptance`; that individual test
@@ -65,6 +85,9 @@ then starts in order. Power on the first radio and use that radio's **Start
 Startup Apps** action; confirm its control readback succeeds before its
 remaining applications launch. Repeat once with both radios powered on and
 confirm heavy applications from the two radio stacks never start in parallel.
+Specifically confirm that a pre-launch **connection refused** followed by
+FLRig startup can become **control ready** within the timeout and that the
+UI/status indication settles to the updated healthy cache state.
 
 ## 2026-09-29 — Radio operational health/cache correction
 
