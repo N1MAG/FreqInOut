@@ -9,6 +9,9 @@ Private implementation commit:
 Follow-up startup-surface commit:
 `e0aebbfa91bf91e0442a4d993b6cd4961ca88486` on the same branch.
 
+Startup-surface diagnostic commit:
+`3517ba3cc1cbc5d2610ec1287be2b11da43ca0e3` on the same branch.
+
 Governing contracts:
 
 - `project_delivery_rules.md`
@@ -41,6 +44,15 @@ frame, and an untitled FIO-sized surface behind the splash while the status was
 `MainWindow` is still under construction and before `main.py` deliberately
 calls `show()`.
 
+A second maintainer recording (`IMG_0937.MOV`) confirmed that the follow-up
+surface shield removed the initial blank frame but did not resolve the defect.
+At 10-frame-per-second inspection, multiple differently sized blank native
+windows appear and disappear behind the stable splash from approximately 5.2
+through 7.6 seconds, spanning `Loading application settings...` and `Building
+station dashboard...`. This is not one late first paint and cannot be safely
+corrected by making only the main window transparent. That unqualified opacity
+experiment was discarded and was never committed or pushed.
+
 ## Bounded correction
 
 `freqinout.core.subprocess_utils.noninteractive_subprocess_kwargs()` is an
@@ -65,6 +77,23 @@ existing main-window lifecycle.
 This correction does not hide, minimize, change flags for, or otherwise alter
 any user-launched companion application. The existing-station upgrade dialog
 runs before `MainWindow` construction and is therefore outside the shield.
+
+## Bounded diagnostic pass
+
+The next private diagnostic adds a Windows-only `QApplication` event filter
+during the startup gate. It writes `STARTUP_SURFACE_TRACE` lines to the normal
+FIO log for every top-level Qt widget or window receiving show, hide, close,
+native-ID, or platform-surface events. Each record includes elapsed time,
+startup status, event, Qt class, object name, title, geometry, visibility,
+`WA_DontShowOnScreen` state, and parent class. The filter is removed as soon as
+the usable shell replaces the splash. It is observational: it never hides,
+reparents, resizes, or changes flags on a surface, and it is not installed on
+Linux or macOS.
+
+One Windows launch and its `freqinout.log` should therefore identify whether
+the flashes are unparented Qt construction widgets, additional native windows
+for the main shell, or a non-Qt process outside the event stream. No additional
+visibility suppression is authorized until that evidence is reviewed.
 
 ## First-launch boundary
 
@@ -99,6 +128,15 @@ Current automated evidence:
   partition: **32 passed, 3 platform skips**;
 - isolated offscreen startup smoke: passed, reaching the first usable shell and
   clean worker shutdown;
+- changed Python files compile successfully; and
+- `git diff --check` passes.
+
+Diagnostic-pass evidence:
+
+- startup-surface trace, splash ordering, and startup-surface deferral — **11
+  passed**;
+- broader startup, subprocess-policy, and database-initialization partition —
+  **26 passed** across isolated invocations;
 - changed Python files compile successfully; and
 - `git diff --check` passes.
 

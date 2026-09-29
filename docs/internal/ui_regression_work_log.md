@@ -13,6 +13,9 @@ on `wip/private-testing-multi-rig-1.2.3-not-ready`.
 Follow-up startup-surface commit:
 `e0aebbfa91bf91e0442a4d993b6cd4961ca88486` on the same branch.
 
+Startup-surface diagnostic commit:
+`3517ba3cc1cbc5d2610ec1287be2b11da43ca0e3` on the same branch.
+
 The supplied Windows recording showed a blank process frame before the FIO
 splash and additional blank process frames behind the otherwise stable splash.
 This was not screen warming: the packaged FIO executable is already windowed,
@@ -41,6 +44,23 @@ removing the shield, and then uses the existing single deliberate `win.show()`.
 Upgrade dialogs run before this window exists, and user-launched companion
 applications are outside the shield. Linux and macOS behavior is unchanged.
 
+The subsequent `IMG_0937.MOV` retest rejects the hypothesis that the remaining
+flash is one unpainted main-window frame. The initial blank frame is gone, but
+10-fps inspection shows several differently sized blank FIO windows repeatedly
+mapping behind the splash from about 5.2 through 7.6 seconds during `Loading
+application settings...` and `Building station dashboard...`. A transparent
+first-paint experiment was discarded without commit or push because it cannot
+identify or safely control multiple independent surfaces.
+
+The next private diagnostic is intentionally observational. A Windows-only,
+startup-bounded application event filter writes `STARTUP_SURFACE_TRACE` records
+to `freqinout.log` for top-level Qt show/hide/native-surface events, including
+elapsed time, current startup stage, class, object name, title, geometry,
+visibility, native-display shield state, and parent. It stops at the usable
+shell and is not installed on Linux or macOS. One maintainer launch log is the
+gate before another visibility correction. The diagnostic itself does not
+hide, resize, reparent, or otherwise change any surface.
+
 Work-package ownership:
 
 - primary `gpt-6-astra` (high reasoning) owned scope, implementation,
@@ -54,6 +74,14 @@ ordering/release, subprocess-policy, runtime, and startup-deferral partition
 passed **32 tests** with 3 platform skips. An isolated offscreen startup smoke
 reached the first usable shell and shut its workers down cleanly. Changed Python
 compilation and `git diff --check` pass.
+
+Diagnostic-pass evidence: the trace, splash-ordering, and startup-deferral
+partition passed **11 tests**; changed-file compilation and `git diff --check`
+pass. The broader startup, subprocess-policy, and database-initialization
+partition passed **26 tests** across isolated invocations. A combined macOS UI
+run again encountered the repository's existing native Qt abort in the
+unrelated Help-layout case after 25 prior passes; isolating the splash audit
+passed.
 
 Maintainer pass gate: install the next Windows candidate, fully exit any
 running FIO process, and record a cold launch from the candidate executable.
