@@ -270,6 +270,8 @@ def main():
         if splash is not None:
             splash.update_status("Opening FIO...")
         stage_started = time.perf_counter()
+        if hasattr(win, "release_startup_surface_shield"):
+            win.release_startup_surface_shield()
         win.show()
         app.processEvents(QEventLoop.ExcludeUserInputEvents)
         _emit_startup_stage("main_window_show", stage_started, app_start=startup_started)

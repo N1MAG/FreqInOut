@@ -23,22 +23,43 @@ arguments elsewhere. Only the timezone and radio-catalog probes use it.
 Operator-launched companion applications, catalog behavior, radio identity,
 database state, upgrade routing, and first-launch guidance are unchanged.
 
+Maintainer retest of private commit `7c6eca2` removed the desktop redraw but
+did not remove the remaining transient windows. The only configured Launch
+Control application was then isolated by disabling both monitoring and startup;
+the behavior was unchanged. Frame review localized an unpainted surface before
+the first splash frame and an untitled FIO-sized surface changing geometry
+behind the splash during `Loading application settings...`, before the
+intentional main-window `show()`.
+
+The follow-up correction prepares the splash's complete first frame before its
+native surface is mapped. It also shields the constructing `MainWindow` with
+`WA_DontShowOnScreen` on Windows only, normalizes any logical visibility before
+removing the shield, and then uses the existing single deliberate `win.show()`.
+Upgrade dialogs run before this window exists, and user-launched companion
+applications are outside the shield. Linux and macOS behavior is unchanged.
+
 Work-package ownership:
 
 - primary `gpt-6-astra` (high reasoning) owned scope, implementation,
   integration, tests, documentation, and exit-gate review;
-- independent `gpt-5.6-terra` (low reasoning) performed the read-only Windows
-  subprocess-policy and regression-boundary audit and made no file changes.
+- independent `gpt-5.6-terra` (low reasoning) performed the initial read-only
+  subprocess-policy audit and follow-up process/surface-boundary audit and made
+  no file changes.
 
-Acceptance evidence: the focused subprocess-policy, radio-catalog, runtime,
-splash, startup-deferral, and public-export partition passed **27 tests** with
-3 platform skips; changed Python compilation and `git diff --check` passed.
+Current acceptance evidence: the focused splash ordering, Windows shell-shield
+ordering/release, subprocess-policy, runtime, and startup-deferral partition
+passed **32 tests** with 3 platform skips. An isolated offscreen startup smoke
+reached the first usable shell and shut its workers down cleanly. Changed Python
+compilation and `git diff --check` pass.
 
 Maintainer pass gate: install the next Windows candidate, fully exit any
-running FIO process, and record a cold launch from the FreqInOut shortcut. No
-blank helper-process frame should appear before or behind the splash. A legacy
-profile must still present `Upgrade Existing Station`. Approval queues the
-hotfix for the next point release and does not authorize a public push.
+running FIO process, and record a cold launch from the candidate executable.
+The pass condition is one fully painted splash followed by one fully built FIO
+window, without any untitled or blank FIO window before or behind the splash. A
+legacy profile must still present `Upgrade Existing Station`, and a configured
+companion application must still open normally after restoring its startup
+choice. Approval queues the hotfix for the next point release and does not
+authorize a public push.
 
 ## 2026-09-28 — Cross-platform release packaging RP-1
 

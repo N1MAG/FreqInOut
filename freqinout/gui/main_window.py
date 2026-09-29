@@ -245,6 +245,14 @@ class MainWindow(QMainWindow):
 
     def __init__(self, startup_status: Callable[[str], None] | None = None):
         super().__init__()
+        # A packaged Windows process can expose the native QMainWindow surface
+        # while its long constructor is still establishing child geometry,
+        # even though FIO has not called show() yet.  Keep that surface out of
+        # the compositor until main.py deliberately presents the finished
+        # shell.  Other platforms retain their existing lifecycle.
+        self._startup_surface_shielded = sys.platform == "win32"
+        if self._startup_surface_shielded:
+            self.setAttribute(Qt.WA_DontShowOnScreen, True)
         self._startup_status_callback = startup_status
         self._shutting_down = False
         self._shutdown_close_pending = False
@@ -1392,6 +1400,18 @@ class MainWindow(QMainWindow):
             pass
         QTimer.singleShot(1200, self._start_launch_control_startup)
         self._notify_startup_status("Opening FIO...")
+
+    def release_startup_surface_shield(self) -> None:
+        """Allow the completed Windows shell to be mapped exactly once."""
+
+        if not bool(getattr(self, "_startup_surface_shielded", False)):
+            return
+        # If construction caused any logical visibility transition, normalize
+        # it before removing the stronger native-surface shield.  main.py owns
+        # the one intentional show() immediately after this method returns.
+        self.hide()
+        self.setAttribute(Qt.WA_DontShowOnScreen, False)
+        self._startup_surface_shielded = False
 
     def _notify_startup_status(self, message: str) -> None:
         callback = getattr(self, "_startup_status_callback", None)
