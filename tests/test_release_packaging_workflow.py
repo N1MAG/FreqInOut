@@ -43,6 +43,15 @@ def test_debian_architecture_mapping(machine: str, expected: str) -> None:
     assert builder.deb_architecture(machine) == expected
 
 
+@pytest.mark.parametrize(
+    "machine,expected",
+    (("x86_64", "x86_64"), ("AMD64", "x86_64"), ("aarch64", "arm64"), ("arm64", "arm64")),
+)
+def test_macos_architecture_mapping(machine: str, expected: str) -> None:
+    builder = _module("fio_build_macos_dmg_arch", "packaging/build_macos_dmg.py")
+    assert builder.macos_architecture(machine) == expected
+
+
 def test_debian_package_staging_has_launcher_metadata_and_preserves_external_profile(
     tmp_path: Path,
 ) -> None:
@@ -109,3 +118,30 @@ def test_pyinstaller_spec_uses_runtime_isolation_and_platform_icon() -> None:
     assert "packaging/pyinstaller_runtime_qt.py" in source
     assert "upx=False" in source
     assert "sys.platform == 'win32'" in source
+    assert "FreqInOut.app" in source
+    assert "org.n1mag.freqinout" in source
+
+
+def test_public_release_workflow_has_separate_candidate_and_production_contracts() -> None:
+    source = (ROOT / ".github" / "workflows" / "public-release.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'branches:\n      - "release/public-*-candidate"' in source
+    assert 'tags:\n      - "v*"' in source
+    assert source.count("environment: production-release") >= 2
+    assert "WINDOWS_SIGNING_CERTIFICATE_BASE64" in source
+    assert "MACOS_CERTIFICATE_P12_BASE64" in source
+    assert "notarytool submit" in source
+    assert "actions/attest@" in source
+    assert "SHA256SUMS.txt" in source
+    assert 'FreqInOut-${{ needs.verify.outputs.version }}-windows-x86_64-setup.exe' in source
+    assert 'FreqInOut-${{ needs.verify.outputs.version }}-linux-amd64.deb' in source
+    assert 'FreqInOut-${{ needs.verify.outputs.version }}-macos-${{ matrix.arch }}.dmg' in source
+    assert "refusing to overwrite it" in source
+    for line in source.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("uses: actions/"):
+            reference = stripped.split("@", 1)[1].split()[0]
+            assert len(reference) == 40
+            int(reference, 16)

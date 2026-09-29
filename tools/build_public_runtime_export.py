@@ -41,9 +41,15 @@ ROOT_FILES: tuple[str, ...] = (
 PUBLIC_PACKAGING_FILES: tuple[str, ...] = (
     "packaging/build-requirements.txt",
     "packaging/build_linux_deb.py",
+    "packaging/build_macos_dmg.py",
     "packaging/linux/freqinout.desktop",
+    "packaging/macos/entitlements.plist",
     "packaging/pyinstaller_runtime_qt.py",
     "packaging/verify_release_inputs.py",
+)
+
+PUBLIC_WORKFLOW_FILES: tuple[str, ...] = (
+    ".github/workflows/public-release.yml",
 )
 
 # Sources may live in the private evidence tree while the public destination
@@ -119,7 +125,13 @@ def iter_public_sources(source_root: Path) -> Iterator[tuple[Path, Path]]:
     """Yield ``(source, public-relative-destination)`` pairs."""
 
     root = Path(source_root).resolve()
-    for relative in ROOT_FILES + PUBLIC_DOCS + JS8NET_FILES + PUBLIC_PACKAGING_FILES:
+    for relative in (
+        ROOT_FILES
+        + PUBLIC_DOCS
+        + JS8NET_FILES
+        + PUBLIC_PACKAGING_FILES
+        + PUBLIC_WORKFLOW_FILES
+    ):
         yield root / relative, Path(relative)
     for source, destination in RENAMED_FILES:
         yield root / source, Path(destination)
@@ -168,8 +180,11 @@ def validate_public_projection(root: Path) -> tuple[Path, ...]:
         Path("FreqInOut.spec"),
         Path("installer.iss"),
         Path("packaging/build_linux_deb.py"),
+        Path("packaging/build_macos_dmg.py"),
+        Path("packaging/macos/entitlements.plist"),
         Path("packaging/pyinstaller_runtime_qt.py"),
         Path("packaging/verify_release_inputs.py"),
+        Path(".github/workflows/public-release.yml"),
         Path("freqinout/main.py"),
         Path("docs/guide.html"),
         Path("config/net_resources/sitrepnets-winter.json"),
@@ -182,7 +197,9 @@ def validate_public_projection(root: Path) -> tuple[Path, ...]:
     if missing:
         raise ValueError("Public runtime projection is missing: " + ", ".join(map(str, missing)))
     for relative in relative_files:
-        if any(part in FORBIDDEN_PARTS for part in relative.parts):
+        if any(part in FORBIDDEN_PARTS for part in relative.parts) and relative not in {
+            Path(path) for path in PUBLIC_WORKFLOW_FILES
+        }:
             raise ValueError(f"Forbidden path entered public runtime projection: {relative}")
         if relative == Path("freqinout/core/config_lab_preset.py"):
             raise ValueError("Private lab preset entered public runtime projection.")

@@ -1,6 +1,6 @@
 # Cross-Platform Release Packaging Specification
 
-Status: `Slice RP-1 hosted builders passed; native field qualification pending`
+Status: `Public workflow implemented; hosted public candidate qualification pending`
 
 Governing contracts:
 
@@ -24,6 +24,8 @@ Release and therefore do not increase the user-visible release count.
 
 - Windows x86-64: `FreqInOut-<version>-windows-x86_64-setup.exe`
 - Linux x86-64: `FreqInOut-<version>-linux-amd64.deb`
+- macOS Intel: `FreqInOut-<version>-macos-x86_64.dmg`
+- macOS Apple Silicon: `FreqInOut-<version>-macos-arm64.dmg`
 - Per-artifact SHA-256 files during candidate qualification.
 - One combined `SHA256SUMS.txt` for a public release.
 - Resolved dependency inventories retained with candidate evidence.
@@ -90,7 +92,8 @@ The reviewed public runtime allowlist includes only the build inputs and public
 release workflow needed to reproduce a package. It continues to exclude private
 tests, specifications, work logs, lab tools, evidence, and private history.
 
-An annotated `v<version>` tag starts parallel Windows and Linux builds. A
+An annotated `v<version>` tag starts parallel Windows, Linux, macOS Intel, and
+macOS Apple Silicon builds. A
 single publication job waits for all platform gates, creates a draft release,
 uploads every artifact and checksum, generates provenance attestations, and
 publishes the draft only after the upload is complete. The job uses a protected
@@ -100,6 +103,35 @@ all application metadata and that the tagged commit belongs to public `main`.
 The release job never overwrites an asset on rerun. An unexpected existing
 release or asset is a failure requiring maintainer review, not permission to
 replace an artifact built from an immutable tag.
+
+### Public workflow implementation (2026-09-29)
+
+The allowlisted `.github/workflows/public-release.yml` is the single public
+entry point. A push to `release/public-*-candidate` or a manual dispatch builds
+unsigned, version-named candidate artifacts and retains them for three days;
+it cannot create a GitHub Release. An immutable `v<version>` tag switches to
+the production path, confirms that the tag version matches all application
+metadata and that its commit belongs to public `main`, and requires the
+protected `production-release` environment.
+
+Production Windows jobs require an Authenticode PFX, sign and timestamp both
+the frozen executable and installer, verify both signatures, and then install,
+launch, and remove the completed installer. Production macOS jobs build native
+Intel and Apple Silicon bundles, require a Developer ID certificate plus App
+Store Connect notary credentials, sign the app and DMG, notarize and staple the
+DMG, and install and launch it from the completed image. Linux uses the same
+install/launch/remove gate without a platform signing secret. Each production
+package receives a GitHub provenance attestation. Publication downloads only
+the production artifacts, rechecks every per-file SHA-256, creates one
+`SHA256SUMS.txt`, refuses to overwrite an existing release, and promotes a
+draft only after all four packages upload successfully.
+
+The macOS bundle/DMG implementation passed a native Apple Silicon PyInstaller
+build, ad-hoc code-signature verification, fresh-profile smoke test, DMG
+verification, mounted-image copy/install smoke test, and profile-preservation
+check. Focused packaging/export tests pass. The public hosted candidate run and
+credential-backed signing/notarization jobs remain external exit gates; no
+production tag may be created until they pass.
 
 ## RP-5 — Signing
 
@@ -143,3 +175,8 @@ upgrade safety, build scripts, workflow security, integration, specification,
 and exit-gate review. The initial RP-1 implementation used no sub-agent under
 the active constraint; the later retention-policy reconciliation received an
 independent read-only audit from `gpt-6-astra` (high reasoning).
+
+The 2026-09-29 public workflow, macOS package builder, allowlist update, tests,
+native macOS qualification, and integration review were all performed by the
+primary `gpt-6-astra` model at high reasoning under the active no-delegation
+constraint.

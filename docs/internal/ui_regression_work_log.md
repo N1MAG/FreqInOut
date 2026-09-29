@@ -12363,3 +12363,39 @@ Maintainer approval: the maintainer explicitly approved the visible default-off
 MeshCore BLE hotfix supersedes the original receive-only BLE expectation;
 qualified MeshCore BLE now uses the same visible permission and connected-only
 Compose guard. Approval does not authorize an immediate public push.
+
+## 2026-09-29 — Public native-package release workflow
+
+Status: `Implemented privately; public hosted candidate qualification pending`
+
+The reviewed public allowlist now carries one production workflow plus only the
+packaging inputs needed to reproduce its outputs. Candidate-branch and manual
+runs build version-named Windows x86-64 setup EXE, Linux amd64 DEB, macOS Intel
+DMG, and macOS Apple Silicon DMG artifacts with three-day retention and no
+GitHub Release publication. A `v<version>` tag activates the protected
+production path: tag/main/version validation, Authenticode signing and
+timestamping, Developer ID signing and Apple notarization, completed-package
+install/launch/remove checks, SHA-256 verification, GitHub provenance
+attestations, and fail-closed draft publication with no overwrite behavior.
+
+The primary `gpt-6-astra` model at high reasoning owned the workflow security,
+macOS package implementation, allowlist boundary, tests, native macOS build,
+and final integration review. No sub-agent was used under the active
+no-delegation constraint.
+
+Acceptance evidence:
+
+- release metadata/build-input validation: pass (`2.0.3` baseline);
+- focused packaging and public-export tests: 15 passed;
+- public workflow YAML parse and immutable action-reference checks: pass;
+- native Apple Silicon PyInstaller `.app` build and ad-hoc signature
+  verification: pass;
+- fresh-profile bundled-app smoke test: pass;
+- native arm64 DMG creation and `hdiutil verify`: pass;
+- mounted-DMG copy/install smoke test and external-profile preservation: pass;
+- changed-file compilation and `git diff --check`: pass.
+
+Open exit gates: push the allowlisted files to the public candidate branch,
+observe all four GitHub-hosted candidate package jobs, and configure the
+protected `production-release` environment and signing/notarization secrets
+before creating a production tag.

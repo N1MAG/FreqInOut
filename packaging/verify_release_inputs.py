@@ -16,8 +16,11 @@ REQUIRED_INPUTS = (
     "packaging/build-requirements.txt",
     "packaging/pyinstaller_runtime_qt.py",
     "packaging/linux/freqinout.desktop",
+    "packaging/build_macos_dmg.py",
+    "packaging/macos/entitlements.plist",
     "assets/FreqInOut.ico",
     "assets/FreqInOut-desktop.png",
+    "assets/FreqInOut_logo.png",
 )
 
 

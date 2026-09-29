@@ -1,6 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
+import os
+import re
 import sys
 
 import PySide6
@@ -8,6 +10,18 @@ import PySide6
 
 ROOT = Path(SPECPATH)
 QT_ROOT = Path(PySide6.__file__).resolve().parent / "Qt"
+APP_VERSION = re.search(
+    r'^__version__\s*=\s*["\']([^"\']+)["\']',
+    (ROOT / "freqinout" / "version.py").read_text(encoding="utf-8"),
+    re.MULTILINE,
+).group(1)
+MACOS_CODESIGN_IDENTITY = os.environ.get("FIO_CODESIGN_IDENTITY") or None
+MACOS_ENTITLEMENTS = (
+    str(ROOT / "packaging" / "macos" / "entitlements.plist")
+    if MACOS_CODESIGN_IDENTITY
+    else None
+)
+MACOS_ICON = ROOT / "assets" / "FreqInOut.icns"
 
 
 def qml_module_files(module_name):
@@ -106,9 +120,13 @@ exe = EXE(
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon='assets/FreqInOut.ico' if sys.platform == 'win32' else None,
+    codesign_identity=MACOS_CODESIGN_IDENTITY,
+    entitlements_file=MACOS_ENTITLEMENTS,
+    icon=(
+        'assets/FreqInOut.ico'
+        if sys.platform == 'win32'
+        else str(MACOS_ICON) if sys.platform == 'darwin' and MACOS_ICON.is_file() else None
+    ),
 )
 coll = COLLECT(
     exe,
@@ -119,3 +137,22 @@ coll = COLLECT(
     upx_exclude=[],
     name='FreqInOut',
 )
+
+if sys.platform == 'darwin':
+    app = BUNDLE(
+        coll,
+        name='FreqInOut.app',
+        icon=str(MACOS_ICON) if MACOS_ICON.is_file() else None,
+        bundle_identifier='org.n1mag.freqinout',
+        version=APP_VERSION,
+        codesign_identity=MACOS_CODESIGN_IDENTITY,
+        entitlements_file=MACOS_ENTITLEMENTS,
+        info_plist={
+            'CFBundleDisplayName': 'FreqInOut',
+            'CFBundleName': 'FreqInOut',
+            'CFBundleShortVersionString': APP_VERSION,
+            'CFBundleVersion': APP_VERSION,
+            'LSApplicationCategoryType': 'public.app-category.utilities',
+            'NSHighResolutionCapable': True,
+        },
+    )

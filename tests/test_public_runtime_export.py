@@ -30,6 +30,8 @@ def test_public_runtime_export_is_allowlisted_and_operator_complete(tmp_path: Pa
     assert Path("FreqInOut.spec") in relative
     assert Path("installer.iss") in relative
     assert Path("packaging/build_linux_deb.py") in relative
+    assert Path("packaging/build_macos_dmg.py") in relative
+    assert Path("packaging/macos/entitlements.plist") in relative
     assert Path("packaging/pyinstaller_runtime_qt.py") in relative
     assert Path("packaging/verify_release_inputs.py") in relative
     assert Path("freqinout/main.py") in relative
@@ -48,6 +50,7 @@ def test_public_runtime_export_is_allowlisted_and_operator_complete(tmp_path: Pa
     assert Path("config/propagation/README.md") not in relative
     assert Path("third_party/js8net/js8net-main/README.md") not in relative
     assert Path(".github/workflows/package-candidate.yml") not in relative
+    assert Path(".github/workflows/public-release.yml") in relative
 
     public_readme = (output / "README.md").read_text(encoding="utf-8")
     assert public_readme.startswith("<p align=\"center\">")
@@ -56,6 +59,7 @@ def test_public_runtime_export_is_allowlisted_and_operator_complete(tmp_path: Pa
 
     public_manifest = (output / "MANIFEST.in").read_text(encoding="utf-8")
     assert "packaging/pyinstaller_runtime_qt.py" in public_manifest
+    assert "packaging/build_macos_dmg.py" in public_manifest
 
 
 def test_public_runtime_export_refuses_existing_destination(tmp_path: Path) -> None:
