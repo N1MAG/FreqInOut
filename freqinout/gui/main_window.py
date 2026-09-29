@@ -46,7 +46,12 @@ from freqinout.core.logger import set_log_level
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.resource_catalog_migration import resource_catalog_authority_state
 from freqinout.core.shortwave_store import ShortwaveStore
-from freqinout.core.multi_radio_store import MultiRadioStore, SUPPORTED_RUNTIME_CONTROL_BACKENDS
+from freqinout.core.multi_radio_store import (
+    FIRST_RUN_ONBOARDING_ACK_KEY,
+    MultiRadioStore,
+    SUPPORTED_RUNTIME_CONTROL_BACKENDS,
+)
+from freqinout.core.multi_rig_runtime_status import should_present_first_run_onboarding
 from freqinout.core.navigation_intent import NavigationIntent
 from freqinout.core.perf_metrics import emit_span, span as perf_span
 from freqinout.core.plan_context_service import PlanContextService
@@ -262,6 +267,8 @@ class MainWindow(QMainWindow):
         self._shutdown_deadline_reported = False
         self._shutdown_registry = WorkerShutdownRegistry()
         self._post_shell_services_started = False
+        self._first_run_onboarding_presented = False
+        self._first_run_onboarding_dialog: QMessageBox | None = None
         self._background_ingest_start_pending = False
         self._message_projection_future = None
         self._message_projection_catchup_pending = False
@@ -4690,6 +4697,13 @@ class MainWindow(QMainWindow):
                 ),
             )
 
+    def open_guided_add_radio(self) -> None:
+        """Open the existing first-radio workflow from any operator surface."""
+
+        self.open_settings_section("radio_profiles", settings_nav_context="radios")
+        if hasattr(self.settings_tab, "start_guided_add_radio"):
+            QTimer.singleShot(0, self.settings_tab.start_guided_add_radio)
+
     def open_station_bbs(self) -> None:
         """Open the top-level, station-owned FIO BBS service."""
         idx = self._screen_index_by_label.get("Managed BBS", -1)
@@ -6888,6 +6902,72 @@ class MainWindow(QMainWindow):
         self.request_message_projection_catchup(reason="post_shell")
         self._schedule_message_projection_reconcile()
         self._publish_watchdog_diagnostic_snapshot()
+
+    def present_first_run_onboarding(self) -> None:
+        """Present fresh-station guidance after the usable shell is painted."""
+
+        if self._shutting_down or self._first_run_onboarding_presented:
+            return
+        if self._first_run_onboarding_dialog is not None:
+            return
+        try:
+            status = self.station_runtime_manager.runtime_status()
+            settings_values = dict(self.settings.all())
+            has_device_profiles = bool(self.multi_radio_store.list_device_profiles())
+            eligible = should_present_first_run_onboarding(
+                status,
+                settings_values=settings_values,
+                has_device_profiles=has_device_profiles,
+            )
+        except Exception as exc:
+            log.warning("MainWindow: first-run onboarding eligibility check failed: %s", exc)
+            return
+        if not eligible:
+            return
+
+        self._first_run_onboarding_presented = True
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Welcome to FreqInOut")
+        dialog.setAccessibleName("Welcome to FreqInOut station setup")
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        dialog.setIcon(QMessageBox.Information)
+        dialog.setText("No existing FreqInOut station was found.")
+        dialog.setInformativeText(
+            "Start by setting up the first radio. Nothing is changed until you review and save it."
+        )
+        setup_button = dialog.addButton("Set Up First Radio…", QMessageBox.AcceptRole)
+        later_button = dialog.addButton("Set Up Later", QMessageBox.RejectRole)
+        setup_button.setAccessibleName("Set up the first radio")
+        later_button.setAccessibleName("Set up the first radio later")
+        dialog.setDefaultButton(setup_button)
+        theme = resolve_theme(self.settings)
+        setup_button.setStyleSheet(button_style("primary", theme))
+        later_button.setStyleSheet(button_style("secondary", theme))
+        dialog.finished.connect(
+            lambda _result, owned=dialog, primary=setup_button: self._finish_first_run_onboarding(
+                owned,
+                primary,
+            )
+        )
+        dialog.destroyed.connect(lambda *_args: setattr(self, "_first_run_onboarding_dialog", None))
+        self._first_run_onboarding_dialog = dialog
+        log.info("MainWindow: presenting fresh-station onboarding after shell startup")
+        dialog.open()
+
+    def _finish_first_run_onboarding(self, dialog: QMessageBox, setup_button: object) -> None:
+        if self._shutting_down:
+            return
+        start_setup = dialog.clickedButton() is setup_button
+        try:
+            self.settings.set(FIRST_RUN_ONBOARDING_ACK_KEY, True)
+        except Exception as exc:
+            log.warning("MainWindow: could not persist first-run onboarding choice: %s", exc)
+        log.info(
+            "MainWindow: fresh-station onboarding choice=%s",
+            "set_up_first_radio" if start_setup else "set_up_later",
+        )
+        if start_setup:
+            QTimer.singleShot(0, self.open_guided_add_radio)
 
     def request_message_projection_catchup(self, *, reason: str = "source_change"):
         """Coalesce message projection work onto the application-owned lane."""

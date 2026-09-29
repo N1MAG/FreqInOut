@@ -35414,6 +35414,12 @@ class SettingsTab(QWidget):
             annotated[family]["native_configuration_status"] = status
         return annotated
 
+    def start_guided_add_radio(self) -> None:
+        """Public navigation seam for onboarding and no-radio recovery actions."""
+
+        self.show_settings_context("radios", health_key="radio_profiles")
+        self._add_device_profile()
+
     def _add_device_profile(
         self,
         *,

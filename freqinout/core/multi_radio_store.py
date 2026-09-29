@@ -186,10 +186,13 @@ MIRRORED_LEGACY_KEYS = frozenset(
     }
 )
 
+FIRST_RUN_ONBOARDING_ACK_KEY = "first_run_onboarding_acknowledged_v1"
+
 FIO_EXISTING_USE_IGNORED_KEYS = frozenset(
     {
         MULTI_RIG_MIGRATION_VERSION_KEY,
         MULTI_RIG_MIGRATION_DEFERRED_KEY,
+        FIRST_RUN_ONBOARDING_ACK_KEY,
         "multi_rig_shared_state_schema_version",
         "autoquery_keys_purged_v1",
         "timezone",

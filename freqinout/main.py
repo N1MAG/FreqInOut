@@ -312,6 +312,8 @@ def main():
         # station upgrade gate ran before MainWindow construction.
         if hasattr(win, "start_post_shell_services"):
             QTimer.singleShot(0, win.start_post_shell_services)
+        if not args.smoke_test and hasattr(win, "present_first_run_onboarding"):
+            QTimer.singleShot(0, win.present_first_run_onboarding)
         log.info("FreqInOut started.")
         if args.smoke_test:
             log.info("FreqInOut packaged smoke test started.")
