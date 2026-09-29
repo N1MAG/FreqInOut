@@ -1,5 +1,45 @@
 # UI Regression Work Log
 
+## 2026-09-29 — Windows startup helper-window flash hotfix
+
+Status: `Awaiting maintainer pass approval`
+
+Governing specification:
+`windows_startup_helper_flash_hotfix_spec.md`.
+
+Private implementation commit: `7ab70df07f263b28c1f7ea253376626c761c202d`
+on `wip/private-testing-multi-rig-1.2.3-not-ready`.
+
+The supplied Windows recording showed a blank process frame before the FIO
+splash and additional blank process frames behind the otherwise stable splash.
+This was not screen warming: the packaged FIO executable is already windowed,
+and deferred screen prewarming is disabled by default. The remaining
+noninteractive startup commands, `tzutil /g` and `rigctl -l`, did not request
+Windows no-console execution.
+
+The bounded hotfix adds an opt-in internal subprocess policy using
+`CREATE_NO_WINDOW` plus hidden `STARTUPINFO` on Windows and no additional
+arguments elsewhere. Only the timezone and radio-catalog probes use it.
+Operator-launched companion applications, catalog behavior, radio identity,
+database state, upgrade routing, and first-launch guidance are unchanged.
+
+Work-package ownership:
+
+- primary `gpt-6-astra` (high reasoning) owned scope, implementation,
+  integration, tests, documentation, and exit-gate review;
+- independent `gpt-5.6-terra` (low reasoning) performed the read-only Windows
+  subprocess-policy and regression-boundary audit and made no file changes.
+
+Acceptance evidence: the focused subprocess-policy, radio-catalog, runtime,
+splash, startup-deferral, and public-export partition passed **27 tests** with
+3 platform skips; changed Python compilation and `git diff --check` passed.
+
+Maintainer pass gate: install the next Windows candidate, fully exit any
+running FIO process, and record a cold launch from the FreqInOut shortcut. No
+blank helper-process frame should appear before or behind the splash. A legacy
+profile must still present `Upgrade Existing Station`. Approval queues the
+hotfix for the next point release and does not authorize a public push.
+
 ## 2026-09-28 — Cross-platform release packaging RP-1
 
 Status: `Hosted package candidates passed; native field qualification pending`
