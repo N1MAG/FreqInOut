@@ -10,6 +10,9 @@ Governing specification:
 Private implementation commit: `7ab70df07f263b28c1f7ea253376626c761c202d`
 on `wip/private-testing-multi-rig-1.2.3-not-ready`.
 
+Follow-up startup-surface commit:
+`e0aebbfa91bf91e0442a4d993b6cd4961ca88486` on the same branch.
+
 The supplied Windows recording showed a blank process frame before the FIO
 splash and additional blank process frames behind the otherwise stable splash.
 This was not screen warming: the packaged FIO executable is already windowed,
