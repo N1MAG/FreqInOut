@@ -1164,17 +1164,22 @@ class LaunchOrchestrator(QObject):
 
     def _program_ready_for_sequence(self, item: Any) -> bool:
         name = self._queue_item_name(item)
-        if not self._program_running(item):
-            return False
         if (
             isinstance(item, Mapping)
             and bool(item.get("radio_control_gate_required", False))
             and name == str(item.get("radio_control_app", "") or "").strip()
         ):
+            # The accepted process inventory is intentionally immutable for
+            # duplicate-launch safety, so it cannot contain a process that FIO
+            # started later in this sequence.  Exact endpoint frequency
+            # readback is stronger post-launch readiness evidence and must not
+            # be suppressed by that pre-launch process snapshot.
             return self._radio_control_evidence_state(
                 item,
                 force=self._radio_control_probe_is_due(item),
             ) == "ready"
+        if not self._program_running(item):
+            return False
         info = self._cached_status_for_item(item)
         if name == "JS8Call":
             policy = item.get("readiness_policy", {}) if isinstance(item, Mapping) else {}

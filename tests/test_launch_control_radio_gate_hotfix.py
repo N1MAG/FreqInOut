@@ -81,9 +81,11 @@ def test_planner_builds_complete_radio_stages_with_control_first() -> None:
     assert [row["radio_control_port"] for row in queue[:4]] == [12354] * 4
 
 
-def test_control_application_readiness_requires_physical_radio_readback() -> None:
+def test_control_readback_is_authoritative_after_launch_process_snapshot() -> None:
     orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
-    orchestrator._program_running = lambda _item: True
+    # Launch safety retains the immutable inventory captured before Popen, so
+    # the newly started FLRig is intentionally absent from this result.
+    orchestrator._program_running = lambda _item: False
     orchestrator._radio_control_probe_is_due = lambda _item: True
     item = {
         "name": "FLRig",
@@ -154,7 +156,7 @@ def test_post_launch_readiness_reprobes_after_prelaunch_negative(monkeypatch) ->
     times = iter((10.0, 11.1))
     monkeypatch.setattr(launch_orchestrator_module.time, "monotonic", lambda: next(times))
     orchestrator = LaunchOrchestrator.__new__(LaunchOrchestrator)
-    orchestrator._program_running = lambda _item: True
+    orchestrator._program_running = lambda _item: False
     orchestrator._sequence_preflight_started_wall = 100.0
     orchestrator._radio_control_probe_due_monotonic = {}
     orchestrator.dependency_status = SimpleNamespace(status_snapshot=_status_snapshot)

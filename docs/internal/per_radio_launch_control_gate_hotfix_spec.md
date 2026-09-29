@@ -35,6 +35,17 @@ timed out, even though the scheduler had already completed a successful FLRig
 frequency write and readback. Pre-launch occupancy evidence and post-launch
 radio-readiness evidence must not share that negative-cache lifecycle.
 
+The next native retest verified the separated cache scope was installed, but
+showed no post-launch control-scope request. Launch safety deliberately retains
+one immutable process inventory captured before any application starts. The
+readiness path incorrectly required that pre-launch inventory to contain the
+newly spawned FLRig before it would request the endpoint readback. Because the
+new process cannot appear in an immutable earlier snapshot, the gate again
+timed out without probing port 12345. After FIO has safely completed duplicate
+preflight and started the selected control command, exact positive frequency
+readback is the authoritative readiness proof; it must not depend on refreshing
+or reinterpreting the pre-launch process inventory.
+
 ## Required behavior
 
 1. Active radios are ordered by existing `display_order`, then stable radio ID.
@@ -55,7 +66,9 @@ radio-readiness evidence must not share that negative-cache lifecycle.
    The pre-launch endpoint check remains authoritative only for duplicate
    prevention. After a process is launched—or while an exact existing process
    is becoming ready—the control gate uses a distinct launch-readback scope.
-   It must not reuse a negative result captured before the process started.
+   It must not reuse a negative result captured before the process started or
+   require the immutable pre-launch process inventory to contain a process that
+   FIO started afterward.
 6. Manual-control and receive-only/manual observer profiles bypass the gate
    explicitly. No success is fabricated for an automated backend.
 7. If the control check succeeds, the remaining radio apps continue through
@@ -130,9 +143,11 @@ profile fields into the immutable launch plan.
 7. A pre-launch connection refusal followed by a successful post-launch FLRig
    readback authorizes the remaining radio applications before timeout and
    replaces the cached endpoint failure.
-8. Repeated launch-readback polling remains exact-backend, rate-limited, and
+8. The same transition succeeds when exact-process lookup continues to return
+   the immutable pre-launch value `False`; no second process walk is required.
+9. Repeated launch-readback polling remains exact-backend, rate-limited, and
    single-flight; unrelated endpoints are not probed.
-9. Existing launch identity, JS8 default identity, shared dependency, VarAC,
+10. Existing launch identity, JS8 default identity, shared dependency, VarAC,
    Windows subprocess, cancellation, and settings preview tests remain green.
-10. No database or installer behavior changes.
-11. Native two-radio operator testing remains required before approval.
+11. No database or installer behavior changes.
+12. Native two-radio operator testing remains required before approval.
