@@ -7,6 +7,9 @@ Status: `Awaiting maintainer pass approval`
 Governing specification:
 `radio_operational_health_cache_hotfix_spec.md`.
 
+Private implementation commit: `7ad67f1` on
+`wip/private-testing-multi-rig-1.2.3-not-ready`.
+
 The Station Control Bar and Station Overview now use the scheduler's existing
 immutable, endpoint-scoped operational summaries as their shared source of
 truth. Cache-only runtime snapshots preserve missing evidence as neutral
