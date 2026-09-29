@@ -1,5 +1,71 @@
 # UI Regression Work Log
 
+## 2026-09-29 — Per-radio launch control gate
+
+Status: `Awaiting maintainer pass approval`
+
+Governing specification:
+`per_radio_launch_control_gate_hotfix_spec.md`.
+
+Private implementation commit: `a4cefb1` on
+`wip/private-testing-multi-rig-1.2.3-not-ready`.
+
+Launch Control now treats each active radio as a bounded startup stage. Radios
+are ordered by their existing display order and stable ID, dependencies are
+ordered inside the owning radio, and a configured FLRig or JS8Call control
+application is placed first when it is included in that radio's startup
+bundle. RigCtlD and already-running control applications use the same gate
+without launching a duplicate.
+
+Before any remaining application for a radio starts, FIO requests fresh,
+endpoint-scoped control evidence through the existing dependency-status
+worker. The exact configured endpoint must return a positive read-only
+frequency: FLRig uses `rig.get_vfo`, RigCtlD uses Hamlib `f`, and JS8Call uses
+its native endpoint-scoped frequency request. A responsive application API by
+itself is not sufficient evidence that the physical radio is available.
+
+If the control application or radio readback is unavailable within the bounded
+timeout, the remaining applications for that radio are recorded as
+`blocked_radio_control`; startup then continues with the next radio. Manual and
+observer profiles retain an explicit bypass. Existing process attribution,
+endpoint duplicate prevention, JS8 identity handling, cancellation, and
+selected-radio **Start Startup Apps** behavior remain in force. The final
+launch summary reports radio-control skips separately.
+
+No schema, migration, persistent setting, launch-bundle, or saved radio-profile
+change was made. Control metadata exists only in the transient launch plan.
+The UI continues to consume immutable cached status; the new radio readback is
+performed only by the existing endpoint worker and never on the Qt GUI thread.
+
+Work-package ownership:
+
+- primary `gpt-6-astra` (high reasoning) owned the specification, launch-plan
+  and orchestrator state machine, cache/worker integration, focused tests,
+  regression review, and final integration;
+- no delegated code package was used because the change is a tightly coupled
+  launch-state correction across the planner, worker snapshot, and executor.
+
+Acceptance evidence:
+
+- focused per-radio gate and exact FLRig/RigCtlD/JS8 endpoint-readback tests:
+  **8 passed**;
+- launch identity, bundle isolation, dependency, JS8/VarAC, guided launch,
+  status/cache, Windows subprocess, and startup-surface partition:
+  **229 passed, 4 platform skips**;
+- changed Python compilation and `git diff --check`: pass;
+- the monolithic whole-suite run reached an existing macOS Qt/native test
+  isolation crash in `test_compose_workbench_acceptance`; that individual test
+  passes alone, and no changed launch/status file appears in its failure path.
+
+Maintainer pass gate: configure startup applications for two radios, with the
+first radio powered off and the second powered on. Start the station and
+confirm only the first radio's configured control application is attempted,
+its remaining applications are skipped, and the second radio's complete stack
+then starts in order. Power on the first radio and use that radio's **Start
+Startup Apps** action; confirm its control readback succeeds before its
+remaining applications launch. Repeat once with both radios powered on and
+confirm heavy applications from the two radio stacks never start in parallel.
+
 ## 2026-09-29 — Radio operational health/cache correction
 
 Status: `Approved—queued for next point release`
