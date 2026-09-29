@@ -14,6 +14,7 @@ from freqinout.core.launch_orchestrator import LaunchOrchestrator
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.station_launch_planner import StationLaunchPlanner
+from freqinout.radio_interface.rigctl_client import FLRigClient
 
 
 def _profile(radio_id: int, *, display_order: int) -> dict[str, object]:
@@ -214,6 +215,87 @@ def test_prelaunch_endpoint_check_does_not_share_control_readback_scope() -> Non
     assert calls[1]["control_probe_only"] is True
 
 
+def test_running_control_process_waits_for_radio_gate_when_endpoint_is_starting(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """A slow FLRig endpoint is not a terminal control-app failure."""
+
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+    orchestrator = LaunchOrchestrator(SettingsManager())
+    orchestrator._test_app = app
+    item = {
+        "name": "FLRig",
+        "instance_identity": "radio-one:flrig",
+        "radio_ids": [1],
+        "radio_names": ["FTDX-10"],
+        "radio_control_gate_required": True,
+        "radio_control_backend": "flrig",
+        "radio_control_app": "FLRig",
+        "readiness_policy": {"host": "127.0.0.1", "port": 12345},
+    }
+    orchestrator._active = True
+    orchestrator._process_preflight_pending = False
+    orchestrator._cancel_requested = False
+    orchestrator._queue = [item]
+    orchestrator._index = 0
+    orchestrator._results = []
+    orchestrator._radio_control_gate_states = {}
+    orchestrator._sequence_claimed_identities = set()
+    orchestrator._endpoint_preflight_verified = set()
+    orchestrator._endpoint_preflight_clear = set()
+    orchestrator._blocked_dependency_for = lambda _item: ""
+    orchestrator._instance_launch_identity_blocker = lambda _item: ""
+    orchestrator._legacy_default_js8_profile_conflict = lambda _item: ""
+    orchestrator._configured_instance_process_running = lambda _item: True
+    orchestrator._configured_endpoint_preflight_state = lambda *_args: "clear"
+    orchestrator._schedule_advance_queue = lambda _delay=0: None
+
+    orchestrator._advance_queue()
+
+    assert orchestrator._results[0]["status"] == "already_running"
+    assert "waiting for endpoint and radio readiness" in orchestrator._results[0]["detail"]
+    assert orchestrator._radio_control_app_failed(item) is False
+    shutdown_dependency_status_service()
+
+
+def test_non_control_process_with_unready_endpoint_remains_a_failure() -> None:
+    assert LaunchOrchestrator._is_gated_radio_control_app(
+        {
+            "name": "FLRig",
+            "radio_control_app": "FLRig",
+            "radio_control_gate_required": True,
+        }
+    ) is True
+    assert LaunchOrchestrator._is_gated_radio_control_app(
+        {
+            "name": "FLDigi",
+            "radio_control_app": "FLRig",
+            "radio_control_gate_required": True,
+        }
+    ) is False
+
+
+def test_flrig_live_transceiver_name_requires_fresh_yaesu_identity_response() -> None:
+    client = FLRigClient()
+    rig = SimpleNamespace(
+        get_xcvr=lambda: "FTdx10",
+        cat_string=lambda command: "ID0670;" if command == "ID;" else "",
+    )
+    client._proxy = SimpleNamespace(rig=rig)
+
+    assert client.get_transceiver_name() == "FTdx10"
+    assert client.get_live_transceiver_name() == "FTdx10"
+
+    rig.cat_string = lambda _command: "No response: FTdx10"
+    assert client.get_live_transceiver_name() is None
+
+    rig.get_xcvr = lambda: ""
+    assert client.get_transceiver_name() is None
+    assert client.get_live_transceiver_name() is None
+
+
 def test_blocked_radio_skips_its_apps_and_healthy_peer_continues(monkeypatch, tmp_path) -> None:
     radio_one = {
         "name": "VarAC",
@@ -284,7 +366,7 @@ def test_manual_control_profile_bypasses_radio_gate() -> None:
     assert queue[0]["radio_control_app"] == ""
 
 
-def test_flrig_control_readback_metadata_requires_positive_frequency(monkeypatch) -> None:
+def test_flrig_control_readback_requires_online_identity_and_positive_frequency(monkeypatch) -> None:
     settings = SimpleNamespace(get=lambda _key, default=None: default)
     service = SoftwareStatusService(settings)
     monkeypatch.setattr(service, "program_is_running", lambda _name: False)
@@ -295,6 +377,7 @@ def test_flrig_control_readback_metadata_requires_positive_frequency(monkeypatch
 
     from freqinout.radio_interface.rigctl_client import FLRigClient
 
+    monkeypatch.setattr(FLRigClient, "get_live_transceiver_name", lambda _self: "FTdx10")
     monkeypatch.setattr(FLRigClient, "get_vfo_frequency", lambda _self: 14_078_000)
     ready = service.status_snapshot(
         force=False,
@@ -308,7 +391,27 @@ def test_flrig_control_readback_metadata_requires_positive_frequency(monkeypatch
     assert ready["reachable"] is True
     assert ready["radio_readback_ready"] is True
     assert ready["frequency_hz"] == 14_078_000
+    assert ready["radio_online"] is True
+    assert ready["transceiver_name"] == "FTdx10"
 
+    monkeypatch.setattr(FLRigClient, "get_live_transceiver_name", lambda _self: None)
+    monkeypatch.setattr(FLRigClient, "get_vfo_frequency", lambda _self: 14_070_000)
+    offline = service.status_snapshot(
+        force=False,
+        force_process_snapshot=False,
+        flrig_host_override="127.0.0.1",
+        flrig_port_override=12345,
+        verify_control_readback=True,
+        control_backend="flrig",
+    )["FLRig"]
+
+    assert offline["reachable"] is True
+    assert offline["radio_online"] is False
+    assert offline["radio_readback_ready"] is False
+    assert offline["frequency_hz"] is None
+    assert "transceiver is offline" in str(offline["tooltip"]).lower()
+
+    monkeypatch.setattr(FLRigClient, "get_live_transceiver_name", lambda _self: "FTdx10")
     monkeypatch.setattr(FLRigClient, "get_vfo_frequency", lambda _self: None)
     unavailable = service.status_snapshot(
         force=False,
@@ -352,6 +455,7 @@ def test_launch_control_probe_forces_only_the_exact_backend(monkeypatch) -> None
 
     from freqinout.radio_interface.rigctl_client import FLRigClient
 
+    monkeypatch.setattr(FLRigClient, "get_live_transceiver_name", lambda _self: "FTdx10")
     monkeypatch.setattr(FLRigClient, "get_vfo_frequency", lambda _self: 14_115_000)
     row = service.status_snapshot(
         force=True,
@@ -382,6 +486,7 @@ def test_successful_post_launch_probe_replaces_cached_endpoint_failure(monkeypat
     from freqinout.radio_interface.rigctl_client import FLRigClient
 
     monkeypatch.setattr(FLRigClient, "is_available", lambda _self: True)
+    monkeypatch.setattr(FLRigClient, "get_live_transceiver_name", lambda _self: "FTdx10")
     monkeypatch.setattr(FLRigClient, "get_vfo_frequency", lambda _self: 7_115_000)
     row = service.status_snapshot(
         force=True,

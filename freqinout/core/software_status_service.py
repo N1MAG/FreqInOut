@@ -1602,15 +1602,19 @@ class SoftwareStatusService:
                 "JS8CALL": "JS8Call_API",
             }.get(active_control_via, "")
             frequency_hz: Optional[int] = None
+            transceiver_name: Optional[str] = None
             try:
                 if readback_key == "FLRig" and flrig_api_ok:
                     from freqinout.radio_interface.rigctl_client import FLRigClient
 
-                    frequency_hz = FLRigClient(
+                    flrig_client = FLRigClient(
                         host=flrig_host,
                         port=flrig_port,
                         timeout=0.8,
-                    ).get_vfo_frequency()
+                    )
+                    transceiver_name = flrig_client.get_live_transceiver_name()
+                    if transceiver_name:
+                        frequency_hz = flrig_client.get_vfo_frequency()
                 elif readback_key == "RigCtlD" and rigctld_api_ok:
                     from freqinout.radio_interface.rigctl_client import RigctldClient
 
@@ -1638,15 +1642,29 @@ class SoftwareStatusService:
                 normalized_frequency_hz = int(frequency_hz) if frequency_hz is not None else None
             except (TypeError, ValueError):
                 normalized_frequency_hz = None
-            ready = bool(normalized_frequency_hz is not None and normalized_frequency_hz > 0)
+            frequency_ready = bool(
+                normalized_frequency_hz is not None and normalized_frequency_hz > 0
+            )
+            ready = bool(
+                frequency_ready
+                and (readback_key != "FLRig" or transceiver_name)
+            )
             if readback_key and readback_key in out:
                 row = out[readback_key]
                 row["radio_readback_ready"] = ready
                 row["frequency_hz"] = normalized_frequency_hz if ready else None
                 row["control_backend"] = active_control_via.lower()
+                if readback_key == "FLRig":
+                    row["radio_online"] = bool(transceiver_name)
+                    row["transceiver_name"] = transceiver_name or ""
                 if bool(row.get("reachable")) and not ready:
+                    reason = (
+                        "FLRig reports that its transceiver is offline."
+                        if readback_key == "FLRig" and not transceiver_name
+                        else "Radio frequency readback is unavailable."
+                    )
                     row["tooltip"] = (
                         str(row.get("tooltip", "") or "").rstrip(". ")
-                        + ". Radio frequency readback is unavailable."
+                        + f". {reason}"
                     )
         return out

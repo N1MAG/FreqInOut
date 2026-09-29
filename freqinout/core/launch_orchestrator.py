@@ -1425,6 +1425,16 @@ class LaunchOrchestrator(QObject):
             str(result.get("status", "") or "") in success_states for result in matches
         )
 
+    @staticmethod
+    def _is_gated_radio_control_app(item: Any) -> bool:
+        if not isinstance(item, Mapping):
+            return False
+        return bool(
+            item.get("radio_control_gate_required", False)
+            and str(item.get("name", "") or "").strip()
+            == str(item.get("radio_control_app", "") or "").strip()
+        )
+
     def _pending_queue_contains(self, names: set[str]) -> bool:
         if not names:
             return False
@@ -1834,16 +1844,27 @@ class LaunchOrchestrator(QObject):
             )
             self._endpoint_preflight_clear.add(endpoint_key)
             if exact_process_running is True:
-                log.warning(
-                    "LaunchOrchestrator: skipped duplicate %s launch; exact process is "
-                    "running but its configured endpoint is not ready",
-                    name,
-                )
+                waiting_for_control = self._is_gated_radio_control_app(queue_item)
+                if waiting_for_control:
+                    log.info(
+                        "LaunchOrchestrator: exact %s process is running; waiting for its "
+                        "configured radio-control endpoint",
+                        name,
+                    )
+                else:
+                    log.warning(
+                        "LaunchOrchestrator: skipped duplicate %s launch; exact process is "
+                        "running but its configured endpoint is not ready",
+                        name,
+                    )
                 result = self._result_for(
                     queue_item,
-                    status="failed",
+                    status="already_running" if waiting_for_control else "failed",
                     detail=(
-                        "configured process is running but its endpoint is not ready; "
+                        "exact configured process is active; waiting for endpoint and "
+                        "radio readiness"
+                        if waiting_for_control
+                        else "configured process is running but its endpoint is not ready; "
                         "duplicate launch skipped"
                     ),
                 )
@@ -2490,17 +2511,28 @@ class LaunchOrchestrator(QObject):
                     self._endpoint_preflight_clear.add(endpoint_key)
                     exact_process_running = self._configured_instance_process_running(item)
                     if exact_process_running is True:
-                        log.warning(
-                            "LaunchOrchestrator: skipped duplicate %s launch; exact process is "
-                            "running but its configured endpoint is not ready",
-                            name,
-                        )
+                        waiting_for_control = self._is_gated_radio_control_app(item)
+                        if waiting_for_control:
+                            log.info(
+                                "LaunchOrchestrator: exact %s process is running; waiting for "
+                                "its configured radio-control endpoint",
+                                name,
+                            )
+                        else:
+                            log.warning(
+                                "LaunchOrchestrator: skipped duplicate %s launch; exact process "
+                                "is running but its configured endpoint is not ready",
+                                name,
+                            )
                         result = self._result_for(
                             item,
-                            status="failed",
+                            status="already_running" if waiting_for_control else "failed",
                             detail=(
-                                "configured process is running but its endpoint is not ready; "
-                                "duplicate launch skipped"
+                                "exact configured process is active; waiting for endpoint and "
+                                "radio readiness"
+                                if waiting_for_control
+                                else "configured process is running but its endpoint is not "
+                                "ready; duplicate launch skipped"
                             ),
                         )
                         self._results.append(result)
@@ -2525,19 +2557,44 @@ class LaunchOrchestrator(QObject):
                 return
             if elapsed >= LAUNCH_ENDPOINT_PREFLIGHT_TIMEOUT_SEC:
                 self._poll_timer.stop()
-                log.warning(
-                    "LaunchOrchestrator: skipped %s launch because configured endpoint verification timed out",
-                    name,
+                exact_process_running = self._configured_instance_process_running(item)
+                waiting_for_control = bool(
+                    exact_process_running is True
+                    and self._is_gated_radio_control_app(item)
                 )
+                if waiting_for_control:
+                    log.info(
+                        "LaunchOrchestrator: exact %s process remains active after endpoint "
+                        "preflight; continuing with bounded radio-control readiness",
+                        name,
+                    )
+                else:
+                    log.warning(
+                        "LaunchOrchestrator: skipped %s launch because configured endpoint "
+                        "verification timed out",
+                        name,
+                    )
                 result = self._result_for(
                     item,
-                    status="failed",
+                    status="already_running" if waiting_for_control else "failed",
                     detail=(
-                        "configured endpoint could not be verified; launch was skipped "
+                        "exact configured process is active; waiting for endpoint and "
+                        "radio readiness"
+                        if waiting_for_control
+                        else "configured endpoint could not be verified; launch was skipped "
                         "to prevent a duplicate instance"
                     ),
                 )
                 self._results.append(result)
+                if waiting_for_control:
+                    sequence_identity = self._sequence_identity_key(item)
+                    if sequence_identity:
+                        self._sequence_claimed_identities = getattr(
+                            self,
+                            "_sequence_claimed_identities",
+                            set(),
+                        )
+                        self._sequence_claimed_identities.add(sequence_identity)
                 self.sequence_progress.emit(result)
                 self._current_name = None
                 self._current_item = None
