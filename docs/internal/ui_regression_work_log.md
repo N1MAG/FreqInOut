@@ -12559,3 +12559,42 @@ Acceptance evidence:
 The second failed production run created no GitHub Release. The existing
 `v2.0.4` tag still resolves to the earlier checksum-only correction and must
 not be replaced again without explicit maintainer authorization.
+
+### Follow-up Windows packaged-startup validation correction
+
+The next production attempt exposed a Windows-only validation problem rather
+than an operator startup failure. The frozen executable reached the usable FIO
+shell, but waiting for Qt/PyInstaller teardown could hang indefinitely. Two
+bounded-shutdown experiments then returned Windows access violation
+`0xC0000005`, even though startup itself had completed. Those attempts did not
+publish a GitHub Release.
+
+The hidden packaging smoke contract now writes a readiness marker only after
+the usable application shell is initialized. Windows package jobs poll that
+marker for at most 120 seconds, verify the process remains healthy until
+readiness, and then stop only the isolated test process. Linux and macOS retain
+normal application shutdown after writing the same marker. This keeps the gate
+focused on the user-visible requirement--that both the unpacked executable and
+installed package can launch--without depending on Windows Qt teardown. Normal
+FIO launches and station behavior are unchanged; the marker is active only
+with the private `--smoke-test` packaging flag.
+
+Acceptance evidence:
+
+- local source smoke readiness, focused packaging tests (25 passed), Python
+  compilation, workflow YAML parse, public-export validation, and
+  `git diff --check`: pass;
+- public GitHub Actions candidate run `36657710945` at exact commit
+  `3943d234d972496633c208900a361b52ff7a0f49` completed successfully in
+  7m 44s;
+- the Windows job passed both its unpacked executable smoke check and its
+  completed-installer install/launch/uninstall check, then uploaded the
+  candidate artifact; and
+- Linux amd64, Intel macOS, and Apple Silicon macOS completed-package jobs all
+  passed, yielding four retained candidate artifacts.
+
+The exact candidate is approved for a fast-forward to public `main`. The
+existing unpublished `v2.0.4` tag still points to
+`553d4b917d4183242a62c4198bb7c4df1ce79f30` and must not be replaced with the
+tested commit until the maintainer explicitly authorizes that destructive tag
+change.
