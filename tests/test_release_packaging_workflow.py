@@ -151,6 +151,9 @@ def test_public_release_workflow_has_separate_candidate_and_production_contracts
     assert "--source-dir release-assets" in source
     assert "--output-dir release-assets-flat" in source
     assert "release-assets-flat/SHA256SUMS.txt" in source
+    assert source.count('FREQINOUT_HARD_EXIT: "1"') == 4
+    assert source.count("WaitForExit(120000)") == 4
+    assert source.count("smoke test timed out after 120 seconds") == 4
     for line in source.splitlines():
         stripped = line.strip()
         if stripped.startswith("uses: actions/"):
