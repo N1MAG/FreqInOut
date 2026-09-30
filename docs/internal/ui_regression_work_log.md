@@ -12491,3 +12491,25 @@ Acceptance evidence:
 The GitHub Release and its durable package assets are not yet published because
 `v2.0.4` has not been created. Publication remains gated on the maintainer's
 final confirmation of the `production-release` environment controls.
+
+## 2026-09-29 — Windows checksum publication correction
+
+Status: `Implemented locally; hosted candidate validation pending`
+
+The first approved 2.0.4 production deployment built, installed, launched,
+removed, and attested all four packages successfully, then stopped before
+creating a GitHub Release. The Windows checksum manifest had a CRLF terminator;
+GNU `sha256sum --check` interpreted the carriage return as part of the
+installer filename and reported a missing file. Package bytes and their hash
+were unaffected.
+
+The Windows unsigned and future signed jobs now write checksum manifests with
+an explicit LF terminator. Publication also normalizes only terminal carriage
+returns in downloaded `.sha256` manifests before verifying every hash and
+rebuilding the combined checksum file. This is a release-workflow correction;
+it changes no FIO runtime code or station data.
+
+Work-package ownership: primary `gpt-6-astra` (high reasoning) owns diagnosis,
+the cross-platform manifest correction, regression coverage, export, and
+hosted-candidate review. No sub-agent was used under the active no-delegation
+constraint.

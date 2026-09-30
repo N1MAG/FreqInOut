@@ -144,6 +144,9 @@ def test_public_release_workflow_has_separate_candidate_and_production_contracts
     assert "packaging/build_release_notes.py" in source
     assert '--notes-file "$RUNNER_TEMP/release-notes.md"' in source
     assert "--generate-notes" not in source
+    assert source.count("[System.IO.File]::WriteAllText(") == 2
+    assert 'Set-Content "$asset.sha256"' not in source
+    assert "sed -i 's/\\r$//' FreqInOut-*.sha256" in source
     for line in source.splitlines():
         stripped = line.strip()
         if stripped.startswith("uses: actions/"):

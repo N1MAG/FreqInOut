@@ -142,6 +142,13 @@ generated from the same signed/unsigned workflow choices that select the asset
 filenames, preventing a release page from describing different artifacts than
 the ones actually uploaded.
 
+Checksum manifests are transport-neutral release metadata. Windows jobs write
+their single-line manifests with an explicit ASCII encoding and LF terminator,
+and the Linux publication job defensively removes a terminal carriage return
+from every downloaded manifest before `sha256sum --check`. This preserves the
+hash and filename while preventing a valid Windows artifact from failing only
+because its manifest crossed operating-system line-ending conventions.
+
 The macOS bundle/DMG implementation passed a native Apple Silicon PyInstaller
 build, ad-hoc code-signature verification, fresh-profile smoke test, DMG
 verification, mounted-image copy/install smoke test, and profile-preservation
