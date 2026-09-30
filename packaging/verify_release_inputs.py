@@ -18,6 +18,7 @@ REQUIRED_INPUTS = (
     "packaging/linux/freqinout.desktop",
     "packaging/build_macos_dmg.py",
     "packaging/build_release_notes.py",
+    "packaging/prepare_release_assets.py",
     "packaging/macos/entitlements.plist",
     "assets/FreqInOut.ico",
     "assets/FreqInOut-desktop.png",
