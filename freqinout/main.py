@@ -168,6 +168,26 @@ def _run_existing_station_upgrade_gate(*, before_dialog=None) -> bool:
     return upgraded
 
 
+def _finish_packaged_smoke_test(lockfile: QLockFile) -> None:
+    """End the packaging-only startup probe without entering Qt teardown."""
+
+    log.info("FreqInOut packaged smoke test passed.")
+    try:
+        lockfile.unlock()
+    except Exception:
+        pass
+    shutdown_perf_metrics(timeout=1.0)
+    for handler in log.handlers:
+        try:
+            handler.flush()
+        except Exception:
+            pass
+    # Frozen Windows builds can retain Qt worker threads after app.quit().
+    # The smoke probe has already proven that the usable shell initialized;
+    # exit here so packaging validation never races normal Qt teardown.
+    os._exit(0)
+
+
 def main():
     startup_started = time.perf_counter()
     parser = argparse.ArgumentParser(description="FreqInOut HF controller")
@@ -317,7 +337,7 @@ def main():
         log.info("FreqInOut started.")
         if args.smoke_test:
             log.info("FreqInOut packaged smoke test started.")
-            QTimer.singleShot(1000, app.quit)
+            QTimer.singleShot(1000, lambda: _finish_packaged_smoke_test(lockfile))
     except Exception as e:
         log.exception("FreqInOut failed during startup: %s", e)
         if surface_trace is not None:

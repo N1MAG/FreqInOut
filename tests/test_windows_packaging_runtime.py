@@ -75,7 +75,29 @@ def test_spec_disables_upx_and_main_exposes_packaged_smoke_diagnostics() -> None
     assert spec.count("upx=False") == 2
     assert "packaging/pyinstaller_runtime_qt.py" in spec
     assert '"--smoke-test"' in main
+    assert "_finish_packaged_smoke_test(lockfile)" in main
     assert "startup-error.log" in main
+
+
+def test_packaged_smoke_completion_unlocks_and_exits_without_qt_teardown(monkeypatch) -> None:
+    import freqinout.main as main_module
+
+    calls: list[object] = []
+
+    class Lock:
+        def unlock(self) -> None:
+            calls.append("unlock")
+
+    monkeypatch.setattr(
+        main_module,
+        "shutdown_perf_metrics",
+        lambda *, timeout: calls.append(("shutdown", timeout)),
+    )
+    monkeypatch.setattr(main_module.os, "_exit", lambda code: calls.append(("exit", code)))
+
+    main_module._finish_packaged_smoke_test(Lock())
+
+    assert calls == ["unlock", ("shutdown", 1.0), ("exit", 0)]
 
 
 def test_spec_packages_all_operator_runtime_data_without_js8net_examples() -> None:
