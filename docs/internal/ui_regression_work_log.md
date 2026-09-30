@@ -12494,7 +12494,7 @@ final confirmation of the `production-release` environment controls.
 
 ## 2026-09-29 — Windows checksum publication correction
 
-Status: `Implemented locally; hosted candidate validation pending`
+Status: `Hosted candidate passed; unpublished tag replacement pending approval`
 
 The first approved 2.0.4 production deployment built, installed, launched,
 removed, and attested all four packages successfully, then stopped before
@@ -12513,3 +12513,17 @@ Work-package ownership: primary `gpt-6-astra` (high reasoning) owns diagnosis,
 the cross-platform manifest correction, regression coverage, export, and
 hosted-candidate review. No sub-agent was used under the active no-delegation
 constraint.
+
+Acceptance evidence:
+
+- focused release packaging and export partition: 17 passed;
+- release metadata, workflow YAML parse, and `git diff --check`: pass;
+- public GitHub Actions candidate run `36650775710` at commit `a6dfd7e` passed
+  Windows x86-64, Linux amd64, Intel macOS, and Apple Silicon macOS completed-
+  package jobs; and
+- public `main` and `release/public-2.0.4-candidate` both resolve to
+  `a6dfd7ed8f9cf48e9c5caef38e71ec5dfdbe30f3`.
+
+The failed `v2.0.4` deployment created no GitHub Release. Its public tag still
+resolves to the pre-correction commit and will not be deleted or replaced
+without explicit maintainer approval.
