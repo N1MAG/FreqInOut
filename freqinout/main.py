@@ -168,24 +168,21 @@ def _run_existing_station_upgrade_gate(*, before_dialog=None) -> bool:
     return upgraded
 
 
-def _finish_packaged_smoke_test(lockfile: QLockFile) -> None:
-    """End the packaging-only startup probe without entering Qt teardown."""
+def _mark_packaged_smoke_test_ready(app: QApplication) -> None:
+    """Publish packaging readiness after the usable shell has initialized."""
 
-    log.info("FreqInOut packaged smoke test passed.")
-    try:
-        lockfile.unlock()
-    except Exception:
-        pass
-    shutdown_perf_metrics(timeout=1.0)
+    marker = get_config_dir() / "packaged-smoke-test.ok"
+    marker.write_text(f"FreqInOut {__version__} ready\n", encoding="utf-8")
+    log.info("FreqInOut packaged smoke test passed: %s", marker)
     for handler in log.handlers:
         try:
             handler.flush()
         except Exception:
             pass
-    # Frozen Windows builds can retain Qt worker threads after app.quit().
-    # The smoke probe has already proven that the usable shell initialized;
-    # exit here so packaging validation never races normal Qt teardown.
-    os._exit(0)
+    # The Windows workflow owns test-process termination after observing the
+    # marker. This keeps Qt teardown behavior separate from startup evidence.
+    if sys.platform != "win32":
+        app.quit()
 
 
 def main():
@@ -337,7 +334,7 @@ def main():
         log.info("FreqInOut started.")
         if args.smoke_test:
             log.info("FreqInOut packaged smoke test started.")
-            QTimer.singleShot(1000, lambda: _finish_packaged_smoke_test(lockfile))
+            QTimer.singleShot(1000, lambda: _mark_packaged_smoke_test_ready(app))
     except Exception as e:
         log.exception("FreqInOut failed during startup: %s", e)
         if surface_trace is not None:

@@ -75,29 +75,42 @@ def test_spec_disables_upx_and_main_exposes_packaged_smoke_diagnostics() -> None
     assert spec.count("upx=False") == 2
     assert "packaging/pyinstaller_runtime_qt.py" in spec
     assert '"--smoke-test"' in main
-    assert "_finish_packaged_smoke_test(lockfile)" in main
+    assert "_mark_packaged_smoke_test_ready(app)" in main
     assert "startup-error.log" in main
 
 
-def test_packaged_smoke_completion_unlocks_and_exits_without_qt_teardown(monkeypatch) -> None:
+def test_packaged_smoke_completion_writes_marker_and_leaves_windows_process_running(
+    monkeypatch, tmp_path: Path
+) -> None:
     import freqinout.main as main_module
 
-    calls: list[object] = []
+    calls: list[str] = []
+    monkeypatch.setattr(main_module, "get_config_dir", lambda: tmp_path)
+    monkeypatch.setattr(main_module.sys, "platform", "win32")
 
-    class Lock:
-        def unlock(self) -> None:
-            calls.append("unlock")
-
-    monkeypatch.setattr(
-        main_module,
-        "shutdown_perf_metrics",
-        lambda *, timeout: calls.append(("shutdown", timeout)),
+    main_module._mark_packaged_smoke_test_ready(
+        type("App", (), {"quit": lambda self: calls.append("quit")})()
     )
-    monkeypatch.setattr(main_module.os, "_exit", lambda code: calls.append(("exit", code)))
 
-    main_module._finish_packaged_smoke_test(Lock())
+    assert (tmp_path / "packaged-smoke-test.ok").read_text(encoding="utf-8") == (
+        f"FreqInOut {main_module.__version__} ready\n"
+    )
+    assert calls == []
 
-    assert calls == ["unlock", ("shutdown", 1.0), ("exit", 0)]
+
+def test_packaged_smoke_completion_quits_normally_off_windows(monkeypatch, tmp_path: Path) -> None:
+    import freqinout.main as main_module
+
+    calls: list[str] = []
+    monkeypatch.setattr(main_module, "get_config_dir", lambda: tmp_path)
+    monkeypatch.setattr(main_module.sys, "platform", "linux")
+
+    main_module._mark_packaged_smoke_test_ready(
+        type("App", (), {"quit": lambda self: calls.append("quit")})()
+    )
+
+    assert (tmp_path / "packaged-smoke-test.ok").is_file()
+    assert calls == ["quit"]
 
 
 def test_spec_packages_all_operator_runtime_data_without_js8net_examples() -> None:

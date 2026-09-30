@@ -112,12 +112,24 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           FREQINOUT_HARD_EXIT: "0"
         run: |
+          $marker = Join-Path $env:FREQINOUT_CONFIG_DIR "packaged-smoke-test.ok"
+          Remove-Item $marker -Force -ErrorAction SilentlyContinue
           $process = Start-Process -FilePath ".\dist\FreqInOut\FreqInOut.exe" -ArgumentList "--smoke-test" -PassThru
-          if (-not $process.WaitForExit(120000)) {
-            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-            throw "Unpacked smoke test timed out after 120 seconds"
+          $deadline = [DateTime]::UtcNow.AddSeconds(120)
+          while (-not (Test-Path $marker) -and -not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Milliseconds 250
+            $process.Refresh()
           }
-          if ($process.ExitCode -ne 0) { throw "Unpacked smoke test failed: $($process.ExitCode)" }
+          if (-not (Test-Path $marker)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            throw "Unpacked smoke test did not report readiness within 120 seconds"
+          }
+          if ($process.HasExited) {
+            if ($process.ExitCode -ne 0) { throw "Unpacked smoke test exited unexpectedly: $($process.ExitCode)" }
+          } else {
+            Stop-Process -Id $process.Id -Force
+            $process.WaitForExit()
+          }
 
       - name: Build Windows installer
         shell: pwsh
@@ -145,12 +157,24 @@ jobs:
           if ($install.ExitCode -ne 0) { throw "Installer failed: $($install.ExitCode)" }
           New-Item -ItemType Directory -Force -Path $env:FREQINOUT_CONFIG_DIR | Out-Null
           Set-Content (Join-Path $env:FREQINOUT_CONFIG_DIR "retain-after-uninstall.txt") "retain"
+          $marker = Join-Path $env:FREQINOUT_CONFIG_DIR "packaged-smoke-test.ok"
+          Remove-Item $marker -Force -ErrorAction SilentlyContinue
           $smoke = Start-Process -FilePath (Join-Path $installDir "FreqInOut.exe") -ArgumentList "--smoke-test" -PassThru
-          if (-not $smoke.WaitForExit(120000)) {
-            Stop-Process -Id $smoke.Id -Force -ErrorAction SilentlyContinue
-            throw "Installed smoke test timed out after 120 seconds"
+          $deadline = [DateTime]::UtcNow.AddSeconds(120)
+          while (-not (Test-Path $marker) -and -not $smoke.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Milliseconds 250
+            $smoke.Refresh()
           }
-          if ($smoke.ExitCode -ne 0) { throw "Installed smoke test failed: $($smoke.ExitCode)" }
+          if (-not (Test-Path $marker)) {
+            Stop-Process -Id $smoke.Id -Force -ErrorAction SilentlyContinue
+            throw "Installed smoke test did not report readiness within 120 seconds"
+          }
+          if ($smoke.HasExited) {
+            if ($smoke.ExitCode -ne 0) { throw "Installed smoke test exited unexpectedly: $($smoke.ExitCode)" }
+          } else {
+            Stop-Process -Id $smoke.Id -Force
+            $smoke.WaitForExit()
+          }
           $uninstall = Start-Process -FilePath (Join-Path $installDir "unins000.exe") -ArgumentList @(
             "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"
           ) -Wait -PassThru
@@ -246,12 +270,24 @@ jobs:
         run: |
           python packaging/verify_release_inputs.py --expected-tag "$env:GITHUB_REF"
           python build_executable.py
+          $marker = Join-Path $env:FREQINOUT_CONFIG_DIR "packaged-smoke-test.ok"
+          Remove-Item $marker -Force -ErrorAction SilentlyContinue
           $smoke = Start-Process -FilePath ".\dist\FreqInOut\FreqInOut.exe" -ArgumentList "--smoke-test" -PassThru
-          if (-not $smoke.WaitForExit(120000)) {
-            Stop-Process -Id $smoke.Id -Force -ErrorAction SilentlyContinue
-            throw "Unpacked smoke test timed out after 120 seconds"
+          $deadline = [DateTime]::UtcNow.AddSeconds(120)
+          while (-not (Test-Path $marker) -and -not $smoke.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Milliseconds 250
+            $smoke.Refresh()
           }
-          if ($smoke.ExitCode -ne 0) { throw "Unpacked smoke test failed: $($smoke.ExitCode)" }
+          if (-not (Test-Path $marker)) {
+            Stop-Process -Id $smoke.Id -Force -ErrorAction SilentlyContinue
+            throw "Unpacked smoke test did not report readiness within 120 seconds"
+          }
+          if ($smoke.HasExited) {
+            if ($smoke.ExitCode -ne 0) { throw "Unpacked smoke test exited unexpectedly: $($smoke.ExitCode)" }
+          } else {
+            Stop-Process -Id $smoke.Id -Force
+            $smoke.WaitForExit()
+          }
 
       - name: Import signing certificate
         id: certificate
@@ -316,12 +352,24 @@ jobs:
           if ($install.ExitCode -ne 0) { throw "Installer failed: $($install.ExitCode)" }
           New-Item -ItemType Directory -Force -Path $env:FREQINOUT_CONFIG_DIR | Out-Null
           Set-Content (Join-Path $env:FREQINOUT_CONFIG_DIR "retain-after-uninstall.txt") "retain"
+          $marker = Join-Path $env:FREQINOUT_CONFIG_DIR "packaged-smoke-test.ok"
+          Remove-Item $marker -Force -ErrorAction SilentlyContinue
           $smoke = Start-Process -FilePath (Join-Path $installDir "FreqInOut.exe") -ArgumentList "--smoke-test" -PassThru
-          if (-not $smoke.WaitForExit(120000)) {
-            Stop-Process -Id $smoke.Id -Force -ErrorAction SilentlyContinue
-            throw "Installed smoke test timed out after 120 seconds"
+          $deadline = [DateTime]::UtcNow.AddSeconds(120)
+          while (-not (Test-Path $marker) -and -not $smoke.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Milliseconds 250
+            $smoke.Refresh()
           }
-          if ($smoke.ExitCode -ne 0) { throw "Installed smoke test failed: $($smoke.ExitCode)" }
+          if (-not (Test-Path $marker)) {
+            Stop-Process -Id $smoke.Id -Force -ErrorAction SilentlyContinue
+            throw "Installed smoke test did not report readiness within 120 seconds"
+          }
+          if ($smoke.HasExited) {
+            if ($smoke.ExitCode -ne 0) { throw "Installed smoke test exited unexpectedly: $($smoke.ExitCode)" }
+          } else {
+            Stop-Process -Id $smoke.Id -Force
+            $smoke.WaitForExit()
+          }
           $uninstall = Start-Process -FilePath (Join-Path $installDir "unins000.exe") -ArgumentList @(
             "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"
           ) -Wait -PassThru
