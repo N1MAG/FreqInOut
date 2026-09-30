@@ -1,5 +1,8 @@
 # Byte-compiled / cache
 __pycache__/
+website/node_modules/
+website/.vitepress/cache/
+website/.vitepress/dist/
 *.py[cod]
 *.pyo
 .pytest_cache/
