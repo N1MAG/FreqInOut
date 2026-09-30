@@ -110,7 +110,7 @@ jobs:
           FREQINOUT_CONFIG_DIR: ${{ runner.temp }}\fio-unpacked-smoke
           FREQINOUT_ALLOW_EXTERNAL_RUNTIME_ENV: "1"
           QT_QPA_PLATFORM: offscreen
-          FREQINOUT_HARD_EXIT: "1"
+          FREQINOUT_HARD_EXIT: "0"
         run: |
           $process = Start-Process -FilePath ".\dist\FreqInOut\FreqInOut.exe" -ArgumentList "--smoke-test" -PassThru
           if (-not $process.WaitForExit(120000)) {
@@ -135,7 +135,7 @@ jobs:
           FREQINOUT_CONFIG_DIR: ${{ runner.temp }}\fio-installed-smoke
           FREQINOUT_ALLOW_EXTERNAL_RUNTIME_ENV: "1"
           QT_QPA_PLATFORM: offscreen
-          FREQINOUT_HARD_EXIT: "1"
+          FREQINOUT_HARD_EXIT: "0"
         run: |
           $installer = Resolve-Path ".\FreqInOut-${{ needs.verify.outputs.version }}-windows-x86_64-setup-unsigned.exe"
           $installDir = Join-Path "${{ runner.temp }}" "FreqInOutInstalled"
@@ -242,7 +242,7 @@ jobs:
           FREQINOUT_CONFIG_DIR: ${{ runner.temp }}\fio-unpacked-smoke
           FREQINOUT_ALLOW_EXTERNAL_RUNTIME_ENV: "1"
           QT_QPA_PLATFORM: offscreen
-          FREQINOUT_HARD_EXIT: "1"
+          FREQINOUT_HARD_EXIT: "0"
         run: |
           python packaging/verify_release_inputs.py --expected-tag "$env:GITHUB_REF"
           python build_executable.py
@@ -306,7 +306,7 @@ jobs:
           FREQINOUT_CONFIG_DIR: ${{ runner.temp }}\fio-installed-smoke
           FREQINOUT_ALLOW_EXTERNAL_RUNTIME_ENV: "1"
           QT_QPA_PLATFORM: offscreen
-          FREQINOUT_HARD_EXIT: "1"
+          FREQINOUT_HARD_EXIT: "0"
         run: |
           $installer = Resolve-Path ".\FreqInOut-${{ needs.verify.outputs.version }}-windows-x86_64-setup.exe"
           $installDir = Join-Path "${{ runner.temp }}" "FreqInOutInstalled"
