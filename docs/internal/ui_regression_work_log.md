@@ -12543,3 +12543,19 @@ and SHA-256, normalizes manifests, and copies only the approved files to a flat
 upload directory. Focused tests reproduce the mixed root/nested layout and the
 Windows CRLF manifest, verify the nine-file output set, and prove duplicate
 expected files fail closed.
+
+Acceptance evidence:
+
+- focused release packaging and export partition: 19 passed;
+- release metadata, Python compilation, workflow YAML parse, public-export
+  validation, and `git diff --check`: pass;
+- public GitHub Actions candidate run `36652634585` at exact commit `553d4b9`
+  passed the Windows x86-64 unsigned installer, Linux amd64 DEB, Intel macOS
+  unsigned DMG, and Apple Silicon macOS unsigned DMG completed-package jobs;
+  and
+- public `main` and `release/public-2.0.4-candidate` both resolve to
+  `553d4b917d4183242a62c4198bb7c4df1ce79f30`.
+
+The second failed production run created no GitHub Release. The existing
+`v2.0.4` tag still resolves to the earlier checksum-only correction and must
+not be replaced again without explicit maintainer authorization.
