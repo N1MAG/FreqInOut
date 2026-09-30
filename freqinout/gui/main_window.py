@@ -46,7 +46,12 @@ from freqinout.core.logger import set_log_level
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.resource_catalog_migration import resource_catalog_authority_state
 from freqinout.core.shortwave_store import ShortwaveStore
-from freqinout.core.multi_radio_store import MultiRadioStore, SUPPORTED_RUNTIME_CONTROL_BACKENDS
+from freqinout.core.multi_radio_store import (
+    FIRST_RUN_ONBOARDING_ACK_KEY,
+    MultiRadioStore,
+    SUPPORTED_RUNTIME_CONTROL_BACKENDS,
+)
+from freqinout.core.multi_rig_runtime_status import should_present_first_run_onboarding
 from freqinout.core.navigation_intent import NavigationIntent
 from freqinout.core.perf_metrics import emit_span, span as perf_span
 from freqinout.core.plan_context_service import PlanContextService
@@ -64,7 +69,10 @@ from freqinout.core.condition_sop_audit import (
     condition_sop_audit_observability_item,
     condition_sop_audit_summary,
 )
-from freqinout.core.station_runtime_manager import StationRuntimeManager
+from freqinout.core.station_runtime_manager import (
+    StationRuntimeManager,
+    apply_endpoint_operational_summary,
+)
 from freqinout.core.scheduler_engine import SchedulerEngine
 from freqinout.core.receiver_qualification_service import (
     QUALIFICATION_REQUEST_ID_FIELD,
@@ -245,6 +253,14 @@ class MainWindow(QMainWindow):
 
     def __init__(self, startup_status: Callable[[str], None] | None = None):
         super().__init__()
+        # A packaged Windows process can expose the native QMainWindow surface
+        # while its long constructor is still establishing child geometry,
+        # even though FIO has not called show() yet.  Keep that surface out of
+        # the compositor until main.py deliberately presents the finished
+        # shell.  Other platforms retain their existing lifecycle.
+        self._startup_surface_shielded = sys.platform == "win32"
+        if self._startup_surface_shielded:
+            self.setAttribute(Qt.WA_DontShowOnScreen, True)
         self._startup_status_callback = startup_status
         self._shutting_down = False
         self._shutdown_close_pending = False
@@ -254,6 +270,8 @@ class MainWindow(QMainWindow):
         self._shutdown_deadline_reported = False
         self._shutdown_registry = WorkerShutdownRegistry()
         self._post_shell_services_started = False
+        self._first_run_onboarding_presented = False
+        self._first_run_onboarding_dialog: QMessageBox | None = None
         self._background_ingest_start_pending = False
         self._message_projection_future = None
         self._message_projection_catchup_pending = False
@@ -1392,6 +1410,18 @@ class MainWindow(QMainWindow):
             pass
         QTimer.singleShot(1200, self._start_launch_control_startup)
         self._notify_startup_status("Opening FIO...")
+
+    def release_startup_surface_shield(self) -> None:
+        """Allow the completed Windows shell to be mapped exactly once."""
+
+        if not bool(getattr(self, "_startup_surface_shielded", False)):
+            return
+        # If construction caused any logical visibility transition, normalize
+        # it before removing the stronger native-surface shield.  main.py owns
+        # the one intentional show() immediately after this method returns.
+        self.hide()
+        self.setAttribute(Qt.WA_DontShowOnScreen, False)
+        self._startup_surface_shielded = False
 
     def _notify_startup_status(self, message: str) -> None:
         callback = getattr(self, "_startup_status_callback", None)
@@ -4670,6 +4700,13 @@ class MainWindow(QMainWindow):
                 ),
             )
 
+    def open_guided_add_radio(self) -> None:
+        """Open the existing first-radio workflow from any operator surface."""
+
+        self.open_settings_section("radio_profiles", settings_nav_context="radios")
+        if hasattr(self.settings_tab, "start_guided_add_radio"):
+            QTimer.singleShot(0, self.settings_tab.start_guided_add_radio)
+
     def open_station_bbs(self) -> None:
         """Open the top-level, station-owned FIO BBS service."""
         idx = self._screen_index_by_label.get("Managed BBS", -1)
@@ -6869,6 +6906,72 @@ class MainWindow(QMainWindow):
         self._schedule_message_projection_reconcile()
         self._publish_watchdog_diagnostic_snapshot()
 
+    def present_first_run_onboarding(self) -> None:
+        """Present fresh-station guidance after the usable shell is painted."""
+
+        if self._shutting_down or self._first_run_onboarding_presented:
+            return
+        if self._first_run_onboarding_dialog is not None:
+            return
+        try:
+            status = self.station_runtime_manager.runtime_status()
+            settings_values = dict(self.settings.all())
+            has_device_profiles = bool(self.multi_radio_store.list_device_profiles())
+            eligible = should_present_first_run_onboarding(
+                status,
+                settings_values=settings_values,
+                has_device_profiles=has_device_profiles,
+            )
+        except Exception as exc:
+            log.warning("MainWindow: first-run onboarding eligibility check failed: %s", exc)
+            return
+        if not eligible:
+            return
+
+        self._first_run_onboarding_presented = True
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Welcome to FreqInOut")
+        dialog.setAccessibleName("Welcome to FreqInOut station setup")
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        dialog.setIcon(QMessageBox.Information)
+        dialog.setText("No existing FreqInOut station was found.")
+        dialog.setInformativeText(
+            "Start by setting up the first radio. Nothing is changed until you review and save it."
+        )
+        setup_button = dialog.addButton("Set Up First Radio…", QMessageBox.AcceptRole)
+        later_button = dialog.addButton("Set Up Later", QMessageBox.RejectRole)
+        setup_button.setAccessibleName("Set up the first radio")
+        later_button.setAccessibleName("Set up the first radio later")
+        dialog.setDefaultButton(setup_button)
+        theme = resolve_theme(self.settings)
+        setup_button.setStyleSheet(button_style("primary", theme))
+        later_button.setStyleSheet(button_style("secondary", theme))
+        dialog.finished.connect(
+            lambda _result, owned=dialog, primary=setup_button: self._finish_first_run_onboarding(
+                owned,
+                primary,
+            )
+        )
+        dialog.destroyed.connect(lambda *_args: setattr(self, "_first_run_onboarding_dialog", None))
+        self._first_run_onboarding_dialog = dialog
+        log.info("MainWindow: presenting fresh-station onboarding after shell startup")
+        dialog.open()
+
+    def _finish_first_run_onboarding(self, dialog: QMessageBox, setup_button: object) -> None:
+        if self._shutting_down:
+            return
+        start_setup = dialog.clickedButton() is setup_button
+        try:
+            self.settings.set(FIRST_RUN_ONBOARDING_ACK_KEY, True)
+        except Exception as exc:
+            log.warning("MainWindow: could not persist first-run onboarding choice: %s", exc)
+        log.info(
+            "MainWindow: fresh-station onboarding choice=%s",
+            "set_up_first_radio" if start_setup else "set_up_later",
+        )
+        if start_setup:
+            QTimer.singleShot(0, self.open_guided_add_radio)
+
     def request_message_projection_catchup(self, *, reason: str = "source_change"):
         """Coalesce message projection work onto the application-owned lane."""
 
@@ -8847,9 +8950,15 @@ class MainWindow(QMainWindow):
         self._station_command_launch_monitor_cache = cache
 
     def _station_command_health_status_snapshot(self, profile: object | None) -> Mapping[str, object]:
-        service_states = self._station_command_value(profile, "service_states", {}) if profile is not None else {}
-        if isinstance(service_states, Mapping) and service_states:
-            return service_states
+        # An explicit (even empty) radio-scoped cache is authoritative.  Do
+        # not substitute the station/global process cache, which can describe
+        # a different radio endpoint and produce cross-radio false warnings.
+        if isinstance(profile, Mapping) and "service_states" in profile:
+            service_states = profile.get("service_states")
+            return service_states if isinstance(service_states, Mapping) else {}
+        if profile is not None and hasattr(profile, "service_states"):
+            service_states = getattr(profile, "service_states", {})
+            return service_states if isinstance(service_states, Mapping) else {}
         try:
             return self.dependency_status_service.software_status_snapshot()
         except Exception:
@@ -8999,9 +9108,10 @@ class MainWindow(QMainWindow):
             if isinstance(raw_items, list):
                 off_schedule_items = [str(item).strip() for item in raw_items if str(item).strip()]
         snapshot = self._station_command_health_status_snapshot(profile)
-        issue_items: list[tuple[str, str, str, str]] = []
+        operational_issues: list[tuple[str, str, str, str]] = []
+        advisories: list[tuple[str, str, str, str]] = []
         if off_schedule_items:
-            issue_items.append(
+            operational_issues.append(
                 (
                     "__off_schedule__",
                     "Off Schedule",
@@ -9010,7 +9120,7 @@ class MainWindow(QMainWindow):
                 )
             )
         for severity, message in assignment_guard_issues:
-            issue_items.append(
+            operational_issues.append(
                 (
                     "__schedule_assignment_rf_guard__",
                     "RF Guard",
@@ -9026,33 +9136,90 @@ class MainWindow(QMainWindow):
             if state == "ok":
                 healthy_count += 1
             else:
-                issue_items.append((key, label_text, state, tooltip))
+                # Process/application imperfections remain visible in Health
+                # Details, but do not color the radio unless cached endpoint
+                # evidence says they currently impair operation.
+                advisories.append((key, label_text, state, tooltip))
         control_issue = self._station_command_control_health_issue(profile)
         if control_issue is not None:
             _control_key, control_label, _control_state, _control_tooltip = control_issue
-            if not any(label == control_label for _key, label, _state, _tooltip in issue_items):
-                issue_items.append(control_issue)
-        issue_states = [state for _key, _label, state, _tooltip in issue_items]
-        summary_state = self._station_command_health_summary_state(issue_states)
+            if not any(label == control_label for _key, label, _state, _tooltip in operational_issues):
+                operational_issues.append(control_issue)
+
+        operational_state = str(
+            self._station_command_value(profile, "operational_state", "") or ""
+        ).strip().lower()
+        operational_detail = str(
+            self._station_command_value(profile, "operational_detail", "")
+            or self._station_command_value(profile, "status_summary", "")
+            or ""
+        ).strip()
+        if operational_state in {"control_stalled", "endpoint_unavailable", "receiver_unavailable"}:
+            if not any(key == "__control_ready__" for key, _label, _state, _tooltip in operational_issues):
+                operational_issues.append(
+                    (
+                        "__operational__",
+                        "Radio control",
+                        "warn",
+                        operational_detail or "The selected radio endpoint is unavailable.",
+                    )
+                )
+        elif operational_state == "readback_mismatch":
+            operational_issues.append(
+                (
+                    "__operational__",
+                    "Schedule readback",
+                    "warn",
+                    operational_detail or "The radio readback does not match the active schedule.",
+                )
+            )
+
+        issue_items = operational_issues + advisories
+        operational_issue_states = [state for _key, _label, state, _tooltip in operational_issues]
+        summary_state = self._station_command_health_summary_state(operational_issue_states)
+        if not operational_issue_states:
+            control_ready = self._station_command_value(profile, "control_ready", None)
+            if operational_state in {"on_schedule_verified", "js8_verification_unavailable"}:
+                summary_state = "ok"
+            elif operational_state or control_ready is None:
+                summary_state = "idle"
+            elif self._station_command_bool(control_ready, default=False):
+                summary_state = "ok"
         if off_schedule_items:
             summary_label = "Off Schedule"
             summary_tooltip = "Off Schedule: " + ", ".join(off_schedule_items)
         elif assignment_guard_issues:
             summary_label = "RF Guard"
             summary_tooltip = "; ".join(message for _severity, message in assignment_guard_issues)
-        elif not items:
+        elif summary_state == "error":
+            summary_label = "Setup"
+            summary_tooltip = "; ".join(
+                f"{label}: {tooltip}" for _key, label, _state, tooltip in operational_issues
+            )
+        elif summary_state == "warn":
+            summary_label = "Review"
+            summary_tooltip = "; ".join(
+                f"{label}: {tooltip}" for _key, label, _state, tooltip in operational_issues
+            )
+        elif summary_state == "ok":
+            summary_label = "Operational"
+            summary_tooltip = operational_detail or "Radio control is operational."
+            if advisories:
+                summary_tooltip += f" {len(advisories)} advisory item(s) are available in Health Details."
+        elif not items and not operational_state:
             summary_label = "No checks"
             summary_tooltip = "No configured software health items for this radio."
-        elif not issue_items:
-            summary_label = "Healthy"
-            summary_tooltip = "Radio control is ready. Helper tools are available when needed."
         else:
-            summary_label = "Setup" if summary_state == "error" else "Review"
-            summary_tooltip = "; ".join(f"{label}: {tooltip}" for _key, label, _state, tooltip in issue_items)
+            summary_label = "Checking"
+            summary_tooltip = operational_detail or "Waiting for current cached radio-control evidence."
+            if advisories:
+                summary_tooltip += f" {len(advisories)} advisory item(s) are available in Health Details."
         return {
             "items": items,
             "healthy_count": healthy_count,
             "issues": issue_items,
+            "operational_issues": operational_issues,
+            "advisories": advisories,
             "state": summary_state,
             "label": summary_label,
             "tooltip": summary_tooltip,
@@ -9078,7 +9245,8 @@ class MainWindow(QMainWindow):
         if ident <= 0 and selected is not None:
             ident = self._station_command_snapshot_id(selected)
         profile = self._station_command_health_profile(selected, ident)
-        summary = self._station_command_health_summary_for_profile(profile)
+        subject = selected if selected is not None else profile
+        summary = self._station_command_health_summary_for_profile(subject)
         radio_name = self._station_command_snapshot_name(profile or selected or {"id": ident})
         anchor_widget = anchor or getattr(self, "station_command_health_widget", None) or self
         try:
@@ -9110,9 +9278,19 @@ class MainWindow(QMainWindow):
         title.setEnabled(False)
         menu.addAction(title)
         issues = [tuple(item) for item in summary.get("issues", []) if isinstance(item, tuple)]
+        operational_keys = {
+            str(item[0])
+            for item in summary.get("operational_issues", [])
+            if isinstance(item, tuple) and item
+        }
         if issues:
-            for _key, label, state, tooltip in issues[:6]:
-                prefix = "Fix" if state == "error" else "Review"
+            for issue_key, label, state, tooltip in issues[:6]:
+                if state == "error":
+                    prefix = "Fix"
+                elif str(issue_key) in operational_keys:
+                    prefix = "Affects operation"
+                else:
+                    prefix = "Advisory"
                 action = QAction(f"{prefix}: {label} - {tooltip}", menu)
                 action.setEnabled(False)
                 menu.addAction(action)
@@ -9378,27 +9556,17 @@ class MainWindow(QMainWindow):
         self.station_command_health_leds = {}
         self.station_command_health_text_labels = {}
         profile = self._station_command_health_profile(selected, selected_id)
-        items = self._station_command_health_items(profile)
+        subject = selected if selected is not None else profile
+        items = self._station_command_health_items(subject)
         theme = resolve_theme(self.settings)
-        summary = self._station_command_health_summary_for_profile(profile)
-        issue_items = [tuple(item) for item in summary.get("issues", []) if isinstance(item, tuple)]
-
-        if not issue_items and items:
-            self._add_station_command_health_item(
-                key="__summary__",
-                label_text="Healthy",
-                state="ok",
-                tooltip=str(summary.get("tooltip", "") or "Radio control is ready. Helper tools are available when needed."),
-                theme=theme,
-            )
-        else:
-            self._add_station_command_health_item(
-                key="__summary__",
-                label_text=str(summary.get("label", "Needs Review") or "Needs Review"),
-                state=str(summary.get("state", "warn") or "warn"),
-                tooltip=str(summary.get("tooltip", "") or "No configured software health items for this radio."),
-                theme=theme,
-            )
+        summary = self._station_command_health_summary_for_profile(subject)
+        self._add_station_command_health_item(
+            key="__summary__",
+            label_text=str(summary.get("label", "Checking") or "Checking"),
+            state=str(summary.get("state", "idle") or "idle"),
+            tooltip=str(summary.get("tooltip", "") or "Waiting for current cached radio-control evidence."),
+            theme=theme,
+        )
         layout.addStretch(1)
         has_items = bool(items)
         self.station_command_health_label.setVisible(has_items)
@@ -9665,6 +9833,11 @@ class MainWindow(QMainWindow):
         if not choices:
             return None
         selected_id = self._station_command_snapshot_id(selected) if selected is not None else 0
+        explicit_id = int(getattr(self, "_station_command_selected_profile_id", 0) or 0)
+        if selected is not None and explicit_id > 0 and selected_id == explicit_id:
+            # Attention may choose the initial focus, but must never override a
+            # radio the operator explicitly selected in this control surface.
+            return selected
         selected_score = self._station_command_focus_score(selected, selected_id) if selected is not None else -1
         best = max(
             choices,
@@ -10875,6 +11048,10 @@ class MainWindow(QMainWindow):
             item = layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                # Removing a visible widget's parent briefly promotes it to a
+                # native top-level window on Windows. Hide it before retaining
+                # the existing unparent-and-delete lifecycle.
+                widget.hide()
                 widget.setParent(None)
                 widget.deleteLater()
         self._station_command_radio_tile_controls = {}
@@ -11076,6 +11253,7 @@ class MainWindow(QMainWindow):
                 item = layout.takeAt(0)
                 widget = item.widget()
                 if widget is not None:
+                    widget.hide()
                     widget.setParent(None)
                     widget.deleteLater()
             empty = QLabel("No configured radios", getattr(self, "station_command_radio_summary_widget", None))
@@ -11135,6 +11313,7 @@ class MainWindow(QMainWindow):
             item = layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                widget.hide()
                 widget.setParent(None)
                 widget.deleteLater()
         self._station_command_radio_tile_controls = {}
@@ -12098,9 +12277,7 @@ class MainWindow(QMainWindow):
             endpoint_summary = operational.get(profile_id) if isinstance(operational, Mapping) else None
             if not isinstance(endpoint_summary, Mapping):
                 continue
-            label = str(endpoint_summary.get("label") or "").strip()
-            if label and hasattr(snapshot, "status_summary"):
-                snapshot.status_summary = label
+            apply_endpoint_operational_summary(snapshot, endpoint_summary)
         snapshot_by_id = {self._station_command_snapshot_id(snapshot): snapshot for snapshot in snapshots}
         choices: list[object] = []
         seen_ids: set[int] = set()
@@ -12761,7 +12938,8 @@ class MainWindow(QMainWindow):
         name = str(data.get("name", "")).strip() or "Application"
         status = str(data.get("status", "")).strip() or "status"
         detail = str(data.get("detail", "")).strip()
-        self._launch_progress_done = min(self._launch_progress_total, self._launch_progress_done + 1)
+        if bool(data.get("counts_toward_total", True)):
+            self._launch_progress_done = min(self._launch_progress_total, self._launch_progress_done + 1)
         try:
             self.statusBar().showMessage(f"Launch: {name} {status}" + (f" ({detail})" if detail else ""))
         except Exception:
@@ -12785,10 +12963,12 @@ class MainWindow(QMainWindow):
             failed = int(data.get("failed", 0) or 0)
             timeout = int(data.get("timeout", 0) or 0)
             blocked_self = int(data.get("blocked_self", 0) or 0)
+            blocked_radio_control = int(data.get("blocked_radio_control", 0) or 0)
             cancelled = bool(data.get("cancelled", False))
             summary = (
                 f"Launch {trigger or 'sequence'} complete: "
-                f"launched={launched}, running={running}, failed={failed}, timeout={timeout}, blocked={blocked_self}"
+                f"launched={launched}, running={running}, failed={failed}, timeout={timeout}, "
+                f"blocked={blocked_self}, radio-control-skipped={blocked_radio_control}"
             )
             if cancelled:
                 summary = f"{summary}, cancelled=true"
@@ -12804,12 +12984,14 @@ class MainWindow(QMainWindow):
                     pass
                 self._launch_progress_dialog = None
             log.info(
-                "LaunchControl summary (%s): launched=%s running=%s failed=%s timeout=%s cancelled=%s",
+                "LaunchControl summary (%s): launched=%s running=%s failed=%s timeout=%s "
+                "radio_control_skipped=%s cancelled=%s",
                 trigger or "unknown",
                 launched,
                 running,
                 failed,
                 timeout,
+                blocked_radio_control,
                 cancelled,
             )
         except Exception:

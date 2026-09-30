@@ -4507,8 +4507,8 @@ class SettingsTab(QWidget):
         self.global_section_buttons_layout = QVBoxLayout(self.global_section_buttons_widget)
         self.global_section_buttons_layout.setContentsMargins(0, 0, 0, 0)
         self.global_section_buttons_layout.setSpacing(4)
-        self.global_section_buttons_widget.setVisible(True)
         nav_panel_layout.addWidget(self.global_section_buttons_widget)
+        self.global_section_buttons_widget.setVisible(True)
         self.radio_settings_toggle_btn = QToolButton()
         self.radio_settings_toggle_btn.setCheckable(True)
         self.radio_settings_toggle_btn.setChecked(False)
@@ -4541,7 +4541,6 @@ class SettingsTab(QWidget):
         self.settings_section_nav_scroll.setMaximumWidth(292)
         self.settings_section_nav_scroll.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self.settings_section_nav_scroll.setWidget(nav_panel)
-        self.settings_section_nav_scroll.setVisible(True)
 
         self.sections_stack = CurrentPageStack()
         self.sections_stack.setMinimumWidth(0)
@@ -4559,6 +4558,7 @@ class SettingsTab(QWidget):
         sections_row.addWidget(self.settings_section_nav_scroll, 0)
         sections_row.addWidget(self.sections_scroll, 1)
         main_layout.addLayout(sections_row, 1)
+        self.settings_section_nav_scroll.setVisible(True)
 
         op_container = QWidget()
         op_container.setLayout(op_layout)
@@ -4600,11 +4600,13 @@ class SettingsTab(QWidget):
             section.setToolTip(f"Show or hide the {title} section.")
             section.setAccessibleName(f"{title} section")
             section.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-            content.setVisible(bool(checked))
             section_layout = QVBoxLayout(section)
             section_layout.setContentsMargins(10, 10, 10, 12)
             section_layout.setSpacing(6)
             section_layout.addWidget(content)
+            # A visible parentless QWidget becomes a native top-level window
+            # on Windows. Parent the content before applying its initial state.
+            content.setVisible(bool(checked))
             section.toggled.connect(content.setVisible)
             return section
 
@@ -7758,7 +7760,6 @@ class SettingsTab(QWidget):
             header_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             header_btn.setMinimumHeight(button_height_for_font(header_btn))
             header_btn.setStyleSheet(self._section_header_style("neutral", resolve_theme(self.settings)))
-            content.setVisible(checked)
 
             def _toggle(opened: bool, *, body: QWidget = content, button: QToolButton = header_btn) -> None:
                 body.setVisible(opened)
@@ -7769,6 +7770,7 @@ class SettingsTab(QWidget):
             header_btn.toggled.connect(_toggle)
             section_layout.addWidget(header_btn)
             section_layout.addWidget(content)
+            content.setVisible(checked)
             return section
 
         gpg_overview_tab = QWidget()
@@ -8260,7 +8262,6 @@ class SettingsTab(QWidget):
             section_layout.addWidget(header_btn)
 
             content = QWidget()
-            content.setVisible(checked)
             layout = QVBoxLayout(content)
             layout.setContentsMargins(8, 8, 8, 8)
             layout.setSpacing(6)
@@ -8277,6 +8278,7 @@ class SettingsTab(QWidget):
 
             header_btn.toggled.connect(_toggle)
             section_layout.addWidget(content)
+            content.setVisible(checked)
             varac_v.addWidget(section)
             return layout
 
@@ -9705,7 +9707,6 @@ class SettingsTab(QWidget):
     ) -> QGroupBox:
         group = QGroupBox()
         group.setMinimumHeight(0)
-        content.setVisible(checked)
 
         header_btn = QToolButton()
         header_btn.setCheckable(True)
@@ -9739,6 +9740,10 @@ class SettingsTab(QWidget):
         layout.addLayout(header_row)
         layout.addWidget(content)
         group.setLayout(layout)
+        # Apply visibility only after Qt has assigned content to the group.
+        # Calling setVisible(True) while it is parentless maps a short-lived
+        # native top-level window during Windows startup.
+        content.setVisible(checked)
 
         header_btn.toggled.connect(lambda state, g=group, w=content: self._on_section_toggled(g, w, state))
         self._section_meta[group] = {
@@ -35408,6 +35413,12 @@ class SettingsTab(QWidget):
                 status = statuses[0] if statuses else ""
             annotated[family]["native_configuration_status"] = status
         return annotated
+
+    def start_guided_add_radio(self) -> None:
+        """Public navigation seam for onboarding and no-radio recovery actions."""
+
+        self.show_settings_context("radios", health_key="radio_profiles")
+        self._add_device_profile()
 
     def _add_device_profile(
         self,

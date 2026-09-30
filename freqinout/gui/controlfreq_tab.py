@@ -502,6 +502,7 @@ class ControlFreqTab(QWidget):
         self._multi_radio_store = MultiRadioStore()
         self._readiness_banner_dismissed = False
         self._readiness_banner_digest = ""
+        self._readiness_has_device_profiles: bool | None = None
         self._readiness_suppressed_version = str(self.settings.get("readiness_review_suppressed_version", "") or "").strip()
         self._readiness_dismissed_digest = str(self.settings.get("readiness_review_dismissed_digest", "") or "").strip()
         self._sop_window_cache: Dict[Tuple[Any, ...], Tuple[float, List[Dict[str, Any]]]] = {}
@@ -2653,6 +2654,9 @@ class ControlFreqTab(QWidget):
             profiles = list(self._multi_radio_store.list_device_profiles())
         except Exception:
             profiles = []
+            self._readiness_has_device_profiles = None
+        else:
+            self._readiness_has_device_profiles = bool(profiles)
         return visible_status_programs(self.settings.all(), device_profiles=profiles)
 
     def _rebuild_status_indicators(self) -> None:
@@ -2685,6 +2689,9 @@ class ControlFreqTab(QWidget):
             profiles = list(self._multi_radio_store.list_device_profiles())
         except Exception:
             profiles = []
+            self._readiness_has_device_profiles = None
+        else:
+            self._readiness_has_device_profiles = bool(profiles)
         try:
             operating_groups = load_operating_groups(self.settings)
         except Exception:
@@ -2714,10 +2721,17 @@ class ControlFreqTab(QWidget):
         self._update_readiness_review_banner()
 
     def _review_readiness_now(self) -> None:
-        issue = self._current_readiness_report().first_actionable_issue()
+        report = self._current_readiness_report()
+        window = self.window()
+        if self._readiness_has_device_profiles is False and hasattr(window, "open_guided_add_radio"):
+            try:
+                window.open_guided_add_radio()
+                return
+            except Exception:
+                pass
+        issue = report.first_actionable_issue()
         section_key = str(issue.section_key if issue else "freqinout")
         radio_id = int(issue.radio_id or 0) if issue and issue.radio_id else None
-        window = self.window()
         if hasattr(window, "open_settings_section"):
             try:
                 window.open_settings_section(section_key, radio_id=radio_id)
@@ -2737,26 +2751,43 @@ class ControlFreqTab(QWidget):
         if not hasattr(self, "readiness_review_widget"):
             return
         report = self._current_readiness_report()
+        requires_first_radio = self._readiness_has_device_profiles is False
         if report.digest != self._readiness_banner_digest:
             self._readiness_banner_digest = report.digest
             self._readiness_banner_dismissed = False
-        if int(getattr(report, "required_count", 0) or 0) <= 0:
+        if int(getattr(report, "required_count", 0) or 0) <= 0 and not requires_first_radio:
             self.readiness_review_widget.setVisible(False)
             return
-        if not should_show_startup_review(
-            report,
-            dismissed_digest=self._readiness_dismissed_digest,
-            suppressed_version=self._readiness_suppressed_version,
-            current_version=__version__,
-        ) or self._readiness_banner_dismissed:
+        if not requires_first_radio and (
+            not should_show_startup_review(
+                report,
+                dismissed_digest=self._readiness_dismissed_digest,
+                suppressed_version=self._readiness_suppressed_version,
+                current_version=__version__,
+            )
+            or self._readiness_banner_dismissed
+        ):
             self.readiness_review_widget.setVisible(False)
             return
-        first_issue = report.first_actionable_issue()
-        detail = f" First item: {format_readiness_issue(first_issue)}." if first_issue else ""
+        if requires_first_radio:
+            self.readiness_review_label.setText(
+                "Station setup: No radio is configured. Set up the first radio now, or return here when you are ready."
+            )
+            self.readiness_review_now_btn.setText("Set Up First Radio…")
+            self.readiness_review_now_btn.setAccessibleName("Set up the first radio")
+            self.readiness_review_dismiss_btn.setVisible(False)
+            self.readiness_review_suppress_btn.setVisible(False)
+        else:
+            first_issue = report.first_actionable_issue()
+            detail = f" First item: {format_readiness_issue(first_issue)}." if first_issue else ""
+            self.readiness_review_label.setText(
+                f"Setup review: {readiness_report_overall_text(report)}{detail}"
+            )
+            self.readiness_review_now_btn.setText("Review Now")
+            self.readiness_review_now_btn.setAccessibleName("Review station setup")
+            self.readiness_review_dismiss_btn.setVisible(True)
+            self.readiness_review_suppress_btn.setVisible(True)
         theme = self._theme()
-        self.readiness_review_label.setText(
-            f"Setup review: {readiness_report_overall_text(report)}{detail}"
-        )
         border = theme.get("warning", "#C99700")
         bg = theme.get("surface_alt", theme.get("surface", "#f7f7f7"))
         fg = theme.get("text", "#222222")
@@ -2772,7 +2803,9 @@ class ControlFreqTab(QWidget):
             " background: transparent;"
             "}"
         )
-        self.readiness_review_now_btn.setStyleSheet(button_style("warning", theme))
+        self.readiness_review_now_btn.setStyleSheet(
+            button_style("primary" if requires_first_radio else "warning", theme)
+        )
         self.readiness_review_copy_btn.setStyleSheet(button_style("secondary", theme))
         self.readiness_review_dismiss_btn.setStyleSheet(button_style("muted", theme))
         self.readiness_review_suppress_btn.setStyleSheet(button_style("muted", theme))

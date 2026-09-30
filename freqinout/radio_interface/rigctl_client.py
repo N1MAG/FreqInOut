@@ -297,6 +297,53 @@ class FLRigClient:
             log.warning("Failed to get VFO frequency from FLRig: %s", e)
             return None
 
+    def get_transceiver_name(self) -> Optional[str]:
+        """Return FLRig's online transceiver name, or None when it is offline.
+
+        FLRig's ``rig.get_vfo`` method returns a fallback frequency even when
+        its transceiver is offline.  ``rig.get_xcvr`` is the documented
+        online-state-aware method: FLRig returns an empty string while its
+        internal transceiver connection is not online.
+        """
+
+        try:
+            raw = self._with_proxy(lambda p: p.rig.get_xcvr(), label="get_xcvr")
+            name = str(raw or "").strip()
+            return name or None
+        except Exception as e:
+            log.warning("Failed to get transceiver identity from FLRig: %s", e)
+            return None
+
+    def get_live_transceiver_name(self) -> Optional[str]:
+        """Return the transceiver name after any supported fresh CAT proof.
+
+        FLRig retains its internal online flag after some already-initialized
+        radios are subsequently powered off.  Its FTdx10 and FT710 drivers use
+        the read-only Yaesu ``ID;`` command for their own initialization check,
+        and ``rig.cat_string`` exposes the actual response rather than a cached
+        display value.  Require that fresh response for those two drivers.
+        Other drivers retain the nonempty online identity check until an
+        equally safe model-specific proof is defined.
+        """
+
+        name = self.get_transceiver_name()
+        if not name:
+            return None
+        normalized_name = re.sub(r"[^A-Z0-9]", "", name.upper())
+        if normalized_name not in {"FTDX10", "FT710"}:
+            return name
+        try:
+            raw = self._with_proxy(
+                lambda p: p.rig.cat_string("ID;"),
+                label="cat_identity",
+            )
+            response = str(raw or "").strip().upper()
+            if response and "NO RESPONSE" not in response and "ID" in response:
+                return name
+        except Exception as e:
+            log.warning("Failed live transceiver identity check through FLRig: %s", e)
+        return None
+
     def get_active_vfo(self) -> Optional[str]:
         """
         Returns the active FLRig VFO ("A" or "B"), or None on failure.

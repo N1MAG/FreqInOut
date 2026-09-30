@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Literal, Mapping, Optional
 
 from freqinout.core.multi_radio_store import (
+    FIRST_RUN_ONBOARDING_ACK_KEY,
     FIO_EXISTING_USE_IGNORED_KEYS,
     MultiRadioStore,
 )
@@ -89,6 +90,29 @@ def _has_fresh_blank_slate_marker(settings_values: Mapping[str, Any], migration_
     if not isinstance(summary, Mapping):
         return False
     return bool(summary.get("fresh_install_blank_slate"))
+
+
+def should_present_first_run_onboarding(
+    status: MultiRigRuntimeStatus,
+    *,
+    settings_values: Mapping[str, Any],
+    has_device_profiles: bool,
+) -> bool:
+    """Return whether the post-shell fresh-station welcome is eligible.
+
+    The migration summary is the authoritative proof that this is a fresh
+    blank slate.  A current-but-empty station is not enough: operators may
+    deliberately remove every radio or choose to use FIO without an HF radio.
+    """
+
+    if status.startup_mode != STARTUP_FRESH_DEFAULT_READY or has_device_profiles:
+        return False
+    if not _has_fresh_blank_slate_marker(settings_values, status.migration_version):
+        return False
+    acknowledged = settings_values.get(FIRST_RUN_ONBOARDING_ACK_KEY, False)
+    if isinstance(acknowledged, str):
+        acknowledged = acknowledged.strip().lower() not in {"", "0", "false", "no", "off"}
+    return not bool(acknowledged)
 
 
 def _int_id(row: Optional[Mapping[str, Any]]) -> Optional[int]:

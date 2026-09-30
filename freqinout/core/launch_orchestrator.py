@@ -54,12 +54,16 @@ JS8_DEPENDENT_APPS = {"JS8Spotter", "CommStat"}
 DEFAULT_VARAC_SETTLE_DELAY_SEC = 12.0
 DEFAULT_JS8CALL_DEPENDENT_DELAY_SEC = 4.0
 DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC = 90
+LEGACY_LAUNCH_READINESS_TIMEOUT_SEC = 30
+DEFAULT_PROCESS_LAUNCH_STABILITY_SEC = 3.0
 LAUNCH_READINESS_INITIAL_POLL_MS = 2000
 LAUNCH_READINESS_RELAXED_POLL_MS = 5000
 LAUNCH_READINESS_RELAX_AFTER_SEC = 30.0
 LAUNCH_PROCESS_PREFLIGHT_TIMEOUT_SEC = 15.0
 LAUNCH_ENDPOINT_PREFLIGHT_TIMEOUT_SEC = 15.0
 LAUNCH_ENDPOINT_PREFLIGHT_POLL_MS = 250
+LAUNCH_RADIO_CONTROL_READY_TIMEOUT_SEC = 30.0
+LAUNCH_RADIO_CONTROL_PROBE_INTERVAL_SEC = 1.0
 LAUNCH_PROCESS_REAPER_INTERVAL_MS = 1000
 
 
@@ -169,12 +173,16 @@ class LaunchOrchestrator(QObject):
         self._current_name: Optional[str] = None
         self._current_item: Any = None
         self._current_cmd: Optional[List[str]] = None
+        self._current_process: Any = None
+        self._current_launch_description = ""
         self._current_started_monotonic = 0.0
         self._current_phase = ""
         self._endpoint_preflight_verified: set[str] = set()
         self._endpoint_preflight_requested: set[str] = set()
         self._endpoint_preflight_clear: set[str] = set()
         self._sequence_claimed_identities: set[str] = set()
+        self._radio_control_gate_states: Dict[int, str] = {}
+        self._radio_control_probe_due_monotonic: Dict[int, float] = {}
         self._sequence_attribution_candidates: tuple[Mapping[str, Any], ...] = ()
         self._sequence_process_records: tuple[Mapping[str, object], ...] = ()
         self._sequence_process_records_ready = False
@@ -1133,6 +1141,11 @@ class LaunchOrchestrator(QObject):
                 "startup_included",
                 "bundle_enabled",
                 "operator_starts",
+                "radio_control_backend",
+                "radio_control_host",
+                "radio_control_port",
+                "radio_control_app",
+                "radio_control_gate_required",
             ):
                 if key in item:
                     result[key] = item[key]
@@ -1155,19 +1168,121 @@ class LaunchOrchestrator(QObject):
 
     def _program_ready_for_sequence(self, item: Any) -> bool:
         name = self._queue_item_name(item)
-        info = self._cached_status_for_item(item)
+        if (
+            isinstance(item, Mapping)
+            and bool(item.get("radio_control_gate_required", False))
+            and name == str(item.get("radio_control_app", "") or "").strip()
+        ):
+            # The accepted process inventory is intentionally immutable for
+            # duplicate-launch safety, so it cannot contain a process that FIO
+            # started later in this sequence.  Exact endpoint frequency
+            # readback is stronger post-launch readiness evidence and must not
+            # be suppressed by that pre-launch process snapshot.
+            return self._radio_control_evidence_state(
+                item,
+                force=self._radio_control_probe_is_due(item),
+            ) == "ready"
+        launched_here = self._current_launch_process_for_item(item) is not None
+        policy = item.get("readiness_policy", {}) if isinstance(item, Mapping) else {}
+        if name == "JS8Call":
+            if isinstance(policy, Mapping) and not bool(policy.get("require_api", True)):
+                return (
+                    self._current_launch_process_is_stable(item)
+                    if launched_here
+                    else self._program_running(item)
+                )
+            if not launched_here and not self._program_running(item):
+                return False
+            return bool(
+                self._cached_status_for_item(item, force=launched_here).get(
+                    "reachable", False
+                )
+            )
+        if name in {"FLRig", "FLDigi"} and isinstance(item, Mapping):
+            if isinstance(policy, Mapping) and bool(policy.get("require_service", False)):
+                if not launched_here and not self._program_running(item):
+                    return False
+                return bool(
+                    self._cached_status_for_item(item, force=launched_here).get(
+                        "reachable", False
+                    )
+                )
+        if launched_here:
+            return self._current_launch_process_is_stable(item)
         if not self._program_running(item):
             return False
-        if name == "JS8Call":
-            policy = item.get("readiness_policy", {}) if isinstance(item, Mapping) else {}
-            if isinstance(policy, Mapping) and not bool(policy.get("require_api", True)):
-                return True
-            return bool(info.get("reachable", False))
-        if name in {"FLRig", "FLDigi"} and isinstance(item, Mapping):
-            policy = item.get("readiness_policy", {})
-            if isinstance(policy, Mapping) and bool(policy.get("require_service", False)):
-                return bool(info.get("reachable", False))
         return True
+
+    def _current_launch_process_for_item(self, item: Any) -> Any:
+        if item is not getattr(self, "_current_item", None):
+            return None
+        return getattr(self, "_current_process", None)
+
+    def _current_launch_return_code(self, item: Any) -> Optional[int]:
+        process = self._current_launch_process_for_item(item)
+        poll = getattr(process, "poll", None)
+        if not callable(poll):
+            return None
+        try:
+            result = poll()
+        except (ChildProcessError, ProcessLookupError):
+            return -1
+        except Exception as exc:
+            log.warning("LaunchOrchestrator: could not poll current launch process: %s", exc)
+            return -1
+        if result is None:
+            return None
+        try:
+            return int(result)
+        except (TypeError, ValueError):
+            return -1
+
+    def _successful_launcher_exit_allowed(self) -> bool:
+        if str(getattr(self, "_current_launch_description", "") or "") == "configured custom tool":
+            return True
+        current_name = str(getattr(self, "_current_name", "") or "").strip()
+        if current_name and current_name not in LAUNCH_APP_META:
+            return True
+        command = getattr(self, "_current_cmd", None)
+        if not isinstance(command, (list, tuple)) or not command:
+            return False
+        executable = os.path.basename(str(command[0] or "")).strip().casefold()
+        return executable in {"open", "xdg-open"}
+
+    def _current_launch_process_is_stable(self, item: Any) -> bool:
+        if self._current_launch_process_for_item(item) is None:
+            return False
+        elapsed = max(
+            0.0,
+            time.monotonic()
+            - float(getattr(self, "_current_started_monotonic", 0.0) or 0.0),
+        )
+        if elapsed < DEFAULT_PROCESS_LAUNCH_STABILITY_SEC:
+            return False
+        return_code = self._current_launch_return_code(item)
+        return return_code is None or (
+            return_code == 0 and self._successful_launcher_exit_allowed()
+        )
+
+    def _current_launch_exit_failure(self, item: Any) -> str:
+        if self._current_launch_process_for_item(item) is None:
+            return ""
+        return_code = self._current_launch_return_code(item)
+        if return_code is None:
+            return ""
+        if return_code == 0 and self._successful_launcher_exit_allowed():
+            return ""
+        return f"launch process exited with code {return_code} before readiness"
+
+    @staticmethod
+    def _normalized_readiness_timeout(raw: Any) -> int:
+        try:
+            timeout = int(raw or DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC)
+        except (TypeError, ValueError):
+            timeout = DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
+        if timeout == LEGACY_LAUNCH_READINESS_TIMEOUT_SEC:
+            return DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
+        return timeout if timeout > 0 else DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
 
     @staticmethod
     def _has_persisted_endpoint_identity(item: Any) -> bool:
@@ -1235,6 +1350,183 @@ class LaunchOrchestrator(QObject):
         info = snapshot.get(key, {}) if isinstance(snapshot, Mapping) else {}
         return info if isinstance(info, Mapping) else {}
 
+    @staticmethod
+    def _radio_ids_for_item(item: Any) -> set[int]:
+        if not isinstance(item, Mapping):
+            return set()
+        radio_ids: set[int] = set()
+        for value in item.get("radio_ids", ()) or ():
+            try:
+                radio_id = int(value or 0)
+            except (TypeError, ValueError):
+                continue
+            if radio_id > 0:
+                radio_ids.add(radio_id)
+        return radio_ids
+
+    @staticmethod
+    def _radio_id_for_item(item: Any) -> int:
+        if not isinstance(item, Mapping):
+            return 0
+        for value in item.get("radio_ids", ()) or ():
+            try:
+                radio_id = int(value or 0)
+            except (TypeError, ValueError):
+                continue
+            if radio_id > 0:
+                return radio_id
+        return 0
+
+    @staticmethod
+    def _radio_name_for_item(item: Any) -> str:
+        if isinstance(item, Mapping):
+            for value in item.get("radio_names", ()) or ():
+                text = str(value or "").strip()
+                if text:
+                    return text
+        radio_id = LaunchOrchestrator._radio_id_for_item(item)
+        return f"Radio {radio_id}" if radio_id > 0 else "Radio"
+
+    @staticmethod
+    def _radio_control_status_key(item: Any) -> str:
+        backend = str(item.get("radio_control_backend", "") or "").strip().lower() if isinstance(item, Mapping) else ""
+        return {
+            "flrig": "FLRig",
+            "rigctld": "RigCtlD",
+            "hamlib": "RigCtlD",
+            "js8call": "JS8Call_API",
+        }.get(backend, "")
+
+    def _cached_radio_control_status(
+        self,
+        item: Any,
+        *,
+        force: bool = False,
+    ) -> Mapping[str, Any]:
+        if not isinstance(item, Mapping):
+            return {}
+        backend = str(item.get("radio_control_backend", "") or "").strip().lower()
+        host = str(item.get("radio_control_host", "") or "").strip() or None
+        try:
+            port = int(item.get("radio_control_port", 0) or 0)
+        except (TypeError, ValueError):
+            port = 0
+        kwargs: Dict[str, Any] = {
+            "force": bool(force),
+            "force_process_snapshot": False,
+            "verify_control_readback": True,
+            "control_backend": backend,
+            "control_probe_only": True,
+        }
+        if backend == "flrig":
+            kwargs.update(flrig_host_override=host, flrig_port_override=port or None)
+        elif backend in {"rigctld", "hamlib"}:
+            kwargs.update(rigctld_host_override=host, rigctld_port_override=port or None)
+        elif backend == "js8call":
+            kwargs.update(host_override=host, port_override=port or None)
+        else:
+            return {}
+        try:
+            snapshot = self.dependency_status.status_snapshot(**kwargs)
+        except Exception:
+            return {}
+        key = self._radio_control_status_key(item)
+        info = snapshot.get(key, {}) if isinstance(snapshot, Mapping) else {}
+        return info if isinstance(info, Mapping) else {}
+
+    def _radio_control_evidence_state(self, item: Any, *, force: bool = False) -> str:
+        info = self._cached_radio_control_status(item, force=force)
+        try:
+            checked_at = float(info.get("checked_at", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            checked_at = 0.0
+        fresh_for_sequence = bool(
+            str(info.get("source", "") or "").strip().lower() == "endpoint"
+            and checked_at >= float(getattr(self, "_sequence_preflight_started_wall", 0.0) or 0.0)
+        )
+        if not fresh_for_sequence:
+            return "pending"
+        return "ready" if bool(info.get("radio_readback_ready", False)) else "unavailable"
+
+    def _radio_control_probe_is_due(self, item: Any, *, immediate: bool = False) -> bool:
+        radio_id = self._radio_id_for_item(item)
+        if radio_id <= 0:
+            return False
+        now = time.monotonic()
+        due_by_radio = getattr(self, "_radio_control_probe_due_monotonic", {})
+        due_at = float(due_by_radio.get(radio_id, 0.0) or 0.0)
+        if not immediate and now < due_at:
+            return False
+        due_by_radio[radio_id] = now + LAUNCH_RADIO_CONTROL_PROBE_INTERVAL_SEC
+        self._radio_control_probe_due_monotonic = due_by_radio
+        return True
+
+    def _begin_radio_control_gate(self, item: Any) -> None:
+        radio_id = self._radio_id_for_item(item)
+        if radio_id <= 0:
+            return
+        states = getattr(self, "_radio_control_gate_states", {})
+        states[radio_id] = "checking"
+        self._radio_control_gate_states = states
+        state = self._radio_control_evidence_state(
+            item,
+            force=self._radio_control_probe_is_due(item, immediate=True),
+        )
+        if state == "ready":
+            states[radio_id] = "ready"
+            log.info(
+                "LaunchOrchestrator: %s control ready; continuing radio startup stage",
+                self._radio_name_for_item(item),
+            )
+            self._schedule_advance_queue(0)
+            return
+        self._current_name = f"{self._radio_name_for_item(item)} control"
+        self._current_item = item
+        self._current_cmd = None
+        self._current_phase = "radio_control_gate"
+        self._current_started_monotonic = time.monotonic()
+        self._poll_timer.setInterval(LAUNCH_ENDPOINT_PREFLIGHT_POLL_MS)
+        self._poll_timer.start()
+        self.sequence_progress.emit(
+            {
+                "name": self._current_name,
+                "status": "checking",
+                "detail": "waiting for fresh radio frequency readback",
+                "counts_toward_total": False,
+                "radio_ids": [radio_id],
+            }
+        )
+
+    def _radio_control_app_failed(self, item: Any) -> bool:
+        if not isinstance(item, Mapping):
+            return False
+        control_app = str(item.get("radio_control_app", "") or "").strip()
+        if not control_app:
+            return False
+        radio_id = self._radio_id_for_item(item)
+        success_states = {"launched", "already_running"}
+        matches = []
+        for result in getattr(self, "_results", ()):
+            if str(result.get("name", "") or "") != control_app:
+                continue
+            result_radios = self._radio_ids_for_item(result)
+            if radio_id > 0 and result_radios and radio_id not in result_radios:
+                continue
+            matches.append(result)
+        return bool(matches) and not any(
+            str(result.get("status", "") or "") in success_states for result in matches
+        )
+
+    @staticmethod
+    def _is_gated_radio_control_app(item: Any) -> bool:
+        if not isinstance(item, Mapping):
+            return False
+        return bool(
+            item.get("radio_control_gate_required", False)
+            and str(item.get("name", "") or "").strip()
+            == str(item.get("radio_control_app", "") or "").strip()
+        )
+
     def _pending_queue_contains(self, names: set[str]) -> bool:
         if not names:
             return False
@@ -1267,12 +1559,16 @@ class LaunchOrchestrator(QObject):
         self._current_name = None
         self._current_item = None
         self._current_cmd = None
+        self._current_process = None
+        self._current_launch_description = ""
         self._current_started_monotonic = 0.0
         self._current_phase = ""
         self._endpoint_preflight_verified = set()
         self._endpoint_preflight_requested = set()
         self._endpoint_preflight_clear = set()
         self._sequence_claimed_identities = set()
+        self._radio_control_gate_states = {}
+        self._radio_control_probe_due_monotonic = {}
         self._sequence_attribution_candidates = self._station_process_attribution_candidates(
             queue
         )
@@ -1294,12 +1590,13 @@ class LaunchOrchestrator(QObject):
             getattr(self, "_last_projection_warnings", {})
         )
         try:
-            self._wait_timeout_sec = int(
-                self.settings.get("launch_readiness_timeout_sec", DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC)
-                or DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
+            configured_timeout = self.settings.get(
+                "launch_readiness_timeout_sec",
+                DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC,
             )
         except Exception:
-            self._wait_timeout_sec = DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
+            configured_timeout = DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
+        self._wait_timeout_sec = self._normalized_readiness_timeout(configured_timeout)
         self.sequence_started.emit(
             {
                 "trigger": trigger,
@@ -1457,14 +1754,63 @@ class LaunchOrchestrator(QObject):
             self._finish_sequence(cancelled=True)
             return
         if self._index >= len(self._queue):
+            if self._queue:
+                last_item = self._queue[-1]
+                if isinstance(last_item, Mapping) and bool(
+                    last_item.get("radio_control_gate_required", False)
+                ):
+                    radio_id = self._radio_id_for_item(last_item)
+                    gate_state = getattr(self, "_radio_control_gate_states", {}).get(
+                        radio_id,
+                        "pending",
+                    )
+                    if gate_state not in {"ready", "blocked"} and not self._radio_control_app_failed(last_item):
+                        self._begin_radio_control_gate(last_item)
+                        return
             self._finish_sequence(cancelled=False)
             return
         queue_item = self._queue[self._index]
         name = self._queue_item_name(queue_item)
-        self._index += 1
         if not name:
+            self._index += 1
             self._schedule_advance_queue(0)
             return
+        if isinstance(queue_item, Mapping) and bool(
+            queue_item.get("radio_control_gate_required", False)
+        ):
+            radio_id = self._radio_id_for_item(queue_item)
+            gate_state = getattr(self, "_radio_control_gate_states", {}).get(
+                radio_id,
+                "pending",
+            )
+            control_app = str(queue_item.get("radio_control_app", "") or "").strip()
+            if gate_state == "blocked":
+                self._index += 1
+                result = self._result_for(
+                    queue_item,
+                    status="blocked_radio_control",
+                    detail=(
+                        f"{self._radio_name_for_item(queue_item)} control did not provide "
+                        "a fresh radio frequency readback"
+                    ),
+                )
+                self._results.append(result)
+                self.sequence_progress.emit(result)
+                self._schedule_advance_queue(0)
+                return
+            if gate_state != "ready" and name != control_app:
+                if self._radio_control_app_failed(queue_item):
+                    self._radio_control_gate_states[radio_id] = "blocked"
+                    log.warning(
+                        "LaunchOrchestrator: skipping remaining %s apps because %s was not ready",
+                        self._radio_name_for_item(queue_item),
+                        control_app or "radio control",
+                    )
+                    self._schedule_advance_queue(0)
+                    return
+                self._begin_radio_control_gate(queue_item)
+                return
+        self._index += 1
         sequence_identity = self._sequence_identity_key(queue_item)
         claimed_identities = getattr(self, "_sequence_claimed_identities", set())
         if sequence_identity and sequence_identity in claimed_identities:
@@ -1593,16 +1939,27 @@ class LaunchOrchestrator(QObject):
             )
             self._endpoint_preflight_clear.add(endpoint_key)
             if exact_process_running is True:
-                log.warning(
-                    "LaunchOrchestrator: skipped duplicate %s launch; exact process is "
-                    "running but its configured endpoint is not ready",
-                    name,
-                )
+                waiting_for_control = self._is_gated_radio_control_app(queue_item)
+                if waiting_for_control:
+                    log.info(
+                        "LaunchOrchestrator: exact %s process is running; waiting for its "
+                        "configured radio-control endpoint",
+                        name,
+                    )
+                else:
+                    log.warning(
+                        "LaunchOrchestrator: skipped duplicate %s launch; exact process is "
+                        "running but its configured endpoint is not ready",
+                        name,
+                    )
                 result = self._result_for(
                     queue_item,
-                    status="failed",
+                    status="already_running" if waiting_for_control else "failed",
                     detail=(
-                        "configured process is running but its endpoint is not ready; "
+                        "exact configured process is active; waiting for endpoint and "
+                        "radio readiness"
+                        if waiting_for_control
+                        else "configured process is running but its endpoint is not ready; "
                         "duplicate launch skipped"
                     ),
                 )
@@ -1719,6 +2076,8 @@ class LaunchOrchestrator(QObject):
                 self._current_name = name
                 self._current_item = queue_item
                 self._current_cmd = None
+                self._current_process = None
+                self._current_launch_description = ""
                 self._current_phase = "readiness"
                 self._current_started_monotonic = time.monotonic()
                 self._poll_timer.setInterval(LAUNCH_READINESS_INITIAL_POLL_MS)
@@ -1790,6 +2149,8 @@ class LaunchOrchestrator(QObject):
             self._current_name = name
             self._current_item = queue_item
             self._current_cmd = cmd
+            self._current_process = process
+            self._current_launch_description = cmd_desc
             self._current_phase = "readiness"
             self._current_started_monotonic = time.monotonic()
             self._poll_timer.setInterval(LAUNCH_READINESS_INITIAL_POLL_MS)
@@ -2132,6 +2493,71 @@ class LaunchOrchestrator(QObject):
             self._schedule_advance_queue(0)
             return
         elapsed = max(0.0, time.monotonic() - self._current_started_monotonic)
+        if self._current_phase == "radio_control_gate":
+            item = self._current_item or {}
+            radio_id = self._radio_id_for_item(item)
+            state = self._radio_control_evidence_state(
+                item,
+                force=self._radio_control_probe_is_due(item),
+            )
+            if state == "ready":
+                self._poll_timer.stop()
+                self._radio_control_gate_states[radio_id] = "ready"
+                radio_name = self._radio_name_for_item(item)
+                log.info(
+                    "LaunchOrchestrator: %s control ready; continuing radio startup stage",
+                    radio_name,
+                )
+                self.sequence_progress.emit(
+                    {
+                        "name": f"{radio_name} control",
+                        "status": "ready",
+                        "detail": "fresh radio frequency readback received",
+                        "counts_toward_total": False,
+                        "radio_ids": [radio_id],
+                    }
+                )
+                self._current_name = None
+                self._current_item = None
+                self._current_cmd = None
+                self._current_phase = ""
+                self._schedule_advance_queue(0)
+                return
+            if elapsed >= LAUNCH_ENDPOINT_PREFLIGHT_TIMEOUT_SEC:
+                self._poll_timer.stop()
+                self._radio_control_gate_states[radio_id] = "blocked"
+                radio_name = self._radio_name_for_item(item)
+                control_app = str(item.get("radio_control_app", "") or "").strip() if isinstance(item, Mapping) else ""
+                for result in self._results:
+                    result_radios = self._radio_ids_for_item(result)
+                    if (
+                        control_app
+                        and str(result.get("name", "") or "") == control_app
+                        and (not result_radios or radio_id in result_radios)
+                        and str(result.get("status", "") or "") == "already_running"
+                    ):
+                        result["status"] = "timeout"
+                        result["detail"] = "application is running, but radio frequency readback is unavailable"
+                log.warning(
+                    "LaunchOrchestrator: %s control unavailable; remaining radio apps will be skipped",
+                    radio_name,
+                )
+                self.sequence_progress.emit(
+                    {
+                        "name": f"{radio_name} control",
+                        "status": "unavailable",
+                        "detail": "fresh radio frequency readback was not available",
+                        "counts_toward_total": False,
+                        "radio_ids": [radio_id],
+                    }
+                )
+                self._current_name = None
+                self._current_item = None
+                self._current_cmd = None
+                self._current_phase = ""
+                self._schedule_advance_queue(0)
+                return
+            return
         if self._current_phase == "endpoint_preflight":
             item = self._current_item or name
             endpoint_key = self._endpoint_preflight_key(item)
@@ -2184,17 +2610,28 @@ class LaunchOrchestrator(QObject):
                     self._endpoint_preflight_clear.add(endpoint_key)
                     exact_process_running = self._configured_instance_process_running(item)
                     if exact_process_running is True:
-                        log.warning(
-                            "LaunchOrchestrator: skipped duplicate %s launch; exact process is "
-                            "running but its configured endpoint is not ready",
-                            name,
-                        )
+                        waiting_for_control = self._is_gated_radio_control_app(item)
+                        if waiting_for_control:
+                            log.info(
+                                "LaunchOrchestrator: exact %s process is running; waiting for "
+                                "its configured radio-control endpoint",
+                                name,
+                            )
+                        else:
+                            log.warning(
+                                "LaunchOrchestrator: skipped duplicate %s launch; exact process "
+                                "is running but its configured endpoint is not ready",
+                                name,
+                            )
                         result = self._result_for(
                             item,
-                            status="failed",
+                            status="already_running" if waiting_for_control else "failed",
                             detail=(
-                                "configured process is running but its endpoint is not ready; "
-                                "duplicate launch skipped"
+                                "exact configured process is active; waiting for endpoint and "
+                                "radio readiness"
+                                if waiting_for_control
+                                else "configured process is running but its endpoint is not "
+                                "ready; duplicate launch skipped"
                             ),
                         )
                         self._results.append(result)
@@ -2219,19 +2656,44 @@ class LaunchOrchestrator(QObject):
                 return
             if elapsed >= LAUNCH_ENDPOINT_PREFLIGHT_TIMEOUT_SEC:
                 self._poll_timer.stop()
-                log.warning(
-                    "LaunchOrchestrator: skipped %s launch because configured endpoint verification timed out",
-                    name,
+                exact_process_running = self._configured_instance_process_running(item)
+                waiting_for_control = bool(
+                    exact_process_running is True
+                    and self._is_gated_radio_control_app(item)
                 )
+                if waiting_for_control:
+                    log.info(
+                        "LaunchOrchestrator: exact %s process remains active after endpoint "
+                        "preflight; continuing with bounded radio-control readiness",
+                        name,
+                    )
+                else:
+                    log.warning(
+                        "LaunchOrchestrator: skipped %s launch because configured endpoint "
+                        "verification timed out",
+                        name,
+                    )
                 result = self._result_for(
                     item,
-                    status="failed",
+                    status="already_running" if waiting_for_control else "failed",
                     detail=(
-                        "configured endpoint could not be verified; launch was skipped "
+                        "exact configured process is active; waiting for endpoint and "
+                        "radio readiness"
+                        if waiting_for_control
+                        else "configured endpoint could not be verified; launch was skipped "
                         "to prevent a duplicate instance"
                     ),
                 )
                 self._results.append(result)
+                if waiting_for_control:
+                    sequence_identity = self._sequence_identity_key(item)
+                    if sequence_identity:
+                        self._sequence_claimed_identities = getattr(
+                            self,
+                            "_sequence_claimed_identities",
+                            set(),
+                        )
+                        self._sequence_claimed_identities.add(sequence_identity)
                 self.sequence_progress.emit(result)
                 self._current_name = None
                 self._current_item = None
@@ -2247,6 +2709,24 @@ class LaunchOrchestrator(QObject):
         )
         if self._poll_timer.interval() != desired_interval:
             self._poll_timer.setInterval(desired_interval)
+        exit_failure = self._current_launch_exit_failure(self._current_item or name)
+        if exit_failure:
+            self._poll_timer.stop()
+            result = self._result_for(
+                self._current_item or name,
+                status="failed",
+                detail=exit_failure,
+            )
+            self._results.append(result)
+            self.sequence_progress.emit(result)
+            self._current_name = None
+            self._current_item = None
+            self._current_cmd = None
+            self._current_process = None
+            self._current_launch_description = ""
+            self._current_phase = ""
+            self._schedule_advance_queue(0)
+            return
         if self._program_ready_for_sequence(self._current_item or name):
             self._poll_timer.stop()
             if name == "JS8Call":
@@ -2261,25 +2741,45 @@ class LaunchOrchestrator(QObject):
                 detail += f"; waiting {delay_sec:.1f}s before next launch"
             result = self._result_for(self._current_item or name, status="launched", detail=detail)
             self._results.append(result)
+            ready_item = self._current_item
+            if (
+                isinstance(ready_item, Mapping)
+                and bool(ready_item.get("radio_control_gate_required", False))
+                and name == str(ready_item.get("radio_control_app", "") or "").strip()
+            ):
+                radio_id = self._radio_id_for_item(ready_item)
+                if radio_id > 0:
+                    self._radio_control_gate_states[radio_id] = "ready"
             self.sequence_progress.emit(result)
             self._current_name = None
             self._current_item = None
             self._current_cmd = None
+            self._current_process = None
+            self._current_launch_description = ""
             self._current_phase = ""
             self._schedule_advance_queue(int(delay_sec * 1000.0))
             return
-        if elapsed >= float(self._wait_timeout_sec):
+        readiness_timeout = float(self._wait_timeout_sec)
+        if (
+            isinstance(self._current_item, Mapping)
+            and bool(self._current_item.get("radio_control_gate_required", False))
+            and name == str(self._current_item.get("radio_control_app", "") or "").strip()
+        ):
+            readiness_timeout = min(readiness_timeout, LAUNCH_RADIO_CONTROL_READY_TIMEOUT_SEC)
+        if elapsed >= readiness_timeout:
             self._poll_timer.stop()
             result = self._result_for(
                 self._current_item or name,
                 status="timeout",
-                detail=f"not ready after {self._wait_timeout_sec}s",
+                detail=f"not ready after {readiness_timeout:g}s",
             )
             self._results.append(result)
             self.sequence_progress.emit(result)
             self._current_name = None
             self._current_item = None
             self._current_cmd = None
+            self._current_process = None
+            self._current_launch_description = ""
             self._current_phase = ""
             self._schedule_advance_queue(0)
 
@@ -2935,12 +3435,16 @@ class LaunchOrchestrator(QObject):
         self._current_name = None
         self._current_item = None
         self._current_cmd = None
+        self._current_process = None
+        self._current_launch_description = ""
         self._current_started_monotonic = 0.0
         self._current_phase = ""
         self._endpoint_preflight_verified = set()
         self._endpoint_preflight_requested = set()
         self._endpoint_preflight_clear = set()
         self._sequence_claimed_identities = set()
+        self._radio_control_gate_states = {}
+        self._radio_control_probe_due_monotonic = {}
         self._sequence_attribution_candidates = ()
         self._sequence_preflight_started_wall = 0.0
         self._process_preflight_reason = ""
@@ -2953,6 +3457,9 @@ class LaunchOrchestrator(QObject):
         timeout = sum(1 for r in self._results if r.get("status") == "timeout")
         blocked_self = sum(1 for r in self._results if r.get("status") == "blocked_self")
         blocked_dependency = sum(1 for r in self._results if r.get("status") == "blocked_dependency")
+        blocked_radio_control = sum(
+            1 for r in self._results if r.get("status") == "blocked_radio_control"
+        )
         cancelled_count = sum(1 for r in self._results if r.get("status") == "cancelled")
         return {
             "trigger": self._trigger,
@@ -2963,6 +3470,7 @@ class LaunchOrchestrator(QObject):
             "timeout": timeout,
             "blocked_self": blocked_self,
             "blocked_dependency": blocked_dependency,
+            "blocked_radio_control": blocked_radio_control,
             "cancelled_count": cancelled_count,
             "results": list(self._results),
             "projection_warnings": dict(

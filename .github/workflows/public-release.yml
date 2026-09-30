@@ -750,6 +750,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Check out exact release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
       - name: Download exact release assets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -780,20 +783,22 @@ jobs:
             exit 1
           fi
 
-          release_notice=""
-          if [[ "$WINDOWS_SIGNED" != "true" || "$MACOS_SIGNED" != "true" ]]; then
-            release_notice=$'### Package signing notice\n\n'
-            if [[ "$WINDOWS_SIGNED" != "true" ]]; then
-              release_notice+=$'- The Windows installer is unsigned and is identified by `-unsigned` in its filename. Windows may display **Unknown publisher** or a Microsoft Defender SmartScreen prompt.\n'
-            fi
-            if [[ "$MACOS_SIGNED" != "true" ]]; then
-              release_notice+=$'- The macOS disk images are not Developer ID signed or notarized and are identified by `-unsigned` in their filenames. macOS may require **Open Anyway** in Privacy & Security.\n'
-            fi
-            release_notice+=$'- Verify the downloaded package against `SHA256SUMS.txt` and the GitHub build-provenance attestation. The installed application name remains **FreqInOut**.\n'
+          notes_args=()
+          if [[ "$WINDOWS_SIGNED" == "true" ]]; then
+            notes_args+=(--windows-signed)
           fi
+          if [[ "$MACOS_SIGNED" == "true" ]]; then
+            notes_args+=(--macos-signed)
+          fi
+          python packaging/build_release_notes.py \
+            --version "$RELEASE_VERSION" \
+            --repository "$GITHUB_REPOSITORY" \
+            --output "$RUNNER_TEMP/release-notes.md" \
+            "${notes_args[@]}"
 
           gh release create "$RELEASE_TAG" --verify-tag --draft \
-            --title "FreqInOut $RELEASE_VERSION" --generate-notes --notes "$release_notice"
+            --title "FreqInOut $RELEASE_VERSION" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"
           gh release upload "$RELEASE_TAG" \
             release-assets/FreqInOut-*.exe \
             release-assets/FreqInOut-*.deb \

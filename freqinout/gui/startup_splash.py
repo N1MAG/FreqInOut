@@ -110,8 +110,12 @@ class StartupSplash:
         return pixmap
 
     def show(self, message: str = "Starting FIO...") -> None:
+        # Prepare the complete first frame before Windows maps the native
+        # surface.  Showing first can expose an unpainted top-level window for
+        # a frame on slower packaged starts.
+        self.update_status_without_event_pump(message)
         self._splash.show()
-        self.update_status(message)
+        self._process_events()
 
     def update_status(self, message: str) -> None:
         self.update_status_without_event_pump(message)

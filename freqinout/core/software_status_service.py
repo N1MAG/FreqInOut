@@ -1407,8 +1407,16 @@ class SoftwareStatusService:
         fldigi_port_override: Optional[int] = None,
         fldigi_host_override: Optional[str] = None,
         instance_identities: Optional[Mapping[str, Mapping[str, object]]] = None,
+        verify_control_readback: bool = False,
+        control_backend: str = "",
+        control_probe_only: bool = False,
     ) -> Dict[str, Dict[str, object]]:
         identities = instance_identities if isinstance(instance_identities, Mapping) else {}
+        active_control_via = (
+            str(control_backend or "").strip().upper()
+            or self._settings_text("control_via", "FLRig").strip().upper()
+        )
+        exact_control_probe = bool(control_probe_only and verify_control_readback)
 
         def _running(program_name: str) -> bool:
             identity = identities.get(program_name, {})
@@ -1448,11 +1456,15 @@ class SoftwareStatusService:
         js8_health = self._health.snapshot(
             self._health_key(("JS8CALL", js8_cache_host or "loopback", int(js8_port), False))
         )
-        js8_api_ok = self.js8_api_reachable(
-            port_override=port_override,
-            host_override=host_override,
-            allow_fallback=False,
-            force=force,
+        js8_api_ok = (
+            self.js8_api_reachable(
+                port_override=port_override,
+                host_override=host_override,
+                allow_fallback=False,
+                force=force,
+            )
+            if not exact_control_probe or active_control_via == "JS8CALL"
+            else False
         )
         running_flrig = _running("FLRig")
         flrig_host = (flrig_host_override or "").strip() or self._settings_text("flrig_host", FLRIG_DEFAULT_HOST) or FLRIG_DEFAULT_HOST
@@ -1462,12 +1474,15 @@ class SoftwareStatusService:
             else self._settings_int("flrig_port", FLRIG_DEFAULT_PORT)
         )
         flrig_key = ("FLRIG", flrig_host.strip().lower(), str(int(flrig_port)))
-        flrig_api_ok = self.flrig_api_reachable(
-            port_override=flrig_port_override,
-            host_override=flrig_host_override,
-            force=force,
+        flrig_api_ok = (
+            self.flrig_api_reachable(
+                port_override=flrig_port_override,
+                host_override=flrig_host_override,
+                force=force,
+            )
+            if not exact_control_probe or active_control_via == "FLRIG"
+            else False
         )
-        active_control_via = self._settings_text("control_via", "FLRig").strip().upper()
         rigctld_active = active_control_via == "RIGCTLD" or rigctld_host_override is not None or rigctld_port_override is not None
         running_rigctld = _running("RigCtlD") if rigctld_active else False
         rigctld_host = (
@@ -1504,12 +1519,16 @@ class SoftwareStatusService:
             flrig_host.strip().lower(),
             str(int(flrig_port)),
         )
-        fldigi_api_ok = self.fldigi_api_reachable(
-            port_override=fldigi_port_override,
-            host_override=fldigi_host_override,
-            flrig_port_override=flrig_port_override,
-            flrig_host_override=flrig_host_override,
-            force=force,
+        fldigi_api_ok = (
+            self.fldigi_api_reachable(
+                port_override=fldigi_port_override,
+                host_override=fldigi_host_override,
+                flrig_port_override=flrig_port_override,
+                flrig_host_override=flrig_host_override,
+                force=force,
+            )
+            if not exact_control_probe
+            else False
         )
 
         out: Dict[str, Dict[str, object]] = {}
@@ -1574,4 +1593,78 @@ class SoftwareStatusService:
                 "tooltip": tooltip,
                 "running": bool(running),
             }
+
+        if verify_control_readback:
+            readback_key = {
+                "FLRIG": "FLRig",
+                "RIGCTLD": "RigCtlD",
+                "HAMLIB": "RigCtlD",
+                "JS8CALL": "JS8Call_API",
+            }.get(active_control_via, "")
+            frequency_hz: Optional[int] = None
+            transceiver_name: Optional[str] = None
+            try:
+                if readback_key == "FLRig" and flrig_api_ok:
+                    from freqinout.radio_interface.rigctl_client import FLRigClient
+
+                    flrig_client = FLRigClient(
+                        host=flrig_host,
+                        port=flrig_port,
+                        timeout=0.8,
+                    )
+                    transceiver_name = flrig_client.get_live_transceiver_name()
+                    if transceiver_name:
+                        frequency_hz = flrig_client.get_vfo_frequency()
+                elif readback_key == "RigCtlD" and rigctld_api_ok:
+                    from freqinout.radio_interface.rigctl_client import RigctldClient
+
+                    frequency_hz = RigctldClient(
+                        host=rigctld_host,
+                        port=rigctld_port,
+                        timeout=0.8,
+                    ).get_vfo_frequency()
+                elif readback_key == "JS8Call_API" and js8_api_ok:
+                    from freqinout.radio_interface.js8_status import JS8ControlClient
+
+                    frequency_hz = JS8ControlClient(
+                        host=js8_host,
+                        port=js8_port,
+                        settings=self.settings,
+                    ).get_frequency()
+            except Exception as exc:
+                log.debug(
+                    "Radio-control launch readback failed for %s: %s",
+                    active_control_via or "unknown",
+                    exc,
+                )
+                frequency_hz = None
+            try:
+                normalized_frequency_hz = int(frequency_hz) if frequency_hz is not None else None
+            except (TypeError, ValueError):
+                normalized_frequency_hz = None
+            frequency_ready = bool(
+                normalized_frequency_hz is not None and normalized_frequency_hz > 0
+            )
+            ready = bool(
+                frequency_ready
+                and (readback_key != "FLRig" or transceiver_name)
+            )
+            if readback_key and readback_key in out:
+                row = out[readback_key]
+                row["radio_readback_ready"] = ready
+                row["frequency_hz"] = normalized_frequency_hz if ready else None
+                row["control_backend"] = active_control_via.lower()
+                if readback_key == "FLRig":
+                    row["radio_online"] = bool(transceiver_name)
+                    row["transceiver_name"] = transceiver_name or ""
+                if bool(row.get("reachable")) and not ready:
+                    reason = (
+                        "FLRig reports that its transceiver is offline."
+                        if readback_key == "FLRig" and not transceiver_name
+                        else "Radio frequency readback is unavailable."
+                    )
+                    row["tooltip"] = (
+                        str(row.get("tooltip", "") or "").rstrip(". ")
+                        + f". {reason}"
+                    )
         return out
