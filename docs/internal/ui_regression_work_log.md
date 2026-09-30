@@ -12527,3 +12527,19 @@ Acceptance evidence:
 The failed `v2.0.4` deployment created no GitHub Release. Its public tag still
 resolves to the pre-correction commit and will not be deleted or replaced
 without explicit maintainer approval.
+
+### Follow-up artifact-layout correction
+
+After the checksum line-ending correction, the replacement-tag production run
+verified the Windows installer successfully but stopped on the four-package
+count. GitHub restored the Windows artifact at the download root while the
+Linux and macOS archives retained their `Output/` directory prefixes;
+`merge-multiple` did not flatten those internal paths.
+
+Publication now uses a Python release-asset assembler instead of root-only
+shell globs. It recursively locates exactly one copy of each versioned package
+and manifest, rejects missing or duplicate names, verifies every exact basename
+and SHA-256, normalizes manifests, and copies only the approved files to a flat
+upload directory. Focused tests reproduce the mixed root/nested layout and the
+Windows CRLF manifest, verify the nine-file output set, and prove duplicate
+expected files fail closed.

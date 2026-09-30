@@ -768,16 +768,24 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: Verify individual checksums and create combined checksum
+      - name: Verify and flatten exact release assets
+        env:
+          RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+          WINDOWS_SIGNED: ${{ vars.FIO_ENABLE_PFX_SIGNING }}
+          MACOS_SIGNED: ${{ vars.FIO_ENABLE_APPLE_SIGNING }}
         run: |
-          cd release-assets
-          sed -i 's/\r$//' FreqInOut-*.sha256
-          for checksum in FreqInOut-*.sha256; do
-            sha256sum --check "$checksum"
-          done
-          find . -maxdepth 1 -type f \( -name 'FreqInOut-*.exe' -o -name 'FreqInOut-*.deb' -o -name 'FreqInOut-*.dmg' \) \
-            -print0 | sort -z | xargs -0 sha256sum | sed 's#  \./#  #' > SHA256SUMS.txt
-          test "$(wc -l < SHA256SUMS.txt)" -eq 4
+          asset_args=()
+          if [[ "$WINDOWS_SIGNED" == "true" ]]; then
+            asset_args+=(--windows-signed)
+          fi
+          if [[ "$MACOS_SIGNED" == "true" ]]; then
+            asset_args+=(--macos-signed)
+          fi
+          python packaging/prepare_release_assets.py \
+            --source-dir release-assets \
+            --output-dir release-assets-flat \
+            --version "$RELEASE_VERSION" \
+            "${asset_args[@]}"
 
       - name: Create draft, upload assets, then publish
         env:
@@ -809,9 +817,9 @@ jobs:
             --title "FreqInOut $RELEASE_VERSION" \
             --notes-file "$RUNNER_TEMP/release-notes.md"
           gh release upload "$RELEASE_TAG" \
-            release-assets/FreqInOut-*.exe \
-            release-assets/FreqInOut-*.deb \
-            release-assets/FreqInOut-*.dmg \
-            release-assets/FreqInOut-*.sha256 \
-            release-assets/SHA256SUMS.txt
+            release-assets-flat/FreqInOut-*.exe \
+            release-assets-flat/FreqInOut-*.deb \
+            release-assets-flat/FreqInOut-*.dmg \
+            release-assets-flat/FreqInOut-*.sha256 \
+            release-assets-flat/SHA256SUMS.txt
           gh release edit "$RELEASE_TAG" --draft=false --latest

@@ -149,6 +149,15 @@ from every downloaded manifest before `sha256sum --check`. This preserves the
 hash and filename while preventing a valid Windows artifact from failing only
 because its manifest crossed operating-system line-ending conventions.
 
+GitHub artifact archives may preserve each upload's internal directory prefix;
+`merge-multiple` merges artifact archives but does not promise that every file
+lands at the download root. Publication therefore discovers each exact
+versioned package and matching manifest recursively, rejects missing or
+duplicate expected names, verifies the manifest's exact basename and hash, and
+copies only the four approved packages and normalized manifests into a new flat
+staging directory. Release upload globs are confined to that verified staging
+directory.
+
 The macOS bundle/DMG implementation passed a native Apple Silicon PyInstaller
 build, ad-hoc code-signature verification, fresh-profile smoke test, DMG
 verification, mounted-image copy/install smoke test, and profile-preservation

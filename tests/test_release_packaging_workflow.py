@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 from pathlib import Path
 import shutil
 
@@ -146,7 +147,10 @@ def test_public_release_workflow_has_separate_candidate_and_production_contracts
     assert "--generate-notes" not in source
     assert source.count("[System.IO.File]::WriteAllText(") == 2
     assert 'Set-Content "$asset.sha256"' not in source
-    assert "sed -i 's/\\r$//' FreqInOut-*.sha256" in source
+    assert "packaging/prepare_release_assets.py" in source
+    assert "--source-dir release-assets" in source
+    assert "--output-dir release-assets-flat" in source
+    assert "release-assets-flat/SHA256SUMS.txt" in source
     for line in source.splitlines():
         stripped = line.strip()
         if stripped.startswith("uses: actions/"):
@@ -192,3 +196,49 @@ def test_release_notes_switch_to_signed_filenames_without_unsigned_notice() -> N
     assert "FreqInOut-2.0.4-windows-x86_64-setup-unsigned.exe" not in notes
     assert "FreqInOut-2.0.4-macos-x86_64-unsigned.dmg" not in notes
     assert "Package signing notice" not in notes
+
+
+def test_release_asset_staging_finds_nested_packages_and_normalizes_manifests(
+    tmp_path: Path,
+) -> None:
+    builder = _module("fio_prepare_release_assets", "packaging/prepare_release_assets.py")
+    source = tmp_path / "downloads"
+    output = tmp_path / "flat"
+    names = builder.expected_asset_names("2.0.4")
+    for index, name in enumerate(names):
+        parent = source if name.endswith(".exe") else source / "Output" / f"platform-{index}"
+        parent.mkdir(parents=True, exist_ok=True)
+        payload = f"package-{index}".encode("ascii")
+        asset = parent / name
+        asset.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        line_ending = "\r\n" if name.endswith(".exe") else "\n"
+        (parent / f"{name}.sha256").write_bytes(
+            f"{digest}  {name}{line_ending}".encode("ascii")
+        )
+
+    staged = builder.prepare_release_assets(source, output, version="2.0.4")
+
+    assert len(staged) == 9
+    assert {path.name for path in output.iterdir()} == {
+        *names,
+        *(f"{name}.sha256" for name in names),
+        "SHA256SUMS.txt",
+    }
+    assert all(b"\r" not in (output / f"{name}.sha256").read_bytes() for name in names)
+    combined = (output / "SHA256SUMS.txt").read_text(encoding="ascii").splitlines()
+    assert len(combined) == 4
+    assert [line.split("  ", 1)[1] for line in combined] == list(names)
+
+
+def test_release_asset_staging_rejects_duplicate_expected_files(tmp_path: Path) -> None:
+    builder = _module("fio_prepare_release_assets_duplicate", "packaging/prepare_release_assets.py")
+    source = tmp_path / "downloads"
+    name = builder.expected_asset_names("2.0.4")[0]
+    for parent_name in ("one", "two"):
+        parent = source / parent_name
+        parent.mkdir(parents=True)
+        (parent / name).write_bytes(b"duplicate")
+
+    with pytest.raises(builder.ReleaseAssetError, match="found 2"):
+        builder.prepare_release_assets(source, tmp_path / "flat", version="2.0.4")
