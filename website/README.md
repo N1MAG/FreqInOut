@@ -25,8 +25,11 @@ npm run verify
 ```
 
 `npm run verify` audits the locked dependency tree and performs a production
-build. The generated site is written to `website/.vitepress/dist/` and is not
-tracked by Git.
+build. It then verifies the exact generated HTML page set, internal links and
+assets, rejects symbolic links, and applies a bounded internal-marker tripwire
+to the publication artifact. The generated site is written to
+`website/.vitepress/dist/` and is not tracked by Git. The artifact-only Pages
+upload remains the primary public/private content boundary.
 
 ## Content boundary
 

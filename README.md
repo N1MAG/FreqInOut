@@ -248,8 +248,13 @@ The main FIO logs are located in the configured profile root:
 
 ## Documentation
 
-- [FreqInOut User Guide](docs/guide.html)
-- [Installation and update guide](docs/Installation.md)
+- [Official FreqInOut documentation](https://n1mag.github.io/FreqInOut/)
+- [Install or upgrade](https://n1mag.github.io/FreqInOut/install/)
+- [Configure your first radio](https://n1mag.github.io/FreqInOut/guide/first-radio)
+- [Connect Local Mesh](https://n1mag.github.io/FreqInOut/integrations/mesh)
+- [Support and diagnostics](https://n1mag.github.io/FreqInOut/support)
+- [Bundled FreqInOut User Guide](docs/guide.html)
+- [Repository installation reference](docs/Installation.md)
 - [Linux installer reference](docs/FreqInOut-linux-installer.md)
 - [Changelog](CHANGELOG.md)
 - [Security and support](SECURITY.md)
