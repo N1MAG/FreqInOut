@@ -156,7 +156,11 @@ jobs:
         run: |
           $asset = "FreqInOut-${{ needs.verify.outputs.version }}-windows-x86_64-setup-unsigned.exe"
           $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $asset" | Set-Content "$asset.sha256" -Encoding ascii
+          [System.IO.File]::WriteAllText(
+            (Join-Path (Get-Location) "$asset.sha256"),
+            "$hash  $asset`n",
+            [System.Text.Encoding]::ASCII
+          )
 
       - name: Retain Windows candidate for three days
         if: needs.verify.outputs.production == 'false'
@@ -315,7 +319,11 @@ jobs:
         run: |
           $asset = "FreqInOut-${{ needs.verify.outputs.version }}-windows-x86_64-setup.exe"
           $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $asset" | Set-Content "$asset.sha256" -Encoding ascii
+          [System.IO.File]::WriteAllText(
+            (Join-Path (Get-Location) "$asset.sha256"),
+            "$hash  $asset`n",
+            [System.Text.Encoding]::ASCII
+          )
 
       - name: Attest Windows installer provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
@@ -763,6 +771,7 @@ jobs:
       - name: Verify individual checksums and create combined checksum
         run: |
           cd release-assets
+          sed -i 's/\r$//' FreqInOut-*.sha256
           for checksum in FreqInOut-*.sha256; do
             sha256sum --check "$checksum"
           done
