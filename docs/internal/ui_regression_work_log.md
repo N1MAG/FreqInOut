@@ -12452,3 +12452,26 @@ Implementation acceptance:
 The remaining release-control gate is GitHub environment configuration:
 `production-release` must require the maintainer reviewer and permit only
 `v*` tags before the 2.0.4 tag is created.
+
+## 2026-09-29 — GitHub Release presentation and source visibility
+
+Status: `Implemented locally; hosted 2.0.4 candidate validation pending`
+
+The production workflow now builds the GitHub Release page from the exact
+curated `CHANGELOG.md` section at the tagged source revision. The page lists
+the four platform-specific package filenames, points technical users to the
+automatic GitHub source ZIP/TAR archives and immutable tag, links the complete
+tagged changelog, and derives the signing notice from the same workflow choices
+that select signed or unsigned asset names. This replaces generic generated
+commit notes with a stable operator-facing release record.
+
+The public README and installation guide use `/releases/latest` as the primary
+download location while retaining explicit `git pull --ff-only` and verified
+source-installer procedures. GitHub automatically exposes the tagged source on
+the release, so packaged and manual users receive the same version and release
+notes without maintaining a second source bundle.
+
+Work-package ownership: primary `gpt-6-astra` (high reasoning) owns the release
+notes generator, workflow integration, public documentation, tests, export,
+and hosted-candidate review. No sub-agent was used under the active
+no-delegation constraint.

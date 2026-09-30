@@ -42,6 +42,7 @@ PUBLIC_PACKAGING_FILES: tuple[str, ...] = (
     "packaging/build-requirements.txt",
     "packaging/build_linux_deb.py",
     "packaging/build_macos_dmg.py",
+    "packaging/build_release_notes.py",
     "packaging/linux/freqinout.desktop",
     "packaging/macos/entitlements.plist",
     "packaging/pyinstaller_runtime_qt.py",
@@ -62,7 +63,7 @@ PUBLIC_DOCS: tuple[str, ...] = (
     "docs/guide.html",
     "docs/Installation.md",
     "docs/FreqInOut-linux-installer.md",
-    "docs/FreqInOut 2.0.3 Installation and Upgrade Guide.docx",
+    "docs/FreqInOut 2.0.4 Installation and Upgrade Guide.docx",
     "docs/FreqInOut Version 2 Upgrade Guide for Current Single Radio Users.docx",
 )
 
@@ -181,6 +182,7 @@ def validate_public_projection(root: Path) -> tuple[Path, ...]:
         Path("installer.iss"),
         Path("packaging/build_linux_deb.py"),
         Path("packaging/build_macos_dmg.py"),
+        Path("packaging/build_release_notes.py"),
         Path("packaging/macos/entitlements.plist"),
         Path("packaging/pyinstaller_runtime_qt.py"),
         Path("packaging/verify_release_inputs.py"),

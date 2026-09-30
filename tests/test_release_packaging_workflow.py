@@ -138,15 +138,54 @@ def test_public_release_workflow_has_separate_candidate_and_production_contracts
     assert 'FreqInOut-${{ needs.verify.outputs.version }}-windows-x86_64-setup-unsigned.exe' in source
     assert 'FreqInOut-${{ needs.verify.outputs.version }}-linux-amd64.deb' in source
     assert 'FreqInOut-${{ needs.verify.outputs.version }}-macos-${{ matrix.arch }}-unsigned.dmg' in source
-    assert "Package signing notice" in source
-    assert "Unknown publisher" in source
-    assert "Open Anyway" in source
     assert "FIO_ENABLE_PFX_SIGNING" in source
     assert "FIO_ENABLE_APPLE_SIGNING" in source
     assert "refusing to overwrite it" in source
+    assert "packaging/build_release_notes.py" in source
+    assert '--notes-file "$RUNNER_TEMP/release-notes.md"' in source
+    assert "--generate-notes" not in source
     for line in source.splitlines():
         stripped = line.strip()
         if stripped.startswith("uses: actions/"):
             reference = stripped.split("@", 1)[1].split()[0]
             assert len(reference) == 40
             int(reference, 16)
+
+
+def test_release_notes_put_downloads_changelog_and_manual_source_first() -> None:
+    builder = _module("fio_build_release_notes", "packaging/build_release_notes.py")
+    notes = builder.build_release_notes(
+        version="2.0.4",
+        repository="N1MAG/FreqInOut",
+        changelog=(ROOT / "CHANGELOG.md").read_text(encoding="utf-8"),
+    )
+
+    assert "# FreqInOut 2.0.4" in notes
+    assert "## Downloads" in notes
+    assert "## What changed" in notes
+    assert "Source code (zip)" in notes
+    assert "tag `v2.0.4`" in notes
+    assert "FreqInOut-2.0.4-windows-x86_64-setup-unsigned.exe" in notes
+    assert "FreqInOut-2.0.4-linux-amd64.deb" in notes
+    assert "FreqInOut-2.0.4-macos-arm64-unsigned.dmg" in notes
+    assert "Package signing notice" in notes
+    assert "Unknown publisher" in notes
+    assert "Open Anyway" in notes
+    assert "## [2.0.3]" not in notes
+
+
+def test_release_notes_switch_to_signed_filenames_without_unsigned_notice() -> None:
+    builder = _module("fio_build_release_notes_signed", "packaging/build_release_notes.py")
+    notes = builder.build_release_notes(
+        version="2.0.4",
+        repository="N1MAG/FreqInOut",
+        changelog=(ROOT / "CHANGELOG.md").read_text(encoding="utf-8"),
+        windows_signed=True,
+        macos_signed=True,
+    )
+
+    assert "FreqInOut-2.0.4-windows-x86_64-setup.exe" in notes
+    assert "FreqInOut-2.0.4-macos-x86_64.dmg" in notes
+    assert "FreqInOut-2.0.4-windows-x86_64-setup-unsigned.exe" not in notes
+    assert "FreqInOut-2.0.4-macos-x86_64-unsigned.dmg" not in notes
+    assert "Package signing notice" not in notes

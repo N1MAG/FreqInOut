@@ -2,7 +2,7 @@
   <img src="assets/FreqInOut_logo.png" alt="FreqInOut logo" width="150">
 </p>
 
-# FreqInOut 2.0.3
+# FreqInOut 2.0.4
 
 ### A coordinated operations console for HF digital stations
 
@@ -107,15 +107,50 @@ on an Internet tile service.
 
 | Platform | FreqInOut 2.0 support |
 |---|---|
-| Linux | Source install and guided installer; tested across common desktop distributions |
-| Windows 10/11 | Source install; no 2.0 executable installer is currently published |
-| macOS | Source install using a current Python; signed/notarized packaging is not currently provided |
+| Linux amd64 | GitHub Release `.deb`, source install, and guided installer |
+| Windows 10/11 x86-64 | GitHub Release installer and source install |
+| macOS Intel and Apple Silicon | GitHub Release disk images and source install |
 
 Python **3.10 through 3.13** is accepted by FIO; Python 3.11 is the tested and
 recommended release interpreter. Companion radio applications are installed
 separately and remain under the operator's control.
 
-## Install from the public repository
+## Download the current release
+
+Use the [latest FreqInOut release](https://github.com/N1MAG/FreqInOut/releases/latest)
+for the clearest installation path. Each release page contains the release
+notes, changelog highlights, source-code archives, package checksums, and the
+available native packages:
+
+- Windows: `FreqInOut-<version>-windows-x86_64-setup-unsigned.exe`
+- Debian/Ubuntu-family Linux: `FreqInOut-<version>-linux-amd64.deb`
+- Apple Silicon macOS: `FreqInOut-<version>-macos-arm64-unsigned.dmg`
+- Intel macOS: `FreqInOut-<version>-macos-x86_64-unsigned.dmg`
+
+Windows and macOS packages are currently unsigned. Windows may show an
+**Unknown publisher** or SmartScreen prompt; macOS may require **Open Anyway**
+under Privacy & Security. Verify the package against `SHA256SUMS.txt` on the
+release page. The installed application is still named **FreqInOut**.
+
+## Install or update manually from the public repository
+
+Technical users may clone or update the public `main` branch instead. Close
+FreqInOut and its companion applications, use the same application folder as
+the existing installation, rerun `install_freqinout.py`, require the final
+`Installation verified` line, and then use the neutral launcher. A Git pull by
+itself is not a complete update.
+
+For an existing public source checkout, update the source first:
+
+```bash
+git fetch origin
+git switch main
+git pull --ff-only origin main
+```
+
+Then rerun the platform-specific installer shown below. Users who need an exact
+immutable release can download the source archive from the Release page or
+check out its `v<version>` tag instead of following moving `main`.
 
 ### Windows PowerShell
 
@@ -155,7 +190,7 @@ custom paths, repair, update, and uninstall instructions.
 
 ## Upgrading an existing FreqInOut station
 
-FreqInOut 2.0.3 is designed to carry an existing single-radio station forward
+FreqInOut 2.0.4 is designed to carry an existing single-radio station forward
 and to update an existing 2.0 installation through the same verified installer.
 Before upgrading:
 
@@ -171,8 +206,8 @@ its schedules, messages, software settings, and operating data forward. Adding
 a second radio is optional. The conversion path has automated rehearsal
 coverage, but operators should treat the verified backup as mandatory and be
 prepared to review or rebuild affected companion-application settings if an
-older station differs from the rehearsed profile. See the [FreqInOut 2.0.3
-installation and upgrade guide](docs/FreqInOut%202.0.3%20Installation%20and%20Upgrade%20Guide.docx)
+older station differs from the rehearsed profile. See the [FreqInOut 2.0.4
+installation and upgrade guide](docs/FreqInOut%202.0.4%20Installation%20and%20Upgrade%20Guide.docx)
 for the Windows, macOS, and Linux workflows and rollback guidance.
 
 ## First configuration

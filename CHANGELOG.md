@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.0.4]
+- Added: A consistent first-run welcome guides new stations into Guided Add Radio, while **Set Up Later** leaves a persistent **Set Up First Radio** action in Ops Center. Existing single-radio upgrades continue through the separate **Upgrade Existing Station** flow.
+- Fixed: Windows startup no longer flashes internal command windows or transient unpainted FIO windows while the splash screen is active.
+- Fixed: Radio health indicators now use cached operational evidence consistently. A working radio remains green when optional software has a harmless advisory, unknown or stale evidence is neutral, and yellow is reserved for conditions that affect operation.
+- Changed: Launch Control starts one radio stack at a time, requires fresh read-only proof that the configured rig-control endpoint can reach that radio, skips the remaining applications for an offline radio, and then continues with the next radio.
+- Fixed: FLDigi and JS8Call advance as soon as their configured endpoints respond, process-only applications advance after a short stability check, slow VarAC/JS8Call startup no longer causes premature dependent skips, and an early nonzero exit is reported immediately.
+- Added: Official GitHub Release packaging for Windows x86-64, Linux amd64, macOS Intel, and macOS Apple Silicon, with checksums and build provenance. Until signing is configured, Windows and macOS download filenames explicitly include `-unsigned` and the release notes explain the operating-system trust prompts.
+
 ## [2.0.3]
 - Fixed: On Windows, installation no longer fails when security or indexing software denies only the final rename of an otherwise complete and verified station backup. FIO retries the rename, retains and reports the verified temporary backup path when necessary, and still blocks installation for every copy, hash, database, manifest, missing-data, or other filesystem failure.
 - Fixed: The native-default JS8Call identity now specifically means the configured executable running without `-r` or `--rig-name`, so a named sibling process can no longer suppress launch of the upgraded station's default JS8Call instance.

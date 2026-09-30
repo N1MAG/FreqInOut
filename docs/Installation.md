@@ -1,12 +1,23 @@
-# Installing and Updating FreqInOut 2.0
+# Installing and Updating FreqInOut 2.0.4
 
-FreqInOut 2.0 supports source installation on Windows 10/11, current macOS
-releases, and common Linux desktop distributions. Python 3.10 through 3.13 is
-accepted; Python 3.11 is the tested and recommended release interpreter.
-Companion radio applications are installed separately. No 2.0 executable or
-signed application bundle is currently published.
+The [latest GitHub Release](https://github.com/N1MAG/FreqInOut/releases/latest)
+is the primary download location for FreqInOut. It provides release notes,
+source archives, SHA-256 checksums, and native packages for Windows x86-64,
+Linux amd64, macOS Intel, and macOS Apple Silicon. Source installation remains
+supported on Windows 10/11, current macOS releases, and common Linux desktop
+distributions.
 
-## One installation rule
+Windows and macOS packages are currently unsigned and include `-unsigned` in
+their download filenames. Windows may display **Unknown publisher** or a
+SmartScreen prompt. macOS may require **Open Anyway** under Privacy & Security.
+The installed application name remains **FreqInOut**. Verify downloads against
+`SHA256SUMS.txt` on the release page.
+
+Python 3.10 through 3.13 is accepted for source installation; Python 3.11 is
+the tested and recommended release interpreter. Companion radio applications
+are installed separately.
+
+## Source installation rule
 
 New installations and upgrades use the same `install_freqinout.py` check. Do
 not start FIO until it prints exactly:
@@ -36,24 +47,22 @@ If database validation fails, do not delete, replace, or edit the named
 database. The installer made no changes; preserve the database and contact
 FreqInOut support before attempting the upgrade again.
 
-## Upgrade an existing 1.2.8 station
+## Upgrade an existing station
 
 1. Close FreqInOut, FLRig, FLDigi, JS8Call, FIO Spotter, VarAC, CommStat, and
    other companion radio applications.
-2. Download the approved FreqInOut release archive and extract it to a **new
-   folder**. Keep the old application folder unchanged for rollback.
-3. Open PowerShell or a terminal in the new folder.
-4. Run the one installation command for your operating system shown below.
-5. Confirm that the final line says `Installation verified`. It will also show
-   the verified backup location. If either message is missing, stop and do not
-   launch FIO.
-6. Run the neutral `start-freqinout` launcher shown below. FIO automatically
-   uses the established profile unless `FREQINOUT_CONFIG_DIR` explicitly
-   selects another one.
-7. In **Upgrade Existing Station**, review or select the manufacturer, model,
+2. Download the appropriate package from the latest GitHub Release, or update
+   the existing public source checkout using the manual procedure below.
+3. For a package, complete the operating-system installation and start
+   **FreqInOut**. For a source checkout, rerun `install_freqinout.py`, require
+   the final `Installation verified` line, and use the neutral
+   `start-freqinout` launcher.
+4. FIO automatically uses the established profile unless
+   `FREQINOUT_CONFIG_DIR` intentionally selects another one.
+5. In **Upgrade Existing Station**, review or select the manufacturer, model,
    display name, plan name, and detected software. Select **Back Up and Upgrade
    Station**.
-8. Review the radio's software, schedule assignment, and Launch Control
+6. Review the radio's software, schedule assignment, and Launch Control
    settings. Launch Control remains off until the operator enables it.
 
 The only other choice in the upgrade window is **Exit FIO**. Closing the window
@@ -66,8 +75,13 @@ folder from the reported `pre-install-...` backup, and launch the retained
 
 ## Windows 10/11
 
-Install 64-bit Python 3.11 from Python.org. Extract the approved release, open
-PowerShell in that folder, and run:
+Download and run
+`FreqInOut-2.0.4-windows-x86_64-setup-unsigned.exe` from the latest GitHub
+Release. Windows may require **More info** followed by **Run anyway** while the
+installer remains unsigned.
+
+For a manual source installation, install 64-bit Python 3.11 from Python.org,
+open PowerShell in the public checkout, and run:
 
 ```powershell
 py -3.11 install_freqinout.py
@@ -86,14 +100,18 @@ git pull --ff-only origin main
 py -3.11 install_freqinout.py
 ```
 
-The repository contains maintainer packaging support, but a signed Windows
-installer should only be treated as available when it is attached to an
-official FreqInOut release.
+Use only installers attached to an official FreqInOut GitHub Release.
 
 ## macOS
 
-Install Python 3.11 from Python.org or Homebrew. Do not use an obsolete system
-Python. Extract the approved release, open Terminal in that folder, and run:
+Download the disk image matching the Mac processor from the latest GitHub
+Release, open it, and copy **FreqInOut** to **Applications**. While the disk
+images remain unsigned, macOS may require **Open Anyway** under Privacy &
+Security on the first launch.
+
+For a manual source installation, install Python 3.11 from Python.org or
+Homebrew. Do not use an obsolete system Python. Open Terminal in the public
+checkout and run:
 
 ```bash
 python3.11 install_freqinout.py
@@ -108,14 +126,21 @@ git pull --ff-only origin main
 python3.11 install_freqinout.py
 ```
 
-FIO is currently supported as a source installation on macOS. A signed and
-notarized macOS application bundle is not currently published. macOS may ask
-for file or automation access when configured companion applications are first
-used; grant only the access needed by those configured paths.
+macOS may ask for file, Bluetooth, or automation access when configured
+companion applications or hardware are first used; grant only the access
+needed by those configured paths.
 
 ## Linux
 
-The same release-folder path used above is supported on Linux:
+On Debian/Ubuntu-family amd64 systems, download the `.deb` from the latest
+GitHub Release and install it with:
+
+```bash
+sudo apt install ./FreqInOut-2.0.4-linux-amd64.deb
+freqinout
+```
+
+The manual source path remains supported on Linux:
 
 ```bash
 python3.11 install_freqinout.py

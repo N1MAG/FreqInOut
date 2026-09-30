@@ -132,6 +132,16 @@ the production artifacts, rechecks every per-file SHA-256, creates one
 `SHA256SUMS.txt`, refuses to overwrite an existing release, and promotes a
 draft only after all four packages upload successfully.
 
+The published GitHub Release is also the user-facing release record. Its title
+uses the application version, its notes place the exact Windows, Linux, and
+macOS package names before the curated changelog section for that version, and
+it links the complete tagged changelog. The notes explicitly identify GitHub's
+automatic source ZIP and TAR archives and the immutable `v<version>` tag for
+operators who install or update from source. Package-signing guidance is
+generated from the same signed/unsigned workflow choices that select the asset
+filenames, preventing a release page from describing different artifacts than
+the ones actually uploaded.
+
 The macOS bundle/DMG implementation passed a native Apple Silicon PyInstaller
 build, ad-hoc code-signature verification, fresh-profile smoke test, DMG
 verification, mounted-image copy/install smoke test, and profile-preservation
