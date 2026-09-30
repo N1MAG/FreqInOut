@@ -12455,7 +12455,7 @@ The remaining release-control gate is GitHub environment configuration:
 
 ## 2026-09-29 — GitHub Release presentation and source visibility
 
-Status: `Implemented locally; hosted 2.0.4 candidate validation pending`
+Status: `Hosted 2.0.4 candidate passed; exact source commit published to main`
 
 The production workflow now builds the GitHub Release page from the exact
 curated `CHANGELOG.md` section at the tagged source revision. The page lists
@@ -12475,3 +12475,19 @@ Work-package ownership: primary `gpt-6-astra` (high reasoning) owns the release
 notes generator, workflow integration, public documentation, tests, export,
 and hosted-candidate review. No sub-agent was used under the active
 no-delegation constraint.
+
+Acceptance evidence:
+
+- approved-hotfix regression partition: 79 passed;
+- release packaging and public-export contract: 17 passed;
+- release metadata, Python compilation, workflow YAML parse, generated release
+  notes, public allowlist validation, and `git diff --check`: pass;
+- public GitHub Actions run `36648276584` at exact commit `8930b51` passed the
+  Windows x86-64 unsigned installer, Linux amd64 DEB, Intel macOS unsigned DMG,
+  and Apple Silicon macOS unsigned DMG completed-package jobs; and
+- public `main` and `release/public-2.0.4-candidate` both resolve to
+  `8930b51fbffcabc3a02527c853d951a459e1600d`.
+
+The GitHub Release and its durable package assets are not yet published because
+`v2.0.4` has not been created. Publication remains gated on the maintainer's
+final confirmation of the `production-release` environment controls.
